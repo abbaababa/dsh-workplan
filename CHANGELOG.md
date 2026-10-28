@@ -1,0 +1,283 @@
+## 1.4.3 — 2026-10-28
+
+**「同一个数字只能有一个来源」的根治版**。1.4.2 及更早版本里，同一个计划的数字存在两套真相源：
+实时状态列表 `record.statuses` 与缓存在记录上的 `record.stats`。缓存只在**每批子任务全部跑完之后**
+刷新一次，而看板头部读缓存、阶段徽标与卡片明细读列表，于是同一张卡片上会同时出现
+「0 正在做」和「正在做」；预算用尽被重置成 pending 的子任务还带着上一轮的 `progress: 100`，
+于是「0/3 做好」的阶段旁边挂着「正在做」、计划进度条显示 100% 而完成数是 0。
+
+本版把计数改成**纯派生**：`derivePlanSnapshot(statuses)` 一次遍历同时产出 `statuses / stats / departments`，
+再也没有第二份可被写坏的数字。
+
+### 缺陷（4 条，全部有可复现证据）
+
+用户报告（会话 `session-91ec3273-…`，19:02 截图）：顶部汇总「0 正在做」，而计划卡里第 3 步挂着「正在做」。
+以同一份会话数据重放，确认差异为**真实缺陷**而非观感问题：
+
+- **D1 计数缓存冻结**（根因）：`writeSubtaskStatus()` 只写 `record.statuses`，不写 `record.stats`；
+  `record.stats` 只在 `while(true)` 批次循环里、**整批子任务跑完之后**才重算。批次运行期间缓存一直是旧值，
+  `serialisePlan()` 又优先读缓存（`record.stats ?? computeStats(statuses)`，而 `stats` 恒已初始化，
+  回退分支永不触发）。实测：真实状态 `done 2 / 正在做 1 / 待做 0`，缓存仍报 `done 1 / 正在做 0 / 待做 2`，
+  进度条 33% 而真实进度 70%。
+- **D2 同一报文自相矛盾**：`serialisePlan()` 里 `stats` 取自缓存、`departments` 却由 `statuses` 现场聚合，
+  一个 GET 响应内 `stats.inProgress = 0` 与 `design.inProgress = 1` 并存。
+- **D3 重置绕过状态机**：预算用尽时用裸对象展开重置为 pending（`progress: item.progress ?? 0`），
+  绕过 `applyStatus()` 的伴随字段清理，留下 `pending + progress: 100 + childId + startedAt`。
+  连带后果：旧公式把每条 `progress` 直接平均（不计状态），12 项里 11 项完成也算出 **100%**。
+- **D4 同一失败两种语义**：异常收敛分支把 blocked 写成 `progress: item.progress ?? 0`，
+  而其余 4 处 blocked 写入点都写 `progress: 100`。
+
+### 修复
+
+- **单一派生源**：`src/plan.ts` 新增 `StatusEntry / Stats / DepartmentSummary / PlanSnapshot` 与
+  `normaliseStatuses`、`deriveAggregates`、`derivePlanSnapshot`、`aggregateInvariantViolations`。
+  规则写死在一个地方：未知状态降级为 pending、pending 强制 `progress=0` 且清空 `childId/startedAt/finishedAt`、
+  done 强制 100、进度加权 done=100、blocked/in_progress=自身进度的 clamp、pending=0。
+- **删除 `record.stats`**：`src/runtime.ts` 移除全部写入与读取点（16 处），`serialisePlan` /
+  `buildRoundResult` / `dispatchTool` / `updateStatus` / `cancelPlan` 全部改为「先派生一次，再用同一个快照填字段」。
+  `grep 'record.stats' src/runtime.ts` 现在只剩一条注释。
+- **状态机收口**：预算用尽重置改为逐项 `applyStatus(..., { status: 'pending', error: '本轮预算用尽，等待续跑' })`；
+  `applyStatus` 的 pending 分支同时清空 `progress/startedAt/finishedAt/childId`（保留显式传入的 error）。
+- **blocked 统一为 100**：异常收敛分支与其余写入点对齐，同一失败不再有两种进度。
+- **构建卫生**：`build` 先 `rm -rf dist`、`test` 先 `rm -rf dist-tests`，并新增 `clean` 脚本。
+  旧编译物残留曾让 `npm test` 报 `ERR_MODULE_NOT_FOUND ... dist-tests/src/state.js`（本次已实测复现并修掉）。
+- **移出失控产物**：子 Agent 遗留、未被任何生产代码引用的 `src/state.ts` 与 `tests/state-machine.test.ts`
+  移到 `docs/design-proposals/` 作参考（它与 `applyStatus` 重复实现同一语义，接入即再造双真相源）；
+  `docs/design-derived-counts.reference.ts` 在设计落地后删除，`scripts/prove-derived-counts.ts`
+  改为直接导入 `src/plan.ts`，杜绝「设计与实现各算一套」。
+
+### 验证
+
+- `npm run check`：exit 0。
+- `npm test`：**90 / 90 通过**（79 项原有 + 11 项新增 `tests/derived-counts.test.ts`）。
+  新增用例含**变异测试**：手工把 `stats.done +1`、`total +1`、`pending -1`、`progress=101`、部门 `done/total`
+  改坏，不变量检查器必须报错——证明断言有效，而不是复述当前行为。
+- `node --experimental-strip-types scripts/repro-inconsistent-counts.ts --expect-fixed`：**全部不变量 PASS**
+  （场景 A 顶部 2 完成 / 1 正在做、卡片 70% / 正在做 1 / 待做 0、甜甜圈 67；场景 B 暂停项 `progress=0`、
+  `childId=null`、`stats.progress=0` 与甜甜圈一致；场景 C resume 后 blocked=0）。
+  同一脚本的默认模式（断言旧缺陷存在）现在 12 条全部失败——符合预期，缺陷已被消除。
+- `node --experimental-strip-types scripts/prove-derived-counts.ts`：13 条断言全通过，含 500 组随机状态序列的
+  不变量与幂等检查。
+
+### 兼容性
+
+- 对外载荷字段不变：`statuses`、`stats`（`total/done/blocked/inProgress/pending/progress`）、
+  `departments` 同名同义；工具 JSON Schema 未改。
+- `stats` 数值语义修正后可能与 1.4.2 的历史数字不同（这正是缺陷修复本身），旧结果消息仍可回放读取。
+- `src/plan.ts` 的 `computeStats()` 保留为 `derivePlanSnapshot()` 的**别名**（标注 `@deprecated`），
+  外部调用者不需要改动即可获得正确结果。
+
+### 回滚
+
+改动前的完整快照：`.backups/v1.4.2-pre-derived-counts-20261028-123136.tar.gz`（含 `src/`、`lib/`、`dist/`、
+`client.js`、`tests/`、`scripts/`、`package.json`、`CHANGELOG.md`）。回滚：
+
+```bash
+cd <repo>
+tar -xzf .backups/v1.4.2-pre-derived-counts-20261028-123136.tar.gz
+npm test   # 回到 1.4.2 的 79 项通过
+```
+
+已安装的运行实例需要重启 DSH（或重新加载 `web` profile）才会使用本版代码。
+
+## 1.4.2 — 2026-10-27
+
+运行态验收（用户重启后的真实页面复核，7 个子任务）驱动的一轮修正，全部为**可复现证据**下的收口。
+
+- **图表文字在浅色主题下几乎不可见（1.14:1）**：取色用了 `getComputedStyle(document.documentElement)`，而 `--dsw-alias-*` 主题变量由主题包定义在 `<body>` 上，`<html>` 读不到自定义属性时返回空串，于是恒回退 `#e2e8f0` —— 白底上仅 **1.14:1**（WCAG 要求 ≥4.5:1）。改读 `document.body` 后实测 **17.43:1（浅）/ 15.01:1（深）**。这是本轮唯一的功能级缺陷。
+- **两处「完成率」口径打架**：图表按**计划数**算（1/7 → 14%），组头摘要按**工作项**算（1/2 → 50%），同屏两个百分比互相打脸。修正：图表标题写明「两类计划数量占比」「进行中计划完成度（按工作项）」，口径写进标题，不再靠读者猜。
+- **「进行中」一词自相矛盾**：组头摘要原写「进行中 N」，而 N 实际是「未完成件数」（含还没开始的），与同一按钮 aria-label 里的「正在做 0 件、还没开始 3 件」冲突。改为 **「未完成 N / 已完成 M（完成率 x%）」**，与 aria 三态明细口径一致。
+- **主题切换后图表文字不变色**：`ink` 只在建图那一刻读取一次，切到深色主题后图表文字仍是浅色主题的颜色。改用 `MutationObserver` 监听 `body` 的 `data-ds-dark-theme` 属性重建图表（零依赖），切换主题即刷新文字色。
+- **自动展开（设计稿 §7.3 补齐）**：①最后一个进行中任务完成时，已完成组自动展开一次；②用户正展开的卡片被移入已完成组时，该组自动展开。依赖均为布尔值，4 秒轮询不会反复弹开。
+
+- **小字对比度未达标（2.77 / 2.80:1）**：18px 统计数字与 12px 状态胶囊直接用了品牌色，白底上只有 2.80:1（橙）/ 2.77:1（蓝），低于 WCAG 4.5:1。改为主题自适应混合色 `color-mix(in srgb, 品牌色 70%, 主文本色)`：浅色实测 **#b35616 4.93:1 / #0e79a9 4.85:1**，深色 **#f99c5b 7.82:1 / #55beee 7.86:1**，色相保留。
+- **环形图弧线深色主题失效**：`--dsh-wp-done-ink` 硬编码 `#0284c7`，对深色底约 2.4:1；改挂同一个自适应色。
+- **焦点环 2.66:1**：组头按钮 `:focus-visible` 用 `--dsh-wp-done`；改为主文本色（浅 18.12 / 深 16.30）。
+- **首屏看不到任务卡（已按用户选择 B 修完）**：`GroupCharts` 两张卡各约 246px、总览块（完成率环 + 每计划进度条）也排在两组之前，首屏被三块内容占满。现顺序为：5 格数字统计条 → 一行口径说明 → 「进行中」组 → 「已完成」组 → 总览块 → 两张图表。打开面板第一屏即是进行中任务卡，所有图表下移到两组之后。
+- **旧浏览器兜底**：`color-mix` 在 Safari <16.2 / Chrome <111 不可用，原写法会让 `--dsh-wp-done-text` 成为无效值。改为先声明主文本色兜底、再用 `@supports (color: color-mix(...))` 覆盖，旧浏览器只丢色相、不丢可读性。
+- **宿主元数据版本滞后**：`src/host.ts` 与 `lib/host.js` 仍写 `1.4.1`，与 `package.json` 的 1.4.2 不一致；已同步为 1.4.2。
+- **条形图静默吞掉第 7 个及以后的计划**：`groups.live.slice(0, 6)` 截断后没有任何提示，读者会以为图里就是全部。改为在图表下方注明「另有 N 个进行中计划未画入图表」（中英双语，零新增依赖）。
+**验证**：`npm test` **79/79 通过**；`npm run build` 无 TS 报错。
+
+## 1.4.1 — 2026-10-27
+
+「一目了然 + 精美绝伦」的收口版本。1.4.0 存在的问题全部由本轮的**实测证据**驱动修正。
+
+- **致命缺陷修复：图表永远不出现**。1.4.0 用 `chartState === 'ready'` 门控 `<canvas>`，而 `chartState` 只有建图成功后才置 `ready` —— 无 canvas 就不建图、不建图就不 ready，形成死循环。只读渲染探针实测：`canvasNodes: 0 / fallbackBars: 1 / liveBarTitle: 0`。改为 **canvas 与 fallback 并存**（ready 前 fallback 可见、ready 后 CSS 互斥隐藏），修复后同一探针：`canvasNodes: 2 / liveBarTitle: 1`。
+- **对比度达标（WCAG AA）**：组头计数徽章原为 12px 白字压在橙/蓝硬编码渐变上，实测 **2.26–2.80:1（进行中）/ 2.14–4.10:1（已完成）**，全部不合格；组头副标题 tertiary 实测 3.56:1 也不合格。改为「主文本色 + 半透明品牌底 + 1px 内描边」，品牌色只做底与描边。组头标题实测 **18.15:1（浅）/ 16.28:1（深）**，本就合格，保持主文本色。
+- **组头完成度摘要**：新增 `groupSummary` / `groupSummaryNoRate` 与 `groupAria` 文案，组头以纯文本给出「进行中 N / 已完成 M（完成率 x%）」，分母为 0 时输出「完成率暂无数据」而非 NaN；读屏可完整念出计划数、件数、完成率与三态明细。折叠态同样可读。
+- **折叠保留 DOM**：折叠走 `hidden`（布尔 true，不是空字符串）+ `--folded` CSS 类隐藏，卡片节点不卸载；`aria-expanded` / `aria-controls` 指向真实存在的节点。
+- **HTML 内容模型修正**：折叠态组头是 `<button>`，原 `<h2>` 嵌在按钮内不合法；改用 `<span role="heading" aria-level="2">`，文档大纲语义不变。
+- **视觉精修**（只加细节，不改结构）：组左栏 3px 竖向渐变强调条（位置+形状编码，非颜色唯一）、卡片内阴影与顶部高光、组头悬停反馈、图表标题色块、数字统一 `tabular-nums`；装饰性动效全部在 `prefers-reduced-motion` 下关闭。
+
+**验证**：`npm test` **73/73 通过**（T5/T6 新增 6 例）；`npm run build` 无 TS 报错；渲染探针见上。
+
+**未验证**：真实浏览器目视、窄侧栏换行、深色模式观感 —— 需重启 `dsh web` 后人工确认。
+
+## 1.4.0 — 2026-10-27
+
+侧栏「任务进度」一眼分清「进行中 / 已完成」。（用户确认口径：严格两组；允许引入图表库。）
+
+- **分组**：面板改成两组 —— 「进行中」（橙色，左侧橙色竖条 + 呼吸圆点）与「已完成」（蓝色）。判定只认 `phase === 'done'` 进「已完成」；`blocked / degraded / paused` 置顶并显示「需处理 N」红色徽章；`planning / executing / integrating` 次之；`pending` 最后。已取消计划继续不显示（与 1.3.7 一致）。
+- **图表**：引入 `chart.js@4.6.1`，以 `vendor/chart.umd.js` 随包分发（MIT，未走打包器——本插件客户端是手写的 `window.__ModuleLoader__` 模块工厂，无 bundler）。新增「两类任务占比」环形图（渐变）与「进行中计划完成度」横向条形图，均带数值与无障碍标签。
+- **折叠**（对齐设计稿 `docs/status-grouping-ia.md` §6.4 #1/#6）：存在进行中任务时，「已完成」组默认折叠（组头可点、`aria-expanded` 同步、chevron 形状编码），避免历史任务抢走视觉权重；无进行中任务时默认展开。折叠态只在本组件内存里，不写偏好，刷新即回默认。
+- **降级**：图表脚本未加载或宿主未重启时，首帧即渲染纯 CSS 双色占比条＋图例，不出现空画布；`prefers-reduced-motion` 下关闭动效与脉冲。
+- **宿主**：新增只读路由 `/dsh-workplan/vendor/chart.umd.js`（`text/javascript`，1 小时缓存）；其余路由、工具、数据结构一字未动。
+- **兼容修复**：`GroupCharts` 原用 `useRef`，而宿主注入的 React 兼容层未提供该 hook，`npm test` 实测抛 `TypeError: useRef is not a function`（3 个渲染用例失败）。改为「状态即 ref」（`useState` + 回调 ref，节点变化才更新），不再依赖 `useRef`；改后 `npm test` **67/67 通过**。
+- **未验证**：本版本只完成编译与产物校验（`client.js` 含分组/图表/降级标记，`lib/host.js` 版本为 `1.4.0`）。**真实界面渲染需重启 `dsh web` 并刷新页面后才能看到**，尚未做视觉走查与浏览器截图验证。
+
+## 1.3.7 — 2026-10-26
+
+真机重启后当场复现，1.3.6 只修了一半。
+
+- **复现**：重启后派发旧计划 `wp-8bc5c900`，返回 `Error: planId 与当前计划不匹配`。
+- **根因**：1.3.6 只在「内存里没有记录」时重建。但重启后下一个回合的规划器会立刻生成新计划，内存马上就有一条别的计划记录，于是 `if (!record?.plan)` 为假，重建根本没跑，直接落到 planId 比对失败。重启窗口里内存为空的状态只存在几秒，实际用户永远撞不到那一半。
+- **修复**：`dispatchTool` 现在在「内存无记录」**或**「调用方点名了另一份计划」时都重建（重建期间有派发在跑则不动），按 planId 从会话存档精确取回。点名一份存档里存在的计划，任何时候都应可派发。
+- **验证**：新增用例「内存里是另一份计划时，按 planId 派发旧计划照样重建并继续跑」；`node --test` **67/67 通过**。用真实会话存档（2677 条事件）重放：不传 planId → 最新计划 `wp-0fd49b2d`、`pending`；传 `wp-8bc5c900` → `paused`、9 完成 / 2 未完成（T10、T11）；传不存在的 planId → `null`。
+
+## 1.3.6 — 2026-10-26
+
+真机重启后暴露的新缺陷：**重启前暂停的旧计划会变得不可派发**。
+
+- 现象（代码推定 + 单测复现）：`reconstructFromSession` 只回放“最新那条计划消息”。重启后下一个回合自动生成了新计划，此时再派发重启前那份暂停计划，重建得到的是新计划，`dispatchTool` 随即抛 `PLAN_ID_MISMATCH`。磁盘上还有未完成的工作，却没有任何入口能继续它——又是一种“卡死”。
+- 修复：`reconstructFromSession(session, targetPlanId?)` 现在为每条计划保留一份快照（状态、`resultPhase`、`resumeCount`、取消标记），派发时按 `planId` 精确取回；不传 `planId` 时行为不变（仍取最新计划，仪表盘语义不变）。
+- 测试：新增「重启后仍能派发重启前暂停的旧计划」用例（两条计划在会话里、记忆为空、派发旧计划并跑完待续子任务）。`node --test` **66/66 通过**。
+
+## 1.3.5 — 2026-10-26
+
+真实进程（PID 7752，1.3.4）11 子任务派发：**完成 9、受阻 0、待续 2**，`phase: "paused"`、`resumeAvailable: true`、`errors` 只有一条预算说明——暂停语义与载荷字段在 1.3.4 真实进程再次成立。同一轮子任务查出两个真问题：
+
+- **调用点变异存活（T4 实测）**：把 `buildRoundResult(record, …)` 改成 `buildRoundResult({ ...record, phase: undefined }, …)`，65/65 仍然全绿——所有用例都直接调函数本体，没有一条断言「session 里真正追加的那条结果消息」。现补端到端断言：重启重建用例派发后从会话取出 `workplan-result` 消息，断言 `phase === 'integrating'` 且键存在。同一变异现在会让用例变红（实测 64 pass / 1 fail）。
+- **修复点 1 尚未在真实进程被触发（T7 实测）**：本轮派发对象是重启**之后**新建的计划（20:54:05 建、进程 20:48:23 启动），内存本来就热，`if (!record?.plan) reconstructFromSession(...)` 分支根本没进入。时间线证明「没报 NO_PLAN」≠「重建生效」。该修复目前仍只有代码 + 单测证据，需「先建计划、后重启、再派发」才能验证；验证动作安排在下一轮。
+- **修复点 2 已取得运行时证据（T8）**：用真实事件流 + 进程实际加载的 `lib/runtime.js` 重放 20:54:18 派发边界 → 新计划 `phase: pending`、`resumeCount: 0`；把同一事件流喂给「删掉重置三行」的对照产物 → 立刻退回 `phase: paused`、`resumeAvailable: true`。对照组精确复现旧症状，说明这三行是承重的。
+- **文档事实核对（T2）**：`plugins/.backups/dsh-workplan-1.3.4-20261026-2042.tar.gz` 文件名写的 20:42，文件系统记录的创建/修改时间是 20:32:15（构建窗口 20:32:07），命名与实际落盘时间不一致；内容本身与当前磁盘树逐字节相同（`lib/host.js` sha256 `3eea645b…`）。此处仅记录事实，不改写历史快照。
+
+测试：65 例全部通过，其中「重启重建」一例新增端到端载荷断言。
+
+## 1.3.4 — 2026-10-26
+
+真实进程（PID 96748，1.3.3）的 11 子任务派发结果证明 1.3.3 的三处修正全部生效：`phase: "paused"` 进了载荷、`resumeAvailable: true`、`errors` 只剩一条预算说明、**受阻 0 / 完成 9 / 待续 2**。同一轮的子任务又查出三个新缺陷，本版修掉：
+
+- **暂停后重启 `dsh web`，计划再也派发不了**：`dispatchTool` 只读内存记录，重启后内存为空就直接报 `NO_PLAN`「当前会话没有可派发的计划」——而卡片还在界面上。用户照我们的话重启一次，就把可续跑的计划变成了永久不可续跑。现在派发前会 `reconstructFromSession` 从会话存档重建记录并登记回内存。
+- **上一份计划的暂停会污染下一份计划**：`reconstructFromSession` 的 `resultPhase` 在新计划消息到达时没有清零，于是同一会话里新建的计划在首次派发前就显示「预算用完」。现在新计划到达时重置 `resultPhase`/`resultSeen`/`resumeCount`。
+- **结果写入处的接线没有测试**：1.3.3 的变异测试（B2：把 `phase: record.phase` 改成 `undefined`）存活，62 个测试全绿——没有任何用例覆盖调用点。现在结果消息构造抽成导出的 `buildRoundResult(record, sessionId, limits)`，并新增用例；同一变异现在会让测试变红（已实测）。
+
+测试：新增 3 例（结果载荷必须携带阶段、新计划不继承暂停、重启后派发自动重建计划），全量 **65/65 通过**。
+
+## 1.3.3 — 2026-10-26
+
+真实进程（PID 29790，1.3.2）端到端派发已证明「预算到点 = 暂停而不是失败」：8 个子任务完成 4 个、**受阻 0 个**、其余 4 个保持 pending，面板显示「本轮预算用尽，可续跑」，没有再出现级联受阻。本轮派发又暴露三处收尾缺陷：
+
+- **暂停计划被说成“不可续跑”**：`canResumePlan` 只认 `blocked`，而暂停留下的是 `pending`，于是载荷里 `resumeAvailable: false`，卡片提示「自动续跑额度已用尽，需要主 Agent 直接接手」——与事实相反（再派发一次就能继续）。现在 `paused` 也算可续跑，且暂停不消耗续跑额度（它是时间切片，不是返工）。
+- **结果消息不带阶段，刷新后暂停会被回放成“正在做”**：结果载荷缺 `phase` 字段，`reconstructFromSession` 只能猜 `executing`。现在结果消息写入本轮 `phase`，刷新后原样回放 `paused`。
+- **暂停仍把被杀子任务的「总执行超时」写进失败清单**：面板虽然显示正常，但载荷 `errors` 里留着 `["T4: 总执行超时", "总执行超时", …]`，模型会读成“有失败”。现在预算分支会剔除这些超时行，只保留「本轮执行预算（N 分钟）已到……」这一条说明。
+
+测试：新增 3 例（暂停后可续跑且不扣额度、结果消息往返携带阶段、失败清单不含超时），全量 **62/62 通过**。
+
+## 1.3.2 — 2026-10-26
+
+真实进程（PID 24118，1.3.1）端到端派发暴露的剩余缺陷，全部来自“计划总预算”这条路径：
+
+- **20 分钟总预算把正常长任务判成失败**：T1 真实跑了 840 秒才完成（1.2.1 的 300 秒上限下必死），T2 137 秒，随后总预算到点，正在跑的 T3 被记为「总执行超时」，T4–T9 级联受阻，面板再次显示「0~2/N 做好了、N 卡住了」。
+- 修复：预算到点不再算失败——未完成子任务保持 `pending`（已完成的不重跑），计划阶段标记为新 `paused`，错误文案写明「本轮执行预算（N 分钟）已到：已完成 X/Y，其余 Z 项保留为未完成，再次派发即可续跑」。
+- 面板与工具输出支持 `paused`：中文「预算用完，可续跑」（warn 色，不显示为「卡住了」），刷新后仍保持该阶段（按结果消息回放）。
+- 自动续跑额度 2 → 4：一次派发最多 20 分钟，慢计划分多轮续跑，避免一整条计划被 20 分钟卡死。
+- 规划器约束：子任务不得写「调用 dsh_workplan_dispatch / 重启或停止 dsh web / 安装升级插件」这类只有主 Agent 能执行的动作（本轮 T3「执行真实派发」对子 Agent 根本不可执行，必然失败）；单个子任务应在 10 分钟内完成。
+- 子 Agent 提示：明确“没有派发权限、不能重启服务”，遇这类步骤直接说明需要主 Agent 执行，禁止空等。
+
+## 1.3.1 — 2026-10-26
+
+让「卡住了」变成一个看得懂、走得通的提示，而不是死路。
+
+- 仪表盘在受阻计划上直接给出续跑指引：`对主 Agent 说「续跑这个计划」，会从受阻处继续（已完成的不重跑）`，并显示剩余额度（如「还可续跑 2 次」）。
+- 续跑额度用尽时，文案改为 `自动续跑额度已用尽，需要主 Agent 直接接手完成`，不再只显示「卡住了」。
+- **修复假取消**：超过 10 分钟未派发的计划原先会被重新标记为 `cancelled`，而 `cancelled` 永远不可续跑——一张没人动过的计划会自己「死掉」。现在保持 `pending`，只额外给出 `stale: true` 标记，提示而不是关死。
+- `reconstructFromSession` 的载荷补上 `resumeLimit`，与实时计划保持一致。
+- 新增 `tests/client-resume-hint.test.ts`（3 个用例）：有额度、额度用尽、pending 不被误显示为已取消。
+
+## 1.3.0 — 2026-10-26
+
+卡住（stuck）问题的系统性修复。所有改动都对应 1.2.1 及更早版本中可复现的“计划卡住”路径，回归测试见 `tests/workplan-stuck-recovery.test.ts`。
+
+### 根因与修复
+
+1. **固定 300 秒墙钟杀死了健康的子任务**（历史证据：22 次 `子任务 T? 超时（300000ms）`）。
+   - 现在把“绝对上限”和“无进展窗口”分开：默认绝对上限 900 秒（可配置 1s–30min），无进展窗口默认 300 秒（可配置 1s–15min）。
+   - 只要子 Agent 的会话日志还在增长，就不算卡住；只有日志停止增长才判定 wedged。
+   - 新增 `src/watchdog.ts`（`pickTimeoutReason` / `createProgressWatchdog`），轮询间隔自动按窗口长度缩放。
+   - 无进展导致的失败会自动重试一次（换一个新的子 Agent），达到绝对上限则不重试，避免烧掉整份计划预算。
+
+2. **重新派发受阻计划是“假成功”**（历史证据：约 12 次 dispatch 完成 0 个子任务）。
+   - 以前所有子任务都是 `blocked`，`readySubtasks()` 返回空，派发器直接 `ok: true`，模型以为成功，计划再也动不了。
+   - 现在 `canResumePlan()` / `resetBlockedStatuses()` 支持从受阻处续跑：只重置受阻/进行中的子任务，已完成的不重跑，每份计划最多续跑 2 次（可配置 0–5）。
+   - 续跑额度用尽时 `dsh_workplan_dispatch` 返回 `ok: false` + 明确原因 + `hint`，让主 Agent 直接接手，而不是重复派发。
+   - 取消（cancelled）的计划永不被自动续跑。
+
+3. **执行中不能取消**（`计划正在执行，不能取消`）。
+   - 现在取消会中止正在运行的派发：`abortedRunning: true`，计划进入 `cancelled`，在途结果仍会写成 durable 消息。
+
+4. **`dispatchPromise` 永挂后永远回答 already running**。
+   - 超过“计划预算 + 120 秒”仍未返回时，派发工具返回 `ok: false`、`stale: true`，并提示主 Agent 直接接手，不再无限 wait-for-success。
+
+5. **`[object Object]` 取代真实错误**（历史证据：1 次）。
+   - 新增 `describeError()`，把 Error / 字符串 / 嵌套对象信封 / Envelope 文本统一渲染成可读文字；`record.errors` 与子任务 `error` 全部走它。
+
+6. **缺少元数据直接炸掉子 Agent 提示词**。
+   - `buildChildPrompt()` 对 `taskUnderstanding` / `contradictions` / `method` 等字段做了防御性读取；以前重建或旧版本计划缺字段会让每个子任务瞬间失败、整份计划被判受阻。
+
+7. **构建产物漏拷 `watchdog.js`**：`npm run build` 之后 `lib/` 缺少新模块会直接导致插件加载失败，构建脚本已修正。
+
+8. **续跑后不再写 durable 结果消息**：续跑会清除 `resultWritten`，保证刷新页面后看到的是最新结果，而不是旧的受阻快照。
+
+### 可观测性
+
+- 结果消息新增 `resumeCount` / `resumeAvailable`，并直接告诉主 Agent「可再次 dispatch 续跑（剩余 N 次）」或「额度已用尽，请直接接手」。
+- 仪表盘 payload 新增 `heartbeatAt`、`resumeCount`、`resumeLimit`、`resumeAvailable`、`dispatchElapsedMs`。
+- 派发工具的渲染文本会带出 `仍在执行（已 Ns）` 与失败时的「下一步」提示。
+
+### 可配置项
+
+| 配置键 | 环境变量 | 默认 | 范围 |
+| --- | --- | --- | --- |
+| `childTimeoutMs` | `DSH_WORKPLAN_CHILD_TIMEOUT_MS` | 900000 | 1000–1800000 |
+| `idleTimeoutMs` | `DSH_WORKPLAN_IDLE_TIMEOUT_MS` | 300000 | 1000–900000 |
+| `totalTimeoutMs` | `DSH_WORKPLAN_TOTAL_TIMEOUT_MS` | 1200000 | ≥ 60000 |
+| `maxResumes` | `DSH_WORKPLAN_MAX_RESUMES` | 2 | 0–5 |
+
+### 测试
+
+- 新增 `tests/workplan-stuck-recovery.test.ts`（11 个用例）：续跑判定、状态重置、结果文案、超时分类、watchdog 增长/停滞、错误渲染、端到端「停滞→受阻→续跑→完成」、额度耗尽、执行中取消、陈旧派发。
+- 全量 `npm test`：51 个用例全部通过。
+
+## 1.2.1 — 2026-10-26
+
+- “做好了/已完成” now uses sky blue (`#0ea5e9`); “正在做” uses orange (`#f97316`) across the summary strip, donut, legend, task bars, mini bars, cards, pills and tool-turn accents.
+- Other status colors (blocked/pending) are unchanged; no layout, interaction or dependency changes.
+- Added a static regression test for the two status color mappings.
+
+## 1.2.0 — 2026-10-26
+
+- Task progress rows in “每个任务的进度” are now buttons: one click expands the matching task card and scrolls it into view.
+- Task cards expose a stable DOM anchor; scrolling uses `scroll-margin-top` so the fixed header does not cover the title.
+- Keyboard users can Tab to a task row and press Enter/Space; focus moves to the expanded card.
+- No new dependency; theme tokens and responsive layout are unchanged.
+
+## 1.1.1 — 2026-10-26
+
+- Plan mode no longer skips decomposition. The plugin now generates a plan in plan mode and explicitly defers dispatch until the user leaves plan mode.
+- While plan mode is active, only `dsh_workplan_dispatch` is denied, with a clear reason; every other tool stays available, so there is no guard deadlock.
+- A plan produced in plan mode is preserved across turns instead of being cancelled before the user can approve it.
+
+# Changelog
+
+## 1.1.0 — 2026-10-26
+
+- Dashboard now shows a fifth `任务` cell in the circled summary strip, so the plan count is visible next to work-item and status counts.
+- Added a status donut and per-task progress bars (SVG/CSS, no new dependency) for a more visual, less text-heavy overview.
+- Added a compact progress bar to each collapsed task card, so progress is visible without expanding.
+- Mobile: five-cell strip becomes a readable 2-column grid, with the task cell spanning the full width; the charts stack in one column.
+- Version metadata is now `1.1.0` in the plugin manifest and host `meta`.
+
+## 1.0.0
+
+- Initial TypeScript implementation: pre-step task decomposition, real department subagents, durable plan/result messages, `dsh_workplan_update` / `dsh_workplan_dispatch` / `dsh_workplan_cancel`, and the responsive `任务进度` dashboard.

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-label="Task Workplan">
+  <rect width="64" height="64" rx="14" fill="#4F6BED"/>
+  <rect x="13" y="15" width="38" height="7" rx="3.5" fill="#FFFFFF" opacity="0.95"/>
+  <rect x="13" y="28" width="26" height="7" rx="3.5" fill="#FFFFFF" opacity="0.82"/>
+  <rect x="13" y="41" width="33" height="7" rx="3.5" fill="#FFFFFF" opacity="0.68"/>
+  <circle cx="47" cy="45" r="4" fill="#FFFFFF"/>
+</svg>

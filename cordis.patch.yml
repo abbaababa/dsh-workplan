@@ -1,0 +1,4 @@
+- insert:
+    - id: dsh-workplan-plugin
+      name: './lib/host.js'
+      config: {}

@@ -1,0 +1,76 @@
+{
+  "name": "dsh-workplan",
+  "version": "1.4.3",
+  "description": "Automatic task decomposition, real department subagents, and a responsive workplan dashboard for DeepSeek Harness.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/abbaababa/dsh-workplan.git"
+  },
+  "homepage": "https://github.com/abbaababa/dsh-workplan#readme",
+  "bugs": {
+    "url": "https://github.com/abbaababa/dsh-workplan/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "deepseek",
+    "plugin",
+    "bundle",
+    "workplan",
+    "task-decomposition",
+    "subagents",
+    "dashboard"
+  ],
+  "main": "lib/host.js",
+  "exports": {
+    ".": "./lib/host.js",
+    "./entry": "./lib/host.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "lib",
+    "vendor",
+    "client.js",
+    "tsconfig.json",
+    "cordis.patch.yml",
+    "locale",
+    "icon.svg",
+    "CHANGELOG.md",
+    "README.md",
+    "README.en.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    }
+  },
+  "scripts": {
+    "clean": "rm -rf dist dist-tests",
+    "build": "rm -rf dist && tsc -p tsconfig.json && cp dist/plan.js dist/runtime.js dist/host.js dist/watchdog.js lib/ && cp dist/client.js client.js",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && rm -rf dist-tests && tsc -p tsconfig.test.json && node --test dist-tests/tests/*.test.js",
+    "verify": "npm run check && npm test"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "@types/react": "^18.3.31",
+    "typescript": "^5.9.3"
+  }
+}
