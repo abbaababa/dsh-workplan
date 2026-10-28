@@ -19,14 +19,48 @@
 - `npm test` → **99/99 通过**（0 fail）。
 - 7 处版本一致性检查 → `[PASS] 7 处版本均为 1.5.1`（`package.json`、`package-lock.json` 两处、
   `src/host.ts`、`lib/host.js`、`dist/host.js`、`CHANGELOG.md` 顶部）。
-- 本次**未打 tag、未发布、未重启服务**；需要在运行实例里看到换序，须由主 Agent 重启 DSH
-  （或重新加载 web profile）后再刷新页面。
+- 提交 `fbe467b`（2026-10-28 22:27:53 +08:00）与 annotated tag `v1.5.1`
+  （taggerdate 2026-10-28 22:28:51 +08:00）已就绪并**已对外发布**（见下「发布」）。
+- 本次**未重启 DSH 服务**；运行实例里的界面换序靠刷新页面触发（客户端 bundle 热重载）。
+
+### 发布
+
+- 两个渠道、同一份制品：
+  - git：`https://github.com/abbaababa/dsh-workplan.git` 的 annotated tag `v1.5.1` → `fbe467b`；
+  - npm：公共 registry `https://registry.npmjs.org/dsh-workplan` 的 `1.5.1`（`dist-tags.latest`）。
+- **状态（2026-10-28 22:46–22:50 +08:00 实测，发布已完成）**：
+  - `git push origin refs/heads/main` → `db74d44..fbe467b  main -> main`（快进，exit 0）；
+  - `git push origin refs/tags/v1.5.1` → `* [new tag]  v1.5.1 -> v1.5.1`（exit 0）；
+  - 远端复核（`git ls-remote`，独立网络查询）：`refs/heads/main` = `fbe467b4a632…`，
+    `refs/tags/v1.5.1` = `120dc2cb…` → `^{}` = `fbe467b4a632…`，本地 `ahead/behind` = `0/0`；
+  - `npm publish --ignore-scripts`（在 `git worktree add --detach … v1.5.1` 的干净快照上执行）
+    → `+ dsh-workplan@1.5.1`（exit 0）；
+  - `https://registry.npmjs.org/dsh-workplan/1.5.1` → **HTTP 200**，`time['1.5.1']` =
+    `2026-10-28T14:49:36.697Z`（22:49:36 +08:00），`dist-tags.latest` = `1.5.1`；
+  - 消费者视角：空白目录 `npm i dsh-workplan@1.5.1 --prefer-online` → 装到 1.5.1
+    （22 个文件，`client.js` 138 195 字节，`lib/host.js` 内 `version: '1.5.1'`）。
+- **已发布制品的校验值**（registry 实测，与本地 `.tgz` 逐字节一致）：
+  - npm `shasum`（SHA-1）：`a6f35bd1b3d2630e3a2cf9e9555b58e51b20eaba`
+  - npm `integrity`（SHA-512 SRI）：`sha512-AmpYMx55Y0ea2tAc14C4V7t/Pxrho+9nZXZqxz7JtdPYvFRyxS+wzEIUCfATRgq5cogT22lTSf0pEwUYOlgdqw==`
+  - 说明：同一份内容在原工作树打包时 `shasum` 为 `ecb39f0…`、在干净 `git worktree` 快照上为
+    `a6f35bd1…`，差异只来自 tar 记录的 mtime；**22 个文件的 blob 哈希与 tag `v1.5.1` 逐一相同**
+    （`checked 22 / mismatch 0`，另 44 个未随包发布的仓库文件按 `files` 白名单正确排除）。
+    实际发布的是干净快照这一份，故以上两行为准。
+- 发布顺序：先分支、后标签、再 npm，避免出现「远端有 tag 而 npm 没有」的半发布态。
+- registry 有约 60–90 秒传播延迟（22:48:58、22:49:20 直连仍 404，22:49:41 转 200）；
+  该窗口内 `npm i` 需加 `--prefer-online` 绕过本地元数据缓存。
+- 命令原文、失败分支、发布后验证与回滚：见 `docs/release-record-1.5.1-20261028.md`。
 
 ### 回滚
 
 - 升级前四个文件的副本：`.backups/pre-1.5.1-20261028-221343/`
   （`package.json`、`package-lock.json`、`CHANGELOG.md`、`src/host.ts`）。
 - 回滚后必须重新 `npm run build`；运行中的进程不会自动重载 `lib/host.js`。
+- 已推送（远端已有 `fbe467b` 与 `v1.5.1`）：`git push origin :refs/tags/v1.5.1` 删远端标签，
+  `git revert fbe467b` 回退提交（不要 `push --force` 改远端 `main` 历史）。
+- 已发布到 npm：先用 `npm deprecate dsh-workplan@1.5.1 "回滚说明"` 引导用户；确需撤销时
+  `npm unpublish dsh-workplan@1.5.1 --force`——受 npm 官方 unpublish 政策约束（可撤销时间窗口、
+  「有包依赖时不可撤销」），执行前核对 `npm unpublish --help` 与 npm 官方文档。
 
 ## 1.5.0 — 2026-10-28
 
