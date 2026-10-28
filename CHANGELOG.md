@@ -1,3 +1,33 @@
+## 1.5.1 — 2026-10-28
+
+**「先看这三句」与「分步进度」位置对换的补丁版**。用户以截图圈出展开态计划卡里的这两个板块，
+要求把它们的布局位置互换。本次只调整渲染顺序，**数据、接口、样式与既有测试断言零改动**。
+
+### 改动
+
+- **展开态面板顺序对换**（`src/client.ts`）：原来的「先看这三句（`Guide`）→ 降级横幅 →
+  分步进度（`PlanOverview`）」改为「分步进度（`PlanOverview`）→ 降级横幅 → 先看这三句（`Guide`）」。
+  两个面板组件本身及其内部逻辑不变；`PlanOverview` 仍然只在计划卡展开时（`open === true`）挂载，
+  折叠态依旧不挂载。
+- **版本**：`1.5.0 → 1.5.1`（patch，仅布局顺序对换，不新增能力、不改对外载荷）；`package.json`、
+  `package-lock.json` 两处、`src/host.ts` 的 `meta.version` 同步；`lib/host.js`、`dist/host.js`、
+  `client.js` 由 `npm run build` 重新生成。
+
+### 验证
+
+- `npm run build` → exit 0；`npm run check` → exit 0。
+- `npm test` → **99/99 通过**（0 fail）。
+- 7 处版本一致性检查 → `[PASS] 7 处版本均为 1.5.1`（`package.json`、`package-lock.json` 两处、
+  `src/host.ts`、`lib/host.js`、`dist/host.js`、`CHANGELOG.md` 顶部）。
+- 本次**未打 tag、未发布、未重启服务**；需要在运行实例里看到换序，须由主 Agent 重启 DSH
+  （或重新加载 web profile）后再刷新页面。
+
+### 回滚
+
+- 升级前四个文件的副本：`.backups/pre-1.5.1-20261028-221343/`
+  （`package.json`、`package-lock.json`、`CHANGELOG.md`、`src/host.ts`）。
+- 回滚后必须重新 `npm run build`；运行中的进程不会自动重载 `lib/host.js`。
+
 ## 1.5.0 — 2026-10-28
 
 **「进度必须一眼看得见」的图表化版本**。1.4.3 把数字收敛成单一来源，但计划卡折叠后仍然只有一行

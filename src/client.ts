@@ -1766,13 +1766,13 @@ window.__ModuleLoader__.load({
           session.updatedAt
             ? h('div', { className: 'dsh-wp-meta dsh-wp-session-updated' }, `${t('updatedAt')} ${formatTime(session.updatedAt)}`)
             : null,
-          h(Guide, { session, t }),
+          open === true ? h(PlanOverview, { t, stats, counts, rows: stageRows }) : null,
           session.degraded ? h('div', { className: 'dsh-wp-banner dsh-wp-banner--degraded' },
             h('strong', null, t('degraded')),
             h('div', null, plainError(session.error || '')),
             h('div', { className: 'dsh-wp-muted' }, t('degradedHint')),
           ) : null,
-          open === true ? h(PlanOverview, { t, stats, counts, rows: stageRows }) : null,
+          h(Guide, { session, t }),
           departments.length ? h('div', { className: 'dsh-wp-section' },
             h('div', { className: 'dsh-wp-section-title' }, t('who')),
             h('div', { className: 'dsh-wp-departments' },
