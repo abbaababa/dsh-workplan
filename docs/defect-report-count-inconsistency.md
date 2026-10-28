@@ -309,7 +309,10 @@ client.js        0c3ffd342a66da3a436633ba73b9d5b514200e9d91db3203f0a97bf7d5acd15
 package.json     b542c81034a24eb31cea016a93ef2716fc850787994cf8dd93c9e42ce8f05fad
 ```
 
-- 无 git 仓库：`git rev-parse` 返回 `fatal: not a git repository`，因此用文件哈希 + 版本号绑定证据。
+- ~~无 git 仓库：`git rev-parse` 返回 `fatal: not a git repository`，因此用文件哈希 + 版本号绑定证据。~~
+  **更正（2026-10-28 14:30 Lead 复核）**：该结论不成立——插件目录是独立 git 仓库（`git rev-parse --show-toplevel`
+  输出本目录，分支 `main`，tag `v1.4.3`）。本报告写作时的证据绑定方式（文件哈希 + 版本号）依然有效且无错，
+  但「没有 git 可用」这一理由有误；未来取证优先用 `git rev-parse HEAD` + 快照 SHA-256 双重绑定。
 - 源码 mtime：`src/runtime.ts` 2026-10-26 21:24；构建产物 `lib/runtime.js`、`client.js` 2026-10-27 16:16。
 
 ---

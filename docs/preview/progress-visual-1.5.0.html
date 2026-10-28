@@ -1,0 +1,683 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>dsh-workplan 1.4.3 → 1.5.0 进度可视化对比</title>
+<style>
+:root {
+  --dsw-alias-bg-base: #ffffff;
+  --dsw-alias-bg-elevated: #ffffff;
+  --dsw-alias-bg-layer-1: #f7f8fa;
+  --dsw-alias-bg-layer-2: #eff2f6;
+  --dsw-alias-border-l1: #e2e6ec;
+  --dsw-alias-border-l2: #d3d9e2;
+  --dsw-alias-brand-primary: #3b6cf6;
+  --dsw-alias-label-primary: #16191d;
+  --dsw-alias-label-secondary: #55606e;
+  --dsw-alias-label-tertiary: #8a94a3;
+  --dsw-alias-line-1: #e2e6ec;
+  --dsw-alias-state-error-primary: #e5484d;
+  --dsw-alias-state-idle-primary: #9aa3b2;
+  --dsw-alias-state-warn-primary: #d97706;
+  color-scheme: light;
+}
+body {
+  margin: 0;
+  padding: 24px;
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+  font: 14px/1.6 -apple-system, "PingFang SC", "Segoe UI", system-ui, sans-serif;
+}
+.wrap { max-width: 760px; margin: 0 auto; }
+h1 { font-size: 20px; margin: 0 0 6px; }
+.lead { color: var(--dsw-alias-label-secondary); margin: 0 0 18px; }
+.compare { display: grid; gap: 14px; margin: 18px 0 22px; }
+.pane { border: 1px solid var(--dsw-alias-border-l1); border-radius: 14px; padding: 12px; background: var(--dsw-alias-bg-layer-1); }
+.pane h2 { font-size: 13px; margin: 0 0 10px; color: var(--dsw-alias-label-secondary); font-weight: 600; }
+.badge { display: inline-block; font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 999px; margin-left: 6px; }
+.badge-old { background: #fde8e8; color: #9b1c1c; }
+.badge-new { background: #e3f5ec; color: #10643f; }
+.note { font-size: 12px; color: var(--dsw-alias-label-secondary); }
+.note code { background: var(--dsw-alias-bg-layer-2); padding: 1px 5px; border-radius: 5px; }
+</style>
+<style>
+/* ===== 以下 CSS 由 scripts/render-preview.ts 从 src/client.ts 原样抽取，未做任何改写 ===== */
+
+.dsh-wp, .dsh-wp *, .dsh-wp *::before, .dsh-wp *::after { box-sizing: border-box; }
+.dsh-wp {
+  /* User-selected status colors: done = sky blue, in progress = orange. */
+  --dsh-wp-done: #0ea5e9;
+  --dsh-wp-active: #f97316;
+  /* 文本/描边用的自适应色：与主文本色混合，浅色主题自动变深、深色主题自动变浅。
+     裸品牌色在白底只有 2.77 / 2.80:1，18px 与 12px 文字都不达标（WCAG 4.5:1）。*/
+  /* 兜底：不支持 color-mix 的旧浏览器（Safari <16.2 / Chrome <111）退回主文本色，
+     可读性不降级，只是失去色相；支持时由下方 @supports 覆盖为混合色。*/
+  --dsh-wp-done-text: var(--dsw-alias-label-primary);
+  --dsh-wp-active-text: var(--dsw-alias-label-primary);
+  /* T6 — 零依赖完成度环：弧线 #0284c7 在浅 #fafafb 3.93:1 / 深 #1b1c1f 4.16:1（≥3:1 图形对比）；
+     底槽用中性灰而不是品牌色，避免「未完成部分」被误读成状态色。 */
+  --dsh-wp-done-ink: var(--dsh-wp-done-text);
+  --dsh-wp-ring-track: rgba(148,163,184,.30);
+  /* 1.5.0 — 进度区图表化：构成条/阶段槽的中性轨道，以及 0% 零轨（≥3:1 图形对比）。 */
+  --dsh-wp-track: rgba(148,163,184,.22);
+  --dsh-wp-track-strong: rgba(100,116,139,.80);
+  min-width: 0;
+  width: 100%;
+  height: 100%;
+  max-height: 100dvh;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: contain;
+  touch-action: pan-y;
+  scrollbar-gutter: stable;
+  padding: 20px;
+  padding-bottom: calc(24px + env(safe-area-inset-bottom));
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-base);
+  font-size: 14px;
+  line-height: 1.6;
+}
+.dsh-wp h1, .dsh-wp h2, .dsh-wp h3, .dsh-wp p { margin: 0; }
+/* v1.4.0 — status grouping: in progress vs completed */
+.dsh-wp-groups { display: flex; flex-direction: column; gap: 20px; }
+.dsh-wp-group { border-radius: 16px; padding: 14px 14px 6px; border: 1px solid var(--dsw-alias-line-1, rgba(148,163,184,.22)); background: var(--dsw-alias-bg-elevated, rgba(148,163,184,.05)); position: relative; overflow: hidden; }
+.dsh-wp-group::before { content: ''; position: absolute; inset: 0 auto 0 0; width: 4px; }
+.dsh-wp-group--live::before { background: linear-gradient(180deg, #fb923c, #f97316); }
+.dsh-wp-group--done::before { background: linear-gradient(180deg, #38bdf8, #0284c7); }
+/* T6 — 组头多出一行完成度摘要，底部内边距 10px → 6px，两组仍在同一屏内读完。 */
+.dsh-wp-group-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 0 4px 6px; }
+.dsh-wp-group-head--btn { width: 100%; background: none; border: 0; color: inherit; font: inherit; text-align: left; cursor: pointer; border-radius: 8px; }
+.dsh-wp-group-head--btn:hover .dsh-wp-group-chevron,
+.dsh-wp-group-head--btn:focus-visible .dsh-wp-group-chevron { border-color: var(--dsw-alias-label-secondary); }
+.dsh-wp-group-head--btn:focus-visible { outline: 2px solid var(--dsw-alias-label-primary); outline-offset: 2px; }
+/* 折叠 chevron：向下=已展开，向右=已折叠（形状编码，不依赖颜色） */
+.dsh-wp-group-chevron { flex: none; width: 7px; height: 7px; border-right: 1.5px solid var(--dsw-alias-label-tertiary, #9ca3af); border-bottom: 1.5px solid var(--dsw-alias-label-tertiary, #9ca3af); transform: rotate(45deg); transition: transform .16s ease; }
+.dsh-wp-group--folded .dsh-wp-group-chevron { transform: rotate(-45deg); }
+/* 折叠态不再给副行降透明度：opacity:.75 会把浅色副行压到 2.45:1，折叠提示由旋转后的 chevron 承担。 */
+@media (prefers-reduced-motion: reduce) { .dsh-wp-group-chevron { transition: none; } }
+/* T6 — 组头完成度环：一个内联 SVG（底槽圆 + 弧线圆），零依赖、无 canvas、无第三方库。
+   环是纯装饰（aria-hidden），百分比同时以文字出现在下一行摘要里，所以不依赖颜色也能读。 */
+.dsh-wp-group-ring { position: relative; width: 44px; height: 44px; flex: none; margin-left: auto; display: inline-grid; place-items: center; }
+.dsh-wp-group-ring svg { position: absolute; inset: 0; display: block; }
+.dsh-wp-group-ring-track { stroke: var(--dsh-wp-ring-track, rgba(148,163,184,.30)); }
+/* 1.5.0 — 0% 不等于「没有图」：零轨加粗到 ≥3:1（rgba(100,116,139,.80)），
+   环仍然看得见；「暂无数据」保持细轨 + 「—」，两种状态在视觉上不是一回事。 */
+.dsh-wp-group-ring[data-zero="true"] .dsh-wp-group-ring-track { stroke: var(--dsh-wp-track-strong); }
+.dsh-wp-group-ring[data-zero="true"] .dsh-wp-group-ring-label { font-size: 12px; font-weight: 800; }
+.dsh-wp-group-ring-arc { stroke: var(--dsh-wp-done-ink, #0284c7); transition: stroke-dasharray .28s ease; }
+.dsh-wp-group-ring-label { position: relative; font-size: 11px; font-weight: 700; line-height: 1; letter-spacing: -.2px; font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-primary, #0f172a); }
+@media (prefers-reduced-motion: reduce) { .dsh-wp-group-ring-arc { transition: none; } }
+.dsh-wp-group-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+.dsh-wp-group--live .dsh-wp-group-dot { background: #f97316; box-shadow: 0 0 0 4px rgba(249,115,22,.16); animation: dsh-wp-pulse 1.8s ease-in-out infinite; }
+.dsh-wp-group--done .dsh-wp-group-dot { background: #0ea5e9; box-shadow: 0 0 0 4px rgba(14,165,233,.14); }
+.dsh-wp-group-title { font-size: 15px; font-weight: 700; letter-spacing: .2px; color: var(--dsw-alias-label-primary, #0f172a); }
+/* 设计稿 §6.1：橙 #f97316 / 白 ≈2.8:1、蓝 #0ea5e9 / 白 ≈2.77:1，均不足 4.5:1，
+   15px 粗体也不算法定「大字号」，所以组头一律用主文本色；品牌色只做「面」——
+   圆点、卡片左栏，以及计数徽章 14% 底色（文字仍是主文本色，浅/深主题同源）。
+   状态区分同时有文字（进行中/已完成）与形状（左栏、折叠 chevron），不依赖颜色。 */
+.dsh-wp-group-count { min-width: 22px; padding: 0 7px; height: 20px; border-radius: 999px; font-size: 12px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; color: var(--dsw-alias-label-primary, #0f172a); font-variant-numeric: tabular-nums; }
+.dsh-wp-group--live .dsh-wp-group-count { background: rgba(249,115,22,.14); box-shadow: inset 0 0 0 1px rgba(249,115,22,.34); }
+.dsh-wp-group--done .dsh-wp-group-count { background: rgba(14,165,233,.14); box-shadow: inset 0 0 0 1px rgba(14,165,233,.34); }
+/* WCAG AA：错误色叠 12% 红底后，浅色 #ec1313 只有 3.70:1；与主文本色混合 20%
+   让浅色变深、深色变浅，两套主题都 ≥4.5:1（实测 5.16:1 / 5.67:1）。 */
+.dsh-wp-group-alert { font-size: 12px; font-weight: 650; color: var(--dsw-alias-state-error-primary, #ef4444); color: color-mix(in srgb, var(--dsw-alias-state-error-primary, #ef4444) 80%, var(--dsw-alias-label-primary, #0f172a) 20%); background: rgba(239,68,68,.12); padding: 1px 8px; border-radius: 999px; }
+/* T6 — 组头完成度摘要：先给纯文本「进行中 N / 已完成 M（完成率 x%）」，
+   不点开、不看颜色也能读出进度。flex-basis:100% 让它独占一整行——
+   窄面板（≈292px 内容宽）下只截断摘要自身（省略号 + title 全文），
+   组名、计数徽章、完成度环都不被挤走；读屏由组头按钮的 aria-label 念完整句。 */
+.dsh-wp-group-sub { flex: 0 0 100%; margin-left: 0; min-width: 0; font-size: 12px; line-height: 1.45; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--dsw-alias-label-secondary, #475569); font-variant-numeric: tabular-nums; }
+.dsh-wp-group-body { display: flex; flex-direction: column; gap: 10px; }
+.dsh-wp-group-body--folded { display: none; }
+/* 已完成的降级感由蓝色左栏 + 组头文案承担；不再整组 opacity:.8——
+   它会把浅色次要文字压到 3.61:1、三级文字压到 2.64:1，直接破坏正文可读性。 */
+.dsh-wp-group-empty { padding: 12px 4px 18px; font-size: 13px; color: var(--dsw-alias-label-secondary, #64748b); }
+.dsh-wp-charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin: 2px 0 2px; }
+.dsh-wp-chart-card { border-radius: 16px; padding: 12px 14px 10px; border: 1px solid var(--dsw-alias-line-1, rgba(148,163,184,.22)); background: linear-gradient(180deg, rgba(148,163,184,.10), rgba(148,163,184,.02)); min-width: 0; }
+.dsh-wp-chart-title { font-size: 12px; font-weight: 650; letter-spacing: .3px; color: var(--dsw-alias-label-secondary, #cbd5e1); margin-bottom: 6px; }
+.dsh-wp-chart-canvas { position: relative; height: 200px; min-width: 0; }
+/* 图表就绪前不占位、就绪后隐去 fallback；两者互斥，避免叠影 */
+.dsh-wp-charts--fallback .dsh-wp-chart-canvas { display: none; }
+.dsh-wp-charts--ready .dsh-wp-fallback { display: none; }
+.dsh-wp-fallback { display: flex; flex-direction: column; gap: 10px; padding: 8px 2px 6px; }
+.dsh-wp-fallback-bar { display: flex; height: 16px; border-radius: 999px; overflow: hidden; background: rgba(148,163,184,.18); }
+.dsh-wp-fallback-live { background: linear-gradient(90deg, #fb923c, #f97316); transition: width .5s ease; }
+.dsh-wp-fallback-done { background: linear-gradient(90deg, #38bdf8, #0284c7); transition: width .5s ease; }
+.dsh-wp-fallback-legend { display: flex; gap: 16px; font-size: 12px; color: var(--dsw-alias-label-secondary, #cbd5e1); }
+.dsh-wp-fallback-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.dsh-wp-fallback-key { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+.dsh-wp-fallback-key--live { background: #f97316; }
+.dsh-wp-fallback-key--done { background: #0ea5e9; }
+@keyframes dsh-wp-pulse { 0%,100% { box-shadow: 0 0 0 4px rgba(249,115,22,.16); } 50% { box-shadow: 0 0 0 7px rgba(249,115,22,.05); } }
+@media (prefers-reduced-motion: reduce) { .dsh-wp-group--live .dsh-wp-group-dot { animation: none; } }
+
+.dsh-wp-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.dsh-wp-title { font-size: clamp(18px, 2.4vw, 24px); font-weight: 650; letter-spacing: -0.01em; }
+.dsh-wp-subtitle { margin-top: 4px; color: var(--dsw-alias-label-secondary); max-width: 70ch; }
+.dsh-wp-guide {
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 14px;
+  background: var(--dsw-alias-bg-layer-1);
+  padding: 12px 14px;
+  margin-bottom: 14px;
+}
+.dsh-wp-guide-title { font-weight: 650; margin-bottom: 8px; }
+.dsh-wp-guide-body {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+}
+.dsh-wp-guide-row {
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-2);
+}
+.dsh-wp-guide-label { color: var(--dsw-alias-label-secondary); font-size: 11px; }
+.dsh-wp-guide-value { min-width: 0; margin-top: 2px; font-size: 13px; overflow-wrap: anywhere; }
+.dsh-wp-guide-hint { margin-top: 8px; color: var(--dsw-alias-label-secondary); font-size: 12px; overflow-wrap: anywhere; }
+.dsh-wp-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: var(--dsw-alias-label-secondary); font-size: 12px; }
+.dsh-wp-scope-note { margin: 8px 0 10px; color: var(--dsw-alias-label-secondary); font-size: 12px; line-height: 1.55; }
+.dsh-wp-button {
+  min-height: 44px;
+  min-width: 44px;
+  padding: 8px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.dsh-wp-button:hover { background: var(--dsw-alias-bg-layer-2); }
+.dsh-wp-button:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 2px; }
+.dsh-wp-banner {
+  border: 1px solid var(--dsw-alias-border-l1);
+  background: var(--dsw-alias-bg-layer-1);
+  border-radius: 12px;
+  padding: 12px 14px;
+  margin-bottom: 14px;
+  overflow-wrap: anywhere;
+}
+.dsh-wp-banner--error { border-color: var(--dsw-alias-state-error-primary); }
+.dsh-wp-banner--degraded { border-color: var(--dsw-alias-state-warn-primary); background: var(--dsw-alias-bg-layer-2); }
+.dsh-wp-empty {
+  border: 1px dashed var(--dsw-alias-border-l2);
+  border-radius: 14px;
+  padding: 28px 18px;
+  text-align: center;
+  color: var(--dsw-alias-label-secondary);
+  overflow-wrap: anywhere;
+}
+.dsh-wp-statbar {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  border: 1px solid var(--dsw-alias-border-l1);
+  background: var(--dsw-alias-bg-layer-1);
+  border-radius: 14px;
+  overflow: hidden;
+  margin-bottom: 16px;
+}
+.dsh-wp-stat {
+  min-width: 0;
+  padding: 9px 12px 10px;
+  border-left: 1px solid var(--dsw-alias-border-l1);
+}
+.dsh-wp-stat:first-child { border-left: 0; }
+.dsh-wp-stat-value { font-size: 18px; line-height: 1.25; font-weight: 650; font-variant-numeric: tabular-nums; }
+.dsh-wp-stat-label { color: var(--dsw-alias-label-secondary); font-size: 11px; letter-spacing: 0.01em; overflow-wrap: anywhere; }
+.dsh-wp-stat--done .dsh-wp-stat-value { color: var(--dsh-wp-done-text); }
+.dsh-wp-stat--active .dsh-wp-stat-value { color: var(--dsh-wp-active-text); }
+.dsh-wp-stat--tasks .dsh-wp-stat-value { color: var(--dsw-alias-brand-primary); }
+.dsh-wp-stat--blocked .dsh-wp-stat-value { color: var(--dsw-alias-state-error-primary); }
+/* Visual overview: one status donut plus one progress bar per task. Uses only
+   the live alias tokens and no chart dependency, so the page stays light. */
+.dsh-wp-overview {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.85fr) minmax(280px, 1.35fr);
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.dsh-wp-chart-card {
+  min-width: 0;
+  border: 1px solid var(--dsw-alias-border-l1);
+  background: var(--dsw-alias-bg-layer-1);
+  border-radius: 14px;
+  padding: 12px 14px;
+  overflow-wrap: anywhere;
+}
+.dsh-wp-chart-card .dsh-wp-section-title { margin-top: 0; }
+.dsh-wp-donut-wrap {
+  position: relative;
+  width: 132px;
+  max-width: 100%;
+  aspect-ratio: 1;
+  margin: 6px auto 10px;
+}
+.dsh-wp-donut { display: block; width: 100%; height: 100%; }
+.dsh-wp-donut-center {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  pointer-events: none;
+  text-align: center;
+}
+.dsh-wp-donut-center strong { font-size: 24px; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.dsh-wp-donut-center span { color: var(--dsw-alias-label-secondary); font-size: 11px; }
+.dsh-wp-legend { display: flex; flex-wrap: wrap; gap: 5px 12px; justify-content: center; }
+.dsh-wp-legend-item { display: inline-flex; align-items: center; gap: 5px; color: var(--dsw-alias-label-secondary); font-size: 12px; }
+.dsh-wp-legend-dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
+.dsh-wp-bar-row { min-width: 0; }
+.dsh-wp-bar-row + .dsh-wp-bar-row { margin-top: 11px; }
+.dsh-wp-bar-button {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 8px 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 10px;
+}
+.dsh-wp-bar-button:hover { background: var(--dsw-alias-bg-layer-1); }
+.dsh-wp-bar-button:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 2px; }
+.dsh-wp-session { scroll-margin-top: 72px; }
+.dsh-wp-bar-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; min-width: 0; }
+.dsh-wp-bar-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.dsh-wp-bar-value { flex: 0 0 auto; color: var(--dsw-alias-label-secondary); font-size: 12px; font-variant-numeric: tabular-nums; }
+.dsh-wp-bar-track {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--dsw-alias-bg-layer-2);
+  overflow: hidden;
+  margin-top: 4px;
+}
+.dsh-wp-bar-fill { height: 100%; border-radius: 999px; background: var(--dsh-wp-active); transition: width 240ms ease; }
+.dsh-wp-bar-fill--done { background: var(--dsh-wp-done); }
+.dsh-wp-bar-fill--blocked { background: var(--dsw-alias-state-error-primary); }
+.dsh-wp-bar-fill--warn { background: var(--dsw-alias-state-warn-primary); }
+.dsh-wp-bar-fill--idle { background: var(--dsw-alias-state-idle-primary); }
+.dsh-wp-bar-meta { display: flex; justify-content: space-between; gap: 8px; margin-top: 3px; color: var(--dsw-alias-label-secondary); font-size: 11px; }
+.dsh-wp-mini {
+  display: inline-block;
+  width: 54px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--dsw-alias-bg-layer-2);
+  overflow: hidden;
+  vertical-align: middle;
+}
+.dsh-wp-mini-fill { display: block; height: 100%; border-radius: 999px; background: var(--dsh-wp-active); }
+.dsh-wp-mini-fill--done { background: var(--dsh-wp-done); }
+.dsh-wp-mini-fill--blocked { background: var(--dsw-alias-state-error-primary); }
+.dsh-wp-mini-fill--warn { background: var(--dsw-alias-state-warn-primary); }
+.dsh-wp-mini-fill--idle { background: var(--dsw-alias-state-idle-primary); }
+/* ── 1.5.0 计划卡进度图表（用户诉求：画圈处必须一眼可读）─────────────────
+   四层信号同时存在，任何一层失效都还能读出进度，且都不依赖颜色：
+   ① 44px 环：图形比例；0% 时轨道加粗仍可见，不画弧（避免圆头端点留下小点）。
+   ② 24px 百分比：主文本色，浅色底 17:1；「—」表示分母为 0，绝不写 NaN。
+   ③ 整行四段构成条：按件数分宽；0% 时是一条完整的灰色「还没开始」，
+      这也是「整条灰＝都还没开始」的图形解释。
+   ④ 11px 状态图例 + 一行「现在在做什么」+ 6px 阶段步进条。
+   数据只来自既有 session.stats / stages / statuses：无新接口、无依赖、无定时器。 */
+.dsh-wp-session-collapse .dsh-wp-collapse-meta { flex: 1 1 100%; display: block; margin-top: 6px; }
+.dsh-wp-planviz {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  grid-template-areas: "ring head" "bar bar" "legend legend" "step step";
+  column-gap: 10px;
+  row-gap: 6px;
+  width: 100%;
+  min-width: 0;
+}
+.dsh-wp-planviz-ring { grid-area: ring; position: relative; width: 44px; height: 44px; display: inline-grid; place-items: center; }
+.dsh-wp-planviz-ring svg { position: absolute; inset: 0; display: block; }
+.dsh-wp-planring-track { stroke: var(--dsh-wp-track); }
+.dsh-wp-planring-arc { stroke: var(--dsh-wp-done-ink); transition: stroke-dasharray .28s ease; }
+.dsh-wp-planviz-ring[data-zero="true"] .dsh-wp-planring-track { stroke: var(--dsh-wp-track-strong); }
+.dsh-wp-planviz-head { grid-area: head; display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; min-width: 0; }
+.dsh-wp-planviz-pct { font-size: 24px; font-weight: 700; line-height: 1.15; letter-spacing: -.4px; color: var(--dsw-alias-label-primary, #0f172a); font-variant-numeric: tabular-nums; }
+.dsh-wp-planviz-scope { min-width: 0; font-size: 12px; font-weight: 600; color: var(--dsw-alias-label-secondary, #475569); font-variant-numeric: tabular-nums; }
+.dsh-wp-planviz-alarm { font-size: 11px; font-weight: 650; padding: 1px 7px; border-radius: 999px; color: var(--dsw-alias-state-error-primary, #ef4444); color: color-mix(in srgb, var(--dsw-alias-state-error-primary, #ef4444) 80%, var(--dsw-alias-label-primary, #0f172a) 20%); background: rgba(239,68,68,.12); }
+.dsh-wp-planviz-now { flex: 1 1 100%; display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12px; color: var(--dsw-alias-label-secondary, #475569); }
+.dsh-wp-planviz-now-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--dsw-alias-state-idle-primary); }
+.dsh-wp-planviz[data-state="active"] .dsh-wp-planviz-now-dot { background: var(--dsh-wp-active); }
+.dsh-wp-planviz[data-state="done"] .dsh-wp-planviz-now-dot { background: var(--dsh-wp-done); }
+.dsh-wp-planviz[data-state="blocked"] .dsh-wp-planviz-now-dot { background: var(--dsw-alias-state-error-primary); }
+.dsh-wp-planviz-now-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-wp-planviz-bar { grid-area: bar; display: flex; align-items: stretch; gap: 2px; height: 8px; border-radius: 999px; background: var(--dsh-wp-track); overflow: hidden; }
+.dsh-wp-planviz-seg { flex: 1 1 0; min-width: 4px; height: 100%; border-radius: 999px; }
+.dsh-wp-planviz-seg[data-kind="done"] { background: var(--dsh-wp-done); }
+.dsh-wp-planviz-seg[data-kind="active"] { background: var(--dsh-wp-active); }
+.dsh-wp-planviz-seg[data-kind="blocked"] { background: var(--dsw-alias-state-error-primary); }
+.dsh-wp-planviz-seg[data-kind="pending"] { background: var(--dsw-alias-state-idle-primary); }
+.dsh-wp-planviz-legend { grid-area: legend; display: flex; flex-wrap: wrap; gap: 2px 10px; font-size: 11px; line-height: 1.5; color: var(--dsw-alias-label-secondary, #475569); font-variant-numeric: tabular-nums; }
+.dsh-wp-planviz-legend-item { display: inline-flex; align-items: center; gap: 4px; }
+.dsh-wp-planviz-legend-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--dsw-alias-state-idle-primary); }
+.dsh-wp-planviz-legend-item[data-kind="done"] .dsh-wp-planviz-legend-dot { background: var(--dsh-wp-done); }
+.dsh-wp-planviz-legend-item[data-kind="active"] .dsh-wp-planviz-legend-dot { background: var(--dsh-wp-active); }
+.dsh-wp-planviz-legend-item[data-kind="blocked"] .dsh-wp-planviz-legend-dot { background: var(--dsw-alias-state-error-primary); }
+.dsh-wp-stepper { grid-area: step; display: flex; gap: 3px; min-width: 0; }
+.dsh-wp-stepper-seg { position: relative; flex: 1 1 0; min-width: 0; height: 6px; border-radius: 999px; background: var(--dsh-wp-track); overflow: hidden; }
+.dsh-wp-stepper-seg[data-tone="pending"] { background: transparent; border: 1px dashed var(--dsh-wp-track-strong); }
+.dsh-wp-stepper-seg[data-tone="blocked"] { box-shadow: inset 0 0 0 1px var(--dsw-alias-state-error-primary); }
+.dsh-wp-stepper-seg[data-current="true"] { outline: 1.5px solid var(--dsh-wp-active-text); outline-offset: 1px; }
+.dsh-wp-stepper-fill { display: block; height: 100%; border-radius: 999px; background: var(--dsh-wp-active); }
+.dsh-wp-stepper-seg[data-tone="done"] .dsh-wp-stepper-fill { background: var(--dsh-wp-done); }
+.dsh-wp-stepper-seg[data-tone="blocked"] .dsh-wp-stepper-fill { background: var(--dsw-alias-state-error-primary); }
+@media (prefers-reduced-motion: reduce) { .dsh-wp-planring-arc { transition: none; } }
+/* 短屏（纵向更紧）：先撤图例与阶段条，保住环 + 百分比 + 构成条 + 当前步骤。 */
+@media (max-height: 720px) and (max-width: 600px) {
+  .dsh-wp-planviz-legend, .dsh-wp-stepper { display: none; }
+}
+/* 展开态「分步进度」：替换旧的计划级进度条，保留加权进度并给出逐阶段分解。 */
+.dsh-wp-planoverview { margin: 12px 0 4px; padding: 12px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 12px; background: var(--dsw-alias-bg-layer-2); display: grid; gap: 8px; }
+.dsh-wp-planoverview-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--dsw-alias-label-secondary, #475569); }
+.dsh-wp-planoverview-title { font-size: 12px; font-weight: 650; letter-spacing: .2px; }
+.dsh-wp-planoverview-stats { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 12px; color: var(--dsw-alias-label-secondary, #475569); font-variant-numeric: tabular-nums; }
+.dsh-wp-planrows { display: grid; }
+.dsh-wp-planrow { display: grid; grid-template-columns: 7px minmax(0, 1fr) 48px auto auto; align-items: center; gap: 8px; min-height: 28px; padding: 4px 0; border-top: 1px solid var(--dsw-alias-border-l1); }
+.dsh-wp-planrow:first-child { border-top: 0; }
+.dsh-wp-planrow[data-current="true"] { background: rgba(249,115,22,.06); border-radius: 8px; }
+.dsh-wp-planrow-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dsw-alias-state-idle-primary); }
+.dsh-wp-planrow[data-tone="done"] .dsh-wp-planrow-dot { background: var(--dsh-wp-done); }
+.dsh-wp-planrow[data-tone="active"] .dsh-wp-planrow-dot { background: var(--dsh-wp-active); }
+.dsh-wp-planrow[data-tone="blocked"] .dsh-wp-planrow-dot { background: var(--dsw-alias-state-error-primary); }
+.dsh-wp-planrow-name { min-width: 0; font-size: 13px; font-weight: 600; color: var(--dsw-alias-label-primary, #0f172a); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-wp-planrow-bar { display: block; height: 4px; border-radius: 999px; background: var(--dsh-wp-track); overflow: hidden; }
+.dsh-wp-planrow-fill { display: block; height: 100%; border-radius: 999px; background: var(--dsh-wp-active); }
+.dsh-wp-planrow[data-tone="done"] .dsh-wp-planrow-fill { background: var(--dsh-wp-done); }
+.dsh-wp-planrow[data-tone="blocked"] .dsh-wp-planrow-fill { background: var(--dsw-alias-state-error-primary); }
+.dsh-wp-planrow-count { font-size: 12px; color: var(--dsw-alias-label-secondary, #475569); font-variant-numeric: tabular-nums; }
+.dsh-wp-planrow-state { font-size: 11px; color: var(--dsw-alias-label-secondary, #475569); white-space: nowrap; }
+.dsh-wp-sessions { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr)); gap: 16px; align-items: start; }
+.dsh-wp-session {
+  min-width: 0;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-top: 3px solid var(--dsh-wp-active);
+  background: var(--dsw-alias-bg-layer-1);
+  border-radius: 16px;
+  padding: 16px;
+  overflow-wrap: anywhere;
+}
+.dsh-wp-session.dsh-wp-tone-done { border-top-color: var(--dsh-wp-done); }
+.dsh-wp-session.dsh-wp-tone-blocked { border-top-color: var(--dsw-alias-state-error-primary); }
+.dsh-wp-session.dsh-wp-tone-warn { border-top-color: var(--dsw-alias-state-warn-primary); }
+
+/* ── 1.4.1 视觉精修：只加细节，不改信息结构 ─────────────────────────────
+   原则（对齐设计稿 §6.4）：
+   1) 颜色不做唯一编码：组别另有位置、圆点、对勾/chevron、文案与形状；
+   2) 所有数字用等宽数字（tabular-nums），列与列之间对得齐；
+   3) 只有装饰性元素（发光、渐变、过渡）参与动效，且尊重 reduced-motion。 */
+.dsh-wp-group { box-shadow: 0 1px 0 rgba(255,255,255,.03) inset, 0 10px 26px -18px rgba(15,23,42,.55); }
+/* 组左栏：4px 竖向强调条，是「位置+形状」编码，不依赖颜色也能看出分区 */
+.dsh-wp-group::before { content: ''; position: absolute; left: 0; top: 14px; bottom: 14px; width: 3px; border-radius: 0 3px 3px 0; opacity: .9; }
+.dsh-wp-group--live::before { background: linear-gradient(180deg, #fbbf24, #ea580c); }
+.dsh-wp-group--done::before { background: linear-gradient(180deg, #7dd3fc, #0369a1); }
+.dsh-wp-group--done { opacity: .97; }
+.dsh-wp-group-head--btn { transition: background-color .16s ease; }
+.dsh-wp-group-head--btn:hover { background: rgba(148,163,184,.10); }
+.dsh-wp-group-count { font-variant-numeric: tabular-nums; }
+.dsh-wp-group-sub { font-variant-numeric: tabular-nums; }
+/* 图表卡：标题左侧一枚小色块，和环形图/条形图配色呼应 */
+.dsh-wp-chart-title { display: flex; align-items: center; gap: 7px; }
+.dsh-wp-chart-title::before { content: ''; width: 9px; height: 9px; border-radius: 3px; flex: none;
+  background: linear-gradient(135deg, #fbbf24, #ea580c); }
+.dsh-wp-chart-card + .dsh-wp-chart-card .dsh-wp-chart-title::before,
+.dsh-wp-chart-card:nth-of-type(2) .dsh-wp-chart-title::before { background: linear-gradient(135deg, #7dd3fc, #0369a1); }
+@media (prefers-reduced-motion: reduce) {
+  .dsh-wp-group-head--btn { transition: none; }
+  .dsh-wp-charts, .dsh-wp-chart-canvas { animation: none !important; }
+}
+.dsh-wp-session-head { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.dsh-wp-session-title { font-size: 16px; font-weight: 650; min-width: 0; }
+.dsh-wp-pills { display: flex; flex-wrap: wrap; gap: 6px; }
+.dsh-wp-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 26px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.dsh-wp-dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; background: var(--dsw-alias-state-idle-primary); }
+.dsh-wp-tone-done .dsh-wp-dot, .dsh-wp-dot--done { background: var(--dsh-wp-done); }
+.dsh-wp-tone-active .dsh-wp-dot, .dsh-wp-dot--in_progress { background: var(--dsh-wp-active); }
+.dsh-wp-pill.dsh-wp-tone-done { color: var(--dsh-wp-done-text); }
+.dsh-wp-pill.dsh-wp-tone-active { color: var(--dsh-wp-active-text); }
+.dsh-wp-tone-blocked .dsh-wp-dot, .dsh-wp-dot--blocked { background: var(--dsw-alias-state-error-primary); }
+.dsh-wp-tone-warn .dsh-wp-dot, .dsh-wp-dot--degraded { background: var(--dsw-alias-state-warn-primary); }
+.dsh-wp-progress {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--dsw-alias-bg-layer-2);
+  overflow: hidden;
+  margin: 10px 0 6px;
+}
+.dsh-wp-progress-fill { height: 100%; border-radius: 999px; background: var(--dsh-wp-active); transition: width 240ms ease; }
+.dsh-wp-progress-fill--done { background: var(--dsh-wp-done); }
+.dsh-wp-progress-fill--blocked { background: var(--dsw-alias-state-error-primary); }
+.dsh-wp-progress-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px; color: var(--dsw-alias-label-secondary); font-size: 12px; }
+.dsh-wp-departments { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.dsh-wp-section { margin-top: 14px; }
+.dsh-wp-section-title { font-size: 13px; font-weight: 650; color: var(--dsw-alias-label-secondary); margin-bottom: 8px; text-transform: none; }
+.dsh-wp-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr)); gap: 8px; }
+.dsh-wp-field { min-width: 0; border: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-2); border-radius: 10px; padding: 8px 10px; }
+.dsh-wp-field-label { color: var(--dsw-alias-label-secondary); font-size: 12px; }
+.dsh-wp-field-value { margin-top: 2px; overflow-wrap: anywhere; }
+.dsh-wp-list { margin: 0; padding-left: 18px; overflow-wrap: anywhere; }
+.dsh-wp-list li + li { margin-top: 3px; }
+.dsh-wp-stage {
+  margin-top: 12px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 12px;
+  padding: 12px;
+  background: var(--dsw-alias-bg-base);
+  min-width: 0;
+}
+.dsh-wp-stage-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px; }
+.dsh-wp-stage-title { font-weight: 650; }
+.dsh-wp-stage-goal { color: var(--dsw-alias-label-secondary); margin-top: 2px; }
+.dsh-wp-checkpoint { margin-top: 6px; color: var(--dsw-alias-label-secondary); font-size: 12px; overflow-wrap: anywhere; }
+.dsh-wp-subtask {
+  margin-top: 10px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 10px;
+  padding: 10px;
+  background: var(--dsw-alias-bg-layer-1);
+  min-width: 0;
+}
+.dsh-wp-subtask-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px; }
+.dsh-wp-subtask-title { font-weight: 600; min-width: 0; }
+.dsh-wp-subtask-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; color: var(--dsw-alias-label-secondary); font-size: 12px; }
+.dsh-wp-subtask-body { margin-top: 6px; }
+.dsh-wp-subtask-body > div { margin-top: 4px; }
+.dsh-wp-subtask-body p { margin-top: 2px; overflow-wrap: anywhere; }
+.dsh-wp-error-text { color: var(--dsw-alias-state-error-primary); overflow-wrap: anywhere; }
+.dsh-wp-muted { color: var(--dsw-alias-label-secondary); }
+/* Reusable disclosure container: default collapsed, one 44px+toggle row, panel below. */
+.dsh-wp-collapse { min-width: 0; }
+.dsh-wp-collapse-head { display: flex; align-items: stretch; gap: 6px; min-width: 0; }
+.dsh-wp-collapse-toggle {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  min-height: 44px;
+  padding: 7px 10px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 12px;
+  background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  touch-action: manipulation;
+  overflow-wrap: anywhere;
+}
+.dsh-wp-collapse-toggle:hover { background: var(--dsw-alias-bg-layer-1); }
+.dsh-wp-chart-more { margin-top: 6px; font-size: 11px; line-height: 1.4; color: var(--dsw-alias-label-primary); }
+.dsh-wp-collapse-toggle:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 2px; }
+.dsh-wp-collapse-chevron {
+  flex: 0 0 auto;
+  width: 9px;
+  height: 9px;
+  margin-left: 2px;
+  border-right: 2px solid currentColor;
+  border-bottom: 2px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 160ms ease;
+}
+.dsh-wp-collapse[data-open="true"] .dsh-wp-collapse-chevron { transform: rotate(45deg); }
+.dsh-wp-collapse-summary { display: flex; flex: 1 1 auto; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; min-width: 0; }
+.dsh-wp-collapse-title { font-weight: 650; min-width: 0; }
+.dsh-wp-collapse-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; color: var(--dsw-alias-label-secondary); font-size: 12px; }
+.dsh-wp-collapse-badge { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 6px; margin-left: auto; }
+.dsh-wp-collapse-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; }
+.dsh-wp-collapse-panel { margin-top: 10px; min-width: 0; }
+.dsh-wp-collapse-panel[hidden] { display: none; }
+/* Task card / step card wrapping: the disclosure row is the only content shown
+   while collapsed, so the card keeps its tone border and padding. */
+.dsh-wp-session-collapse .dsh-wp-collapse-toggle { padding: 9px 12px; }
+.dsh-wp-session-updated { margin: 0 0 10px; }
+.dsh-wp-stage-collapse .dsh-wp-collapse-toggle { padding: 7px 10px; }
+.dsh-wp-stage-body > .dsh-wp-stage-goal { margin-top: 0; }
+.dsh-wp-details { margin-top: 12px; border-top: 1px solid var(--dsw-alias-border-l1); padding-top: 10px; }
+.dsh-wp-details > summary { cursor: pointer; min-height: 44px; display: flex; align-items: center; font-weight: 600; color: var(--dsw-alias-label-primary); }
+.dsh-wp-details > summary:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 2px; }
+.dsh-wp-turn {
+  margin: 8px 0;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-left: 3px solid var(--dsw-alias-brand-primary);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-1);
+  padding: 10px 12px;
+  color: var(--dsw-alias-label-primary);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.dsh-wp-turn.dsh-wp-tone-done { border-left-color: var(--dsh-wp-done); }
+.dsh-wp-turn.dsh-wp-tone-active { border-left-color: var(--dsh-wp-active); }
+.dsh-wp-turn-title { font-weight: 650; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.dsh-wp-tool {
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-1);
+  padding: 8px 10px;
+  margin: 6px 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.dsh-wp-tool-head { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-weight: 600; }
+.dsh-wp-tool-body { margin-top: 4px; color: var(--dsw-alias-label-secondary); font-size: 12px; }
+.dsh-wp-code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; overflow-wrap: anywhere; }
+.dsh-wp-sidebar-icon { display: inline-flex; align-items: center; justify-content: center; width: 100%; height: 100%; color: currentColor; }
+@media (max-width: 600px) {
+  .dsh-wp { padding: 12px; padding-bottom: calc(20px + env(safe-area-inset-bottom)); }
+  .dsh-wp-sessions { grid-template-columns: minmax(0, 1fr); }
+  .dsh-wp-overview { grid-template-columns: minmax(0, 1fr); }
+  .dsh-wp-statbar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dsh-wp-stat:nth-child(3),
+  .dsh-wp-stat:nth-child(4),
+  .dsh-wp-stat:nth-child(5) { border-top: 1px solid var(--dsw-alias-border-l1); }
+  .dsh-wp-stat:nth-child(3),
+  .dsh-wp-stat:nth-child(5) { border-left: 0; }
+  .dsh-wp-stat:nth-child(5) { grid-column: 1 / -1; }
+  .dsh-wp-session { padding: 12px; }
+  .dsh-wp-guide-body { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .dsh-wp-details > summary { min-height: 44px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dsh-wp-progress-fill { transition: none; }
+  .dsh-wp-collapse-chevron { transition: none; }
+}
+
+/* 主题自适应文本色（渐变品牌色 → 与主文本色混合）。
+   浅色 #b35616 4.93:1 / #0e79a9 4.85:1，深色 #f99c5b 7.82:1 / #55beee 7.86:1。*/
+@supports (color: color-mix(in srgb, red, blue)) {
+  .dsh-wp {
+    --dsh-wp-done-text: color-mix(in srgb, var(--dsh-wp-done) 70%, var(--dsw-alias-label-primary));
+    --dsh-wp-active-text: color-mix(in srgb, var(--dsh-wp-active) 70%, var(--dsw-alias-label-primary));
+  }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>dsh-workplan 进度可视化：1.4.3 → 1.5.0</h1>
+  <p class="lead">同一套 CSS、同一份数据。左上方是 1.4.3 折叠卡的样子（0% 时条形宽度为 0，只剩灰字），下方是 1.5.0 的实际渲染输出。</p>
+
+  <div class="compare">
+    <div class="pane">
+      <h2>改前 <span class="badge badge-old">v1.4.3</span></h2>
+      <div class="dsh-wp"><article id="dsh-wp-session-s-zero" data-session-id="s-zero" class="dsh-wp-session dsh-wp-tone-active">
+  <section class="dsh-wp-collapse dsh-wp-session-collapse" data-open="false">
+    <div class="dsh-wp-collapse-head">
+      <button type="button" class="dsh-wp-collapse-toggle" aria-expanded="false">
+        <span class="dsh-wp-collapse-chevron" aria-hidden="true"></span>
+        <span class="dsh-wp-collapse-summary">
+          <span class="dsh-wp-collapse-title">核查 1.1.9 是否已进入 CDN 插件索引</span>
+          <span class="dsh-wp-collapse-meta">
+            <span>本计划 0/8 做好了</span>
+            <span class="dsh-wp-mini" title="0%"><span class="dsh-wp-mini-fill dsh-wp-mini-fill--active" style="width:0%"></span></span>
+            <span>0 卡住了</span>
+          </span>
+        </span>
+        <span class="dsh-wp-collapse-badge"><span class="dsh-wp-pill dsh-wp-tone-active"><span class="dsh-wp-dot"></span>正在做</span></span>
+      </button>
+    </div>
+  </section>
+</article>
+
+<section class="dsh-wp-group dsh-wp-group--done dsh-wp-group--folded" data-group="done" data-folded="true" data-total="0" data-done="0" data-percent="none">
+  <button type="button" class="dsh-wp-group-head dsh-wp-group-head--btn" aria-expanded="false">
+    <span class="dsh-wp-group-dot" aria-hidden="true"></span>
+    <span class="dsh-wp-group-title" role="heading" aria-level="2">已完成</span>
+    <span class="dsh-wp-group-count" title="1 个计划">1</span>
+    <span class="dsh-wp-group-ring" aria-hidden="true"><svg viewBox="0 0 44 44" width="44" height="44" focusable="false"><circle class="dsh-wp-group-ring-track" cx="22" cy="22" r="18" fill="none" stroke-width="4"></circle></svg><span class="dsh-wp-group-ring-label">—</span></span>
+    <span class="dsh-wp-group-chevron" aria-hidden="true"></span>
+    <span class="dsh-wp-group-sub" title="未完成 0 / 已完成 0（完成率暂无数据）">未完成 0 / 已完成 0（完成率暂无数据）</span>
+  </button>
+  <div class="dsh-wp-group-body">
+    <div class="dsh-wp-group-empty">还没有完成的任务</div>
+  </div>
+</section></div>
+      <p class="note">折叠卡只有 12px 灰字 + 54×5px 迷你条；0% 时迷你条填充宽度为 0、轨道色与卡片底色几乎同色，等于没有图；百分比只在 <code>title</code> 悬停里。</p>
+    </div>
+    <div class="pane">
+      <h2>改后 <span class="badge badge-new">v1.5.0</span>（真实渲染输出）</h2>
+      <div class="dsh-wp"><article id="dsh-wp-session-s-zero" data-session-id="s-zero" class="dsh-wp-session dsh-wp-tone-active"><section class="dsh-wp-collapse dsh-wp-session-collapse" data-open="false"><div class="dsh-wp-collapse-head"><button type="button" class="dsh-wp-collapse-toggle" aria-expanded="false" aria-controls="dsh-wp-collapse-s-zero-panel"><span class="dsh-wp-collapse-chevron" aria-hidden="true"></span><span class="dsh-wp-collapse-summary"><span class="dsh-wp-collapse-title">核查 1.1.9 是否已进入 CDN 插件索引</span><span class="dsh-wp-collapse-meta"><div class="dsh-wp-planviz" data-percent="0" data-alarm="false" data-state="active"><span class="dsh-wp-planviz-ring" aria-hidden="true" data-zero="true"><svg viewBox="0 0 44 44" width="44" height="44" focusable="false"><circle class="dsh-wp-planring-track" cx="22" cy="22" r="18" fill="none" stroke-width="4"></circle></svg></span><div class="dsh-wp-planviz-head"><span class="dsh-wp-planviz-pct">0%</span><span class="dsh-wp-planviz-scope">本计划 0/8 做好了</span><span class="dsh-wp-planviz-now" data-state="active"><span class="dsh-wp-planviz-now-dot" aria-hidden="true"></span><span class="dsh-wp-planviz-now-text">正在做 · 定位插件源码</span></span></div><div class="dsh-wp-planviz-bar" aria-hidden="true" data-total="8"><span class="dsh-wp-planviz-seg" data-kind="active" data-count="1" style="flex-grow:1"></span><span class="dsh-wp-planviz-seg" data-kind="pending" data-count="7" style="flex-grow:7"></span></div><div class="dsh-wp-planviz-legend"><span class="dsh-wp-planviz-legend-item" data-kind="done" data-count="0"><span class="dsh-wp-planviz-legend-dot" aria-hidden="true"></span>做好了 0</span><span class="dsh-wp-planviz-legend-item" data-kind="active" data-count="1"><span class="dsh-wp-planviz-legend-dot" aria-hidden="true"></span>正在做 1</span><span class="dsh-wp-planviz-legend-item" data-kind="blocked" data-count="0"><span class="dsh-wp-planviz-legend-dot" aria-hidden="true"></span>卡住了 0</span><span class="dsh-wp-planviz-legend-item" data-kind="pending" data-count="7"><span class="dsh-wp-planviz-legend-dot" aria-hidden="true"></span>还没开始 7</span></div><div class="dsh-wp-stepper" aria-hidden="true" data-stages="3"><span class="dsh-wp-stepper-seg" data-stage-id="S1" data-tone="active" data-current="true" title="第 1 步 0/2 做好了"><span class="dsh-wp-stepper-fill" data-width="50" style="width:50%"></span></span><span class="dsh-wp-stepper-seg" data-stage-id="S2" data-tone="pending" data-current="false" title="第 2 步 0/2 做好了"><span class="dsh-wp-stepper-fill" data-width="0" style="width:0%"></span></span><span class="dsh-wp-stepper-seg" data-stage-id="S3" data-tone="pending" data-current="false" title="第 3 步 0/4 做好了"><span class="dsh-wp-stepper-fill" data-width="0" style="width:0%"></span></span></div></div></span></span><span class="dsh-wp-collapse-badge"><span class="dsh-wp-pill dsh-wp-tone-active"><span class="dsh-wp-dot"></span>正在做</span></span></button></div><div id="dsh-wp-collapse-s-zero-panel" class="dsh-wp-collapse-panel dsh-wp-session-body" hidden="true"><div class="dsh-wp-meta dsh-wp-session-updated">更新于 10/28/2026, 2:26:40 PM</div><section class="dsh-wp-guide" aria-label="先看这三句"><div class="dsh-wp-guide-title">先看这三句</div><div class="dsh-wp-guide-body"><div class="dsh-wp-guide-row"><div class="dsh-wp-guide-label">这件事</div><div class="dsh-wp-guide-value">一份可视化改造结果</div></div><div class="dsh-wp-guide-row"><div class="dsh-wp-guide-label">现在谁在做</div><div class="dsh-wp-guide-value">工程研发 · 定位插件源码</div></div><div class="dsh-wp-guide-row"><div class="dsh-wp-guide-label">接下来做什么</div><div class="dsh-wp-guide-value">工程研发 · 整理澄清问题</div></div></div><div class="dsh-wp-guide-hint">负责团队 = 谁来做；具体工作 = 要完成的一件事；卡住了 = 需要人处理。</div></section><div class="dsh-wp-section"><div class="dsh-wp-section-title">分几步做</div><section class="dsh-wp-stage dsh-wp-tone-active"><section class="dsh-wp-collapse dsh-wp-stage-collapse" data-open="false"><div class="dsh-wp-collapse-head"><button type="button" class="dsh-wp-collapse-toggle" aria-expanded="false" aria-controls="() => nextCollapseId()-panel"><span class="dsh-wp-collapse-chevron" aria-hidden="true"></span><span class="dsh-wp-collapse-summary"><span class="dsh-wp-collapse-title">第 1 步：现状定位</span><span class="dsh-wp-collapse-meta">0/2 做好了</span></span><span class="dsh-wp-collapse-badge"><span class="dsh-wp-pill dsh-wp-tone-active"><span class="dsh-wp-dot"></span>正在做</span></span></button></div><div id="() => nextCollapseId()-panel" class="dsh-wp-collapse-panel dsh-wp-stage-body" hidden="true"><div class="dsh-wp-stage-goal">要做出什么：现状定位目标</div><div class="dsh-wp-checkpoint">这一步做完先检查：现状定位检查点</div><div class="dsh-wp-subtask dsh-wp-tone-active"><div class="dsh-wp-subtask-head"><div class="dsh-wp-subtask-title">具体工作 1：定位插件源码</div><span class="dsh-wp-pill dsh-wp-tone-active"><span class="dsh-wp-dot"></span>正在做</span></div><div class="dsh-wp-subtask-meta"><span>负责团队：工程研发 · 工程师</span></div><div class="dsh-wp-subtask-body"><p><strong>要做出什么：</strong></p><div><strong>怎么做：</strong><span class="dsh-wp-muted">—</span></div><div><strong>怎样算做好：</strong><span class="dsh-wp-muted">—</span></div></div><div class="dsh-wp-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="dsh-wp-progress-fill" style="width:0%"></div></div><div class="dsh-wp-progress-meta"><span>进度 0%</span></div><details class="dsh-wp-details"><summary>更多细节（不看也不影响理解）</summary><div class="dsh-wp-grid" style="margin-top:8px"><div class="dsh-wp-field"><div class="dsh-wp-field-label">负责人</div><div class="dsh-wp-field-value">工程师</div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">开始前需要</div><div class="dsh-wp-field-value"><span class="dsh-wp-muted">—</span></div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">可能的问题</div><div class="dsh-wp-field-value">—</div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">内部编号</div><div class="dsh-wp-field-value">T1</div></div></div></details></div><div class="dsh-wp-subtask dsh-wp-tone-idle"><div class="dsh-wp-subtask-head"><div class="dsh-wp-subtask-title">具体工作 2：整理澄清问题</div><span class="dsh-wp-pill dsh-wp-tone-idle"><span class="dsh-wp-dot"></span>还没开始</span></div><div class="dsh-wp-subtask-meta"><span>负责团队：工程研发 · 工程师</span></div><div class="dsh-wp-subtask-body"><p><strong>要做出什么：</strong></p><div><strong>怎么做：</strong><span class="dsh-wp-muted">—</span></div><div><strong>怎样算做好：</strong><span class="dsh-wp-muted">—</span></div></div><details class="dsh-wp-details"><summary>更多细节（不看也不影响理解）</summary><div class="dsh-wp-grid" style="margin-top:8px"><div class="dsh-wp-field"><div class="dsh-wp-field-label">负责人</div><div class="dsh-wp-field-value">工程师</div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">开始前需要</div><div class="dsh-wp-field-value"><span class="dsh-wp-muted">—</span></div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">可能的问题</div><div class="dsh-wp-field-value">—</div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">内部编号</div><div class="dsh-wp-field-value">T2</div></div></div></details></div></div></section></section><section class="dsh-wp-stage dsh-wp-tone-idle"><section class="dsh-wp-collapse dsh-wp-stage-collapse" data-open="false"><div class="dsh-wp-collapse-head"><button type="button" class="dsh-wp-collapse-toggle" aria-expanded="false" aria-controls="() => nextCollapseId()-panel"><span class="dsh-wp-collapse-chevron" aria-hidden="true"></span><span class="dsh-wp-collapse-summary"><span class="dsh-wp-collapse-title">第 2 步：方案设计</span><span class="dsh-wp-collapse-meta">0/2 做好了</span></span><span class="dsh-wp-collapse-badge"><span class="dsh-wp-pill dsh-wp-tone-idle"><span class="dsh-wp-dot"></span>还没开始</span></span></button></div><div id="() => nextCollapseId()-panel" class="dsh-wp-collapse-panel dsh-wp-stage-body" hidden="true"><div class="dsh-wp-stage-goal">要做出什么：方案设计目标</div><div class="dsh-wp-checkpoint">这一步做完先检查：方案设计检查点</div><div class="dsh-wp-subtask dsh-wp-tone-idle"><div class="dsh-wp-subtask-head"><div class="dsh-wp-subtask-title">具体工作 1：设计图表形态</div><span class="dsh-wp-pill dsh-wp-tone-idle"><span class="dsh-wp-dot"></span>还没开始</span></div><div class="dsh-wp-subtask-meta"><span>负责团队：工程研发 · 工程师</span></div><div class="dsh-wp-subtask-body"><p><strong>要做出什么：</strong></p><div><strong>怎么做：</strong><span class="dsh-wp-muted">—</span></div><div><strong>怎样算做好：</strong><span class="dsh-wp-muted">—</span></div></div><details class="dsh-wp-details"><summary>更多细节（不看也不影响理解）</summary><div class="dsh-wp-grid" style="margin-top:8px"><div class="dsh-wp-field"><div class="dsh-wp-field-label">负责人</div><div class="dsh-wp-field-value">工程师</div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">开始前需要</div><div class="dsh-wp-field-value"><span class="dsh-wp-muted">—</span></div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">可能的问题</div><div class="dsh-wp-field-value">—</div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">内部编号</div><div class="dsh-wp-field-value">T3</div></div></div></details></div><div class="dsh-wp-subtask dsh-wp-tone-idle"><div class="dsh-wp-subtask-head"><div class="dsh-wp-subtask-title">具体工作 2：定义版本策略</div><span class="dsh-wp-pill dsh-wp-tone-idle"><span class="dsh-wp-dot"></span>还没开始</span></div><div class="dsh-wp-subtask-meta"><span>负责团队：工程研发 · 工程师</span></div><div class="dsh-wp-subtask-body"><p><strong>要做出什么：</strong></p><div><strong>怎么做：</strong><span class="dsh-wp-muted">—</span></div><div><strong>怎样算做好：</strong><span class="dsh-wp-muted">—</span></div></div><details class="dsh-wp-details"><summary>更多细节（不看也不影响理解）</summary><div class="dsh-wp-grid" style="margin-top:8px"><div class="dsh-wp-field"><div class="dsh-wp-field-label">负责人</div><div class="dsh-wp-field-value">工程师</div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">开始前需要</div><div class="dsh-wp-field-value"><span class="dsh-wp-muted">—</span></div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">可能的问题</div><div class="dsh-wp-field-value">—</div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">内部编号</div><div class="dsh-wp-field-value">T4</div></div></div></details></div></div></section></section><section class="dsh-wp-stage dsh-wp-tone-idle"><section class="dsh-wp-collapse dsh-wp-stage-collapse" data-open="false"><div class="dsh-wp-collapse-head"><button type="button" class="dsh-wp-collapse-toggle" aria-expanded="false" aria-controls="() => nextCollapseId()-panel"><span class="dsh-wp-collapse-chevron" aria-hidden="true"></span><span class="dsh-wp-collapse-summary"><span class="dsh-wp-collapse-title">第 3 步：实现与验证</span><span class="dsh-wp-collapse-meta">0/4 做好了</span></span><span class="dsh-wp-collapse-badge"><span class="dsh-wp-pill dsh-wp-tone-idle"><span class="dsh-wp-dot"></span>还没开始</span></span></button></div><div id="() => nextCollapseId()-panel" class="dsh-wp-collapse-panel dsh-wp-stage-body" hidden="true"><div class="dsh-wp-stage-goal">要做出什么：实现与验证目标</div><div class="dsh-wp-checkpoint">这一步做完先检查：实现与验证检查点</div><div class="dsh-wp-subtask dsh-wp-tone-idle"><div class="dsh-wp-subtask-head"><div class="dsh-wp-subtask-title">具体工作 1：实现图表渲染</div><span class="dsh-wp-pill dsh-wp-tone-idle"><span class="dsh-wp-dot"></span>还没开始</span></div><div class="dsh-wp-subtask-meta"><span>负责团队：工程研发 · 工程师</span></div><div class="dsh-wp-subtask-body"><p><strong>要做出什么：</strong></p><div><strong>怎么做：</strong><span class="dsh-wp-muted">—</span></div><div><strong>怎样算做好：</strong><span class="dsh-wp-muted">—</span></div></div><details class="dsh-wp-details"><summary>更多细节（不看也不影响理解）</summary><div class="dsh-wp-grid" style="margin-top:8px"><div class="dsh-wp-field"><div class="dsh-wp-field-label">负责人</div><div class="dsh-wp-field-value">工程师</div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">开始前需要</div><div class="dsh-wp-field-value"><span class="dsh-wp-muted">—</span></div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">可能的问题</div><div class="dsh-wp-field-value">—</div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">内部编号</div><div class="dsh-wp-field-value">T5</div></div></div></details></div><div class="dsh-wp-subtask dsh-wp-tone-idle"><div class="dsh-wp-subtask-head"><div class="dsh-wp-subtask-title">具体工作 2：同步递增版本</div><span class="dsh-wp-pill dsh-wp-tone-idle"><span class="dsh-wp-dot"></span>还没开始</span></div><div class="dsh-wp-subtask-meta"><span>负责团队：工程研发 · 工程师</span></div><div class="dsh-wp-subtask-body"><p><strong>要做出什么：</strong></p><div><strong>怎么做：</strong><span class="dsh-wp-muted">—</span></div><div><strong>怎样算做好：</strong><span class="dsh-wp-muted">—</span></div></div><details class="dsh-wp-details"><summary>更多细节（不看也不影响理解）</summary><div class="dsh-wp-grid" style="margin-top:8px"><div class="dsh-wp-field"><div class="dsh-wp-field-label">负责人</div><div class="dsh-wp-field-value">工程师</div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">开始前需要</div><div class="dsh-wp-field-value"><span class="dsh-wp-muted">—</span></div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">可能的问题</div><div class="dsh-wp-field-value">—</div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">内部编号</div><div class="dsh-wp-field-value">T6</div></div></div></details></div><div class="dsh-wp-subtask dsh-wp-tone-idle"><div class="dsh-wp-subtask-head"><div class="dsh-wp-subtask-title">具体工作 3：编写单元测试</div><span class="dsh-wp-pill dsh-wp-tone-idle"><span class="dsh-wp-dot"></span>还没开始</span></div><div class="dsh-wp-subtask-meta"><span>负责团队：工程研发 · 工程师</span></div><div class="dsh-wp-subtask-body"><p><strong>要做出什么：</strong></p><div><strong>怎么做：</strong><span class="dsh-wp-muted">—</span></div><div><strong>怎样算做好：</strong><span class="dsh-wp-muted">—</span></div></div><details class="dsh-wp-details"><summary>更多细节（不看也不影响理解）</summary><div class="dsh-wp-grid" style="margin-top:8px"><div class="dsh-wp-field"><div class="dsh-wp-field-label">负责人</div><div class="dsh-wp-field-value">工程师</div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">开始前需要</div><div class="dsh-wp-field-value"><span class="dsh-wp-muted">—</span></div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">可能的问题</div><div class="dsh-wp-field-value">—</div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">内部编号</div><div class="dsh-wp-field-value">T7</div></div></div></details></div><div class="dsh-wp-subtask dsh-wp-tone-idle"><div class="dsh-wp-subtask-head"><div class="dsh-wp-subtask-title">具体工作 4：截取对比证据</div><span class="dsh-wp-pill dsh-wp-tone-idle"><span class="dsh-wp-dot"></span>还没开始</span></div><div class="dsh-wp-subtask-meta"><span>负责团队：工程研发 · 工程师</span></div><div class="dsh-wp-subtask-body"><p><strong>要做出什么：</strong></p><div><strong>怎么做：</strong><span class="dsh-wp-muted">—</span></div><div><strong>怎样算做好：</strong><span class="dsh-wp-muted">—</span></div></div><details class="dsh-wp-details"><summary>更多细节（不看也不影响理解）</summary><div class="dsh-wp-grid" style="margin-top:8px"><div class="dsh-wp-field"><div class="dsh-wp-field-label">负责人</div><div class="dsh-wp-field-value">工程师</div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">开始前需要</div><div class="dsh-wp-field-value"><span class="dsh-wp-muted">—</span></div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">可能的问题</div><div class="dsh-wp-field-value">—</div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">内部编号</div><div class="dsh-wp-field-value">T8</div></div></div></details></div></div></section></section></div><details class="dsh-wp-details"><summary>为什么这样安排</summary><div class="dsh-wp-muted" style="margin-top:6px">先找出最关键的问题，再按顺序解决；每一步做完先检查，再决定下一步。</div><div class="dsh-wp-section"><div class="dsh-wp-section-title">任务说明</div><div class="dsh-wp-grid"><div class="dsh-wp-field"><div class="dsh-wp-field-label">最终要交的东西</div><div class="dsh-wp-field-value">一份可视化改造结果</div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">做好后应该达到</div><div class="dsh-wp-field-value"><span class="dsh-wp-muted">—</span></div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">不能违反的限制</div><div class="dsh-wp-field-value"><span class="dsh-wp-muted">—</span></div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">已经确认的事</div><div class="dsh-wp-field-value"><span class="dsh-wp-muted">—</span></div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">还不确定的事</div><div class="dsh-wp-field-value"><span class="dsh-wp-muted">—</span></div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">暂时这样认为</div><div class="dsh-wp-field-value"><span class="dsh-wp-muted">—</span></div></div></div></div><div class="dsh-wp-section dsh-wp-muted">下面是给研发人员看的字段，小白可以跳过。</div><div class="dsh-wp-section dsh-wp-muted dsh-wp-code">内部编号: plan-s-zero</div></details></div></section></article>
+<article id="dsh-wp-session-s-mid" data-session-id="s-mid" class="dsh-wp-session dsh-wp-tone-active"><section class="dsh-wp-collapse dsh-wp-session-collapse" data-open="false"><div class="dsh-wp-collapse-head"><button type="button" class="dsh-wp-collapse-toggle" aria-expanded="false" aria-controls="dsh-wp-collapse-s-mid-panel"><span class="dsh-wp-collapse-chevron" aria-hidden="true"></span><span class="dsh-wp-collapse-summary"><span class="dsh-wp-collapse-title">dsh 插件多通道版本发布一致性方案</span><span class="dsh-wp-collapse-meta"><div class="dsh-wp-planviz" data-percent="38" data-alarm="true" data-state="blocked"><span class="dsh-wp-planviz-ring" aria-hidden="true" data-zero="false"><svg viewBox="0 0 44 44" width="44" height="44" focusable="false"><circle class="dsh-wp-planring-track" cx="22" cy="22" r="18" fill="none" stroke-width="4"></circle><circle class="dsh-wp-planring-arc" cx="22" cy="22" r="18" fill="none" stroke-width="4" stroke-linecap="round" stroke-dasharray="42.97698750110837 70.12034802812418" transform="rotate(-90 22 22)"></circle></svg></span><div class="dsh-wp-planviz-head"><span class="dsh-wp-planviz-pct">38%</span><span class="dsh-wp-planviz-scope">本计划 3/8 做好了</span><span class="dsh-wp-planviz-alarm">1 卡住了</span><span class="dsh-wp-planviz-now" data-state="blocked"><span class="dsh-wp-planviz-now-dot" aria-hidden="true"></span><span class="dsh-wp-planviz-now-text">卡住了 · 定义版本策略</span></span></div><div class="dsh-wp-planviz-bar" aria-hidden="true" data-total="8"><span class="dsh-wp-planviz-seg" data-kind="done" data-count="3" style="flex-grow:3"></span><span class="dsh-wp-planviz-seg" data-kind="active" data-count="1" style="flex-grow:1"></span><span class="dsh-wp-planviz-seg" data-kind="blocked" data-count="1" style="flex-grow:1"></span><span class="dsh-wp-planviz-seg" data-kind="pending" data-count="3" style="flex-grow:3"></span></div><div class="dsh-wp-planviz-legend"><span class="dsh-wp-planviz-legend-item" data-kind="done" data-count="3"><span class="dsh-wp-planviz-legend-dot" aria-hidden="true"></span>做好了 3</span><span class="dsh-wp-planviz-legend-item" data-kind="active" data-count="1"><span class="dsh-wp-planviz-legend-dot" aria-hidden="true"></span>正在做 1</span><span class="dsh-wp-planviz-legend-item" data-kind="blocked" data-count="1"><span class="dsh-wp-planviz-legend-dot" aria-hidden="true"></span>卡住了 1</span><span class="dsh-wp-planviz-legend-item" data-kind="pending" data-count="3"><span class="dsh-wp-planviz-legend-dot" aria-hidden="true"></span>还没开始 3</span></div><div class="dsh-wp-stepper" aria-hidden="true" data-stages="3"><span class="dsh-wp-stepper-seg" data-stage-id="S1" data-tone="done" data-current="false" title="第 1 步 2/2 做好了"><span class="dsh-wp-stepper-fill" data-width="100" style="width:100%"></span></span><span class="dsh-wp-stepper-seg" data-stage-id="S2" data-tone="blocked" data-current="false" title="第 2 步 1/2 做好了"><span class="dsh-wp-stepper-fill" data-width="100" style="width:100%"></span></span><span class="dsh-wp-stepper-seg" data-stage-id="S3" data-tone="active" data-current="true" title="第 3 步 0/4 做好了"><span class="dsh-wp-stepper-fill" data-width="25" style="width:25%"></span></span></div></div></span></span><span class="dsh-wp-collapse-badge"><span class="dsh-wp-pill dsh-wp-tone-active"><span class="dsh-wp-dot"></span>正在做</span></span></button></div><div id="dsh-wp-collapse-s-mid-panel" class="dsh-wp-collapse-panel dsh-wp-session-body" hidden="true"><div class="dsh-wp-meta dsh-wp-session-updated">更新于 10/28/2026, 2:26:40 PM</div><section class="dsh-wp-guide" aria-label="先看这三句"><div class="dsh-wp-guide-title">先看这三句</div><div class="dsh-wp-guide-body"><div class="dsh-wp-guide-row"><div class="dsh-wp-guide-label">这件事</div><div class="dsh-wp-guide-value">一份可视化改造结果</div></div><div class="dsh-wp-guide-row"><div class="dsh-wp-guide-label">现在谁在做</div><div class="dsh-wp-guide-value">工程研发 · 实现图表渲染</div></div><div class="dsh-wp-guide-row"><div class="dsh-wp-guide-label">接下来做什么</div><div class="dsh-wp-guide-value">先处理：工程研发 · 定义版本策略</div></div></div><div class="dsh-wp-guide-hint">负责团队 = 谁来做；具体工作 = 要完成的一件事；卡住了 = 需要人处理。</div></section><div class="dsh-wp-section"><div class="dsh-wp-section-title">分几步做</div><section class="dsh-wp-stage dsh-wp-tone-done"><section class="dsh-wp-collapse dsh-wp-stage-collapse" data-open="false"><div class="dsh-wp-collapse-head"><button type="button" class="dsh-wp-collapse-toggle" aria-expanded="false" aria-controls="() => nextCollapseId()-panel"><span class="dsh-wp-collapse-chevron" aria-hidden="true"></span><span class="dsh-wp-collapse-summary"><span class="dsh-wp-collapse-title">第 1 步：现状定位</span><span class="dsh-wp-collapse-meta">2/2 做好了</span></span><span class="dsh-wp-collapse-badge"><span class="dsh-wp-pill dsh-wp-tone-done"><span class="dsh-wp-dot"></span>都做完了</span></span></button></div><div id="() => nextCollapseId()-panel" class="dsh-wp-collapse-panel dsh-wp-stage-body" hidden="true"><div class="dsh-wp-stage-goal">要做出什么：现状定位目标</div><div class="dsh-wp-checkpoint">这一步做完先检查：现状定位检查点</div><div class="dsh-wp-subtask dsh-wp-tone-done"><div class="dsh-wp-subtask-head"><div class="dsh-wp-subtask-title">具体工作 1：定位插件源码</div><span class="dsh-wp-pill dsh-wp-tone-done"><span class="dsh-wp-dot"></span>做好了</span></div><div class="dsh-wp-subtask-meta"><span>负责团队：工程研发 · 工程师</span></div><div class="dsh-wp-subtask-body"><p><strong>要做出什么：</strong></p><div><strong>怎么做：</strong><span class="dsh-wp-muted">—</span></div><div><strong>怎样算做好：</strong><span class="dsh-wp-muted">—</span></div></div><details class="dsh-wp-details"><summary>更多细节（不看也不影响理解）</summary><div class="dsh-wp-grid" style="margin-top:8px"><div class="dsh-wp-field"><div class="dsh-wp-field-label">负责人</div><div class="dsh-wp-field-value">工程师</div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">开始前需要</div><div class="dsh-wp-field-value"><span class="dsh-wp-muted">—</span></div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">可能的问题</div><div class="dsh-wp-field-value">—</div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">内部编号</div><div class="dsh-wp-field-value">T1</div></div></div></details></div><div class="dsh-wp-subtask dsh-wp-tone-done"><div class="dsh-wp-subtask-head"><div class="dsh-wp-subtask-title">具体工作 2：整理澄清问题</div><span class="dsh-wp-pill dsh-wp-tone-done"><span class="dsh-wp-dot"></span>做好了</span></div><div class="dsh-wp-subtask-meta"><span>负责团队：工程研发 · 工程师</span></div><div class="dsh-wp-subtask-body"><p><strong>要做出什么：</strong></p><div><strong>怎么做：</strong><span class="dsh-wp-muted">—</span></div><div><strong>怎样算做好：</strong><span class="dsh-wp-muted">—</span></div></div><details class="dsh-wp-details"><summary>更多细节（不看也不影响理解）</summary><div class="dsh-wp-grid" style="margin-top:8px"><div class="dsh-wp-field"><div class="dsh-wp-field-label">负责人</div><div class="dsh-wp-field-value">工程师</div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">开始前需要</div><div class="dsh-wp-field-value"><span class="dsh-wp-muted">—</span></div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">可能的问题</div><div class="dsh-wp-field-value">—</div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">内部编号</div><div class="dsh-wp-field-value">T2</div></div></div></details></div></div></section></section><section class="dsh-wp-stage dsh-wp-tone-blocked"><section class="dsh-wp-collapse dsh-wp-stage-collapse" data-open="false"><div class="dsh-wp-collapse-head"><button type="button" class="dsh-wp-collapse-toggle" aria-expanded="false" aria-controls="() => nextCollapseId()-panel"><span class="dsh-wp-collapse-chevron" aria-hidden="true"></span><span class="dsh-wp-collapse-summary"><span class="dsh-wp-collapse-title">第 2 步：方案设计</span><span class="dsh-wp-collapse-meta">1/2 做好了</span></span><span class="dsh-wp-collapse-badge"><span class="dsh-wp-pill dsh-wp-tone-blocked"><span class="dsh-wp-dot"></span>1 卡住了</span></span></button></div><div id="() => nextCollapseId()-panel" class="dsh-wp-collapse-panel dsh-wp-stage-body" hidden="true"><div class="dsh-wp-stage-goal">要做出什么：方案设计目标</div><div class="dsh-wp-checkpoint">这一步做完先检查：方案设计检查点</div><div class="dsh-wp-subtask dsh-wp-tone-done"><div class="dsh-wp-subtask-head"><div class="dsh-wp-subtask-title">具体工作 1：设计图表形态</div><span class="dsh-wp-pill dsh-wp-tone-done"><span class="dsh-wp-dot"></span>做好了</span></div><div class="dsh-wp-subtask-meta"><span>负责团队：工程研发 · 工程师</span></div><div class="dsh-wp-subtask-body"><p><strong>要做出什么：</strong></p><div><strong>怎么做：</strong><span class="dsh-wp-muted">—</span></div><div><strong>怎样算做好：</strong><span class="dsh-wp-muted">—</span></div></div><details class="dsh-wp-details"><summary>更多细节（不看也不影响理解）</summary><div class="dsh-wp-grid" style="margin-top:8px"><div class="dsh-wp-field"><div class="dsh-wp-field-label">负责人</div><div class="dsh-wp-field-value">工程师</div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">开始前需要</div><div class="dsh-wp-field-value"><span class="dsh-wp-muted">—</span></div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">可能的问题</div><div class="dsh-wp-field-value">—</div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">内部编号</div><div class="dsh-wp-field-value">T3</div></div></div></details></div><div class="dsh-wp-subtask dsh-wp-tone-blocked"><div class="dsh-wp-subtask-head"><div class="dsh-wp-subtask-title">具体工作 2：定义版本策略</div><span class="dsh-wp-pill dsh-wp-tone-blocked"><span class="dsh-wp-dot"></span>卡住了</span></div><div class="dsh-wp-subtask-meta"><span>负责团队：工程研发 · 工程师</span></div><div class="dsh-wp-subtask-body"><p><strong>要做出什么：</strong></p><div><strong>怎么做：</strong><span class="dsh-wp-muted">—</span></div><div><strong>怎样算做好：</strong><span class="dsh-wp-muted">—</span></div></div><details class="dsh-wp-details"><summary>更多细节（不看也不影响理解）</summary><div class="dsh-wp-grid" style="margin-top:8px"><div class="dsh-wp-field"><div class="dsh-wp-field-label">负责人</div><div class="dsh-wp-field-value">工程师</div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">开始前需要</div><div class="dsh-wp-field-value"><span class="dsh-wp-muted">—</span></div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">可能的问题</div><div class="dsh-wp-field-value">—</div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">内部编号</div><div class="dsh-wp-field-value">T4</div></div></div></details></div></div></section></section><section class="dsh-wp-stage dsh-wp-tone-active"><section class="dsh-wp-collapse dsh-wp-stage-collapse" data-open="false"><div class="dsh-wp-collapse-head"><button type="button" class="dsh-wp-collapse-toggle" aria-expanded="false" aria-controls="() => nextCollapseId()-panel"><span class="dsh-wp-collapse-chevron" aria-hidden="true"></span><span class="dsh-wp-collapse-summary"><span class="dsh-wp-collapse-title">第 3 步：实现与验证</span><span class="dsh-wp-collapse-meta">0/4 做好了</span></span><span class="dsh-wp-collapse-badge"><span class="dsh-wp-pill dsh-wp-tone-active"><span class="dsh-wp-dot"></span>正在做</span></span></button></div><div id="() => nextCollapseId()-panel" class="dsh-wp-collapse-panel dsh-wp-stage-body" hidden="true"><div class="dsh-wp-stage-goal">要做出什么：实现与验证目标</div><div class="dsh-wp-checkpoint">这一步做完先检查：实现与验证检查点</div><div class="dsh-wp-subtask dsh-wp-tone-active"><div class="dsh-wp-subtask-head"><div class="dsh-wp-subtask-title">具体工作 1：实现图表渲染</div><span class="dsh-wp-pill dsh-wp-tone-active"><span class="dsh-wp-dot"></span>正在做</span></div><div class="dsh-wp-subtask-meta"><span>负责团队：工程研发 · 工程师</span></div><div class="dsh-wp-subtask-body"><p><strong>要做出什么：</strong></p><div><strong>怎么做：</strong><span class="dsh-wp-muted">—</span></div><div><strong>怎样算做好：</strong><span class="dsh-wp-muted">—</span></div></div><div class="dsh-wp-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="dsh-wp-progress-fill" style="width:0%"></div></div><div class="dsh-wp-progress-meta"><span>进度 0%</span></div><details class="dsh-wp-details"><summary>更多细节（不看也不影响理解）</summary><div class="dsh-wp-grid" style="margin-top:8px"><div class="dsh-wp-field"><div class="dsh-wp-field-label">负责人</div><div class="dsh-wp-field-value">工程师</div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">开始前需要</div><div class="dsh-wp-field-value"><span class="dsh-wp-muted">—</span></div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">可能的问题</div><div class="dsh-wp-field-value">—</div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">内部编号</div><div class="dsh-wp-field-value">T5</div></div></div></details></div><div class="dsh-wp-subtask dsh-wp-tone-idle"><div class="dsh-wp-subtask-head"><div class="dsh-wp-subtask-title">具体工作 2：同步递增版本</div><span class="dsh-wp-pill dsh-wp-tone-idle"><span class="dsh-wp-dot"></span>还没开始</span></div><div class="dsh-wp-subtask-meta"><span>负责团队：工程研发 · 工程师</span></div><div class="dsh-wp-subtask-body"><p><strong>要做出什么：</strong></p><div><strong>怎么做：</strong><span class="dsh-wp-muted">—</span></div><div><strong>怎样算做好：</strong><span class="dsh-wp-muted">—</span></div></div><details class="dsh-wp-details"><summary>更多细节（不看也不影响理解）</summary><div class="dsh-wp-grid" style="margin-top:8px"><div class="dsh-wp-field"><div class="dsh-wp-field-label">负责人</div><div class="dsh-wp-field-value">工程师</div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">开始前需要</div><div class="dsh-wp-field-value"><span class="dsh-wp-muted">—</span></div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">可能的问题</div><div class="dsh-wp-field-value">—</div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">内部编号</div><div class="dsh-wp-field-value">T6</div></div></div></details></div><div class="dsh-wp-subtask dsh-wp-tone-idle"><div class="dsh-wp-subtask-head"><div class="dsh-wp-subtask-title">具体工作 3：编写单元测试</div><span class="dsh-wp-pill dsh-wp-tone-idle"><span class="dsh-wp-dot"></span>还没开始</span></div><div class="dsh-wp-subtask-meta"><span>负责团队：工程研发 · 工程师</span></div><div class="dsh-wp-subtask-body"><p><strong>要做出什么：</strong></p><div><strong>怎么做：</strong><span class="dsh-wp-muted">—</span></div><div><strong>怎样算做好：</strong><span class="dsh-wp-muted">—</span></div></div><details class="dsh-wp-details"><summary>更多细节（不看也不影响理解）</summary><div class="dsh-wp-grid" style="margin-top:8px"><div class="dsh-wp-field"><div class="dsh-wp-field-label">负责人</div><div class="dsh-wp-field-value">工程师</div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">开始前需要</div><div class="dsh-wp-field-value"><span class="dsh-wp-muted">—</span></div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">可能的问题</div><div class="dsh-wp-field-value">—</div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">内部编号</div><div class="dsh-wp-field-value">T7</div></div></div></details></div><div class="dsh-wp-subtask dsh-wp-tone-idle"><div class="dsh-wp-subtask-head"><div class="dsh-wp-subtask-title">具体工作 4：截取对比证据</div><span class="dsh-wp-pill dsh-wp-tone-idle"><span class="dsh-wp-dot"></span>还没开始</span></div><div class="dsh-wp-subtask-meta"><span>负责团队：工程研发 · 工程师</span></div><div class="dsh-wp-subtask-body"><p><strong>要做出什么：</strong></p><div><strong>怎么做：</strong><span class="dsh-wp-muted">—</span></div><div><strong>怎样算做好：</strong><span class="dsh-wp-muted">—</span></div></div><details class="dsh-wp-details"><summary>更多细节（不看也不影响理解）</summary><div class="dsh-wp-grid" style="margin-top:8px"><div class="dsh-wp-field"><div class="dsh-wp-field-label">负责人</div><div class="dsh-wp-field-value">工程师</div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">开始前需要</div><div class="dsh-wp-field-value"><span class="dsh-wp-muted">—</span></div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">可能的问题</div><div class="dsh-wp-field-value">—</div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">内部编号</div><div class="dsh-wp-field-value">T8</div></div></div></details></div></div></section></section></div><details class="dsh-wp-details"><summary>为什么这样安排</summary><div class="dsh-wp-muted" style="margin-top:6px">先找出最关键的问题，再按顺序解决；每一步做完先检查，再决定下一步。</div><div class="dsh-wp-section"><div class="dsh-wp-section-title">任务说明</div><div class="dsh-wp-grid"><div class="dsh-wp-field"><div class="dsh-wp-field-label">最终要交的东西</div><div class="dsh-wp-field-value">一份可视化改造结果</div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">做好后应该达到</div><div class="dsh-wp-field-value"><span class="dsh-wp-muted">—</span></div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">不能违反的限制</div><div class="dsh-wp-field-value"><span class="dsh-wp-muted">—</span></div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">已经确认的事</div><div class="dsh-wp-field-value"><span class="dsh-wp-muted">—</span></div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">还不确定的事</div><div class="dsh-wp-field-value"><span class="dsh-wp-muted">—</span></div></div><div class="dsh-wp-field"><div class="dsh-wp-field-label">暂时这样认为</div><div class="dsh-wp-field-value"><span class="dsh-wp-muted">—</span></div></div></div></div><div class="dsh-wp-section dsh-wp-muted">下面是给研发人员看的字段，小白可以跳过。</div><div class="dsh-wp-section dsh-wp-muted dsh-wp-code">内部编号: plan-s-mid</div></details></div></section></article></div>
+      <p class="note">44px 环形图 + 24px 百分比 + 四段构成条 + 状态图例 + 阶段步进条，全部在折叠态可见；0% 时环轨加粗、构成条整条灰色「还没开始」、当前阶段虚线槽描边。</p>
+    </div>
+  </div>
+
+  <p class="note">生成时间 2026-10-28T06:26:40.272Z；改后区块由 <code>node scripts/render-preview.ts</code> 渲染 <code>client.js</code> 得到，改前区块按 1.4.3 的 <code>meta</code> 结构还原（同样的 <code>Collapse</code> 骨架与旧类名）。</p>
+</div>
+</body>
+</html>

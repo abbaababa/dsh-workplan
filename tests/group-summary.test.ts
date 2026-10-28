@@ -181,14 +181,21 @@ test('the indicator is one inline SVG ring with a text label, no canvas', async 
   assert.equal(groupSlice(zero, 'live').includes('strokeDasharray'), false, '0% must not draw the arc')
 })
 
-test('zero work items renders 0/0 with 完成率暂无数据 instead of NaN', async () => {
+test('zero work items renders a dash instead of 0/0 or NaN', async () => {
   const html = await renderDashboard([
     session({ sessionId: 'empty-plan', phase: 'degraded', stats: { total: 0, done: 0, blocked: 0, inProgress: 0, pending: 0, progress: 0 } }),
   ])
   assertNoBrokenNumbers(html)
-  assert.ok(html.includes('未完成 0 / 已完成 0（完成率暂无数据）'), 'empty denominator must fall back to the no-rate wording')
+  // v1.5.0（用户 Q3）：删掉「未完成 0 / 已完成 0（完成率暂无数据）」这行 0/0；
+  // 环上已经是「—」，组内空态也已说明没有工作项，重复一遍只是噪声。
+  assert.equal(html.includes('完成率暂无数据'), false, 'empty denominator must not print a 0/0 sentence')
   assert.ok(html.includes('data-percent="none"'), 'unknown rate must be exposed as none, not 0')
   assert.ok(html.includes('dsh-wp-group-ring-label">—<'), 'unknown rate must render an em dash, not a bogus percentage')
+  // 「暂无数据」与「0%」必须是两种视觉状态：这里既没有组内工作项，卡片也是 0/0，
+  // 所以两边都只能是「—」；真正的 0/8 由 progress-visual.test.ts 覆盖。
+  assert.ok(html.includes('data-zero="false"'), 'a group without work items must not be marked as a real 0%')
+  assert.equal(html.includes('data-zero="true"'), false, 'no surface in this fixture has a real 0% rate')
+  assert.ok(html.includes('dsh-wp-planviz-pct">—<'), 'the plan card must show an em dash instead of 0%')
 })
 
 test('dirty stats are clamped: done never exceeds total, negatives count as zero', async () => {
@@ -202,8 +209,10 @@ test('dirty stats are clamped: done never exceeds total, negatives count as zero
   const done = groupSlice(html, 'done')
   assert.ok(done.includes('未完成 0 / 已完成 2（完成率 100%）'), 'done must be clamped to total')
   assert.ok(done.includes('data-percent="100"'), 'clamped rate must be exposed as 100')
-  // live group: negative and missing stats must be treated as zero, not poison the sum
-  assert.ok(html.includes('未完成 0 / 已完成 0（完成率暂无数据）'), 'negative/missing stats must collapse to 0/0')
+  // live group: negative and missing stats must be treated as zero, not poison the sum.
+  // v1.5.0: a 0/0 group no longer prints a sentence at all (user Q3) — the ring is "—".
+  assert.equal(html.includes('完成率暂无数据'), false, 'negative/missing stats must not resurrect the 0/0 sentence')
+  assert.ok(html.includes('dsh-wp-group-ring-label">—<'), 'a group with no work items must show an em dash')
   // the header ring never shows more than 100% (per-card percentages are another component)
   for (const match of html.matchAll(/dsh-wp-group-ring-label">(\d+)%</g)) {
     assert.ok(Number(match[1]) <= 100, `group rate must stay inside 0..100, got ${match[1]}%`)

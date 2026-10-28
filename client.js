@@ -172,6 +172,8 @@ window.__ModuleLoader__.load({
                 "jumpToTask": "跳转到任务明细",
                 "scopeAll": "当前各会话最新计划汇总",
                 "scopeThis": "本计划",
+                "vizStageTitle": "分步进度",
+                "vizWeighted": "总体进度（加权）",
                 "allPlansHint": "上面是当前各会话最新计划的合计；历史计划不在此汇总，下面每张卡片只统计本计划。",
                 "openHint": "打开左侧「任务进度」看完整安排。"
             },
@@ -332,6 +334,8 @@ window.__ModuleLoader__.load({
                 "jumpToTask": "Jump to task details",
                 "scopeAll": "Latest plan per live session",
                 "scopeThis": "This plan",
+                "vizStageTitle": "Step progress",
+                "vizWeighted": "Overall progress (weighted)",
                 "allPlansHint": "These totals cover the latest plan in each live session; older plans are not included. Each card below counts only its own plan.",
                 "openHint": "Open “Task progress” on the left for the full plan."
             }
@@ -364,6 +368,9 @@ window.__ModuleLoader__.load({
      底槽用中性灰而不是品牌色，避免「未完成部分」被误读成状态色。 */
   --dsh-wp-done-ink: var(--dsh-wp-done-text);
   --dsh-wp-ring-track: rgba(148,163,184,.30);
+  /* 1.5.0 — 进度区图表化：构成条/阶段槽的中性轨道，以及 0% 零轨（≥3:1 图形对比）。 */
+  --dsh-wp-track: rgba(148,163,184,.22);
+  --dsh-wp-track-strong: rgba(100,116,139,.80);
   min-width: 0;
   width: 100%;
   height: 100%;
@@ -405,6 +412,10 @@ window.__ModuleLoader__.load({
 .dsh-wp-group-ring { position: relative; width: 44px; height: 44px; flex: none; margin-left: auto; display: inline-grid; place-items: center; }
 .dsh-wp-group-ring svg { position: absolute; inset: 0; display: block; }
 .dsh-wp-group-ring-track { stroke: var(--dsh-wp-ring-track, rgba(148,163,184,.30)); }
+/* 1.5.0 — 0% 不等于「没有图」：零轨加粗到 ≥3:1（rgba(100,116,139,.80)），
+   环仍然看得见；「暂无数据」保持细轨 + 「—」，两种状态在视觉上不是一回事。 */
+.dsh-wp-group-ring[data-zero="true"] .dsh-wp-group-ring-track { stroke: var(--dsh-wp-track-strong); }
+.dsh-wp-group-ring[data-zero="true"] .dsh-wp-group-ring-label { font-size: 12px; font-weight: 800; }
 .dsh-wp-group-ring-arc { stroke: var(--dsh-wp-done-ink, #0284c7); transition: stroke-dasharray .28s ease; }
 .dsh-wp-group-ring-label { position: relative; font-size: 11px; font-weight: 700; line-height: 1; letter-spacing: -.2px; font-variant-numeric: tabular-nums; color: var(--dsw-alias-label-primary, #0f172a); }
 @media (prefers-reduced-motion: reduce) { .dsh-wp-group-ring-arc { transition: none; } }
@@ -629,6 +640,84 @@ window.__ModuleLoader__.load({
 .dsh-wp-mini-fill--blocked { background: var(--dsw-alias-state-error-primary); }
 .dsh-wp-mini-fill--warn { background: var(--dsw-alias-state-warn-primary); }
 .dsh-wp-mini-fill--idle { background: var(--dsw-alias-state-idle-primary); }
+/* ── 1.5.0 计划卡进度图表（用户诉求：画圈处必须一眼可读）─────────────────
+   四层信号同时存在，任何一层失效都还能读出进度，且都不依赖颜色：
+   ① 44px 环：图形比例；0% 时轨道加粗仍可见，不画弧（避免圆头端点留下小点）。
+   ② 24px 百分比：主文本色，浅色底 17:1；「—」表示分母为 0，绝不写 NaN。
+   ③ 整行四段构成条：按件数分宽；0% 时是一条完整的灰色「还没开始」，
+      这也是「整条灰＝都还没开始」的图形解释。
+   ④ 11px 状态图例 + 一行「现在在做什么」+ 6px 阶段步进条。
+   数据只来自既有 session.stats / stages / statuses：无新接口、无依赖、无定时器。 */
+.dsh-wp-session-collapse .dsh-wp-collapse-meta { flex: 1 1 100%; display: block; margin-top: 6px; }
+.dsh-wp-planviz {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  grid-template-areas: "ring head" "bar bar" "legend legend" "step step";
+  column-gap: 10px;
+  row-gap: 6px;
+  width: 100%;
+  min-width: 0;
+}
+.dsh-wp-planviz-ring { grid-area: ring; position: relative; width: 44px; height: 44px; display: inline-grid; place-items: center; }
+.dsh-wp-planviz-ring svg { position: absolute; inset: 0; display: block; }
+.dsh-wp-planring-track { stroke: var(--dsh-wp-track); }
+.dsh-wp-planring-arc { stroke: var(--dsh-wp-done-ink); transition: stroke-dasharray .28s ease; }
+.dsh-wp-planviz-ring[data-zero="true"] .dsh-wp-planring-track { stroke: var(--dsh-wp-track-strong); }
+.dsh-wp-planviz-head { grid-area: head; display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; min-width: 0; }
+.dsh-wp-planviz-pct { font-size: 24px; font-weight: 700; line-height: 1.15; letter-spacing: -.4px; color: var(--dsw-alias-label-primary, #0f172a); font-variant-numeric: tabular-nums; }
+.dsh-wp-planviz-scope { min-width: 0; font-size: 12px; font-weight: 600; color: var(--dsw-alias-label-secondary, #475569); font-variant-numeric: tabular-nums; }
+.dsh-wp-planviz-alarm { font-size: 11px; font-weight: 650; padding: 1px 7px; border-radius: 999px; color: var(--dsw-alias-state-error-primary, #ef4444); color: color-mix(in srgb, var(--dsw-alias-state-error-primary, #ef4444) 80%, var(--dsw-alias-label-primary, #0f172a) 20%); background: rgba(239,68,68,.12); }
+.dsh-wp-planviz-now { flex: 1 1 100%; display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12px; color: var(--dsw-alias-label-secondary, #475569); }
+.dsh-wp-planviz-now-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--dsw-alias-state-idle-primary); }
+.dsh-wp-planviz[data-state="active"] .dsh-wp-planviz-now-dot { background: var(--dsh-wp-active); }
+.dsh-wp-planviz[data-state="done"] .dsh-wp-planviz-now-dot { background: var(--dsh-wp-done); }
+.dsh-wp-planviz[data-state="blocked"] .dsh-wp-planviz-now-dot { background: var(--dsw-alias-state-error-primary); }
+.dsh-wp-planviz-now-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-wp-planviz-bar { grid-area: bar; display: flex; align-items: stretch; gap: 2px; height: 8px; border-radius: 999px; background: var(--dsh-wp-track); overflow: hidden; }
+.dsh-wp-planviz-seg { flex: 1 1 0; min-width: 4px; height: 100%; border-radius: 999px; }
+.dsh-wp-planviz-seg[data-kind="done"] { background: var(--dsh-wp-done); }
+.dsh-wp-planviz-seg[data-kind="active"] { background: var(--dsh-wp-active); }
+.dsh-wp-planviz-seg[data-kind="blocked"] { background: var(--dsw-alias-state-error-primary); }
+.dsh-wp-planviz-seg[data-kind="pending"] { background: var(--dsw-alias-state-idle-primary); }
+.dsh-wp-planviz-legend { grid-area: legend; display: flex; flex-wrap: wrap; gap: 2px 10px; font-size: 11px; line-height: 1.5; color: var(--dsw-alias-label-secondary, #475569); font-variant-numeric: tabular-nums; }
+.dsh-wp-planviz-legend-item { display: inline-flex; align-items: center; gap: 4px; }
+.dsh-wp-planviz-legend-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--dsw-alias-state-idle-primary); }
+.dsh-wp-planviz-legend-item[data-kind="done"] .dsh-wp-planviz-legend-dot { background: var(--dsh-wp-done); }
+.dsh-wp-planviz-legend-item[data-kind="active"] .dsh-wp-planviz-legend-dot { background: var(--dsh-wp-active); }
+.dsh-wp-planviz-legend-item[data-kind="blocked"] .dsh-wp-planviz-legend-dot { background: var(--dsw-alias-state-error-primary); }
+.dsh-wp-stepper { grid-area: step; display: flex; gap: 3px; min-width: 0; }
+.dsh-wp-stepper-seg { position: relative; flex: 1 1 0; min-width: 0; height: 6px; border-radius: 999px; background: var(--dsh-wp-track); overflow: hidden; }
+.dsh-wp-stepper-seg[data-tone="pending"] { background: transparent; border: 1px dashed var(--dsh-wp-track-strong); }
+.dsh-wp-stepper-seg[data-tone="blocked"] { box-shadow: inset 0 0 0 1px var(--dsw-alias-state-error-primary); }
+.dsh-wp-stepper-seg[data-current="true"] { outline: 1.5px solid var(--dsh-wp-active-text); outline-offset: 1px; }
+.dsh-wp-stepper-fill { display: block; height: 100%; border-radius: 999px; background: var(--dsh-wp-active); }
+.dsh-wp-stepper-seg[data-tone="done"] .dsh-wp-stepper-fill { background: var(--dsh-wp-done); }
+.dsh-wp-stepper-seg[data-tone="blocked"] .dsh-wp-stepper-fill { background: var(--dsw-alias-state-error-primary); }
+@media (prefers-reduced-motion: reduce) { .dsh-wp-planring-arc { transition: none; } }
+/* 短屏（纵向更紧）：先撤图例与阶段条，保住环 + 百分比 + 构成条 + 当前步骤。 */
+@media (max-height: 720px) and (max-width: 600px) {
+  .dsh-wp-planviz-legend, .dsh-wp-stepper { display: none; }
+}
+/* 展开态「分步进度」：替换旧的计划级进度条，保留加权进度并给出逐阶段分解。 */
+.dsh-wp-planoverview { margin: 12px 0 4px; padding: 12px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 12px; background: var(--dsw-alias-bg-layer-2); display: grid; gap: 8px; }
+.dsh-wp-planoverview-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--dsw-alias-label-secondary, #475569); }
+.dsh-wp-planoverview-title { font-size: 12px; font-weight: 650; letter-spacing: .2px; }
+.dsh-wp-planoverview-stats { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 12px; color: var(--dsw-alias-label-secondary, #475569); font-variant-numeric: tabular-nums; }
+.dsh-wp-planrows { display: grid; }
+.dsh-wp-planrow { display: grid; grid-template-columns: 7px minmax(0, 1fr) 48px auto auto; align-items: center; gap: 8px; min-height: 28px; padding: 4px 0; border-top: 1px solid var(--dsw-alias-border-l1); }
+.dsh-wp-planrow:first-child { border-top: 0; }
+.dsh-wp-planrow[data-current="true"] { background: rgba(249,115,22,.06); border-radius: 8px; }
+.dsh-wp-planrow-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dsw-alias-state-idle-primary); }
+.dsh-wp-planrow[data-tone="done"] .dsh-wp-planrow-dot { background: var(--dsh-wp-done); }
+.dsh-wp-planrow[data-tone="active"] .dsh-wp-planrow-dot { background: var(--dsh-wp-active); }
+.dsh-wp-planrow[data-tone="blocked"] .dsh-wp-planrow-dot { background: var(--dsw-alias-state-error-primary); }
+.dsh-wp-planrow-name { min-width: 0; font-size: 13px; font-weight: 600; color: var(--dsw-alias-label-primary, #0f172a); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dsh-wp-planrow-bar { display: block; height: 4px; border-radius: 999px; background: var(--dsh-wp-track); overflow: hidden; }
+.dsh-wp-planrow-fill { display: block; height: 100%; border-radius: 999px; background: var(--dsh-wp-active); }
+.dsh-wp-planrow[data-tone="done"] .dsh-wp-planrow-fill { background: var(--dsh-wp-done); }
+.dsh-wp-planrow[data-tone="blocked"] .dsh-wp-planrow-fill { background: var(--dsw-alias-state-error-primary); }
+.dsh-wp-planrow-count { font-size: 12px; color: var(--dsw-alias-label-secondary, #475569); font-variant-numeric: tabular-nums; }
+.dsh-wp-planrow-state { font-size: 11px; color: var(--dsw-alias-label-secondary, #475569); white-space: nowrap; }
 .dsh-wp-sessions { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr)); gap: 16px; align-items: start; }
 .dsh-wp-session {
   min-width: 0;
@@ -1188,18 +1277,253 @@ window.__ModuleLoader__.load({
             const primary = contradictions.primary || {};
             return h('details', { className: 'dsh-wp-details' }, h('summary', null, t('analysis')), h('div', { className: 'dsh-wp-muted', style: { marginTop: '6px' } }, t('whyHint')), h('div', { className: 'dsh-wp-section' }, h('div', { className: 'dsh-wp-section-title' }, t('taskUnderstanding')), h('div', { className: 'dsh-wp-grid' }, h(Field, { label: t('deliverable') }, task.deliverable || '—'), h(Field, { label: t('successCriteria') }, h(List, { items: task.successCriteria, empty: '—' })), h(Field, { label: t('constraints') }, h(List, { items: task.constraints, empty: '—' })), h(Field, { label: t('knownFacts') }, h(List, { items: task.knownFacts, empty: '—' })), h(Field, { label: t('unknowns') }, h(List, { items: task.unknowns, empty: '—' })), h(Field, { label: t('assumptions') }, h(List, { items: task.assumptions, empty: '—' })))), primary.statement ? h('div', { className: 'dsh-wp-section' }, h('div', { className: 'dsh-wp-section-title' }, t('contradictions')), h(Field, { label: t('primaryContradiction') }, primary.statement), h('div', { className: 'dsh-wp-grid', style: { marginTop: '8px' } }, h(Field, { label: t('evidence') }, h(List, { items: primary.evidence, empty: '—' })), h(Field, { label: t('whyPrimary') }, primary.whyPrimary || '—'), h(Field, { label: t('secondary') }, h(List, { items: contradictions.secondary, empty: '—' })), h(Field, { label: t('transformation') }, h(List, { items: contradictions.transformationConditions, empty: '—' })))) : null, session.risks?.length ? h('div', { className: 'dsh-wp-section' }, h('div', { className: 'dsh-wp-section-title' }, t('risks')), session.risks.map((risk, index) => h('div', { className: 'dsh-wp-field', key: index, style: { marginTop: '6px' } }, h('div', { className: 'dsh-wp-field-value' }, risk.risk), h('div', { className: 'dsh-wp-field-label' }, `${t('likelihood')}: ${levelText(t, risk.likelihood)} · ${t('impact')}: ${risk.impact}`), h('div', { className: 'dsh-wp-muted' }, `${t('mitigation')}: ${risk.mitigation} · ${t('trigger')}: ${risk.trigger}`)))) : null, session.verification?.length ? h('div', { className: 'dsh-wp-section' }, h('div', { className: 'dsh-wp-section-title' }, t('verification')), session.verification.map((item, index) => h('div', { className: 'dsh-wp-field', key: index, style: { marginTop: '6px' } }, h('div', { className: 'dsh-wp-field-value' }, item.item), h('div', { className: 'dsh-wp-muted' }, `${item.method} → ${item.evidence}`)))) : null, session.practiceLoop ? h('div', { className: 'dsh-wp-section' }, h('div', { className: 'dsh-wp-section-title' }, t('practiceLoop')), h('div', { className: 'dsh-wp-grid' }, h(Field, { label: t('plan') }, session.practiceLoop.plan), h(Field, { label: t('do') }, session.practiceLoop.do), h(Field, { label: t('check') }, session.practiceLoop.check), h(Field, { label: t('act') }, session.practiceLoop.act))) : null, h('div', { className: 'dsh-wp-section dsh-wp-muted' }, t('advancedHint')), h('div', { className: 'dsh-wp-section dsh-wp-muted dsh-wp-code' }, `${t('planId')}: ${session.planId || '—'}`));
         }
+        // ── 1.5.0 进度图表化：把「做好了 / 卡住了」从一行 12px 文字升级为图表 ──
+        // 数据只来自 session.stats / session.stages / session.statuses；全部是纯函数，
+        // 无副作用、无新依赖；0/0 与脏数据收敛为「—」，绝不输出 NaN / Infinity。
+        const PLAN_RING_SIZE = 44;
+        const PLAN_RING_RADIUS = 18;
+        const PLAN_RING_STROKE = 4;
+        const PLAN_RING_CIRCUMFERENCE = 2 * Math.PI * PLAN_RING_RADIUS;
+        function planCount(value) {
+            const number = Number(value);
+            if (!Number.isFinite(number))
+                return 0;
+            return Math.max(0, Math.round(number));
+        }
+        // 与 groupTotals 同一套口径：先夹到 [0,total]，再让「正在做/还没开始」
+        // 吃掉剩余量，四段之和恒等于总数（构成条不会溢出或出现负宽度）。
+        function planCounts(stats) {
+            const source = stats || {};
+            const total = planCount(source.total);
+            const done = Math.min(planCount(source.done), total);
+            const blocked = Math.min(planCount(source.blocked), total - done);
+            const active = Math.min(planCount(source.inProgress), total - done - blocked);
+            const pending = Math.max(0, total - done - blocked - active);
+            const percent = total > 0 ? Math.round((done / total) * 100) : null;
+            return { total, done, active, blocked, pending, percent };
+        }
+        function planStatusMap(statuses) {
+            const byId = new Map();
+            for (const item of Array.isArray(statuses) ? statuses : []) {
+                if (item && item.subtaskId != null)
+                    byId.set(String(item.subtaskId), item);
+            }
+            return byId;
+        }
+        function planTaskEntries(stages, statuses) {
+            const byId = planStatusMap(statuses);
+            const entries = [];
+            for (const stage of Array.isArray(stages) ? stages : []) {
+                const subtasks = Array.isArray(stage?.subtasks) ? stage.subtasks : [];
+                for (const subtask of subtasks) {
+                    if (subtask?.id == null)
+                        continue;
+                    const item = byId.get(String(subtask.id));
+                    entries.push({ title: String(subtask?.title ?? ''), status: String(item?.status ?? 'pending') });
+                }
+            }
+            return entries;
+        }
+        // 当前阶段＝第一个有「正在做」的阶段；否则第一个还没全部做完的阶段。
+        function planCurrentStageId(rows) {
+            const running = rows.find((row) => row.active > 0);
+            if (running)
+                return running.id;
+            const open = rows.find((row) => row.tone !== 'done');
+            return open ? open.id : null;
+        }
+        function planStageRows(stages, statuses) {
+            const byId = planStatusMap(statuses);
+            const rows = [];
+            const list = Array.isArray(stages) ? stages : [];
+            list.forEach((stage, index) => {
+                const subtasks = Array.isArray(stage?.subtasks) ? stage.subtasks : [];
+                let done = 0;
+                let active = 0;
+                let blocked = 0;
+                for (const subtask of subtasks) {
+                    const status = subtask?.id == null ? undefined : byId.get(String(subtask.id))?.status;
+                    if (status === 'done')
+                        done += 1;
+                    else if (status === 'in_progress')
+                        active += 1;
+                    else if (status === 'blocked')
+                        blocked += 1;
+                }
+                const total = subtasks.length;
+                const tone = blocked > 0
+                    ? 'blocked'
+                    : total > 0 && done === total
+                        ? 'done'
+                        : active > 0 || done > 0 ? 'active' : 'pending';
+                rows.push({
+                    id: String(stage?.id ?? `stage-${index}`),
+                    name: String(stage?.name ?? ''),
+                    index,
+                    total,
+                    done,
+                    active,
+                    blocked,
+                    tone,
+                    current: false,
+                });
+            });
+            const currentId = planCurrentStageId(rows);
+            return rows.map((row) => ({ ...row, current: row.id === currentId }));
+        }
+        // 「现在在做什么」：卡住优先（需要人介入），其次是正在做，再次是全部做完/还没开始。
+        function planNow(t, counts, entries) {
+            const withTitle = (label, title) => (title ? `${label} · ${title}` : label);
+            if (counts.blocked > 0) {
+                const blocked = entries.find((entry) => entry.status === 'blocked');
+                return { state: 'blocked', text: withTitle(t('stats.blocked'), blocked?.title) };
+            }
+            if (counts.active > 0) {
+                const active = entries.find((entry) => entry.status === 'in_progress');
+                return { state: 'active', text: withTitle(t('stats.inProgress'), active?.title) };
+            }
+            if (counts.total > 0 && counts.done === counts.total)
+                return { state: 'done', text: t('helpDone') };
+            return { state: 'pending', text: t('stats.pending') };
+        }
+        function PlanRing({ percent }) {
+            const value = percent === null ? null : Math.max(0, Math.min(100, Math.round(percent)));
+            // 0% 时不画弧：圆头端点会在 12 点方向留下一个与「已完成」混淆的小点。
+            const arc = value === null ? 0 : (value / 100) * PLAN_RING_CIRCUMFERENCE;
+            return h('span', {
+                className: 'dsh-wp-planviz-ring',
+                'aria-hidden': 'true',
+                'data-zero': value === 0 ? 'true' : 'false',
+            }, h('svg', { viewBox: `0 0 ${PLAN_RING_SIZE} ${PLAN_RING_SIZE}`, width: PLAN_RING_SIZE, height: PLAN_RING_SIZE, focusable: 'false' }, h('circle', {
+                className: 'dsh-wp-planring-track',
+                cx: PLAN_RING_SIZE / 2,
+                cy: PLAN_RING_SIZE / 2,
+                r: PLAN_RING_RADIUS,
+                fill: 'none',
+                strokeWidth: PLAN_RING_STROKE,
+            }), value !== null && value > 0
+                ? h('circle', {
+                    className: 'dsh-wp-planring-arc',
+                    cx: PLAN_RING_SIZE / 2,
+                    cy: PLAN_RING_SIZE / 2,
+                    r: PLAN_RING_RADIUS,
+                    fill: 'none',
+                    strokeWidth: PLAN_RING_STROKE,
+                    strokeLinecap: 'round',
+                    strokeDasharray: `${arc} ${PLAN_RING_CIRCUMFERENCE - arc}`,
+                    transform: `rotate(-90 ${PLAN_RING_SIZE / 2} ${PLAN_RING_SIZE / 2})`,
+                })
+                : null));
+        }
+        function PlanLegend({ t, counts }) {
+            const items = [
+                { kind: 'done', label: t('stats.done'), count: counts.done },
+                { kind: 'active', label: t('stats.inProgress'), count: counts.active },
+                { kind: 'blocked', label: t('stats.blocked'), count: counts.blocked },
+                { kind: 'pending', label: t('stats.pending'), count: counts.pending },
+            ];
+            return h('div', { className: 'dsh-wp-planviz-legend' }, items.map((item) => h('span', {
+                key: item.kind,
+                className: 'dsh-wp-planviz-legend-item',
+                'data-kind': item.kind,
+                'data-count': String(item.count),
+            }, h('span', { className: 'dsh-wp-planviz-legend-dot', 'aria-hidden': 'true' }), `${item.label} ${item.count}`)));
+        }
+        function PlanSegments({ counts }) {
+            const segments = [
+                { kind: 'done', count: counts.done },
+                { kind: 'active', count: counts.active },
+                { kind: 'blocked', count: counts.blocked },
+                { kind: 'pending', count: counts.pending },
+            ];
+            return h('div', {
+                className: 'dsh-wp-planviz-bar',
+                'aria-hidden': 'true',
+                'data-total': String(counts.total),
+            }, counts.total === 0
+                ? null
+                : segments.map((segment) => (segment.count > 0
+                    ? h('span', {
+                        key: segment.kind,
+                        className: 'dsh-wp-planviz-seg',
+                        'data-kind': segment.kind,
+                        'data-count': String(segment.count),
+                        style: { flexGrow: segment.count },
+                    })
+                    : null)));
+        }
+        function PlanStepper({ t, rows }) {
+            if (rows.length < 1 || rows.length > 12)
+                return null;
+            return h('div', { className: 'dsh-wp-stepper', 'aria-hidden': 'true', 'data-stages': String(rows.length) }, rows.map((row) => {
+                const reach = row.total > 0 ? ((row.done + row.active + row.blocked) / row.total) * 100 : 0;
+                const width = row.tone === 'pending' ? 0 : reach;
+                return h('span', {
+                    key: row.id,
+                    className: 'dsh-wp-stepper-seg',
+                    'data-stage-id': row.id,
+                    'data-tone': row.tone,
+                    'data-current': row.current ? 'true' : 'false',
+                    title: `${stageLabel(t, row.index)} ${row.done}/${row.total} ${t('stats.done')}`,
+                }, h('span', {
+                    className: 'dsh-wp-stepper-fill',
+                    'data-width': String(Math.round(width)),
+                    style: { width: `${width}%` },
+                }));
+            }));
+        }
+        function PlanViz({ t, counts, now, rows }) {
+            const state = counts.percent === null
+                ? 'idle'
+                : counts.blocked > 0
+                    ? 'blocked'
+                    : counts.percent >= 100 ? 'done' : 'active';
+            return h('div', {
+                className: 'dsh-wp-planviz',
+                'data-percent': counts.percent === null ? 'none' : String(counts.percent),
+                'data-alarm': counts.blocked > 0 ? 'true' : 'false',
+                'data-state': state,
+            }, h(PlanRing, { percent: counts.percent }), h('div', { className: 'dsh-wp-planviz-head' }, h('span', { className: 'dsh-wp-planviz-pct' }, counts.percent === null ? '—' : `${counts.percent}%`), h('span', { className: 'dsh-wp-planviz-scope' }, `${t('scopeThis')} ${counts.done}/${counts.total} ${t('stats.done')}`), counts.blocked > 0
+                ? h('span', { className: 'dsh-wp-planviz-alarm' }, `${counts.blocked} ${t('stats.blocked')}`)
+                : null, h('span', { className: 'dsh-wp-planviz-now', 'data-state': now.state }, h('span', { className: 'dsh-wp-planviz-now-dot', 'aria-hidden': 'true' }), h('span', { className: 'dsh-wp-planviz-now-text' }, now.text))), h(PlanSegments, { counts }), h(PlanLegend, { t, counts }), h(PlanStepper, { t, rows }));
+        }
+        // 展开后的「分步进度」：逐阶段行 + 加权总体进度，替代旧的一根计划级进度条。
+        function PlanOverview({ t, stats, counts, rows }) {
+            const stateOf = (tone) => (tone === 'done'
+                ? t('stats.done')
+                : tone === 'active' ? t('stats.inProgress') : tone === 'blocked' ? t('stats.blocked') : t('stats.pending'));
+            return h('div', {
+                className: 'dsh-wp-planoverview',
+                'data-plan-total': String(counts.total),
+                'data-plan-done': String(counts.done),
+            }, h('div', { className: 'dsh-wp-planoverview-head' }, h('span', { className: 'dsh-wp-planoverview-title' }, t('vizStageTitle')), h('span', null, `${counts.done}/${counts.total} ${t('stats.done')}`)), h('div', { className: 'dsh-wp-planoverview-stats' }, h('span', null, `${t('vizWeighted')} ${clampPct(stats?.progress ?? 0)}%`), h('span', null, `${counts.active} ${t('stats.inProgress')} · ${counts.pending} ${t('stats.pending')}`), counts.blocked > 0 ? h('span', null, `${counts.blocked} ${t('stats.blocked')}`) : null), rows.length
+                ? h('div', { className: 'dsh-wp-planrows' }, rows.map((row) => {
+                    const width = row.total > 0 ? (row.done / row.total) * 100 : 0;
+                    return h('div', {
+                        key: row.id,
+                        className: 'dsh-wp-planrow',
+                        'data-tone': row.tone,
+                        'data-current': row.current ? 'true' : 'false',
+                    }, h('span', { className: 'dsh-wp-planrow-dot', 'aria-hidden': 'true' }), h('span', { className: 'dsh-wp-planrow-name' }, `${stageLabel(t, row.index)}：${row.name}`), h('span', { className: 'dsh-wp-planrow-bar' }, h('span', {
+                        className: 'dsh-wp-planrow-fill',
+                        'data-width': String(Math.round(width)),
+                        style: { width: `${width}%` },
+                    })), h('span', { className: 'dsh-wp-planrow-count' }, `${row.done}/${row.total}`), h('span', { className: 'dsh-wp-planrow-state' }, stateOf(row.tone)));
+                }))
+                : null);
+        }
         function SessionCard({ session, t, open, onToggle }) {
             const domId = `dsh-wp-session-${session.sessionId}`;
             const phase = session.phase || 'pending';
             const stats = session.stats || {};
             const tone = phaseTone(phase);
             const departments = Array.isArray(session.departments) ? session.departments : [];
-            // The summary keeps the same numbers the old header showed, read from the
-            // same `session.stats` object; collapsing only hides the detail panel.
-            const done = stats.done ?? 0;
-            const total = stats.total ?? 0;
-            const blocked = stats.blocked ?? 0;
-            const percent = total > 0 ? Math.round((done / total) * 100) : 0;
+            // 1.5.0：折叠卡摘要＝图表（环 + 百分比 + 四段构成条 + 图例 + 阶段步进条）；
+            // 数字仍只来自 session.stats，与旧头部的口径完全一致，不引入第二套统计。
+            const counts = planCounts(stats);
+            const statuses = Array.isArray(session.statuses) ? session.statuses : [];
+            const stageRows = planStageRows(session.stages, statuses);
+            const now = planNow(t, counts, planTaskEntries(session.stages, statuses));
             return h('article', { id: domId, 'data-session-id': session.sessionId, className: `dsh-wp-session dsh-wp-tone-${tone}` }, h(Collapse, {
                 id: `dsh-wp-collapse-${session.sessionId}`,
                 open: open === true,
@@ -1207,15 +1531,11 @@ window.__ModuleLoader__.load({
                 className: 'dsh-wp-session-collapse',
                 panelClassName: 'dsh-wp-session-body',
                 title: session.title || t('panel'),
-                meta: [
-                    h('span', { key: 'scope' }, `${t('scopeThis')} ${done}/${total} ${t('stats.done')}`),
-                    h('span', { key: 'bar', className: 'dsh-wp-mini', title: `${percent}%` }, h('span', { className: `dsh-wp-mini-fill dsh-wp-mini-fill--${tone}`, style: { width: `${percent}%` } })),
-                    h('span', { key: 'blocked' }, `${blocked} ${t('stats.blocked')}`),
-                ],
+                meta: h(PlanViz, { t, counts, now, rows: stageRows }),
                 badge: h(Pill, { tone }, t(`phase.${phase}`)),
             }, session.updatedAt
                 ? h('div', { className: 'dsh-wp-meta dsh-wp-session-updated' }, `${t('updatedAt')} ${formatTime(session.updatedAt)}`)
-                : null, h(Guide, { session, t }), session.degraded ? h('div', { className: 'dsh-wp-banner dsh-wp-banner--degraded' }, h('strong', null, t('degraded')), h('div', null, plainError(session.error || '')), h('div', { className: 'dsh-wp-muted' }, t('degradedHint'))) : null, h(Progress, { value: stats.progress ?? 0, tone }), h('div', { className: 'dsh-wp-progress-meta' }, h('span', null, `${t('stats.progress')} ${clampPct(stats.progress ?? 0)}%`), h('span', null, `${stats.inProgress ?? 0} ${t('stats.inProgress')} · ${stats.pending ?? 0} ${t('stats.pending')}`)), departments.length ? h('div', { className: 'dsh-wp-section' }, h('div', { className: 'dsh-wp-section-title' }, t('who')), h('div', { className: 'dsh-wp-departments' }, departments.map((dept) => h(Pill, { key: dept.id, tone: dept.blocked > 0 ? 'blocked' : dept.done === dept.total ? 'done' : 'active' }, `${deptName(t, dept.id)} ${dept.done}/${dept.total} ${t('stats.done')}`)))) : null, h('div', { className: 'dsh-wp-section' }, h('div', { className: 'dsh-wp-section-title' }, t('steps')), (session.stages || []).map((stage, index) => h(StageCard, {
+                : null, h(Guide, { session, t }), session.degraded ? h('div', { className: 'dsh-wp-banner dsh-wp-banner--degraded' }, h('strong', null, t('degraded')), h('div', null, plainError(session.error || '')), h('div', { className: 'dsh-wp-muted' }, t('degradedHint'))) : null, open === true ? h(PlanOverview, { t, stats, counts, rows: stageRows }) : null, departments.length ? h('div', { className: 'dsh-wp-section' }, h('div', { className: 'dsh-wp-section-title' }, t('who')), h('div', { className: 'dsh-wp-departments' }, departments.map((dept) => h(Pill, { key: dept.id, tone: dept.blocked > 0 ? 'blocked' : dept.done === dept.total ? 'done' : 'active' }, `${deptName(t, dept.id)} ${dept.done}/${dept.total} ${t('stats.done')}`)))) : null, h('div', { className: 'dsh-wp-section' }, h('div', { className: 'dsh-wp-section-title' }, t('steps')), (session.stages || []).map((stage, index) => h(StageCard, {
                 key: stage.id,
                 stage,
                 statuses: session.statuses || [],
@@ -1431,7 +1751,12 @@ window.__ModuleLoader__.load({
                 ? Math.min(100, Math.max(0, percent))
                 : null;
             const arc = value === null ? 0 : (value / 100) * circumference;
-            return h('span', { className: 'dsh-wp-group-ring', 'aria-hidden': 'true' }, h('svg', { viewBox: `0 0 ${size} ${size}`, width: size, height: size, focusable: 'false' }, h('circle', {
+            return h('span', {
+                className: 'dsh-wp-group-ring',
+                'aria-hidden': 'true',
+                // 0% 与「暂无数据」必须在视觉上可区分：0% 加粗零轨（≥3:1），无数则细轨 + 破折号。
+                'data-zero': value === 0 ? 'true' : 'false',
+            }, h('svg', { viewBox: `0 0 ${size} ${size}`, width: size, height: size, focusable: 'false' }, h('circle', {
                 className: 'dsh-wp-group-ring-track',
                 cx: size / 2,
                 cy: size / 2,
@@ -1479,8 +1804,11 @@ window.__ModuleLoader__.load({
             const totals = useMemo(() => groupTotals(list), [list]);
             const groupTitle = t(isDone ? 'groupDone' : 'groupLive');
             const hintText = t(isDone ? 'groupDoneHint' : 'groupLiveHint');
+            // 用户 Q3：0/0 时不再显示「未完成 0 / 已完成 0（完成率暂无数据）」——
+            // 环上已经是「—」，组内空态也已说明没有工作项；再重复一遍 0/0 只是噪声。
+            // 全部做完（100%）仍保留整句，因为那时「未完成 0」正是用户要找的结论。
             const summaryText = totals.percent === null
-                ? fill(t('groupSummaryNoRate'), { open: totals.open, done: totals.done })
+                ? null
                 : fill(t('groupSummary'), { open: totals.open, done: totals.done, pct: totals.percent });
             // 读屏用完整句：计数、完成率与三态明细一起念，避免只听到一个孤零零的数字。
             const ariaText = totals.total > 0
@@ -1506,7 +1834,9 @@ window.__ModuleLoader__.load({
                 collapsible ? h('span', { key: 'chevron', className: 'dsh-wp-group-chevron', 'aria-hidden': 'true' }) : null,
                 // 摘要独占一整行（CSS 里 flex-basis:100%）：窄面板只截断摘要本身，
                 // 组名/徽章/环不会被挤走；完整句放在 title，悬停可读全。
-                h('span', { key: 'summary', className: 'dsh-wp-group-sub', title: hintText }, summaryText),
+                summaryText === null
+                    ? null
+                    : h('span', { key: 'summary', className: 'dsh-wp-group-sub', title: hintText }, summaryText),
             ];
             const head = collapsible
                 ? h('button', {

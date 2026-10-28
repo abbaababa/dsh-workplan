@@ -1,3 +1,55 @@
+## 1.5.0 — 2026-10-28
+
+**「进度必须一眼看得见」的图表化版本**。1.4.3 把数字收敛成单一来源，但计划卡折叠后仍然只有一行
+12px 灰字（`本计划 0/8 做好了` + 54×5px 迷你条 + `0 卡住了`），0% 时迷你条宽度为 0、轨道色与
+折叠按钮底色同 token，等于**没有图**；百分比只存在于 `title` 悬停提示里；组头在 0/0 时印
+`未完成 0 / 已完成 0（完成率暂无数据）`。用户以截图指出三处画圈区域「不直观、不一目了然、不醒目」，
+要求「必须通过图表等形式突出显示」。
+
+### 改动（只动展示层，`plan.ts` / `runtime.ts` / `host.ts` 逻辑零改动）
+
+- **折叠卡摘要改为图表**（`src/client.ts`，默认视图即可读，无需展开、无需悬停）：
+  44px SVG 环 + 24px 百分比数字 + `本计划 X/Y 做好了` + 一行「现在在做什么」（卡住优先→正在做→
+  全部做完/还没开始，带任务名）+ 8px 四段构成条（按件数分宽，`done/active/blocked/pending`）+
+  11px 状态图例（`做好了 0 · 正在做 1 · 卡住了 0 · 还没开始 7`）+ 6px 阶段步进条
+  （每阶段一段，当前阶段描边，`data-stage-id` / `data-tone` / `data-current`）。
+- **展开后新增「分步进度」**：逐阶段行（名称、`done/total`、4px 细条、状态）＋加权总体进度，
+  替换旧的一根计划级进度条；折叠态不挂载，保持卡头紧凑。
+- **0% 不再等于「没有图」**：四层信号同时存在——环的零轨加粗到 `rgba(100,116,139,.80)`（≈3.14:1，
+  `data-zero="true"`）、24px「0%」、整条灰色「还没开始」构成条、虚线阶段槽 + 当前阶段描边；
+  0% 不画 SVG 弧，避免圆头端点在 12 点方向留下与「已完成」混淆的小点。
+- **组头收口**：0% 组环零轨同样加粗（`data-zero="true"`）；0/0（没有工作项）时**删除**
+  `未完成 0 / 已完成 0（完成率暂无数据）` 整句，只保留环上的 `—` 与组内空态；100% 组
+  （`未完成 0 / 已完成 3（完成率 100%）`）整句保留，因为那正是用户要的结论。
+- **零新增依赖**：进度全部由既有 `session.stats` / `session.stages` / `session.statuses` 派生，
+  纯函数组件，无 `useEffect`、无定时器、不引用 chart.js；`package.json` 无 `dependencies`。
+  注意 `node_modules` 里仍能看到 `chart.js@4.6.1`、`@kurkle/color@0.3.4` 标为 extraneous：
+  它们是 1.4.3 之后那次「移除 chart.js 依赖」改动未执行 `npm prune` 的残留，不出现在
+  `package.json`、不参与 `npm run build`，运行时图表库来自 `vendor/chart.umd.js` 路由。
+- **版本**：`1.4.3 → 1.5.0`（minor，新增用户可见能力）；`package.json` / `package-lock.json` 两处 /
+  `src/host.ts` 的 `meta.version` 同步，`lib/host.js`、`dist/host.js` 由 `npm run build` 生成。
+
+### 验证
+
+- `npm run check` → exit 0（strict + noImplicitAny）。
+- `npm test` → **99/99 通过**（1.4.3 基线 90 项 + 新增 `tests/progress-visual.test.ts` 8 项 +
+  `tests/version-sync.test.ts` 1 项）。
+  新增用例锁定：0/8 的四个可见信号、3/8→38% 且构成条件数之和等于 total、卡住项
+  `data-alarm="true"` 且阶段 `data-tone="blocked"`、三个阶段恰好一个 `data-current="true"`、
+  图例恰好四项且顺序固定、折叠态不挂载分步面板、脏数据不产生 NaN/Infinity/undefined 且不超过 100%、
+  卡头不引入 canvas 或图表库。`version-sync` 锁定 `package.json` = `package-lock.json` 两处 =
+  `src/host.ts` 的 `meta.version`，升级时不需要改测试。
+- 同步修改的既有断言：`tests/group-summary.test.ts`（两处 `完成率暂无数据` 改为「不再出现」）、
+  `tests/session-collapse.test.ts`（`0 卡住了` → 图例 `卡住了 0` + 可见 `100%`）。
+
+### 回滚
+
+- 改造前整树快照：`.backups/v1.4.3-pre-progress-viz-20261028-133958.tar.gz`
+  （SHA-256 `b8ccc0efa7c307160739ffecdb4af44daab44b3a0f0c779c74d9d0783f6993c7`）。
+- 代码完成、版本号未升时的中间快照：`.backups/v1.4.3-progress-viz-code-20261028-142153.tar.gz`
+  （SHA-256 `c79513f5c0279e3bb291d536fba7a631fa8018e27bc7d4fca500fbabd9e602da`）。
+- 恢复后必须 `npm run build` 并重启 DSH web profile（宿主启动时加载 `lib/host.js`，刷新浏览器不够）。
+
 ## 1.4.3 — 2026-10-28
 
 **「同一个数字只能有一个来源」的根治版**。1.4.2 及更早版本里，同一个计划的数字存在两套真相源：

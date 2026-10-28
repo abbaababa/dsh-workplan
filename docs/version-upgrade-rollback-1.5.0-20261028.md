@@ -7,6 +7,14 @@
 > T4 落盘物只有两件：本文件；改造前快照 `.backups/v1.4.3-pre-progress-viz-20261028-133958.tar.gz`。
 > **未改动任何插件源码、版本号或运行实例；未重启任何服务。**
 
+> **更正（Lead 复核，2026-10-28 14:26 Asia/Shanghai）**：本文件原有多处以「插件目录没有 git」为前提，
+> 与事实不符——`ls -d .git` 存在，`git rev-parse --show-toplevel` 输出就是本插件目录，当前分支 `main`，
+> 已有 tag `v1.4.3`，`git status` 显示跟踪 `origin/main`。正确口径是：**回滚首选 git**
+> （`git checkout -- .` 放弃未提交改动、`git reset --hard <commit>` 回到已知提交），
+> `.backups/` 快照负责覆盖「未提交改动、未跟踪文件、被 .gitignore 忽略的构建产物」这些 git 不保存的状态，
+> 二者互补。§1.4、§3.3、§4.3 与 §6 风险表中的旧表述已同步修正。发布动作（commit / tag / npm publish）
+> 仍属未授权，需用户明确要求后才执行。
+
 ---
 
 ## 0. 结论速览
@@ -79,10 +87,11 @@ src/*.ts ──tsc──> dist/*.js ──cp──> lib/*.js（宿主运行时�
 - 版本递增后**必须重建**，否则 `lib/host.js` 仍报旧版本（1.4.3 报告里“四处交叉核对”就是查这个）。
 - `tsconfig.json` 只编译 `src/**/*.ts`，不包含 `tests/` 与 `scripts/`；测试由 `tsconfig.test.json` 单独编译到 `dist-tests/`。
 
-### 1.4 没有 git 仓库，备份就是审计链
+### 1.4 目录里有 git，快照与提交互补
 
-- 插件目录**没有 `.git`**（`ls -d .git` 不存在），不能靠 `git revert`/`git checkout` 回滚。
-- 因此本策略把 `.backups/` 下的**带时间戳整树快照**当作唯一可信回滚物；CHANGELOG 记录快照名与 SHA-256。
+- 插件目录**是独立 git 仓库**：`git rev-parse --show-toplevel` 输出即本目录，分支 `main`，已有 tag `v1.4.3`，跟踪远端 `origin/main`。
+- 回滚首选 git：`git checkout -- .`（放弃未提交改动）或 `git reset --hard <commit>`；git 不保存被 `.gitignore` 忽略的构建产物与未跟踪文件，所以 `.backups/` 下的**带时间戳整树快照**仍要保留，作为「未提交 + 未跟踪」状态的取证与兜底。
+- 发布动作（commit / tag / npm publish）未获用户授权前不执行；CHANGELOG 记录快照名与 SHA-256，发布后由 commit hash 与 tag 补齐审计链。
 
 ---
 
@@ -176,9 +185,9 @@ src/*.ts ──tsc──> dist/*.js ──cp──> lib/*.js（宿主运行时�
 - 内容至少包含：改造前后对比截图、图表形态与数据映射、0%/部分/100% 三态、宽窄屏、无障碍（百分比必须有文本，不只靠颜色）、验证命令输出。
 - 设计阶段的 T1 定位报告：`docs/progress-visualization-locate-20261028.md`；本策略：本文件。历史报告不因回滚而删除（`docs/` 被回滚命令排除）。
 
-### 3.3 没有 git，如何留痕
+### 3.3 如何在 git 与 CHANGELOG 之间留痕
 
-- 每次发布/回滚都写 CHANGELOG；快照名带时间戳；在 CHANGELOG 的“回滚”节写 SHA-256。
+- 每次发布/回滚都写 CHANGELOG；快照名带时间戳；在 CHANGELOG 的“回滚”节写 SHA-256；发布后补 commit hash 与 tag（如 `v1.5.0`）。
 - **回滚记录不能删历史**：
   - 若 1.5.0 尚未在主 Agent 的运行实例里重启、用户从未看到：可以撤掉未发布的条目，并在 `docs/` 留一份“未发布即回滚”的说明；
   - 若 1.5.0 已经重启并对用户可见：**保留 1.5.0 条目**，在其顶部加 `> 已回滚：时间 / 原因 / 恢复快照 SHA-256 / 验证结果`，然后另起一个 patch 版本修复，不允许把历史抹掉。
@@ -238,7 +247,7 @@ shasum -a 256 .backups/v1.4.3-pre-progress-viz-20261028-133958.tar.gz       # �
 ```bash
 cd <repo>
 
-# 只改 package.json + package-lock.json 的两处版本；--no-git-tag-version 防止生成 git tag（本目录无 git）
+# 只改 package.json + package-lock.json 的两处版本；--no-git-tag-version 表示只升版本、不打 tag（打 tag 由用户在发布时决定）
 npm version 1.5.0 --no-git-tag-version
 
 # 手工改插件 meta.version 这一行（src/host.ts:328）
@@ -479,7 +488,7 @@ npm test
 - **禁止局部回滚**（比如只还原 `client.js` 而宿主仍是 1.5.0）：会造成宿主/客户端版本不一致，恰好是本策略要防的问题。
 - **禁止**只 `tar -xzf` 到仓库根就结束：新增文件不会被删除，`src/` 里会残留 1.5.0 文件，`npm test` 可能编译到它们。
 - **禁止**手改 `lib/host.js` 或 `dist/host.js` 来“临时回退版本”；必须重建。
-- **禁止**删除 `.backups/` 下的历史快照；它们是没有 git 时的唯一审计链。
+- **禁止**删除 `.backups/` 下的历史快照；它们是「未提交改动 + 未跟踪文件 + 被忽略的构建产物」的唯一取证物（git 只覆盖已跟踪路径，不能替代快照）。
 
 ### 6.7 回滚后的记录
 
@@ -501,7 +510,7 @@ npm test
 | 测试数被改动掩盖回归 | 本轮会新增测试，总数不再是 90 | 验收看 `fail 0` + 1.4.3 的 90 项仍存在；不能只看“总数变多” |
 | 版本检查顺序错 | checker 包含 CHANGELOG 顶部 | 先写 CHANGELOG 再跑 checker，否则是预期 FAIL |
 | 快照被半成品覆盖 | 实现过程中可能误建备份 | 1.4.3 快照保持不可变；新备份另起名字（`v1.5.0-pre-…`） |
-| 没有 git，回滚靠人 | 插件目录无 `.git` | 快照 + SHA-256 + CHANGELOG 记录；禁止删除 `.backups/` |
+| 只依赖快照、忘了目录其实有 git | 目录是 git 仓库（tag `v1.4.3`、远端 `origin`） | 优先 `git checkout -- .` / `git reset --hard <commit>`；快照用于未提交与未跟踪状态；禁止删除 `.backups/` |
 | Node 版本差异 | 本机 Node v26.9.0、npm 12.0.2；`engines` 要求 >=22 | 在目标环境再跑一次 `npm run check`/`npm test`；tsc target ES2022 |
 | 日期/时区写错 | CHANGELOG 只写日期 | 统一 Asia/Shanghai；以重启验收日为准，跨天要改 |
 

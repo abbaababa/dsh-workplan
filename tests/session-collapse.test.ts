@@ -295,7 +295,10 @@ test('task cards and step cards start collapsed and keep name, done/total and st
   const firstSummary = textOf(toggleOf(sessions[0]))
   assert.ok(firstSummary.includes('单句说明 1+1=2'), 'summary keeps the task name')
   assert.ok(firstSummary.includes('本计划 1/1 做好了'), 'summary keeps done/total')
-  assert.ok(firstSummary.includes('0 卡住了'), 'summary keeps the blocked count')
+  // v1.5.0: the old one-line meta (`0 卡住了`) became the chart legend `卡住了 0`
+  // plus the four-segment bar; the blocked count must still be visible.
+  assert.ok(firstSummary.includes('卡住了 0'), 'summary keeps the blocked count in the legend')
+  assert.ok(firstSummary.includes('100%'), 'the rate is visible as a number, not hidden in a title attribute')
   assert.ok(firstSummary.includes('已完成'), 'summary keeps the task status')
   const secondSummary = textOf(toggleOf(sessions[1]))
   assert.ok(secondSummary.includes('检查 dsh-workplan README'))

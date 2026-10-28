@@ -102,6 +102,23 @@ grep -RInE "writeFileSync|child_process|eval\(" src
 npm audit --omit=dev
 ```
 
+## What 1.5.0 changes (progress you can see)
+
+1.5.0 is presentation-only: the collapsed plan card swaps its single grey line ("本计划 0/8 做好了" plus a 54×5px bar) for an actual chart.
+
+| Where | Before | After |
+|---|---|---|
+| collapsed plan card | 12px grey text + mini bar + "0 卡住了"; the percentage existed only in the hover `title` | 44px ring + 24px percentage + `本计划 X/Y 做好了` + one "what is happening now" line (blocked first, with the task name) + 8px four-segment composition bar + status legend + stage stepper |
+| expanded panel | one plan-level progress bar | "Step progress": one row per stage (name, `done/total`, thin bar, state) plus a weighted overall figure |
+| a 0% plan | the bar fill was 0px wide and its track used the same token as the card background — effectively no chart | four signals: a thickened ring track, a 24px "0%", a full grey "not started" bar, and dashed stage slots with the current stage outlined |
+| a group with 0 work items | `未完成 0 / 已完成 0（完成率暂无数据）` | that sentence is gone; only the `—` in the ring remains (the in-group empty state still renders when expanded) |
+
+None of the counts disappeared — the legend always carries all four buckets with their numbers.
+
+**How to see it**: the front end ships in `client.js`, which DSH Web loads at start-up, so restart DSH Web and then reload <http://127.0.0.1:3080>. For an offline comparison open [docs/preview/progress-visual-1.5.0.html](docs/preview/progress-visual-1.5.0.html) (`npm run preview` regenerates it with the same CSS for both versions).
+
+No new dependencies, `plan.ts` / `runtime.ts` untouched; rollback is documented in [CHANGELOG.md](CHANGELOG.md).
+
 ## What 1.4.3 fixes
 
 1.4.3 is a counting-consistency release. The plugin used to keep two sources of truth — live subtask state and a cached stats snapshot — so the panel could disagree with reality.
@@ -136,8 +153,9 @@ dsh plugin --profile web remove dsh-workplan
 ```bash
 npm ci
 npm run check     # tsc --noEmit
-npm test          # 90 tests, including count invariants and mutation tests
+npm test          # 99 tests, including count invariants, mutation tests and the progress chart
 npm run build     # src/*.ts → lib/*.js, client.js
+npm run preview   # regenerate the 1.4.3 / 1.5.0 card comparison under docs/preview
 ```
 
 `lib/` and `client.js` are committed build output; CI rebuilds them and fails if they drift.
