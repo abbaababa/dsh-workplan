@@ -69,13 +69,12 @@
 
 ### 回滚
 
-改动前的完整快照：`.backups/v1.4.2-pre-derived-counts-20261028-123136.tar.gz`（含 `src/`、`lib/`、`dist/`、
-`client.js`、`tests/`、`scripts/`、`package.json`、`CHANGELOG.md`）。回滚：
+**1.4.3 是本项目首次公开发布**，更早的 1.0.0–1.4.2 只在本地开发，没有发布到 npm，也没有对应的 git 标签，
+因此公开仓库里没有 1.4.2 的可回滚版本。如果你是从本地开发副本升级上来的，回滚到升级前那份副本即可：
 
 ```bash
-cd <repo>
-tar -xzf .backups/v1.4.2-pre-derived-counts-20261028-123136.tar.gz
-npm test   # 回到 1.4.2 的 79 项通过
+npm ci && npm test        # 回到升级前的行为，先确认它仍然可构建、测试通过
+dsh plugin --profile web add /path/to/the/older/copy
 ```
 
 已安装的运行实例需要重启 DSH（或重新加载 `web` profile）才会使用本版代码。
