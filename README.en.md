@@ -53,7 +53,7 @@ dsh plugin --profile web add "$(pwd)"
 4. Open **Task progress** in the sidebar:
 
    - five headline numbers: **tasks / work items / done / in progress / blocked**;
-   - plan cards grouped into **In progress** and **Completed**, each with a completion rate;
+   - plan cards grouped into **In progress**, **Ended** and **Completed**, each with a completion rate. **Ended** means the turn has stopped (nothing is running) while the plan is still unfinished; the card also says where it stopped (budget spent / stuck / not started) and resuming is one sentence away;
    - expand any plan to see per-stage progress and who owns each work item.
 
 Every number is derived from the same task state — the panel can no longer claim "0 in progress" while the list below shows work running. That inconsistency is exactly what 1.4.3 fixed.

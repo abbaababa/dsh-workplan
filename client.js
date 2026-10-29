@@ -19,21 +19,26 @@ window.__ModuleLoader__.load({
                 "panel": "任务进度",
                 "groupLive": "进行中",
                 "groupDone": "已完成",
+                "groupEnded": "已结束",
                 "groupLiveHint": "还没结束，正在或即将推进",
                 "groupDoneHint": "已全部完成并收尾",
+                "groupEndedHint": "这一轮已经停了，没有东西在跑；说「续跑」可继续推进",
                 "groupCollapse": "收起",
                 "groupExpand": "展开",
                 "groupNeeds": "需处理",
                 "groupLiveEmpty": "没有进行中的任务",
                 "groupDoneEmpty": "还没有完成的任务",
+                "groupEndedEmpty": "没有已结束但未完成的任务",
                 "groupSummary": "未完成 {open} / 已完成 {done}（完成率 {pct}%）",
                 "groupSummaryNoRate": "未完成 {open} / 已完成 {done}（完成率暂无数据）",
                 "groupAria": "{title}组，{plans} 个计划，共 {total} 件具体工作，已完成 {done} 件，完成率 {pct}%。其中正在做 {active} 件、卡住 {blocked} 件、还没开始 {pending} 件。",
                 "groupAriaEmpty": "{title}组，{plans} 个计划，暂无具体工作项。",
                 "groupPlansLabel": "个计划",
-                "chartGroups": "两类计划数量占比",
-                "chartLive": "进行中计划完成度（按工作项）",
-                "chartMore": "另有 {n} 个进行中计划未画入图表",
+                "chartGroups": "计划数量与完成情况",
+                "chartOpen": "未结束",
+                "chartDone": "已完成",
+                "chartLive": "未完成计划的完成度（按工作项）",
+                "chartMore": "另有 {n} 个未完成计划未画入图表",
                 "title": "任务进度：一眼看懂",
                 "subtitle": "用大白话说明：现在要做什么、谁在做、做到哪一步、接下来做什么。",
                 "helpTitle": "先看这三句",
@@ -67,7 +72,8 @@ window.__ModuleLoader__.load({
                     "blocked": "卡住了",
                     "paused": "预算用完，可续跑",
                     "degraded": "安排失败",
-                    "cancelled": "已取消"
+                    "cancelled": "已取消",
+                    "ended": "已结束，可续跑"
                 },
                 "status": {
                     "pending": "还没开始",
@@ -183,6 +189,7 @@ window.__ModuleLoader__.load({
             "en": {
                 "groupLive": "In progress",
                 "groupDone": "Completed",
+                "groupEnded": "Ended",
                 "groupLiveHint": "Not finished yet — running or about to run",
                 "groupDoneHint": "All work finished and wrapped up",
                 "groupCollapse": "Collapse",
@@ -190,14 +197,17 @@ window.__ModuleLoader__.load({
                 "groupNeeds": "needs attention",
                 "groupLiveEmpty": "No work in progress",
                 "groupDoneEmpty": "Nothing completed yet",
+                "groupEndedEmpty": "No ended-but-unfinished plans",
                 "groupSummary": "Open {open} / done {done} ({pct}% complete)",
                 "groupSummaryNoRate": "Open {open} / done {done} (completion rate unavailable)",
                 "groupAria": "{title} group: {plans} plan(s), {total} work item(s), {done} done, {pct}% complete. Right now {active} in progress, {blocked} blocked, {pending} not started.",
                 "groupAriaEmpty": "{title} group: {plans} plan(s), no work items yet.",
                 "groupPlansLabel": "plan(s)",
-                "chartGroups": "Plan count by group",
-                "chartLive": "In-progress plans by work item",
-                "chartMore": "{n} more in-progress plans not drawn",
+                "chartGroups": "Plan count and completion",
+                "chartOpen": "Open",
+                "chartDone": "Completed",
+                "chartLive": "Open plans by work item",
+                "chartMore": "{n} more open plans not drawn",
                 "panel": "Task progress",
                 "title": "Task progress at a glance",
                 "subtitle": "Plain language: what this is, who is doing it, how far along it is, and what happens next.",
@@ -232,7 +242,8 @@ window.__ModuleLoader__.load({
                     "blocked": "Stuck",
                     "paused": "Paused (budget spent)",
                     "degraded": "Planning failed",
-                    "cancelled": "Cancelled"
+                    "cancelled": "Cancelled",
+                    "ended": "Ended (resumable)"
                 },
                 "status": {
                     "pending": "Not started",
@@ -402,6 +413,7 @@ window.__ModuleLoader__.load({
 .dsh-wp-group::before { content: ''; position: absolute; inset: 0 auto 0 0; width: 4px; }
 .dsh-wp-group--live::before { background: linear-gradient(180deg, #fb923c, #f97316); }
 .dsh-wp-group--done::before { background: linear-gradient(180deg, #38bdf8, #0284c7); }
+.dsh-wp-group--ended::before { background: linear-gradient(180deg, #94a3b8, #64748b); }
 /* T6 — 组头多出一行完成度摘要，底部内边距 10px → 6px，两组仍在同一屏内读完。 */
 .dsh-wp-group-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 0 4px 6px; }
 .dsh-wp-group-head--btn { width: 100%; background: none; border: 0; color: inherit; font: inherit; text-align: left; cursor: pointer; border-radius: 8px; }
@@ -428,6 +440,8 @@ window.__ModuleLoader__.load({
 .dsh-wp-group-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
 .dsh-wp-group--live .dsh-wp-group-dot { background: #f97316; box-shadow: 0 0 0 4px rgba(249,115,22,.16); animation: dsh-wp-pulse 1.8s ease-in-out infinite; }
 .dsh-wp-group--done .dsh-wp-group-dot { background: #0ea5e9; box-shadow: 0 0 0 4px rgba(14,165,233,.14); }
+/* [1.6.0] 已结束：灰点、不脉冲——"没有东西在跑"这件事不允许用动画表达。 */
+.dsh-wp-group--ended .dsh-wp-group-dot { background: #94a3b8; box-shadow: 0 0 0 4px rgba(148,163,184,.16); }
 .dsh-wp-group-title { font-size: 15px; font-weight: 700; letter-spacing: .2px; color: var(--dsw-alias-label-primary, #0f172a); }
 /* 设计稿 §6.1：橙 #f97316 / 白 ≈2.8:1、蓝 #0ea5e9 / 白 ≈2.77:1，均不足 4.5:1，
    15px 粗体也不算法定「大字号」，所以组头一律用主文本色；品牌色只做「面」——
@@ -436,6 +450,7 @@ window.__ModuleLoader__.load({
 .dsh-wp-group-count { min-width: 22px; padding: 0 7px; height: 20px; border-radius: 999px; font-size: 12px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; color: var(--dsw-alias-label-primary, #0f172a); font-variant-numeric: tabular-nums; }
 .dsh-wp-group--live .dsh-wp-group-count { background: rgba(249,115,22,.14); box-shadow: inset 0 0 0 1px rgba(249,115,22,.34); }
 .dsh-wp-group--done .dsh-wp-group-count { background: rgba(14,165,233,.14); box-shadow: inset 0 0 0 1px rgba(14,165,233,.34); }
+.dsh-wp-group--ended .dsh-wp-group-count { background: rgba(148,163,184,.16); box-shadow: inset 0 0 0 1px rgba(148,163,184,.36); }
 /* WCAG AA：错误色叠 12% 红底后，浅色 #ec1313 只有 3.70:1；与主文本色混合 20%
    让浅色变深、深色变浅，两套主题都 ≥4.5:1（实测 5.16:1 / 5.67:1）。 */
 .dsh-wp-group-alert { font-size: 12px; font-weight: 650; color: var(--dsw-alias-state-error-primary, #ef4444); color: color-mix(in srgb, var(--dsw-alias-state-error-primary, #ef4444) 80%, var(--dsw-alias-label-primary, #0f172a) 20%); background: rgba(239,68,68,.12); padding: 1px 8px; border-radius: 999px; }
@@ -748,6 +763,7 @@ window.__ModuleLoader__.load({
 .dsh-wp-group::before { content: ''; position: absolute; left: 0; top: 14px; bottom: 14px; width: 3px; border-radius: 0 3px 3px 0; opacity: .9; }
 .dsh-wp-group--live::before { background: linear-gradient(180deg, #fbbf24, #ea580c); }
 .dsh-wp-group--done::before { background: linear-gradient(180deg, #7dd3fc, #0369a1); }
+.dsh-wp-group--ended::before { background: linear-gradient(180deg, #cbd5e1, #94a3b8); }
 .dsh-wp-group--done { opacity: .97; }
 .dsh-wp-group-head--btn { transition: background-color .16s ease; }
 .dsh-wp-group-head--btn:hover { background: rgba(148,163,184,.10); }
@@ -980,6 +996,12 @@ window.__ModuleLoader__.load({
         function phaseTone(phase) {
             if (phase === 'blocked')
                 return 'blocked';
+            /*
+             * [1.6.0] `ended` = 这一轮停了，但计划没做完。它既不是成功（done），也不能
+             * 冒充正在干活（active）；用中性 idle 色，卡在哪由二级徽标 suspendedPhase 说明。
+             */
+            if (phase === 'ended')
+                return 'idle';
             if (phase === 'degraded' || phase === 'cancelled' || phase === 'paused')
                 return 'warn';
             if (phase === 'integrating' || phase === 'done')
@@ -987,6 +1009,23 @@ window.__ModuleLoader__.load({
             if (phase === 'executing' || phase === 'planning')
                 return 'active';
             return 'idle';
+        }
+        /*
+         * [1.6.0] 「已结束」徽标要把「停在哪儿」一起说出来。
+         *
+         * 只说「已结束，可续跑」，用户不知道是预算用完、卡住了、还是压根没开始；
+         * 只说原阶段（「正在做」），又会像事故截图那样暗示还在跑。两段式表达：
+         * 终态 + 原阶段，一次说清两个事实。
+         */
+        function phaseLabel(phase, session, t) {
+            const base = t(`phase.${phase}`);
+            if (phase !== 'ended')
+                return base;
+            const suspended = String(session?.suspendedPhase ?? '');
+            if (!suspended)
+                return base;
+            const detail = t(`phase.${suspended}`);
+            return detail && detail !== base ? `${base} · ${detail}` : base;
         }
         function allEntries(session) {
             const byId = new Map((Array.isArray(session?.statuses) ? session.statuses : []).map((item) => [item.subtaskId, item]));
@@ -1637,7 +1676,7 @@ window.__ModuleLoader__.load({
                 panelClassName: 'dsh-wp-session-body',
                 title: session.title || t('panel'),
                 meta: h(PlanViz, { t, counts, now, rows: stageRows }),
-                badge: h(Pill, { tone }, t(`phase.${phase}`)),
+                badge: h(Pill, { tone }, phaseLabel(phase, session, t)),
             }, session.updatedAt
                 ? h('div', { className: 'dsh-wp-meta dsh-wp-session-updated' }, `${t('updatedAt')} ${formatTime(session.updatedAt)}`)
                 : null, open === true ? h(PlanOverview, { t, stats, counts, rows: stageRows }) : null, session.degraded ? h('div', { className: 'dsh-wp-banner dsh-wp-banner--degraded' }, h('strong', null, t('degraded')), h('div', null, plainError(session.error || '')), h('div', { className: 'dsh-wp-muted' }, t('degradedHint'))) : null, h(Guide, { session, t }), departments.length ? h('div', { className: 'dsh-wp-section' }, h('div', { className: 'dsh-wp-section-title' }, t('who')), h('div', { className: 'dsh-wp-departments' }, departments.map((dept) => h(Pill, { key: dept.id, tone: dept.blocked > 0 ? 'blocked' : dept.done === dept.total ? 'done' : 'active' }, `${deptName(t, dept.id)} ${dept.done}/${dept.total} ${t('stats.done')}`)))) : null, h('div', { className: 'dsh-wp-section' }, h('div', { className: 'dsh-wp-section-title' }, t('steps')), (session.stages || []).map((stage, index) => h(StageCard, {
@@ -1722,7 +1761,7 @@ window.__ModuleLoader__.load({
                             charts.push(new lib(canvasA, {
                                 type: 'doughnut',
                                 data: {
-                                    labels: [t('groupLive'), t('groupDone')],
+                                    labels: [t('chartOpen'), t('chartDone')],
                                     datasets: [{ data: [liveCount, doneCount], backgroundColor: [liveFill, doneFill], borderWidth: 0, hoverOffset: 5 }],
                                 },
                                 options: {
@@ -1783,8 +1822,8 @@ window.__ModuleLoader__.load({
             // 「无 canvas → 不建图 → 不 ready → 无 canvas」的死循环（T3 实测
             // 探针输出 canvasNodes:0 / fallbackBars:1）。改为并存：
             // fallback 在 ready 前可见，ready 后由 CSS 隐藏，canvas 反向隐藏。
-            h('div', { className: 'dsh-wp-chart-canvas' }, h('canvas', { 'data-chart': 'groups', role: 'img', 'aria-label': `${t('groupLive')} ${liveCount} / ${t('groupDone')} ${doneCount}` })), chartState !== 'ready'
-                ? h('div', { className: 'dsh-wp-fallback' }, h('div', { className: 'dsh-wp-fallback-bar', role: 'img', 'aria-label': `${t('groupLive')} ${liveCount} / ${t('groupDone')} ${doneCount}` }, h('span', { className: 'dsh-wp-fallback-live', style: { width: `${livePct}%` } }), h('span', { className: 'dsh-wp-fallback-done', style: { width: `${donePct}%` } })), h('div', { className: 'dsh-wp-fallback-legend' }, h('span', null, h('i', { className: 'dsh-wp-fallback-key dsh-wp-fallback-key--live' }), `${t('groupLive')} ${liveCount}`), h('span', null, h('i', { className: 'dsh-wp-fallback-key dsh-wp-fallback-key--done' }), `${t('groupDone')} ${doneCount}`)))
+            h('div', { className: 'dsh-wp-chart-canvas' }, h('canvas', { 'data-chart': 'groups', role: 'img', 'aria-label': `${t('chartOpen')} ${liveCount} / ${t('chartDone')} ${doneCount}` })), chartState !== 'ready'
+                ? h('div', { className: 'dsh-wp-fallback' }, h('div', { className: 'dsh-wp-fallback-bar', role: 'img', 'aria-label': `${t('chartOpen')} ${liveCount} / ${t('chartDone')} ${doneCount}` }, h('span', { className: 'dsh-wp-fallback-live', style: { width: `${livePct}%` } }), h('span', { className: 'dsh-wp-fallback-done', style: { width: `${donePct}%` } })), h('div', { className: 'dsh-wp-fallback-legend' }, h('span', null, h('i', { className: 'dsh-wp-fallback-key dsh-wp-fallback-key--live' }), `${t('chartOpen')} ${liveCount}`), h('span', null, h('i', { className: 'dsh-wp-fallback-key dsh-wp-fallback-key--done' }), `${t('chartDone')} ${doneCount}`)))
                 : null), (liveBars || []).length
                 ? h('div', { className: 'dsh-wp-chart-card' }, h('div', { className: 'dsh-wp-chart-title' }, t('chartLive')), h('div', { className: 'dsh-wp-chart-canvas' }, h('canvas', { 'data-chart': 'live', role: 'img', 'aria-label': t('chartLive') })), hiddenBars > 0 ? h('div', { className: 'dsh-wp-chart-more' }, fill(t('chartMore'), { n: hiddenBars })) : null)
                 : null);
@@ -1883,11 +1922,18 @@ window.__ModuleLoader__.load({
                 : null), h('span', { className: 'dsh-wp-group-ring-label' }, value === null ? '—' : `${value}%`));
         }
         function SessionGroup({ group, list, hasLive, urgent, t, openSessionId, setOpenSessionId }) {
+            /*
+             * [1.6.0] 三个分组共用一套组件：live（真的在跑）、ended（这一轮停了但没做完）、
+             * done（全部完成）。`ended` 是本次事故的修复核心——它必须是一个**独立分组**，
+             * 而不是被塞回「进行中」：会话已经结束的事实不允许用「进行中」这三个字表达。
+             */
             const isDone = group === 'done';
+            const isEnded = group === 'ended';
+            const keySuffix = isDone ? 'Done' : isEnded ? 'Ended' : 'Live';
             // 设计稿 §6.4 #1/#6：已完成组在有进行中任务时默认折叠，避免历史任务抢走
             // 「进行中」的视觉权重；没有进行中任务时默认展开，空的进度栏仍是空的。
-            // 折叠态由本组件自己持有（不给 users 存偏好），刷新后回到默认，符合 §7.3「不打扰」。
-            const [open, setOpen] = useState(!(isDone && hasLive));
+            // [1.6.0] 「已结束」组同理：还有东西在跑时收起来，只留组头一行结论。
+            const [open, setOpen] = useState(!((isDone || isEnded) && hasLive));
             // §7.3「不打扰」的自动展开：只在这两种情形打开一次，不做反复弹开——
             // ① 进行中清零（最后一个任务完成）；② 用户正展开着的卡片被移进本组。
             // 依赖都是布尔值，轮询刷新不会重复触发。
@@ -1896,7 +1942,7 @@ window.__ModuleLoader__.load({
                 setOpen(true); }, [hasLive]);
             useEffect(() => { if (holdsOpenCard)
                 setOpen(true); }, [holdsOpenCard]);
-            const collapsible = isDone && list.length > 0;
+            const collapsible = (isDone || isEnded) && list.length > 0;
             // 折叠只隐藏、不卸载：`hidden` 必须是布尔 true，不能传空字符串——
             // React 对 `hidden` 走 DOM 布尔属性赋值，`el.hidden = ''` 会得到 false，
             // 只剩 CSS 类在遮挡；那样「折叠态 DOM 保留 + 无障碍语义」就不成立。
@@ -1907,8 +1953,8 @@ window.__ModuleLoader__.load({
             // T6：组头完成度摘要 + 零依赖进度环。数值只来自 groupTotals(list)，
             // 先用纯文本给出「进行中 N / 已完成 M（完成率 x%）」，不点开、不看颜色也能读出进度。
             const totals = useMemo(() => groupTotals(list), [list]);
-            const groupTitle = t(isDone ? 'groupDone' : 'groupLive');
-            const hintText = t(isDone ? 'groupDoneHint' : 'groupLiveHint');
+            const groupTitle = t(`group${keySuffix}`);
+            const hintText = t(`group${keySuffix}Hint`);
             // 用户 Q3：0/0 时不再显示「未完成 0 / 已完成 0（完成率暂无数据）」——
             // 环上已经是「—」，组内空态也已说明没有工作项；再重复一遍 0/0 只是噪声。
             // 全部做完（100%）仍保留整句，因为那时「未完成 0」正是用户要找的结论。
@@ -1973,7 +2019,7 @@ window.__ModuleLoader__.load({
                     open: openSessionId === session.sessionId,
                     onToggle: (next) => setOpenSessionId(next ? session.sessionId : null),
                 })))
-                : h('div', { className: 'dsh-wp-group-empty' }, t(isDone ? 'groupDoneEmpty' : 'groupLiveEmpty')));
+                : h('div', { className: 'dsh-wp-group-empty' }, t(`group${keySuffix}Empty`)));
         }
         function Donut({ totals, t }) {
             const total = Math.max(0, Number(totals?.total) || 0);
@@ -2036,7 +2082,7 @@ window.__ModuleLoader__.load({
                     'aria-label': `${t('jumpToTask')} ${session.title || t('panel')}`,
                     onClick: () => { if (typeof onSelect === 'function')
                         onSelect(session.sessionId); },
-                }, h('div', { className: 'dsh-wp-bar-head' }, h('span', { className: 'dsh-wp-bar-title' }, session.title || t('panel')), h('span', { className: 'dsh-wp-bar-value' }, `${counts.done}/${counts.total}`)), h('div', { className: 'dsh-wp-bar-track' }, h('div', { className: `dsh-wp-bar-fill dsh-wp-bar-fill--${tone}`, style: { width: `${percent}%` } })), h('div', { className: 'dsh-wp-bar-meta' }, h('span', null, t(`phase.${phase}`)), h('span', null, `${percent}%`)));
+                }, h('div', { className: 'dsh-wp-bar-head' }, h('span', { className: 'dsh-wp-bar-title' }, session.title || t('panel')), h('span', { className: 'dsh-wp-bar-value' }, `${counts.done}/${counts.total}`)), h('div', { className: 'dsh-wp-bar-track' }, h('div', { className: `dsh-wp-bar-fill dsh-wp-bar-fill--${tone}`, style: { width: `${percent}%` } })), h('div', { className: 'dsh-wp-bar-meta' }, h('span', null, phaseLabel(phase, session, t)), h('span', null, `${percent}%`)));
             }));
         }
         function Dashboard({ t }) {
@@ -2084,6 +2130,7 @@ window.__ModuleLoader__.load({
             }, [activeSessions]);
             const groups = useMemo(() => {
                 const live = [];
+                const ended = [];
                 const finished = [];
                 const urgentPhases = ['blocked', 'degraded', 'paused'];
                 /*
@@ -2093,10 +2140,17 @@ window.__ModuleLoader__.load({
                  * 14/14、100% 的计划带着 integrating 被塞进 live 组，组头于是出现
                  * 「未完成 0 / 已完成 14（完成率 100%）」却仍标着「进行中」。
                  * `planPhaseOf` 让分组、组头计数、卡片胶囊共用同一个结论。
+                 *
+                 * [1.6.0] 新增 ended 分组：宿主已经 `turn/end`（会话这一轮结束、没有任何
+                 * 东西在跑），而计划还没做完的，一律进「已结束」，绝不进「进行中」。
+                 * 这正是本次事故的现象：会话结束 4 小时后仍显示「进行中」。
                  */
                 for (const session of activeSessions) {
-                    if (planPhaseOf(session.phase, planCounts(session.stats)) === 'done')
+                    const phase = planPhaseOf(session.phase, planCounts(session.stats));
+                    if (phase === 'done')
                         finished.push(session);
+                    else if (phase === 'ended')
+                        ended.push(session);
                     else
                         live.push(session);
                 }
@@ -2114,11 +2168,19 @@ window.__ModuleLoader__.load({
                     integrating: 3,
                     planning: 4,
                     pending: 5,
+                    ended: 6,
                 };
                 const rank = (session) => phaseRank[planPhaseOf(session.phase, planCounts(session.stats))] ?? 5;
                 live.sort((a, b) => (rank(a) - rank(b))
                     || ((Number(b.createdAt) || 0) - (Number(a.createdAt) || 0))
                     || String(a.sessionId).localeCompare(String(b.sessionId)));
+                /*
+                 * [1.6.0] 已结束组按「最近结束在前」：`endedAt` 是宿主 turn/end 的时间戳
+                 * （后端下发），比 updatedAt 更准确地表达「什么时候停的」。
+                 */
+                const endedAt = (session) => Number(session.endedAt) || Number(session.updatedAt) || Number(session.createdAt) || 0;
+                ended.sort((a, b) => (endedAt(b) - endedAt(a))
+                    || ((Number(b.createdAt) || 0) - (Number(a.createdAt) || 0)));
                 /*
                  * 已完成组按「最近完成在前」（§3.3 / C8）：优先取子任务
                  * statuses[].finishedAt 的最大值（忽略 null / 非数字），缺失则退回
@@ -2144,9 +2206,20 @@ window.__ModuleLoader__.load({
                 };
                 finished.sort((a, b) => (finishedAt(b) - finishedAt(a))
                     || ((Number(b.createdAt) || 0) - (Number(a.createdAt) || 0)));
-                return { live, finished, urgent: live.filter((session) => urgentPhases.includes(session.phase)).length };
+                return {
+                    live,
+                    ended,
+                    finished,
+                    urgent: live.filter((session) => urgentPhases.includes(session.phase)).length,
+                    /*
+                     * [1.6.0] 「已结束」组也需要「需处理」角标：卡住的计划停了仍然是卡住的，
+                     * 判定用后端下发的 suspendedPhase（原派发阶段），而不是被收敛后的 ended。
+                     */
+                    urgentEnded: ended.filter((session) => urgentPhases.includes(String(session.suspendedPhase ?? ''))).length,
+                };
             }, [activeSessions]);
-            const liveBars = useMemo(() => groups.live.slice(0, 6).map((session) => {
+            // [1.6.0] 图表口径 = 未结束计划（进行中 + 已结束未完成），与环图标签一致。
+            const liveBars = useMemo(() => [...groups.live, ...groups.ended].slice(0, 6).map((session) => {
                 const raw = String(session.title || t('panel'));
                 return {
                     label: raw.length > 14 ? `${raw.slice(0, 14)}…` : raw,
@@ -2156,14 +2229,23 @@ window.__ModuleLoader__.load({
             }), [groups, t]);
             return h('div', { className: 'dsh-wp' }, h('header', { className: 'dsh-wp-header' }, h('div', null, h('h1', { className: 'dsh-wp-title' }, t('title')), h('p', { className: 'dsh-wp-subtitle' }, t('subtitle')), h('div', { className: 'dsh-wp-meta' }, updatedAt ? h('span', null, `${t('updatedAt')} ${formatTime(updatedAt)}`) : null, h('span', null, `${t('scopeAll')}：${activeSessions.length} ${t('sessionCount')}，${t('taskBreakdown')} ${totals.total} ${t('subtaskCount')}`))), h('button', { type: 'button', className: 'dsh-wp-button', onClick: reload, disabled: loading }, t('refresh'))), error ? h(ErrorBanner, { message: error, onRetry: reload, t }) : null, activeSessions.length > 0 ? h('div', { className: 'dsh-wp-statbar', role: 'list' }, h('div', { className: 'dsh-wp-stat dsh-wp-stat--tasks', role: 'listitem' }, h('div', { className: 'dsh-wp-stat-value' }, activeSessions.length), h('div', { className: 'dsh-wp-stat-label' }, t('sessionCount'))), h('div', { className: 'dsh-wp-stat', role: 'listitem' }, h('div', { className: 'dsh-wp-stat-value' }, totals.total), h('div', { className: 'dsh-wp-stat-label' }, t('workItems'))), h('div', { className: 'dsh-wp-stat dsh-wp-stat--done', role: 'listitem' }, h('div', { className: 'dsh-wp-stat-value' }, totals.done), h('div', { className: 'dsh-wp-stat-label' }, t('stats.done'))), h('div', { className: 'dsh-wp-stat dsh-wp-stat--active', role: 'listitem' }, h('div', { className: 'dsh-wp-stat-value' }, totals.inProgress), h('div', { className: 'dsh-wp-stat-label' }, t('stats.inProgress'))), h('div', { className: 'dsh-wp-stat dsh-wp-stat--blocked', role: 'listitem' }, h('div', { className: 'dsh-wp-stat-value' }, totals.blocked), h('div', { className: 'dsh-wp-stat-label' }, t('stats.blocked')))) : null, activeSessions.length > 0 ? h('div', { className: 'dsh-wp-scope-note' }, t('allPlansHint')) : null, activeSessions.length === 0
                 ? h('div', { className: 'dsh-wp-empty' }, h('div', { style: { fontWeight: 650, marginBottom: '4px' } }, t('empty')), h('div', null, t('emptyHint')))
-                : h('div', { className: 'dsh-wp-groups' }, h(SessionGroup, { group: 'live', list: groups.live, urgent: groups.urgent, t, openSessionId, setOpenSessionId }), h(SessionGroup, { group: 'done', list: groups.finished, hasLive: groups.live.length > 0, urgent: 0, t, openSessionId, setOpenSessionId }), 
+                : h('div', { className: 'dsh-wp-groups' }, 
+                /*
+                 * [1.6.0] 三组顺序：真的在跑 → 已结束（停在半路） → 已完成。
+                 * 「已结束」夹在中间是有意为之：它是用户最需要立刻知道的那一档
+                 * （刚停、还没做完），不能滑到历史组的下面去。
+                 */
+                h(SessionGroup, { key: 'live', group: 'live', list: groups.live, urgent: groups.urgent, t, openSessionId, setOpenSessionId }), groups.ended.length > 0
+                    ? h(SessionGroup, { key: 'ended', group: 'ended', list: groups.ended, hasLive: groups.live.length > 0, urgent: groups.urgentEnded, t, openSessionId, setOpenSessionId })
+                    : null, h(SessionGroup, { key: 'done', group: 'done', list: groups.finished, hasLive: groups.live.length > 0 || groups.ended.length > 0, urgent: 0, t, openSessionId, setOpenSessionId }), 
                 // 用户选择 B：总览块（完成率环 + 每个计划的进度条）同样下移到两组之后，
                 // 让开屏第一屏直接是「进行中」组的任务卡（此前统计条 → 总览 → 说明行 →
                 // 任务卡，第一张卡要下滑约一屏）。顶部只保留 5 格数字统计条与一行口径说明。
                 activeSessions.length > 0 ? h('div', { className: 'dsh-wp-overview' }, h(Donut, { totals, t }), h(TaskBars, { sessions: activeSessions, t, onSelect: selectSession })) : null, 
                 // 图表放两组之后：两张卡各 ≈246px，排在组前会让首屏看不到任何一张任务卡
                 // （设计稿 §8 第 12 条，T8 复核时复现在 1.4.2 源码里）。
-                h(GroupCharts, { liveCount: groups.live.length, doneCount: groups.finished.length, liveBars, hiddenBars: Math.max(0, groups.live.length - 6), t })));
+                // [1.6.0] 「未结束」= 进行中 + 已结束但未完成：两者都还没做完，都是用户要盯的对象。
+                h(GroupCharts, { liveCount: groups.live.length + groups.ended.length, doneCount: groups.finished.length, liveBars, hiddenBars: Math.max(0, groups.live.length + groups.ended.length - 6), t })));
         }
         function TurnCard({ sessionId, turn, t }) {
             const { sessions } = usePlans(sessionId);
@@ -2188,7 +2270,7 @@ window.__ModuleLoader__.load({
             const stats = session.stats || {};
             const phase = planPhaseOf(session.phase || 'pending', planCounts(stats));
             const tone = phaseTone(phase);
-            return h('div', { className: `dsh-wp-turn dsh-wp-tone-${tone}` }, h('div', { className: 'dsh-wp-turn-title' }, h('span', null, session.title || t('panel')), h(Pill, { tone }, t(`phase.${phase}`))), h('div', { className: 'dsh-wp-muted', style: { marginTop: '6px' } }, `${t('helpWho')}：${workerText(session, t)}`), h('div', { className: 'dsh-wp-muted', style: { marginTop: '2px' } }, `${t('helpNext')}：${nextText(session, t)}`), h('div', { className: 'dsh-wp-progress-meta' }, h('span', null, `${stats.done ?? 0}/${stats.total ?? 0} ${t('stats.done')} · ${stats.blocked ?? 0} ${t('stats.blocked')}`), h('span', { className: 'dsh-wp-muted' }, t('viewHint'))));
+            return h('div', { className: `dsh-wp-turn dsh-wp-tone-${tone}` }, h('div', { className: 'dsh-wp-turn-title' }, h('span', null, session.title || t('panel')), h(Pill, { tone }, phaseLabel(phase, session, t))), h('div', { className: 'dsh-wp-muted', style: { marginTop: '6px' } }, `${t('helpWho')}：${workerText(session, t)}`), h('div', { className: 'dsh-wp-muted', style: { marginTop: '2px' } }, `${t('helpNext')}：${nextText(session, t)}`), h('div', { className: 'dsh-wp-progress-meta' }, h('span', null, `${stats.done ?? 0}/${stats.total ?? 0} ${t('stats.done')} · ${stats.blocked ?? 0} ${t('stats.blocked')}`), h('span', { className: 'dsh-wp-muted' }, t('viewHint'))));
         }
         function contentText(block) {
             if (!block || !Array.isArray(block.content))

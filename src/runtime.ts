@@ -856,6 +856,58 @@ export async function dispatchPlan(ctx: any, record: any, options: any) {
   return record
 }
 
+/*
+ * [1.6.0] 会话「这一轮到底还在不在跑」的唯一事实源。
+ *
+ * 事故（session-7129faea…）：会话早已结束，面板仍把计划列在「进行中」组，
+ * 卡片写着「预算用完，可续跑」——没有任何东西在跑，状态却表示正在跑。
+ *
+ * 根因：插件只订阅 `agent/pre-step`，`turn/end`、`session/disposed` 全都收不到；
+ * 计划状态因此只由「派发结果」驱动，而派发结束后不再有任何事件把它收敛。
+ *
+ * 修复不引入第二个事件订阅（跨 scope 的事件投递受 scope 过滤，不可靠；而且
+ * 订阅只覆盖实时路径，刷新/重启后全靠回放，两条链路一旦不同源就会来回翻转）。
+ * 这里直接读会话日志本身——它既是实时事实，也是回放事实：
+ *
+ *  - 从末尾向前找最近的一条「轮次边界」事件：先遇到 `turn/end` ⇒ 这一轮已结束；
+ *    先遇到 `turn/start` ⇒ 这一轮还开着；都没找到 ⇒ 未知，调用方保持原判定。
+ *  - 不存在「会话已结束」这种事件：宿主只有每轮 `turn/end`。因此**不能**把
+ *    `turn/end` 直接等同于「计划取消/完成」——一轮结束后可以随时续跑，这也是
+ *    卡片提供「可续跑」的原因。它只证明「此刻没有东西在跑」。
+ *  - 向后扫描设上限，避免越界；超过上限就返回 unknown，绝不猜测。
+ */
+const TURN_BOUNDARY_SCAN = 200
+
+export function sessionTurnState(session: any) {
+  const total = Number(session?.seq)
+  if (!Number.isFinite(total) || total <= 0 || typeof session?.eventAt !== 'function') {
+    return { state: 'unknown', reason: null, reasonDetail: null, at: null }
+  }
+  const floor = Math.max(0, Math.floor(total) - TURN_BOUNDARY_SCAN)
+  for (let seq = Math.floor(total) - 1; seq >= floor; seq -= 1) {
+    let event
+    try {
+      event = session.eventAt(seq)
+    } catch {
+      return { state: 'unknown', reason: null, reasonDetail: null, at: null }
+    }
+    if (!event) continue
+    if (event.type === 'turn/start') return { state: 'open', reason: null, reasonDetail: null, at: null }
+    if (event.type === 'turn/end') {
+      const reason = event.data?.reason ?? null
+      const detail = reason && reason.kind === 'aborted' ? (reason.reason?.kind ?? null) : null
+      const at = Number(event.time)
+      return {
+        state: 'ended',
+        reason: typeof reason?.kind === 'string' ? reason.kind : 'completed',
+        reasonDetail: typeof detail === 'string' ? detail : null,
+        at: Number.isFinite(at) ? at : null,
+      }
+    }
+  }
+  return { state: 'unknown', reason: null, reasonDetail: null, at: null }
+}
+
 function serialisePlan(record: any, session: any) {
   const plan = record.plan ?? null
   /*
@@ -889,6 +941,36 @@ function serialisePlan(record: any, session: any) {
     phase = 'cancelled'
   }
   /*
+   * [1.6.0] 终态收敛：这一轮已经结束，而计划没有完成 ⇒ 不许再显示「进行中」。
+   *
+   * `phase` 到这里为止只由「派发动作」写入（executing / paused / blocked …），
+   * 而派发结束后没有任何事件把它改回来，于是会话结束、进程空闲、面板却仍在
+   * 「进行中」组里（事故截图）。上面 `sessionTurnState` 用会话日志回答
+   * 「此刻还有没有东西在跑」，这里把答案落成独立阶段 `ended`：
+   *
+   *  - done / cancelled 已经是终态，不再改写（done 改写会直接违反不变量 I8）；
+   *  - 其余阶段一律收敛为 `ended`，并把原阶段留在 `suspendedPhase` 里，
+   *    卡片因此仍能显示「预算用完，可续跑」「卡住了」这类二级事实，不丢信息；
+   *  - 只改**下发出去的那一份**，不动 `record.phase`：用户说「继续」后同一轮
+   *    重新开始（日志里出现新的 turn/start），下一份 payload 自然回到原来的
+   *    派发状态，不需要任何反向迁移逻辑；
+   *  - 实时路径与回放路径都经过本函数，因此刷新前后结论必然一致（T4 硬约束）。
+   */
+  let suspendedPhase: any = null
+  let endReason: any = null
+  let endReasonDetail: any = null
+  let endedAt: any = null
+  if (phase !== 'done' && phase !== 'cancelled') {
+    const turn = sessionTurnState(session)
+    if (turn.state === 'ended') {
+      suspendedPhase = phase
+      endReason = turn.reason
+      endReasonDetail = turn.reasonDetail
+      endedAt = turn.at
+      phase = 'ended'
+    }
+  }
+  /*
    * 每次真正下发前跑一遍跨字段不变量（I1–I10）。正常情况下恒为空；一旦某个
    * 未来改动重新引入「进度与状态打架」，这里会把它连同具体字段值一起带出去，
    * 而不是等用户截图发现。附在 payload 上而不是抛错：展示层不应因自检而白屏。
@@ -899,6 +981,7 @@ function serialisePlan(record: any, session: any) {
     planId: record.planId ?? plan?.planId ?? null,
     title: plan?.title ?? record.title ?? '任务进度',
     phase,
+    ...(phase === 'ended' ? { suspendedPhase, endReason, endReasonDetail, endedAt } : {}),
     ...(violations.length ? { violations } : {}),
     degraded: record.degraded === true,
     error: record.error ? truncate(record.error, 2000) : null,
@@ -966,6 +1049,8 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
    * plan and let the caller ask for a specific one.
    */
   const finished: any[] = []
+  /** [1.6.0] callId → 待确认的 update 写入；只有配对的 tool/result 才能定案。 */
+  const pendingToolCalls = new Map<string, any>()
   const snapshot = () => ({ plan, statuses, resultPhase, resultSeen, resumeCount, cancelled })
   for (let seq = start; seq < session.seq; seq += 1) {
     let event
@@ -1013,19 +1098,42 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
         cancelled = true
       }
     } else if (event.type === 'tool/call' && plan) {
+      /*
+       * [1.6.0] 只登记，不下结论。
+       *
+       * 回放原来一见到 `dsh_workplan_update` 的调用就 applyStatus，但调用发起不等于
+       * 状态写入成功：宿主的 tool/result 带着 `message.isError`。会话
+       * session-7129faea 里就有一次失败的 update 被回放记成完成，于是刷新后面板显示
+       * 7/12，而真实只完成 6/12 —— 回放比实时“更乐观”，这是第二个数据源打架点。
+       * 现在一律等对应的 tool/result：成功才采纳，失败或没有结果都不采纳。
+       */
       const data = event.data
-      if (data?.name === 'dsh_workplan_update') {
+      if (data?.name === 'dsh_workplan_update' && typeof data.callId === 'string') {
         const args = readToolArguments(data.arguments)
         if (args && typeof args.subtaskId === 'string' && typeof args.status === 'string') {
-          try {
-            statuses = applyStatus(statuses, args.subtaskId, {
-              status: args.status,
-              progress: typeof args.progress === 'number' ? args.progress : undefined,
-              summary: typeof args.note === 'string' ? args.note : undefined,
-            })
-          } catch {
-            // An invalid historical call is ignored; the live cache remains authoritative.
-          }
+          pendingToolCalls.set(data.callId, { args, planId: plan.planId })
+        }
+      }
+    } else if (event.type === 'tool/result') {
+      const message = event.data?.message
+      const callId = message?.role === 'tool' ? message.toolCallId : null
+      if (typeof callId !== 'string') continue
+      const pending = pendingToolCalls.get(callId)
+      pendingToolCalls.delete(callId)
+      if (!pending || !plan || pending.planId !== plan.planId) {
+        // 结果晚于新计划到达：旧计划的写入不污染新计划的状态表。
+      } else if (message.isError === true) {
+        // 失败的更新不是完成：状态表保持原样。
+      } else {
+        const args = pending.args
+        try {
+          statuses = applyStatus(statuses, args.subtaskId, {
+            status: args.status,
+            progress: typeof args.progress === 'number' ? args.progress : undefined,
+            summary: typeof args.note === 'string' ? args.note : undefined,
+          })
+        } catch {
+          // An invalid historical call is ignored; the live cache remains authoritative.
         }
       }
     }

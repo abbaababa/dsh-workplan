@@ -1,3 +1,96 @@
+## 1.6.0 — 2026-10-29
+
+**「会话终止」收敛版**。用户截图圈出 `session-7129faea-d4bd-4ed5-a081-769496e07ceb`：
+这一轮对话早就结束了（没有任何东西在跑），面板红圈的分组仍写着**「进行中」**，卡片还停在
+「预算用完，可续跑」。本次让**宿主会话生命周期**成为「到底有没有在跑」的唯一事实源，并把
+该结论落成新的独立阶段 `ended` / 独立分组「已结束」，同时修掉回放路径上把失败写入计为完成的
+第二个打架点。
+
+### 事故与根因
+
+事故会话的关键事实（来自会话日志回放）：
+
+1. 插件**只订阅 `agent/pre-step`**（`src/host.ts:286`），`turn/end`、`session/event`、
+   `session/disposed` 一个都不消费 → **会话结束这件事对插件不可见**；
+2. 计划阶段只由「派发动作」写入（`executing` / `paused` / `blocked` …），派发结束后
+   再没有任何代码把它改回来，于是阶段永久停在被最后一次派发写下的值；
+3. 唯一存在的兜底只覆盖一种情形：**从未派发**且 `pending` 超过 10 分钟才改判 `cancelled`
+   （`src/runtime.ts` 的 `STALE_PENDING_MS` 分支），对「派发过、会话结束」完全无效；
+4. 客户端把**除 done 以外的一切阶段**都塞进「进行中」组
+   （分组条件只有 `planPhaseOf(...) !== 'done'`）→ `paused` / `blocked` / `pending` /
+   `executing` / `degraded` 全部显示成「进行中」；
+5. 回放路径 `reconstructFromSession` 见到 `dsh_workplan_update` 调用就 `applyStatus`，
+   **忽略宿主 `tool/result` 的 `message.isError`** → 该会话里一次失败的写入被记成完成
+   （面板显示 7/12，真实完成 6/12），刷新前后又一次「数据源打架」。
+
+结论：这是**插件缺陷**，不是上游缺失——宿主侧 `turn/start` / `turn/end`（含
+`aborted.reason.kind` 的 `user` / `parent` / `hook` / `disposed`）事件齐全且已落盘。
+
+### 改动
+
+- **`src/runtime.ts`**
+  - 新增并导出 `sessionTurnState(session)`：从会话日志末尾向前扫最近 200 条
+    （`TURN_BOUNDARY_SCAN`），先遇 `turn/start` ⇒ 这一轮还开着，先遇 `turn/end` ⇒
+    已结束并带出 `reason.kind` 与 `aborted` 子原因；扫不到 ⇒ `unknown`（**绝不猜**）。
+    读日志而不是加事件订阅：日志既是实时事实也是回放事实，实时与刷新后必然同源。
+  - `serialisePlan()`（实时与回放共用的唯一出口）在既有的过期 `pending` 兜底之后、
+    不变量自检之前收敛：`planPhase` 不是 `done` / `cancelled` 且这一轮已结束 ⇒
+    阶段改为 `ended`，原阶段写进 `suspendedPhase`，并附带 `endReason` /
+    `endReasonDetail` / `endedAt`。**`done` 不参与改写**（否则直接违反不变量 I8）。
+  - **`turn/end` 不等于「取消」或「完成」**：一轮结束后可以随时续跑，因此只把
+    「没有东西在跑」这件事表达出来，不动 `record.phase`——用户说「继续」、日志出现
+    新的 `turn/start` 后，下一份载荷自然回到原派发阶段，无反向迁移逻辑。
+  - 回放改为**先登记、后定案**：`tool/call` 只记 `callId → 参数`，等配对
+    `tool/result` 到达才采纳；`message.isError === true` 丢弃，无结果同样不采纳
+    （保守优先于乐观）。跨计划的迟到结果按 `planId` 拒绝，不污染新计划。
+- **`src/client.ts`**
+  - 新增阶段 `ended`（中「已结束，可续跑」/ 英「Ended (resumable)」）与**第三个独立分组
+    「已结束」**，位置在「进行中」与「已完成」之间；分组、组头计数、卡片胶囊继续共用
+    `planPhaseOf` 单一结论。
+  - 新增 `phaseLabel()`：徽标两段式表达「终态 + 原阶段」（如
+    「已结束，可续跑 · 预算用完，可续跑」「已结束，可续跑 · 卡住了」），
+    不再用一个词暗示还在跑，也不丢「停在哪儿」这个关键信息。
+  - 「已结束」组保留「需处理」角标（判定用后端下发的 `suspendedPhase`），
+    组头按 `endedAt` 排序（最近结束在前）；有进行中/已结束计划时「已完成」组默认收起。
+  - 图表口径随之改名：环图为「未结束 / 已完成」，柱图为「未结束计划的完成度」，
+    已结束但未完成的计划一并计入「未结束」。
+  - 新增 `.dsh-wp-group--ended` 样式：灰点、**不脉冲**——「没有东西在跑」不允许用动画表达。
+- **版本**：`1.5.2 → 1.6.0`（minor）。载荷新增字段、客户端新增分组，属**向后兼容的对外
+  扩展**而非纯 bugfix：旧客户端读新载荷只会忽略 `ended` 相关字段并把计划当 `pending`，
+  不会崩溃，但**看不到「已结束」**，所以建议同步升级。
+
+### 测试（新增 17 条，全部可复跑）
+
+- `tests/session-end-convergence.test.ts`（12 条，后端/载荷级）：正常结束、异常中断
+  （`aborted/user`）、进程级中断（`aborted/disposed`）、**正在跑不误判**、全部完成仍是
+  `done` 且无不变量违规、结束后说「继续」阶段回退、刷新幂等、双会话隔离、
+  扫描上限返回 `unknown`、回放只采纳成功写入（isError / 无结果 / 成功三态）。
+- `tests/ended-group.test.ts`（5 条，渲染级）：`ended` 计划只进「已结束」组、组名不再出现
+  「进行中」、徽标两段式、卡住的计划仍报「需处理」、无 `ended` 时不渲染空组、
+  「已完成」组折叠规则。
+
+```
+npm test   # 137 tests / 137 pass / 0 fail
+```
+
+### 验证方式（任何人都可复跑）
+
+```bash
+# 1) 完整回归（含本次新增的 17 条用例）
+cd /Users/open/Documents/Stocks/plugins/dsh-workplan && npm test
+# 2) 只跑本次的两个新用例文件
+node --test dist-tests/tests/session-end-convergence.test.js dist-tests/tests/ended-group.test.js
+# 3) 面板验收（人工）：打开一个「已结束、未完成」的会话，
+#    任务进度面板应把它放在「已结束」组，徽标写「已结束，可续跑 · …」；
+#    说一句「继续」后，同一张卡应回到「进行中」。
+```
+
+### 兼容与升级
+
+- 已装 1.5.x 的用户：升级后刷新页面即可，「已结束」组立即生效；
+- 若面板在升级后仍显示「进行中」：先确认宿主版本已把 `turn/end` 落盘（1.6.0 依赖它，
+  未落盘时会保持原判定而不是误判），再确认浏览器已加载新 `client.js`。
+
 ## 1.5.2 — 2026-10-29
 
 **「完成语义」统一版**。用户截图圈出一张 `14/14` 全部做完、环形进度 `100%` 的计划卡，
