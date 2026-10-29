@@ -10,7 +10,7 @@
  *    not be stopped at all;
  *  - `[object Object]` replaced the real failure text in user-visible errors.
  */
-import test from 'node:test'
+import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
@@ -29,6 +29,20 @@ import {
   normaliseIdleTimeout,
 } from '../src/runtime.js'
 import { createProgressWatchdog, describeError, pickTimeoutReason } from '../src/watchdog.js'
+
+/*
+ * The idle and hard timeout timers under test are unref'd on purpose: a
+ * shutting-down host must not be held open by them. Node 22, though, cancels a
+ * pending test the moment the event loop drains with no ref'd handle left, so
+ * these tests would be cancelled instead of reaching their timeouts. Keep one
+ * ref'd handle alive for this file — the stand-in for the HTTP server a real
+ * host always has running. It drops itself after a minute so a genuinely stuck
+ * test still fails instead of hanging CI.
+ */
+const eventLoopAnchor = setInterval(() => {}, 1_000)
+const dropEventLoopAnchor = setTimeout(() => clearInterval(eventLoopAnchor), 60_000)
+dropEventLoopAnchor.unref?.()
+after(() => clearInterval(eventLoopAnchor))
 
 function messageTextOf(message: any) {
   return (message?.content ?? [])
