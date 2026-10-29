@@ -99,7 +99,36 @@
 
 ### 发布
 
-- **未执行**。`git tag v1.5.2`、`npm publish` 属对外发布，需用户明确授权后再做。
+- 两个渠道、同一份制品（2026-10-29 13:22–13:25 +08:00 实测，发布已完成）：
+  - git：`https://github.com/abbaababa/dsh-workplan.git` 的 annotated tag `v1.5.2` → `666b0fe`；
+  - npm：公共 registry `https://registry.npmjs.org/dsh-workplan` 的 `1.5.2`（`dist-tags.latest`）。
+- **状态**：
+  - `git push origin main` → `b0e0b76..666b0fe  main -> main`（快进，exit 0）；
+  - `git push origin v1.5.2` → `* [new tag]  v1.5.2 -> v1.5.2`（exit 0）；
+  - 远端复核（`git ls-remote`）：`refs/heads/main` = `666b0fee483b…`，
+    `refs/tags/v1.5.2` = `155c601c73d7…` → `^{}` = `666b0fee483b…`；
+  - `npm publish ./dsh-workplan-1.5.2.tgz --access public --ignore-scripts`
+    （在 `git worktree add --detach /tmp/dsh-wp-1.5.2 v1.5.2` 的干净快照上先 `npm pack`，
+    再发布该 `.tgz`，22 个文件全部取自 tag 提交）→ `+ dsh-workplan@1.5.2`（exit 0）；
+  - `https://registry.npmjs.org/dsh-workplan/1.5.2` → **HTTP 200**，
+    `time['1.5.2']` = `2026-10-29T05:24:48.346Z`（13:24:48 +08:00），`dist-tags.latest` = `1.5.2`；
+  - 消费者视角：空白目录 `npm i dsh-workplan@1.5.2` →
+    `meta = {"name":"dsh-workplan","version":"1.5.2",…}`（22 个文件）。
+- **已发布制品的校验值**（registry 实测，与本地 `.tgz` 逐字节一致）：
+  - npm `shasum`（SHA-1）：`2159024d69c05b3aeeefd5e7ff2f208ec05c67a2`
+  - npm `integrity`（SHA-512 SRI）：`sha512-sY7UgT09JwfRFe61HKCOCH7wLz0xbdAxyLla3WO8xoyZ/T6Yxb6H/IqRFf9LEX9EsnW7+z4jcHICms6RKPmTzQ==`
+  - 本地 `.tgz` SHA-256：`4482f202d098bbaec35051e54440d0d2be6e0099b6d6606e3c582b88e1aee9fa`
+    （269 264 字节，解包 888 135 字节，22 个文件）
+- 发布顺序：先分支、后标签、再 npm，避免出现「远端有 tag 而 npm 没有」的半发布态。
+- registry 传播延迟实测约 45 秒（直连 404×3 → 200）。
+- **CI 说明**：tag 提交 `666b0fe` 的 verify 运行 `40823115340` 为 failure——20 个用例在
+  Node 22 上被 `cancelledByParent`（`Promise resolution is still pending but the event loop
+  has already resolved`），与 1.5.1 / 1.5.0 / 1.4.3 的推送运行失败原因完全相同（各 20 条），
+  属**既有 CI 缺陷**，与本次改动无关，也不影响制品（测试不入包）。根因是运行时把轮次预算/
+  空闲计时器 `unref` 掉后，Node 22 在事件循环清空时取消挂起的测试。已在
+  `9f0de34`（只改 `tests/` 两个文件，`git diff v1.5.2 -- . ':!tests' ':!docs' ':!scripts'` 为空）
+  用「测试期间持有一个 ref 句柄、`after` 钩子释放」修掉；对应运行 `40823694198` 全绿。
+- 命令原文与发布后验证：见 `docs/release-record-1.5.2-20261029.md`。
 
 ### 回滚
 
