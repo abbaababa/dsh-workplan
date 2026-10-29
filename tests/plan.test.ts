@@ -26,6 +26,7 @@ import {
   parseCancelMessage,
   parseWorkplanMessage,
   planPhase,
+  reconcilePhase,
   validatePlan,
 } from '../src/plan.js'
 
@@ -294,8 +295,20 @@ test('status transitions and stats are consistent', () => {
   assert.equal(stats.progress, 50)
   assert.equal(planPhase(statuses), 'blocked')
   const allDone = statuses.map((item: any) => ({ ...item, status: 'done' }))
-  assert.equal(planPhase(allDone), 'integrating')
+  /*
+   * [1.5.2] 完成语义只由 statuses 决定。
+   *
+   * 旧断言要求「全 done 且没有结果消息 ⇒ integrating」，正是「100% + 正在收尾」
+   * 的来源：结果消息是个副作用，不该参与定义计划是否做完。
+   */
+  assert.equal(planPhase(allDone), 'done')
   assert.equal(planPhase(allDone, true), 'done')
+  assert.equal(planPhase(allDone, false), 'done')
+  // 对账：仍被旧的缓存 phase 压在 integrating/done 的计划会被纠正回真实状态，
+  // 但 paused/blocked 等「有独立事实来源」的 phase 不受影响。
+  assert.equal(reconcilePhase('integrating', allDone), 'done')
+  assert.equal(reconcilePhase('done', statuses), 'blocked')
+  assert.equal(reconcilePhase('paused', statuses), 'paused')
 })
 
 test('invalid status and unknown subtask are rejected', () => {

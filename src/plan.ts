@@ -1074,8 +1074,16 @@ export function applyStatus(statuses: any, subtaskId: any, patch: any) {
     if (patch.summary === undefined) next.summary = ''
     if (patch.error === undefined) next.error = null
   }
-  if (patch.status === 'in_progress' && next.startedAt === null) {
-    next.startedAt = Date.now()
+  if (patch.status === 'in_progress') {
+    if (next.startedAt === null) next.startedAt = Date.now()
+    /*
+     * [1.5.2] 「正在做」不允许自称 100%。
+     *
+     * 工具允许 `{status:'in_progress', progress:100}`，界面于是出现
+     * 「正在做 + 进度 100%」，计划层再叠一个环 0% / 加权 100%（T5 C8）。
+     * 完成只能由 status='done' 表达，progress 到 99 就是这一步的上限。
+     */
+    if (Number(next.progress) >= 100) next.progress = 99
   }
   if (patch.status === 'blocked' && next.finishedAt === null) {
     next.finishedAt = Date.now()
@@ -1272,6 +1280,16 @@ export function deriveAggregates(statuses: readonly StatusEntry[]): {
   }
 
   const total = statuses.length
+  const allDone = total > 0 && done === total
+  /*
+   * [1.5.2] 加权进度在「未全部完成」时不得四舍五入成 100。
+   *
+   * 旧算法直接 `round(progressSum / total)`：11 个 done + 1 个 blocked@95 得到
+   * 100，卡片上就出现「总体进度 100%」旁边还有「1 卡住了 / 11/12 做好了」——
+   * 与截图同类的自相矛盾（T4 实测 A.5）。这里的封顶只作用于展示口径，不影响
+   * 任何计数；全部完成时仍严格为 100，从而与 `done === total` 一一对应。
+   */
+  const raw = total === 0 ? 0 : Math.round(progressSum / total)
   return {
     stats: {
       total,
@@ -1279,7 +1297,7 @@ export function deriveAggregates(statuses: readonly StatusEntry[]): {
       blocked,
       inProgress,
       pending,
-      progress: total === 0 ? 0 : Math.round(progressSum / total),
+      progress: allDone ? 100 : Math.min(99, raw),
     },
     departments: [...departments.values()],
   }
@@ -1309,13 +1327,18 @@ export function computeStats(statuses: any): Stats {
 }
 
 /**
- * Invariant checker for tests and CI; production paths never call it because
- * pure derivation is already self-consistent.
+ * Invariant checker for tests and CI.
  *
  * Returns an empty array when every invariant holds. Each message names the
  * field and the observed value so it can be pasted straight into a report.
+ *
+ * [1.5.2] `phase` 是新增的可选入参：1.4.3 的 I1–I7 只校验计数内部自洽，
+ * 完全不看 `phase` 与 `stats` 的关系，因此「14/14 且 progress=100 却写着
+ * 正在收尾」这种**跨字段**矛盾一路畅通到界面。I8/I9 专门封住这一类：
+ * 只要调用方把本次真正要下发的 phase 传进来，任何「进度与状态文案打架」
+ * 的载荷都会在这里被判为违规，而不是等到用户看截图。
  */
-export function aggregateInvariantViolations(snapshot: PlanSnapshot): string[] {
+export function aggregateInvariantViolations(snapshot: PlanSnapshot, phase?: any): string[] {
   const violations: string[] = []
   const { statuses, stats, departments } = snapshot
 
@@ -1371,15 +1394,94 @@ export function aggregateInvariantViolations(snapshot: PlanSnapshot): string[] {
     violations.push(`I7 各部门 inProgress 之和=${sums.inProgress} 与 stats.inProgress=${stats.inProgress} 不一致`)
   }
 
+  /*
+   * [1.5.2] I8/I9 —— 完成语义跨字段不变量（用户截图那条「100% + 正在收尾」）。
+   *
+   * I8：工作项全部 done ⇔ phase 必须是 done。这是一条双向断言：
+   *     - 全 done 却是 pending/planning/executing/integrating/paused/blocked/degraded
+   *       ⇒ 卡片会同时出现 100% 与进行中文案（本次事故）；
+   *     - phase=done 却还有未完成项 ⇒ 反向矛盾（「已完成」下面挂着没做完的活）。
+   * I9：加权进度与计数同口径：全 done ⇒ 100；未全 done ⇒ 不得为 100。
+   *     旧算法 round(progressSum/total) 让 11 done + 1 blocked@95 算出 100。
+   */
+  if (stats.total > 0) {
+    const allDone = stats.done === stats.total
+    if (allDone && phase !== undefined && phase !== null && phase !== 'done') {
+      violations.push(`I8 stats.done=${stats.done}/${stats.total} 已全部完成，但 phase=${String(phase)} 仍表示未完成`)
+    }
+    if (!allDone && phase === 'done') {
+      violations.push(`I8 phase=done 但 stats.done=${stats.done}/${stats.total} 尚未全部完成`)
+    }
+    if (allDone && stats.progress !== 100) {
+      violations.push(`I9 全部完成但 stats.progress=${stats.progress}`)
+    }
+    if (!allDone && stats.progress >= 100) {
+      violations.push(`I9 未全部完成（${stats.done}/${stats.total}）却显示 stats.progress=${stats.progress}`)
+    }
+  }
+  /*
+   * I10：单个工作项也不能自相矛盾——`in_progress` 意味着「还没做完」，
+   * 它的进度必须 < 100（旧载荷里出现过「正在做 + 100%」，T5 C8）。
+   */
+  for (const item of statuses) {
+    if (item?.status === 'in_progress' && Number(item?.progress) >= 100) {
+      violations.push(`I10 子任务 ${String(item?.subtaskId)} 状态为 in_progress 但 progress=${item?.progress}`)
+    }
+  }
+
   return violations
 }
 
-export function planPhase(statuses: any, resultSeen = false) {
+/**
+ * 计划级阶段，由状态列表唯一决定。
+ *
+ * [1.5.2] 修复「一边 100%、一边正在收尾」的根因。
+ *
+ * 旧实现的最后一步是 `return resultSeen ? 'done' : 'integrating'`：工作项全部
+ * done 时仍要等「结果消息落盘」才晋升终态。问题在于 `resultSeen` 只是**持久化
+ * 回放**才知道的副作用，内存路径（`updateStatus` / `serialisePlan`）拿不到它：
+ *
+ *  - 主 Agent 用 `dsh_workplan_update` 补完最后几项时，phase 永远停在 integrating；
+ *  - 该路径不会再派发，也就永远不会写结果消息，于是 integrating 永久留存；
+ *  - 同期 `stats.done/total` 已是 14/14、百分比 100%，卡片就同时显示
+ *    「100% · 都做完了」和「正在收尾」，并留在「进行中」组（用户截图）。
+ *
+ * 结论：完成语义只能有一个事实源——状态列表。工作项全部完成即计划完成，
+ * 不需要也不允许等另一个副作用来「确认」。`resultSeen` 参数仅为兼容旧调用点保留，
+ * 不再参与判定（旧的 integrating 窗口已由 dispatch 内的 `executing` 覆盖）。
+ */
+export function planPhase(statuses: any, _resultSeen = false) {
   if (statuses.length === 0) return 'pending'
-  if (statuses.every((item: any) => item.status === 'done')) return resultSeen ? 'done' : 'integrating'
+  if (statuses.every((item: any) => item.status === 'done')) return 'done'
   if (statuses.some((item: any) => item.status === 'blocked')) return 'blocked'
   if (statuses.some((item: any) => item.status === 'in_progress' || item.status === 'done')) return 'executing'
   return 'pending'
+}
+
+/**
+ * 把「缓存的 phase」与「由状态列表派生的 phase」对账成唯一结果。
+ *
+ * phase 是缓存（dispatch/预算/取消会写它），statuses 是事实源。只要两者可能
+ * 分叉，就必须在出口处对账，否则同一个会话会因读取路径不同而翻转（实时
+ * integrating / 刷新后 done，T2 场景 B）。
+ *
+ * 规则只有四条，全部可由 `aggregateInvariantViolations` 断言：
+ *  1. 工作项全部 done ⇒ 一定是 done（缓存不得把它拖回任何进行中状态）；
+ *  2. 缓存是 done/integrating 但工作项没全 done ⇒ 缓存过期，回退到派生值；
+ *  3. pending/planning/executing 是「状态列表能直接回答」的轮次状态：一旦
+ *     有工作项开始（派生值不再是 pending），缓存里的旧 pending/planning 必须
+ *     让位；而派生值仍是 pending 时保留缓存（dispatch 刚开始、状态尚未落盘）。
+ *  4. 其余情况保留缓存的轮次状态（paused/cancelled/blocked/degraded）——
+ *     它们携带状态列表里没有的信息（预算暂停、用户取消）。
+ */
+export function reconcilePhase(phase: any, statuses: any) {
+  const derived = planPhase(statuses)
+  if (derived === 'done') return 'done'
+  if (phase === 'done' || phase === 'integrating') return derived
+  if (phase === 'pending' || phase === 'planning' || phase === 'executing') {
+    return derived === 'pending' ? phase : derived
+  }
+  return phase ?? derived
 }
 
 export function nextReadyInStage(plan: any, statuses: any[], stageId: string) {

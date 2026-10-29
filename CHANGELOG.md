@@ -1,3 +1,112 @@
+## 1.5.2 — 2026-10-29
+
+**「完成语义」统一版**。用户截图圈出一张 `14/14` 全部做完、环形进度 `100%` 的计划卡，
+右侧状态胶囊却写「正在收尾」，而且这张卡仍留在「进行中」组。本次把**进度**与**状态**
+收敛到同一个事实源，并把状态矩阵里同一根因的 8 类矛盾一并修掉。
+
+### 事故与根因
+
+截图会话为 `session-c3852c31-f6cd-4fc5-8cff-d8a3932e9feb`。事件回放显示：
+
+1. 最后一次派发在预算用尽时结束，结果消息落盘为 `12/14 done、phase: paused`；
+2. 之后主 Agent 直接调用 `dsh_workplan_update`，把剩余 `T13`、`T14` 标为 done
+   （会话里两次工具调用，`seq 263` / `seq 269`），**没有再发生任何派发轮次**；
+3. `updateStatus` 用 `planPhase(statuses)` 重算 phase，而 `planPhase` 以
+   「结果消息是否已落盘（`resultSeen`）」为终态闸门 → 全部完成后仍返回 `integrating`；
+4. 结果消息只在派发轮次末尾写入，走 update 工具的路径**永远不会**写它，
+   于是 phase 永久停在 `integrating`，`stats.progress` 已经是 `100`；
+5. `serialisePlan` 又优先信任内存里的 `record.phase`，而回放 `reconstructFromSession`
+   用 `resultSeen = true` 重算出 `done` —— 同一条记录「刷新前正在收尾、刷新后已完成」；
+6. 客户端还有三套独立的「是否完成」判断：环形进度看 `percent >= 100`、
+   「都做完了」看 `done === total`、状态胶囊看 `phase`，三者可以各说各话。
+
+因此这不是文案问题，而是**完成事实有两个事实源**（计数 vs. 副作用闸门）。
+
+### 改动
+
+- **`src/plan.ts`**
+  - `planPhase()`：所有子任务 `done` 时**恒返回 `done`**，不再看 `resultSeen`
+    （参数保留以兼容既有调用，标注为历史遗留）；`integrating` 仅作为旧载荷的
+    兼容取值存在。
+  - 新增 `reconcilePhase(phase, statuses)`：终态只由计数决定；`done` / `integrating`
+    这类「由计数派生」的旧值一律重算；`paused` / `cancelled` / `blocked` / `degraded`
+    保留各自的事实来源。
+  - `deriveAggregates()`：未全部完成时总进度**封顶 99**（`Math.min(99, raw)`），
+    杜绝「11 done + 1 blocked@95 → 总体进度 100」。
+  - `applyStatus()`：`in_progress` 的 `progress` 夹紧到 `99`，「正在做」不允许自称 100%。
+  - `aggregateInvariantViolations(snapshot, phase?)`：新增
+    **I8**（`done === total` 必须 `phase === 'done'`，双向）、
+    **I9**（全部完成必须 100%，未全部完成不得 >= 100）、
+    **I10**（`in_progress` 不得 `progress >= 100`）。
+- **`src/runtime.ts`**
+  - `serialisePlan()`：`phase` 改为 `reconcilePhase(record.phase ?? 派生值, statuses)`；
+    载荷在存在不变量违背时附带 `violations` 数组，便于定位而不是静默显示。
+  - `updateStatus()`：改为 `reconcilePhase(record.phase, record.statuses)`
+    —— 截图矛盾的直接入口。
+  - 派发尾部：终态晋升不再依赖「结果消息写入」这一副作用，同样走 `reconcilePhase`。
+  - 回放 `reconstructFromSession()`：paused/cancelled 覆盖之后统一 `reconcilePhase`，
+    保证**刷新前后同源**。
+  - `cancelPlan()`：计划已全部完成时改为 no-op（返回 `alreadyDone: true`），
+    消除「100% + 已取消」。
+  - 预算到点分支：若此刻已经全部完成，记 `done` 而不是 `paused`（防御性，正常循环下不可达）。
+- **`src/client.ts`**（自包含 bundle，不能 import `plan.ts`，故在客户端复刻同一语义）
+  - 三个唯一算式：`planPercent(done, total)`、`planPhaseOf(rawPhase, counts)`、
+    `planWeightedPercent(stats, counts)`；卡片环、徽章、分组、分组环、阶段条、
+    会话内联卡、`rank`、`liveBars` 全部改走它们。
+  - 新增文案：`helpWaitActive`（等这一步做完，再继续下一项）、
+    `helpNoPlan`（还没有安排任何工作）、`nowRemaining`（还剩 {n} 项）。
+- **测试**
+  - 新增 `tests/phase-percent-invariant.test.ts`（13 例）：终态语义、计数封顶、
+    I8/I9 双向、update 补完最后一项、空更新不回退、取消已完成计划、
+    客户端渲染旧载荷。
+  - 新增 `tests/completion-semantics.test.ts`（8 例）：`in_progress@100` 夹紧、
+    I10、单任务执行中不再宣布完成、部分完成「还剩 N 项」、0/0 降级不说完成、
+    阶段条只按 done 计宽度、阶段卡与「现在」同口径、0% 未开始不再标 active。
+  - 更新 `tests/plan.test.ts`、`tests/workplan-budget-pause.test.ts` 里把
+    「全部完成后停在进行中」当期望值的断言；`tests/derived-counts.test.ts`
+    的 blocked 用例期望改为 99。
+- **版本**：`1.5.1 → 1.5.2`（patch，修正完成语义，不新增对外接口）。
+
+### 同类矛盾（来自 `docs/state-progress-matrix.md`）
+
+| 编号 | 现象 | 本次 |
+| --- | --- | --- |
+| C1 | 100% + 「正在收尾」+ 留在「进行中」 | 已修 |
+| C2 | 执行中却写「没有下一步，这件事已完成」 | 已修 |
+| C5 | 部分完成却写「还没开始」 | 已修 |
+| C7 | 阶段条把 blocked 算作已触达（环 50%、条 100%） | 已修 |
+| C8 | 允许 `in_progress + 100%` | 已修 |
+| C9 | 阶段行说「正在做」、阶段卡说「还没开始」 | 已修 |
+| C11 | 0/0 降级计划也说「这件事已完成」 | 已修 |
+| C12 | 同屏两个互斥的「现在」 | 已修 |
+| C13 | 0% 未开始的卡标 `data-state="active"` | 已修 |
+| C3 | 已取消的卡在前端被过滤，用户看不到（与 `dsh_workplan_cancel` 描述文案不一致） | 未改：既有设计，`tests/client-render.test.ts` 明确断言不渲染；记录待与工具描述统一 |
+| C10 | stale pending 被序列化成 cancelled，而回放返回 `pending + stale:true` | 未改：记录为下一步 |
+| C14 | `planning` 是死枚举 | 未改：记录为清理项 |
+
+### 验证
+
+- `npm run build` → exit 0；`npm run check`（`tsc --noEmit`）→ exit 0。
+- `npm test` → **120/120 通过**，0 fail（原 99 + 新增 13 + 8）。
+- `node scripts/repro-phase-percent-integrating.mjs --expect-fixed` → 7/7 PASS，
+  `payload.phase = done`、`stats = { total: 2, done: 2, progress: 100 }`、
+  徽章「已完成」、`live = done`、`replay = done`、无 `violations`。
+  （同一脚本不带参数运行现在会 3 条 FAIL —— 这是旧 bug 已不存在、修复生效的证据。）
+- 版本一致性 7 处：`package.json`、`package-lock.json` 两处、`src/host.ts`、
+  `lib/host.js`、`dist/host.js`、本文件顶部，全部 `1.5.2`。
+- 本次**未重启 DSH 服务**：`lib/*.js`（host 侧）在 DSH 进程下次启动时才加载；
+  `client.js` 随页面刷新生效。
+
+### 发布
+
+- **未执行**。`git tag v1.5.2`、`npm publish` 属对外发布，需用户明确授权后再做。
+
+### 回滚
+
+- 升级前四个文件的副本：`.backups/pre-1.5.2-20261029-125724/`
+  （`package.json`、`package-lock.json`、`CHANGELOG.md`、`src/host.ts`）。
+- 回滚后必须重新 `npm run build`；运行中的 DSH 进程不会自动重载 `lib/host.js`。
+
 ## 1.5.1 — 2026-10-28
 
 **「先看这三句」与「分步进度」位置对换的补丁版**。用户以截图圈出展开态计划卡里的这两个板块，

@@ -66,9 +66,14 @@ test('表驱动：四种状态的计数与按状态加权的总进度', () => {
       expected: { total: 1, done: 1, blocked: 0, inProgress: 0, pending: 0, progress: 100 },
     },
     {
-      name: '单个 blocked（终态按 100 计）',
+      /*
+       * [1.5.2] blocked 的权重仍按 100 计（它不会再前进），但「总体进度」在
+       * 计划没有全部完成时封顶 99：否则「1/1 卡住了」会同时显示「总体进度 100%」，
+       * 与「100% + 正在收尾」是同一类语义冲突（T4 实测 A.5）。
+       */
+      name: '单个 blocked（权重按 100 计，但未全部完成时总进度封顶 99）',
       statuses: [entry({ status: 'blocked', progress: 100 })],
-      expected: { total: 1, done: 0, blocked: 1, inProgress: 0, pending: 0, progress: 100 },
+      expected: { total: 1, done: 0, blocked: 1, inProgress: 0, pending: 0, progress: 99 },
     },
     {
       name: '单个 in_progress（按自身进度）',

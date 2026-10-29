@@ -17,6 +17,7 @@ import { randomUUID } from 'node:crypto'
 import {
   MAX_CONCURRENT,
   PlanError,
+  aggregateInvariantViolations,
   applyStatus,
   attachPlanMeta,
   buildChildPrompt,
@@ -43,6 +44,7 @@ import {
   parseResultMessage,
   parseWorkplanMessage,
   planPhase,
+  reconcilePhase,
   truncate,
   validatePlan,
   applyResultStatuses,
@@ -800,21 +802,30 @@ export async function dispatchPlan(ctx: any, record: any, options: any) {
         })
       }
       record.statuses = reset
-      record.phase = 'paused'
       const total = record.statuses.length
       const done = record.statuses.filter((item: any) => item.status === 'done').length
+      /*
+       * [1.5.2] 预算到点 ≠ 一定是「暂停」。
+       *
+       * 旧代码在这里无条件 `record.phase = 'paused'`：如果最后一个子任务恰好在
+       * 截止时刻之后完成（done === total），计划会以 14/14、progress=100 的载荷
+       * 带着 paused 返回，界面就是「100% + 预算用完，可续跑」（T5 C4）。
+       * 全部完成时直接进终态，并且不再写「其余 0 项保留为未完成」这种自相矛盾的说明。
+       */
+      const allDoneNow = total > 0 && done === total
+      record.phase = allDoneNow ? 'done' : 'paused'
       const minutes = Math.max(1, Math.round((options.totalTimeoutMs ?? TOTAL_TIMEOUT_MS) / 60000))
-      record.error = `本轮执行预算（${minutes} 分钟）已到：已完成 ${done}/${total}，其余 ${total - done} 项保留为未完成，再次派发本计划即可续跑（已完成的不重跑）`
+      record.error = allDoneNow
+        ? null
+        : `本轮执行预算（${minutes} 分钟）已到：已完成 ${done}/${total}，其余 ${total - done} 项保留为未完成，再次派发本计划即可续跑（已完成的不重跑）`
       /*
        * Drop the failure lines the aborted children wrote on their way out.
        * They used to survive into the result payload as
        * `["T4: 总执行超时", "总执行超时", …]`, so the model read a failure
        * report for subtasks that were explicitly *not* failures.
        */
-      record.errors = [
-        ...(record.errors ?? []).filter((line: string) => !/总执行超时/.test(String(line))),
-        record.error,
-      ].slice(-20)
+      record.errors = (record.errors ?? []).filter((line: string) => !/总执行超时/.test(String(line)))
+      if (!allDoneNow) record.errors = [...record.errors, record.error].slice(-20)
     } else {
       /*
        * `blocked` is a terminal state, so it always reports progress 100 — the
@@ -865,15 +876,30 @@ function serialisePlan(record: any, session: any) {
   )
   const statuses = snapshot.statuses
   const stats = snapshot.stats
-  let phase = record.phase ?? (plan ? planPhase(statuses) : 'degraded')
+  /*
+   * [1.5.2] 出口对账，而不是无条件相信内存缓存。
+   *
+   * 旧写法 `record.phase ?? planPhase(statuses)` 让缓存一旦存在就完全绕过
+   * statuses：一次 `updateStatus` 把计划写成 integrating 之后，即使 14/14 全部
+   * 完成，下发的 phase 仍是 integrating，界面于是「100% + 正在收尾」。这里改成
+   * `reconcilePhase`：全部完成一律 done，缓存过期的 done/integrating 回退到派生值。
+   */
+  let phase = reconcilePhase(record.phase ?? (plan ? planPhase(statuses) : 'degraded'), statuses)
   if (phase === 'pending' && !record.dispatchedAt && plan?.createdAt && Date.now() - plan.createdAt > STALE_PENDING_MS) {
     phase = 'cancelled'
   }
+  /*
+   * 每次真正下发前跑一遍跨字段不变量（I1–I10）。正常情况下恒为空；一旦某个
+   * 未来改动重新引入「进度与状态打架」，这里会把它连同具体字段值一起带出去，
+   * 而不是等用户截图发现。附在 payload 上而不是抛错：展示层不应因自检而白屏。
+   */
+  const violations = aggregateInvariantViolations(snapshot, phase)
   return {
     sessionId: session.id,
     planId: record.planId ?? plan?.planId ?? null,
     title: plan?.title ?? record.title ?? '任务进度',
     phase,
+    ...(violations.length ? { violations } : {}),
     degraded: record.degraded === true,
     error: record.error ? truncate(record.error, 2000) : null,
     errors: (record.errors ?? []).slice(-20),
@@ -1028,6 +1054,15 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
   let phase = planPhase(statuses, resultSeen)
   if (resultPhase === 'paused' && statuses.some((item: any) => item.status !== 'done')) phase = 'paused'
   if (cancelled) phase = 'cancelled'
+  /*
+   * [1.5.2] 回放也必须走同一套对账。
+   *
+   * 回放曾经因为 `resultSeen=true`（结果消息在会话里）得到 done，而同一时刻的
+   * 实时缓存因为没有这个副作用得到 integrating —— 同一个会话刷新前后翻转。
+   * `reconcilePhase` 让两条链路都以 statuses 为准：全部完成即 done（包括历史上
+   * 「先完成、后收到取消消息」的会话，不再出现「100% + 已取消」）。
+   */
+  phase = reconcilePhase(phase, statuses)
   /*
    * An old plan that was never dispatched used to be relabelled `cancelled`,
    * which also made it permanently unresumable — the card said "已取消" and no
@@ -1206,7 +1241,16 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     if (status === 'blocked') {
       record.statuses = markDependentsBlocked(record.plan, record.statuses, subtaskId)
     }
-    record.phase = planPhase(record.statuses)
+    /*
+     * [1.5.2] 这里曾是「100% + 正在收尾」的直接入口。
+     *
+     * 旧代码 `record.phase = planPhase(record.statuses)` 用不到 `resultSeen`，
+     * 所以主 Agent 用 update 工具补完最后一项时得到的 phase 永远是 integrating；
+     * 而这条路径之后不会再派发，也就永远不会写结果消息把它晋升为 done。
+     * 走 `reconcilePhase` 后，全部完成即 done，且已 done 的计划不会被一次
+     * 空更新打回 integrating（T4 实测 A.2 的回退路径）。
+     */
+    record.phase = reconcilePhase(record.phase, record.statuses)
     record.updatedAt = Date.now()
     const snapshot = derivePlanSnapshot(record.statuses)
     return {
@@ -1231,6 +1275,29 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     const reason = typeof args?.reason === 'string' && args.reason.trim()
       ? args.reason.trim()
       : '用户取消'
+    /*
+     * [1.5.2] 已完成即终态：取消不再把 100% 的计划改写成「已取消」。
+     *
+     * T4 实测 A.4：2/2 全部 done 的计划被取消后会得到 `phase=cancelled` +
+     * `done=2/2` + `percent=100` —— 又一个「一边说全好了、一边说被取消」的
+     * 自相矛盾组合，且会让本可续跑/查看的完成记录永远退出「已完成」组。
+     * 这里直接把取消变成 no-op 并如实返回 done。
+     */
+    const before = derivePlanSnapshot(record.statuses)
+    if (before.stats.total > 0 && before.stats.done === before.stats.total) {
+      record.phase = 'done'
+      record.updatedAt = Date.now()
+      state.records.set(session.id, record)
+      return {
+        ok: true,
+        planId: record.plan.planId,
+        phase: 'done',
+        reason,
+        alreadyDone: true,
+        abortedRunning: false,
+        stats: before.stats,
+      }
+    }
     if (record.dispatchPromise) {
       /*
        * Cancel must always work.
@@ -1411,9 +1478,14 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         ctx.logger?.warn?.(`dsh-workplan: 写入结果消息失败：${error instanceof Error ? error.message : String(error)}`)
       }
     }
-    if (record.resultWritten && record.statuses.length > 0 && record.statuses.every((item: any) => item.status === 'done')) {
-      record.phase = 'done'
-    }
+    /*
+     * [1.5.2] 终态不再依赖「结果消息写成功」这个副作用。
+     *
+     * 旧代码只有 `record.resultWritten === true` 时才把 phase 升成 done，
+     * 于是 session.append 抛错（或该轮根本没有派发）就会永久停在 integrating。
+     * 完成语义由 statuses 决定；结果消息只负责持久化，不负责定义完成。
+     */
+    record.phase = reconcilePhase(record.phase, record.statuses)
     /*
      * The model's dispatch result reports the same snapshot the dashboard will
      * show. It used to send `record.stats` while the status list below was read

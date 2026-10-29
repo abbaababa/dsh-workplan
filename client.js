@@ -43,6 +43,9 @@ window.__ModuleLoader__.load({
                 "helpNobody": "还没开始",
                 "helpDone": "都做完了",
                 "helpNextDone": "没有下一步，这件事已完成",
+                "helpWaitActive": "等这一步做完，再继续下一项",
+                "helpNoPlan": "还没有安排任何工作",
+                "nowRemaining": "还剩 {n} 项",
                 "helpHint": "负责团队 = 谁来做；具体工作 = 要完成的一件事；卡住了 = 需要人处理。",
                 "handleBlocked": "先处理",
                 "resumeReady": "对主 Agent 说「续跑这个计划」，会从受阻处继续（已完成的不重跑）",
@@ -205,6 +208,9 @@ window.__ModuleLoader__.load({
                 "helpNobody": "Not started yet",
                 "helpDone": "Everything is done",
                 "helpNextDone": "Nothing next; this task is complete",
+                "helpWaitActive": "Wait for this step to finish, then continue",
+                "helpNoPlan": "No work has been scheduled yet",
+                "nowRemaining": "{n} item(s) left",
                 "helpHint": "Team = who does it; work item = one thing to finish; stuck = a person needs to help.",
                 "handleBlocked": "Fix first",
                 "resumeReady": "Tell the main agent to resume this plan; it continues from the blocked step without re-running finished work",
@@ -1026,13 +1032,20 @@ window.__ModuleLoader__.load({
             return text;
         }
         function workerText(session, t) {
-            const active = findEntry(session, 'in_progress');
-            if (active) {
-                return `${deptName(t, active.subtask.department)} · ${active.subtask.title}`;
-            }
+            /*
+             * [1.5.2] 与 `planNow` 同序：卡住优先。
+             *
+             * 旧顺序是「正在做」优先，而卡片右上角的「现在」是「卡住了」优先，
+             * 于是同一屏一边说「现在卡住了 T1」、一边说「正在做 T2」（T5 C12）。
+             * 卡住需要人介入，两个位置都应先报它。
+             */
             const blocked = findEntry(session, 'blocked');
             if (blocked) {
                 return `${deptName(t, blocked.subtask.department)} · ${blocked.subtask.title}（${t('status.blocked')}）`;
+            }
+            const active = findEntry(session, 'in_progress');
+            if (active) {
+                return `${deptName(t, active.subtask.department)} · ${active.subtask.title}`;
             }
             const stats = session.stats || {};
             if ((stats.total ?? 0) > 0 && (stats.done ?? 0) >= (stats.total ?? 0))
@@ -1060,13 +1073,26 @@ window.__ModuleLoader__.load({
             const blocked = findEntry(session, 'blocked');
             if (blocked)
                 return `${t('handleBlocked')}：${deptName(t, blocked.subtask.department)} · ${blocked.subtask.title}${resumeHint(session, t)}`;
+            /*
+             * [1.5.2] 「没有下一步」只允许出现在真正全部完成之后。
+             *
+             * 旧实现找不到 pending 就直接 return「没有下一步，这件事已完成」，于是
+             *   · 单任务计划刚进入 in_progress（环 0%）→ 同一张卡宣布「已完成」（T5 C2）；
+             *   · 降级计划 0/0 → 一边「安排失败」一边「已完成」（T5 C11）。
+             * 现在先按计数判终态，再区分「等当前这一步」「根本没有计划」。
+             */
+            const counts = planCounts(session.stats || {});
+            if (counts.total > 0 && counts.done === counts.total)
+                return t('helpDone');
+            if (counts.total === 0)
+                return t('helpNoPlan');
             const next = findEntry(session, 'pending') || allEntries(session).find((entry) => !entry.item);
             if (next)
                 return `${deptName(t, next.subtask.department)} · ${next.subtask.title}`;
-            const stats = session.stats || {};
-            if ((stats.total ?? 0) > 0 && (stats.done ?? 0) >= (stats.total ?? 0))
-                return t('helpDone');
-            return t('helpNextDone');
+            const active = findEntry(session, 'in_progress');
+            if (active)
+                return `${t('helpWaitActive')}：${deptName(t, active.subtask.department)} · ${active.subtask.title}`;
+            return t('helpWaitActive');
         }
         function progressText(item, t) {
             const status = item?.status || 'pending';
@@ -1254,15 +1280,19 @@ window.__ModuleLoader__.load({
             const done = items.filter(({ item }) => item?.status === 'done').length;
             const blocked = items.filter(({ item }) => item?.status === 'blocked').length;
             const inProgress = items.some(({ item }) => item?.status === 'in_progress');
-            const tone = blocked > 0 ? 'blocked' : done === items.length ? 'done' : inProgress ? 'active' : 'idle';
+            // [1.5.2] 与 `planStageRows` 同一条规则：有 done 就是 active，不再只在
+            // 有 in_progress 时才算「正在做」。旧规则让同一阶段在概览行显示「正在做」、
+            // 在阶段卡显示「还没开始」（T5 C9）。
+            const tone = blocked > 0 ? 'blocked' : items.length > 0 && done === items.length ? 'done' : inProgress || done > 0 ? 'active' : 'idle';
             // Same tone/counts as before; only the presentation moved into the
             // collapsed summary row (done/total + state pill), so the numbers keep one
             // source: this step's own items from `statuses`.
             const stateText = blocked > 0
                 ? `${blocked} ${t('stats.blocked')}`
-                : done === items.length
+                : items.length > 0 && done === items.length
                     ? t('helpDone')
-                    : inProgress ? t('phase.executing') : t('phase.pending');
+                    : inProgress ? t('phase.executing')
+                        : done > 0 ? fill(t('nowRemaining'), { n: items.length - done }) : t('phase.pending');
             return h('section', { className: `dsh-wp-stage dsh-wp-tone-${tone}` }, h(Collapse, {
                 className: 'dsh-wp-stage-collapse',
                 panelClassName: 'dsh-wp-stage-body',
@@ -1290,6 +1320,17 @@ window.__ModuleLoader__.load({
                 return 0;
             return Math.max(0, Math.round(number));
         }
+        /*
+         * [1.5.2] 计划级百分比的唯一算式。
+         *
+         * 1.5.1 及以前，同一页面上至少有三处各自 `Math.round(done / total * 100)`：
+         * 卡片环（planCounts）、组头环（groupTotals）、按任务进度条（TaskBars / 总览柱状图）。
+         * 三份实现口径相同只是巧合，任何一处单独改动都会让「同一张卡两个百分比」重现。
+         * 现在只有这一个函数，其它地方一律调用它。
+         */
+        function planPercent(done, total) {
+            return total > 0 ? Math.round((done / total) * 100) : null;
+        }
         // 与 groupTotals 同一套口径：先夹到 [0,total]，再让「正在做/还没开始」
         // 吃掉剩余量，四段之和恒等于总数（构成条不会溢出或出现负宽度）。
         function planCounts(stats) {
@@ -1299,8 +1340,46 @@ window.__ModuleLoader__.load({
             const blocked = Math.min(planCount(source.blocked), total - done);
             const active = Math.min(planCount(source.inProgress), total - done - blocked);
             const pending = Math.max(0, total - done - blocked - active);
-            const percent = total > 0 ? Math.round((done / total) * 100) : null;
-            return { total, done, active, blocked, pending, percent };
+            return { total, done, active, blocked, pending, percent: planPercent(done, total) };
+        }
+        /*
+         * [1.5.2] 完成语义的第二道保险：状态文案必须服从计数事实。
+         *
+         * 后端已保证「工作项全部 done ⇒ phase=done」（`reconcilePhase`）。这里再兜一层，
+         * 让任何历史载荷、旧缓存或第三方构造的 payload 都不可能渲染出「100% + 正在
+         * 收尾」：计数齐全且全部完成时一律按「已完成」呈现；反过来，phase 说 done
+         * 但计数里还有没做完的项时，按真实计数降级，避免「已完成下面挂着没做完的活」。
+         *
+         * 计数未知（total=0，例如已取消或尚未拆解）时不动原始 phase——此时没有事实
+         * 可以覆盖它，硬改会把「进行中/已完成」的分组依据一起抹掉。
+         * 「integrating」只在计数证明全部完成时升级为 done，否则保留原语义（回放旧会话）。
+         */
+        function planPhaseOf(rawPhase, counts) {
+            const phase = String(rawPhase ?? 'pending');
+            if (counts.total > 0) {
+                if (counts.done === counts.total)
+                    return 'done';
+                if (phase === 'done') {
+                    if (counts.blocked > 0)
+                        return 'blocked';
+                    if (counts.active > 0)
+                        return 'executing';
+                    return 'pending';
+                }
+            }
+            return phase;
+        }
+        /*
+         * [1.5.2] 加权总进度的展示口径：未全部完成时封顶 99。
+         *
+         * 服务端 `deriveAggregates` 已做同样封顶；这里再算一次是为了让旧载荷/手工
+         * fixture 也守同一条不变量——「总体进度 100%」绝不能与「还有 N 项没完成」同屏。
+         */
+        function planWeightedPercent(stats, counts) {
+            const weighted = clampPct(stats?.progress ?? 0);
+            if (counts.total > 0 && counts.done === counts.total)
+                return 100;
+            return Math.min(99, weighted);
         }
         function planStatusMap(statuses) {
             const byId = new Map();
@@ -1384,6 +1463,16 @@ window.__ModuleLoader__.load({
             }
             if (counts.total > 0 && counts.done === counts.total)
                 return { state: 'done', text: t('helpDone') };
+            /*
+             * [1.5.2] 部分完成不再落到「还没开始」。
+             *
+             * `done>0` 但没有 blocked、也没有 in_progress 时（预算把剩余项重置成
+             * pending，或剩余项还没轮到），旧代码直接返回 `stats.pending`「还没开始」，
+             * 与同一张卡上的「1/2 做好了」和 50% 直接冲突（T5 C5）。
+             */
+            if (counts.done > 0) {
+                return { state: 'active', text: fill(t('nowRemaining'), { n: counts.total - counts.done }) };
+            }
             return { state: 'pending', text: t('stats.pending') };
         }
         function PlanRing({ percent }) {
@@ -1456,7 +1545,9 @@ window.__ModuleLoader__.load({
             if (rows.length < 1 || rows.length > 12)
                 return null;
             return h('div', { className: 'dsh-wp-stepper', 'aria-hidden': 'true', 'data-stages': String(rows.length) }, rows.map((row) => {
-                const reach = row.total > 0 ? ((row.done + row.active + row.blocked) / row.total) * 100 : 0;
+                // [1.5.2] 只按 done 计。旧式把 blocked/active 也算「触达」，于是环 50%
+                // 时阶段条已经全满（T5 C7）——同一张卡两个「完成度」。
+                const reach = row.total > 0 ? (row.done / row.total) * 100 : 0;
                 const width = row.tone === 'pending' ? 0 : reach;
                 return h('span', {
                     key: row.id,
@@ -1473,11 +1564,20 @@ window.__ModuleLoader__.load({
             }));
         }
         function PlanViz({ t, counts, now, rows }) {
+            /*
+             * [1.5.2] data-state 也是「完成语义」的一个读者。
+             *
+             * 旧实现只看 percent：0% 的 pending 卡拿到 data-state="active"，
+             * 而 100% 的卡即使 phase 说 integrating 也是 "done"（T5 C13/C1）。
+             * 现在与胶囊、分组、环共用计数：全 done 才 done，0 且有未完成才 idle。
+             */
             const state = counts.percent === null
                 ? 'idle'
                 : counts.blocked > 0
                     ? 'blocked'
-                    : counts.percent >= 100 ? 'done' : 'active';
+                    : counts.total > 0 && counts.done === counts.total
+                        ? 'done'
+                        : counts.done > 0 || counts.active > 0 ? 'active' : 'idle';
             return h('div', {
                 className: 'dsh-wp-planviz',
                 'data-percent': counts.percent === null ? 'none' : String(counts.percent),
@@ -1496,7 +1596,7 @@ window.__ModuleLoader__.load({
                 className: 'dsh-wp-planoverview',
                 'data-plan-total': String(counts.total),
                 'data-plan-done': String(counts.done),
-            }, h('div', { className: 'dsh-wp-planoverview-head' }, h('span', { className: 'dsh-wp-planoverview-title' }, t('vizStageTitle')), h('span', null, `${counts.done}/${counts.total} ${t('stats.done')}`)), h('div', { className: 'dsh-wp-planoverview-stats' }, h('span', null, `${t('vizWeighted')} ${clampPct(stats?.progress ?? 0)}%`), h('span', null, `${counts.active} ${t('stats.inProgress')} · ${counts.pending} ${t('stats.pending')}`), counts.blocked > 0 ? h('span', null, `${counts.blocked} ${t('stats.blocked')}`) : null), rows.length
+            }, h('div', { className: 'dsh-wp-planoverview-head' }, h('span', { className: 'dsh-wp-planoverview-title' }, t('vizStageTitle')), h('span', null, `${counts.done}/${counts.total} ${t('stats.done')}`)), h('div', { className: 'dsh-wp-planoverview-stats' }, h('span', null, `${t('vizWeighted')} ${planWeightedPercent(stats, counts)}%`), h('span', null, `${counts.active} ${t('stats.inProgress')} · ${counts.pending} ${t('stats.pending')}`), counts.blocked > 0 ? h('span', null, `${counts.blocked} ${t('stats.blocked')}`) : null), rows.length
                 ? h('div', { className: 'dsh-wp-planrows' }, rows.map((row) => {
                     const width = row.total > 0 ? (row.done / row.total) * 100 : 0;
                     return h('div', {
@@ -1514,13 +1614,18 @@ window.__ModuleLoader__.load({
         }
         function SessionCard({ session, t, open, onToggle }) {
             const domId = `dsh-wp-session-${session.sessionId}`;
-            const phase = session.phase || 'pending';
             const stats = session.stats || {};
-            const tone = phaseTone(phase);
-            const departments = Array.isArray(session.departments) ? session.departments : [];
             // 1.5.0：折叠卡摘要＝图表（环 + 百分比 + 四段构成条 + 图例 + 阶段步进条）；
             // 数字仍只来自 session.stats，与旧头部的口径完全一致，不引入第二套统计。
             const counts = planCounts(stats);
+            /*
+             * [1.5.2] 卡片的色调与胶囊文案也走统一对账：只要计数显示全部完成，
+             * 胶囊就必须是「已完成」，视觉档位也必须是 done。截图里那张卡之所以
+             * 「100% + 正在收尾 + 留在进行中组」，就是因为这三个读者各读各的字段。
+             */
+            const phase = planPhaseOf(session.phase || 'pending', counts);
+            const tone = phaseTone(phase);
+            const departments = Array.isArray(session.departments) ? session.departments : [];
             const statuses = Array.isArray(session.statuses) ? session.statuses : [];
             const stageRows = planStageRows(session.stages, statuses);
             const now = planNow(t, counts, planTaskEntries(session.stages, statuses));
@@ -1729,7 +1834,7 @@ window.__ModuleLoader__.load({
                 total,
                 done,
                 open: total - done,
-                percent: total > 0 ? Math.round((done / total) * 100) : null,
+                percent: planPercent(done, total),
                 active: Math.max(0, active),
                 pending: Math.max(0, pending),
                 blocked: Math.max(0, blocked),
@@ -1919,10 +2024,11 @@ window.__ModuleLoader__.load({
         function TaskBars({ sessions, t, onSelect }) {
             return h('section', { className: 'dsh-wp-chart-card dsh-wp-task-bars' }, h('div', { className: 'dsh-wp-section-title' }, t('taskChart')), (Array.isArray(sessions) ? sessions : []).map((session) => {
                 const stats = session.stats || {};
-                const total = Math.max(0, Number(stats.total) || 0);
-                const done = Math.max(0, Number(stats.done) || 0);
-                const percent = total > 0 ? Math.round((done / total) * 100) : 0;
-                const tone = phaseTone(session.phase || 'pending');
+                const counts = planCounts(stats);
+                // 同一套计数与对账：柱状图的百分比、文案、色调都不得自成一套。
+                const percent = counts.percent ?? 0;
+                const phase = planPhaseOf(session.phase || 'pending', counts);
+                const tone = phaseTone(phase);
                 return h('button', {
                     key: session.sessionId,
                     type: 'button',
@@ -1930,7 +2036,7 @@ window.__ModuleLoader__.load({
                     'aria-label': `${t('jumpToTask')} ${session.title || t('panel')}`,
                     onClick: () => { if (typeof onSelect === 'function')
                         onSelect(session.sessionId); },
-                }, h('div', { className: 'dsh-wp-bar-head' }, h('span', { className: 'dsh-wp-bar-title' }, session.title || t('panel')), h('span', { className: 'dsh-wp-bar-value' }, `${done}/${total}`)), h('div', { className: 'dsh-wp-bar-track' }, h('div', { className: `dsh-wp-bar-fill dsh-wp-bar-fill--${tone}`, style: { width: `${percent}%` } })), h('div', { className: 'dsh-wp-bar-meta' }, h('span', null, t(`phase.${session.phase || 'pending'}`)), h('span', null, `${percent}%`)));
+                }, h('div', { className: 'dsh-wp-bar-head' }, h('span', { className: 'dsh-wp-bar-title' }, session.title || t('panel')), h('span', { className: 'dsh-wp-bar-value' }, `${counts.done}/${counts.total}`)), h('div', { className: 'dsh-wp-bar-track' }, h('div', { className: `dsh-wp-bar-fill dsh-wp-bar-fill--${tone}`, style: { width: `${percent}%` } })), h('div', { className: 'dsh-wp-bar-meta' }, h('span', null, t(`phase.${phase}`)), h('span', null, `${percent}%`)));
             }));
         }
         function Dashboard({ t }) {
@@ -1980,8 +2086,16 @@ window.__ModuleLoader__.load({
                 const live = [];
                 const finished = [];
                 const urgentPhases = ['blocked', 'degraded', 'paused'];
+                /*
+                 * [1.5.2] 分组也按对账后的 phase，而不是 payload 里的原始 phase。
+                 *
+                 * 截图那张卡之所以停在「进行中」组，就是因为这里只读 `session.phase`：
+                 * 14/14、100% 的计划带着 integrating 被塞进 live 组，组头于是出现
+                 * 「未完成 0 / 已完成 14（完成率 100%）」却仍标着「进行中」。
+                 * `planPhaseOf` 让分组、组头计数、卡片胶囊共用同一个结论。
+                 */
                 for (const session of activeSessions) {
-                    if (session.phase === 'done')
+                    if (planPhaseOf(session.phase, planCounts(session.stats)) === 'done')
                         finished.push(session);
                     else
                         live.push(session);
@@ -2001,7 +2115,7 @@ window.__ModuleLoader__.load({
                     planning: 4,
                     pending: 5,
                 };
-                const rank = (session) => phaseRank[session.phase] ?? 5;
+                const rank = (session) => phaseRank[planPhaseOf(session.phase, planCounts(session.stats))] ?? 5;
                 live.sort((a, b) => (rank(a) - rank(b))
                     || ((Number(b.createdAt) || 0) - (Number(a.createdAt) || 0))
                     || String(a.sessionId).localeCompare(String(b.sessionId)));
@@ -2033,12 +2147,11 @@ window.__ModuleLoader__.load({
                 return { live, finished, urgent: live.filter((session) => urgentPhases.includes(session.phase)).length };
             }, [activeSessions]);
             const liveBars = useMemo(() => groups.live.slice(0, 6).map((session) => {
-                const doneCount = session.stats?.done ?? 0;
-                const totalCount = session.stats?.total ?? 0;
                 const raw = String(session.title || t('panel'));
                 return {
                     label: raw.length > 14 ? `${raw.slice(0, 14)}…` : raw,
-                    value: totalCount > 0 ? Math.round((doneCount / totalCount) * 100) : 0,
+                    // [1.5.2] 与卡片/组头同一个百分比函数，杜绝第二套口径。
+                    value: planPercent(planCount(session.stats?.done), planCount(session.stats?.total)) ?? 0,
                 };
             }), [groups, t]);
             return h('div', { className: 'dsh-wp' }, h('header', { className: 'dsh-wp-header' }, h('div', null, h('h1', { className: 'dsh-wp-title' }, t('title')), h('p', { className: 'dsh-wp-subtitle' }, t('subtitle')), h('div', { className: 'dsh-wp-meta' }, updatedAt ? h('span', null, `${t('updatedAt')} ${formatTime(updatedAt)}`) : null, h('span', null, `${t('scopeAll')}：${activeSessions.length} ${t('sessionCount')}，${t('taskBreakdown')} ${totals.total} ${t('subtaskCount')}`))), h('button', { type: 'button', className: 'dsh-wp-button', onClick: reload, disabled: loading }, t('refresh'))), error ? h(ErrorBanner, { message: error, onRetry: reload, t }) : null, activeSessions.length > 0 ? h('div', { className: 'dsh-wp-statbar', role: 'list' }, h('div', { className: 'dsh-wp-stat dsh-wp-stat--tasks', role: 'listitem' }, h('div', { className: 'dsh-wp-stat-value' }, activeSessions.length), h('div', { className: 'dsh-wp-stat-label' }, t('sessionCount'))), h('div', { className: 'dsh-wp-stat', role: 'listitem' }, h('div', { className: 'dsh-wp-stat-value' }, totals.total), h('div', { className: 'dsh-wp-stat-label' }, t('workItems'))), h('div', { className: 'dsh-wp-stat dsh-wp-stat--done', role: 'listitem' }, h('div', { className: 'dsh-wp-stat-value' }, totals.done), h('div', { className: 'dsh-wp-stat-label' }, t('stats.done'))), h('div', { className: 'dsh-wp-stat dsh-wp-stat--active', role: 'listitem' }, h('div', { className: 'dsh-wp-stat-value' }, totals.inProgress), h('div', { className: 'dsh-wp-stat-label' }, t('stats.inProgress'))), h('div', { className: 'dsh-wp-stat dsh-wp-stat--blocked', role: 'listitem' }, h('div', { className: 'dsh-wp-stat-value' }, totals.blocked), h('div', { className: 'dsh-wp-stat-label' }, t('stats.blocked')))) : null, activeSessions.length > 0 ? h('div', { className: 'dsh-wp-scope-note' }, t('allPlansHint')) : null, activeSessions.length === 0
@@ -2066,9 +2179,16 @@ window.__ModuleLoader__.load({
                 if (currentTurn > createdTurn && !active)
                     return null;
             }
+            /*
+             * [1.5.2] 会话内联卡（TurnCard）也走同一套对账。
+             *
+             * 面板卡片修好了、内联卡却仍按原始 phase 渲染的话，同一张计划会在
+             * 「侧栏已完成 / 对话里正在收尾」之间再次自相矛盾。
+             */
             const stats = session.stats || {};
-            const tone = phaseTone(session.phase || 'pending');
-            return h('div', { className: `dsh-wp-turn dsh-wp-tone-${tone}` }, h('div', { className: 'dsh-wp-turn-title' }, h('span', null, session.title || t('panel')), h(Pill, { tone }, t(`phase.${session.phase || 'pending'}`))), h('div', { className: 'dsh-wp-muted', style: { marginTop: '6px' } }, `${t('helpWho')}：${workerText(session, t)}`), h('div', { className: 'dsh-wp-muted', style: { marginTop: '2px' } }, `${t('helpNext')}：${nextText(session, t)}`), h('div', { className: 'dsh-wp-progress-meta' }, h('span', null, `${stats.done ?? 0}/${stats.total ?? 0} ${t('stats.done')} · ${stats.blocked ?? 0} ${t('stats.blocked')}`), h('span', { className: 'dsh-wp-muted' }, t('viewHint'))));
+            const phase = planPhaseOf(session.phase || 'pending', planCounts(stats));
+            const tone = phaseTone(phase);
+            return h('div', { className: `dsh-wp-turn dsh-wp-tone-${tone}` }, h('div', { className: 'dsh-wp-turn-title' }, h('span', null, session.title || t('panel')), h(Pill, { tone }, t(`phase.${phase}`))), h('div', { className: 'dsh-wp-muted', style: { marginTop: '6px' } }, `${t('helpWho')}：${workerText(session, t)}`), h('div', { className: 'dsh-wp-muted', style: { marginTop: '2px' } }, `${t('helpNext')}：${nextText(session, t)}`), h('div', { className: 'dsh-wp-progress-meta' }, h('span', null, `${stats.done ?? 0}/${stats.total ?? 0} ${t('stats.done')} · ${stats.blocked ?? 0} ${t('stats.blocked')}`), h('span', { className: 'dsh-wp-muted' }, t('viewHint'))));
         }
         function contentText(block) {
             if (!block || !Array.isArray(block.content))

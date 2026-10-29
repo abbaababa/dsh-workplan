@@ -156,7 +156,12 @@ test('再次派发会接着跑剩余子任务，已完成的不重跑', async ()
   ctx.subagents.startActivation = () => quickChild('续跑完成')
   await dispatchPlan(ctx, record, { ...options, totalTimeoutMs: 5000 })
   assert.equal(derivePlanSnapshot(record.statuses).stats.done, 2, 'both subtasks finish on the second dispatch')
-  assert.equal(record.phase, 'integrating', 'all work finished; the result message is what turns it into done')
+  /*
+   * [1.5.2] 全部子任务完成即终态，不再等结果消息把它「晋升」成 done。
+   * 旧断言固化的是 `integrating`，那正是「14/14、100%、正在收尾」的来源：
+   * 结果消息写失败或本轮根本不派发时，计划会永远停在收尾态。
+   */
+  assert.equal(record.phase, 'done', 'all subtasks done is itself the terminal condition')
 })
 
 test('paused 阶段能从结果消息回放出来（刷新后不退回“正在做”）', () => {
@@ -233,7 +238,8 @@ test('预算暂停后仍算可续跑，且续跑不消耗自动续跑额度', as
 
   ctx.subagents.startActivation = () => quickChild('续跑完成')
   await dispatchPlan(ctx, record, { ...options, totalTimeoutMs: 5000 })
-  assert.equal(record.phase, 'integrating')
+  // [1.5.2] 续跑把最后两项做完后，计划当场就是 done（不再停在 integrating）。
+  assert.equal(record.phase, 'done')
   assert.equal(record.resumeCount ?? 0, 0, 'continuing after a pause stays outside the resume budget')
 })
 
@@ -363,7 +369,11 @@ test('重启后没有内存记录时，派发会从会话存档重建计划而�
     if (parsed?.planId === plan.planId) resultPayload = parsed
   }
   assert.ok(resultPayload, 'a durable result message must be appended')
-  assert.equal(resultPayload.phase, 'integrating', 'the phase must reach the payload through the real call site')
+  /*
+   * [1.5.2] 结果消息里的 phase 也必须已经是 done：它是刷新后回放的唯一依据，
+   * 曾经这里写的是 integrating，于是同一个会话刷新前后在「正在收尾/已完成」之间翻转。
+   */
+  assert.equal(resultPayload.phase, 'done', 'the phase must reach the payload through the real call site')
   assert.equal('phase' in resultPayload, true)
 })
 
