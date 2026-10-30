@@ -1,42 +1,37 @@
-# Task Progress (dsh-workplan)
+# dsh-workplan
+
+> **Two selling points, one line: an ISO/IEC 15408:2026 (CC) evidence pack you can verify yourself, and a one-command install with zero runtime dependencies.**
 
 [![verify](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml/badge.svg)](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml)
 
-**中文（简体）说明：** [README.md](README.md)
+Adds "plan first → dispatch real department subagents → watch progress in the sidebar" to **DeepSeek Harness (DSH)**. No app, no DSH source patch, no page replacement.
 
-> Plan first, dispatch real department subagents, then show the progress in plain language.
->
-> **No app to install, no DSH source to patch, no page replacement.** You get three things: a plan in the conversation, real subagents doing the work, and a **Task progress** panel in the sidebar.
+- A task-decomposition block appears in the conversation first: stages, work items, departments, acceptance criteria
+- Up to 5 real subagents run in parallel and write results back into the session
+- The **Task progress** panel shows who is working, how far, and what is stuck
+
+**中文（简体）说明：** [README.md](README.md)
 
 ---
 
-## 🌍 International security standard: the full evidence chain, and the honest boundary
+## Why ISO/IEC 15408 is a selling point here — honestly
 
-**You have probably seen plugins claim "ISO/IEC 15408 / Common Criteria certified". For small open-source tools that claim is almost always false — CC's rules do not allow it.**
+**CC (Common Criteria, ISO/IEC 15408) works in three separated roles: the developer supplies evidence → an accredited lab evaluates it → a national scheme issues the certificate. Software cannot certify itself.** So "this plugin is CC certified", with no certificate number, is a false statement — we do not write it.
 
-In plain words:
+We do the half that can be done by us: **build the materials the 2026 edition (not 2022) asks for, in its own structure, and publish them so anyone can check.**
 
-- **ISO/IEC 15408** (a.k.a. **CC**, Common Criteria) is an international standard that answers one question: *"what can this software actually secure, and why should anyone believe it?"* The current edition is **2026** (not 2022).
-- CC splits the work three ways: **the developer supplies evidence → an accredited lab evaluates it → a national scheme issues the certificate**. The certificate comes from a third party; **software cannot certify itself**.
-- So any claim of "fully satisfies ISO/IEC 15408" without a **certificate number** is a false statement. This plugin has no certificate, and we **will not** write that.
-
-So what did we do? **We produced the materials CC asks for, in the standard's own structure, and published them so you can verify everything yourself — without trusting us.**
-
-| What is published | What it is in the standard | Where |
+| What is published | In the standard | Where |
 |---|---|---|
-| What this plugin protects, from whom, and where the boundary is | Security Target (ST) | [docs/cc/SECURITY-TARGET.md](docs/cc/SECURITY-TARGET.md) |
+| What it protects, from whom, where the boundary is | Security Target (ST) | [docs/cc/SECURITY-TARGET.md](docs/cc/SECURITY-TARGET.md) |
 | Attack surface, 7 threats, countermeasures, residual risk | Vulnerability assessment (AVA) | [docs/cc/AVA-VULNERABILITY-ANALYSIS.md](docs/cc/AVA-VULNERABILITY-ANALYSIS.md) |
-| Class-by-class mapping, EAL1 readiness, what is still missing | Self-assessment | [docs/cc/CC-2026-ASSESSMENT.md](docs/cc/CC-2026-ASSESSMENT.md) |
-| Every third-party component, licence and hash | Life cycle (ALC) | [docs/SBOM.md](docs/SBOM.md) |
-| How to report a vulnerability, response times, deployment | Security policy | [SECURITY.md](SECURITY.md) |
+| Class-by-class mapping, EAL1 readiness, what is missing | Self-assessment | [docs/cc/CC-2026-ASSESSMENT.md](docs/cc/CC-2026-ASSESSMENT.md) |
+| Third-party components, licences, hashes | Life cycle (ALC) | [docs/SBOM.md](docs/SBOM.md) |
+| How to report a vulnerability, response times | Security policy | [SECURITY.md](SECURITY.md) |
 | 188 automated tests, one command to re-run | Testing (ATE) | `npm run verify` |
 
-**Three sentences of conclusion:**
-1. On engineering evidence, the material is close to **EAL1** — the lowest CC level (10 of 14 components ready, 3 partial, 1 that **only** an external lab can provide);
-2. Certification itself costs lab time and money and **cannot be achieved by editing code**, so we do not pretend otherwise;
-3. What we do claim is **checkable by anyone with 5 commands** — worth far more than the phrase "certified".
+Status: of the 14 EAL1 components — CC's lowest level — **10 are ready, 3 partially ready, 1 can only come from an external lab**. What is missing is lab money and scheduling, not code, so we sell evidence and do not pretend to hold a certificate.
 
-Verify it yourself (copy-paste):
+Check it yourself — 3 lines, copy-paste:
 
 ```bash
 git clone https://github.com/abbaababa/dsh-workplan.git && cd dsh-workplan
@@ -44,12 +39,9 @@ npm ci && npm run verify                                  # expect: tests 188 / 
 grep -RInE "child_process|execSync|eval\(|writeFileSync" src || echo "0 hits (expected)"
 ```
 
-> Remember one line: **a certificate is given by a third party; evidence is earned by the project. We give you the evidence, and we do not fake the certificate.**
-
-> **Self-correction record**: v1.8.1 fixed three places in v1.8.0 where the documentation promised more than the code did — the chart route is *not* auth-checked, the suite does *not* cover the auth/truncation branches, and the EAL1 matrix marked a self-contradicting component as ready. What we got wrong, and why, is recorded in the [CHANGELOG](CHANGELOG.md) and [§6.1 of the assessment](docs/cc/CC-2026-ASSESSMENT.md). **We even write down where we were wrong.**
-
-
----
+> Remember one line: **a certificate is given by a third party; evidence is earned by the project.**
+>
+> **Self-correction record**: v1.8.1 publicly fixed three places in v1.8.0 where the documentation claimed more than the code did (the chart route is not auth-checked, the suite does not cover the auth/truncation branches, and the EAL1 matrix marked a self-contradicting component as ready). Details in the [CHANGELOG](CHANGELOG.md) and [assessment §6.1](docs/cc/CC-2026-ASSESSMENT.md).
 
 ## What it actually does
 
@@ -85,7 +77,7 @@ The full contract — roles, data shapes, state machine, recovery, and the three
 ## Install
 
 ```bash
-dsh plugin --profile web add dsh-workplan@1.8.1
+dsh plugin --profile web add dsh-workplan@1.8.2
 ```
 
 Restart the DSH Web process (or reload the page) so the bundle is picked up.
@@ -157,7 +149,8 @@ grep -RInE "writeFileSync|child_process|eval\(" src
 npm audit --omit=dev
 ```
 
-## What 1.5.0 changes (progress you can see)
+<details>
+<summary><b>What 1.5.0 changes (progress you can see)</b> (click to expand)</summary>
 
 1.5.0 is presentation-only: the collapsed plan card swaps its single grey line ("本计划 0/8 做好了" plus a 54×5px bar) for an actual chart.
 
@@ -174,7 +167,10 @@ None of the counts disappeared — the legend always carries all four buckets wi
 
 No new dependencies, `plan.ts` / `runtime.ts` untouched; rollback is documented in [CHANGELOG.md](CHANGELOG.md).
 
-## What 1.4.3 fixes
+</details>
+
+<details>
+<summary><b>What 1.4.3 fixes</b> (click to expand)</summary>
 
 1.4.3 is a counting-consistency release. The plugin used to keep two sources of truth — live subtask state and a cached stats snapshot — so the panel could disagree with reality.
 
@@ -186,6 +182,8 @@ No new dependencies, `plan.ts` / `runtime.ts` untouched; rollback is documented 
 | D4 | the same failure reported at 100% or 0% | two code paths disagreed on blocked progress |
 
 The fix removes the cached snapshot: every number is derived at serialisation time by one function, guarded by 7 invariants and mutation tests. Full report: [docs/fix-report-derived-counts-1.4.3.md](docs/fix-report-derived-counts-1.4.3.md).
+
+</details>
 
 ## FAQ
 

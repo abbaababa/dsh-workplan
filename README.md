@@ -1,42 +1,37 @@
-# 任务进度（dsh-workplan）
+# dsh-workplan
+
+> **两个卖点，一句话：安全证据按 ISO/IEC 15408:2026（CC）公开、自己就能验；安装只要一条命令、零第三方运行时依赖。**
 
 [![verify](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml/badge.svg)](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml)
 
-**English (US) — plain-language guide:** [README.en.md](README.en.md)
+给 **DeepSeek Harness（DSH）** 加一段「先拆计划 → 真派部门子 Agent 去做 → 左侧栏实时看进度」的能力。不装 App、不改 DSH 源码、不换页面。
 
-> 给 **DeepSeek Harness（DSH）** 加一个「先拆任务、再真的派人去做、最后让你一眼看懂进度」的能力。
->
-> **不用装 App，不改 DSH 源码，不替换页面。** 装上以后多三样东西：对话里的计划、真的部门子 Agent、左侧栏一个「任务进度」面板。
+- 对话里先出【任务分解】：阶段、子任务、部门、验收标准，一样不缺
+- 最多 5 个真实子 Agent 并行执行，结果写回会话
+- 左侧栏「任务进度」：谁在做、做到哪、哪件卡住了
+
+**English (US) — plain-language guide:** [README.en.md](README.en.md)
 
 ---
 
-## 🌍 国际安全标准：我们公开了完整证据链，也公开了边界
+## 为什么敢拿 ISO/IEC 15408 当卖点，又不算吹牛
 
-**你可能在别的插件介绍里见过「通过 ISO/IEC 15408 / Common Criteria 认证」。这句话在开源小工具上基本都是假的，因为 CC 的规矩不允许。**
+**CC（Common Criteria，ISO/IEC 15408）的规矩是三方分工：开发者交材料 → 独立实验室评测 → 国家机构发证。软件不能给自己发证。** 所以「本插件已通过 CC 认证」这句话，没有证书编号就是假的——这种话我们不说。
 
-先说人话版：
+我们做的是能自己做的那一半：**按 2026 版（不是 2022 版）标准的结构，把材料真做出来、公开出来，任何人都能自己核对。**
 
-- **ISO/IEC 15408**（简称 **CC**，通用准则）是一份国际标准，专门回答一个问题：*"一个软件在安全上到底能做到什么，凭什么让人信？"* 最新版是 **2026 年版**（不是 2022 版）。
-- CC 的规矩是三方分工：**写代码的人交材料 → 独立实验室去测 → 国家认证机构发证书**。证书由第三方签发，**软件自己不能给自己发**。
-- 所以任何"我这个插件完全满足 ISO/IEC 15408"的说法，只要没给出**证书编号**，就是不实陈述。本插件没有证书，我们**不会**这么写。
-
-那我们做了什么？**把 CC 要求的那套材料，按标准结构真做出来、公开出来、让任何人不信任我们也能自己核对。**
-
-| 我们公开的 | 对应标准里的东西 | 在哪儿看 |
+| 我们公开的 | 对应标准 | 在哪儿 |
 |---|---|---|
-| 这个插件保护什么、防谁、边界在哪 | 安全目标（ST） | [docs/cc/SECURITY-TARGET.md](docs/cc/SECURITY-TARGET.md) |
+| 保护什么、防谁、边界在哪 | 安全目标（ST） | [docs/cc/SECURITY-TARGET.md](docs/cc/SECURITY-TARGET.md) |
 | 攻击面、7 条威胁、对策、残留风险 | 脆弱性评定（AVA） | [docs/cc/AVA-VULNERABILITY-ANALYSIS.md](docs/cc/AVA-VULNERABILITY-ANALYSIS.md) |
-| 逐类对照 + EAL1 就绪度 + 还缺什么 | 符合性自评估 | [docs/cc/CC-2026-ASSESSMENT.md](docs/cc/CC-2026-ASSESSMENT.md) |
-| 用了哪些别人的代码、许可证、哈希 | 生命周期（ALC） | [docs/SBOM.md](docs/SBOM.md) |
+| 逐类对照 + EAL1 就绪度 + 还缺什么 | 自评估 | [docs/cc/CC-2026-ASSESSMENT.md](docs/cc/CC-2026-ASSESSMENT.md) |
+| 第三方组件、许可证、哈希 | 生命周期（ALC） | [docs/SBOM.md](docs/SBOM.md) |
 | 漏洞怎么报、多久回、部署怎么配 | 安全策略 | [SECURITY.md](SECURITY.md) |
 | 188 项自动化测试，一条命令复跑 | 测试（ATE） | `npm run verify` |
 
-**结论就三句**：
-1. 工程实践上，材料已接近 CC 最低等级 **EAL1** 的要求（14 项组件里 10 项已就绪、3 项部分具备、1 项**完全**必须靠外部实验室）；
-2. 认证本身要花外部实验室的钱和时间，**不是改代码能解决的**，所以我们不吹；
-3. 我们吹的是**能被任何人 5 条命令验证的事实**——这比一句"已通过认证"值钱得多。
+现状：CC 最低等级 **EAL1** 的 14 项组件里，**10 项就绪、3 项部分具备、1 项只能靠外部实验室**。差的不是代码，是认证要花的实验室费用与排期——所以我们只卖证据，不冒充分证。
 
-自己验证（复制即用）：
+自己验，3 行，复制即用：
 
 ```bash
 git clone https://github.com/abbaababa/dsh-workplan.git && cd dsh-workplan
@@ -44,13 +39,9 @@ npm ci && npm run verify                                  # 期望：tests 188 /
 grep -RInE "child_process|execSync|eval\(|writeFileSync" src || echo "0 命中（预期）"
 ```
 
-> 一句话记住：**"有证书"是第三方给的，"有证据"是自己挣的。我们给你后者，并且不冒充前者。**
+> 一句话记住：**有证书是第三方给的，有证据是自己挣的。**
 >
-> **自我更正记录**：v1.8.1 更正了 v1.8.0 里三处"文档写得比代码多"的地方（图表路由其实不鉴权、
-> 自测并未覆盖鉴权/截断分支、EAL1 矩阵把一个自相矛盾的组件判成就绪）。更正过程与原因记在
-> [CHANGELOG](CHANGELOG.md) 与 [自评估报告 §6.1](docs/cc/CC-2026-ASSESSMENT.md)。**我们连自己说错的话都会写出来。**
-
----
+> **自我更正记录**：v1.8.1 公开更正了 v1.8.0 里三处「文档写得比代码多」的地方（图表路由其实不鉴权、自测并未覆盖鉴权与截断分支、EAL1 矩阵把一个自相矛盾的组件判成就绪），详情见 [CHANGELOG](CHANGELOG.md) 与 [自评估 §6.1](docs/cc/CC-2026-ASSESSMENT.md)。
 
 ## 它到底做了什么（用大白话讲）
 
@@ -75,7 +66,7 @@ grep -RInE "child_process|execSync|eval\(|writeFileSync" src || echo "0 命中�
 ## 一键安装
 
 ```bash
-dsh plugin --profile web add dsh-workplan@1.8.1
+dsh plugin --profile web add dsh-workplan@1.8.2
 ```
 
 装完**重启一次 DSH Web**（或重新载入当前页面）让插件生效。
@@ -163,7 +154,8 @@ grep -RInE "writeFileSync|child_process|eval\(" src   # 应无命中
 npm audit --omit=dev
 ```
 
-## 1.5.0 改了什么（进度一眼可见）
+<details>
+<summary><b>1.5.0 改了什么（进度一眼可见）</b>（点开看）</summary>
 
 1.5.0 只改展示层：把计划卡折叠态那行「本计划 0/8 做好了 + 一根 54×5px 的小条」换成图表组合。
 
@@ -180,7 +172,10 @@ npm audit --omit=dev
 
 没有新增依赖，`plan.ts` / `runtime.ts` 无改动；回滚方式见 [CHANGELOG.md](CHANGELOG.md)。
 
-## 1.4.3 修了什么（为什么值得升级）
+</details>
+
+<details>
+<summary><b>1.4.3 修了什么（为什么值得升级）</b>（点开看）</summary>
 
 1.4.3 是一次**计数一致性**修复：插件曾同时维护「实时任务状态」和「缓存的统计快照」两份真相，导致面板数字和实际状态对不上（截图里「0 个正在做」但下面有任务正在做，就是它）。
 
@@ -192,6 +187,8 @@ npm audit --omit=dev
 | D4 | 同一类失败，进度有时 100 有时 0 | 两处代码对「卡住」的进度语义不一致 |
 
 修法是**删掉缓存快照，只保留一份状态源**：所有数字在序列化时由同一函数现场派生，并配了 7 条不变量 + 变异测试防止回退。完整报告：[docs/fix-report-derived-counts-1.4.3.md](docs/fix-report-derived-counts-1.4.3.md)。
+
+</details>
 
 ## 常见问题
 
