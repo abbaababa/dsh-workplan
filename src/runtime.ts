@@ -13,6 +13,8 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { existsSync } from 'node:fs'
+import { isAbsolute, resolve } from 'node:path'
 
 import {
   MAX_CONCURRENT,
@@ -48,6 +50,10 @@ import {
   truncate,
   validatePlan,
   applyResultStatuses,
+  adjudicateResult,
+  MAX_CONVERSATION_CHARS,
+  parseUpdateMessage,
+  buildUpdateMessage,
 } from './plan.js'
 import { createProgressWatchdog, describeError } from './watchdog.js'
 
@@ -121,7 +127,7 @@ function taskTextFromMessages(messages: any) {
  * it to both the planner and every child. Plugin-generated plan/result rows are
  * excluded to avoid feeding the plan back into itself.
  */
-function recentConversation(session: any, maxChars = 7000) {
+function recentConversation(session: any, maxChars = MAX_CONVERSATION_CHARS) {
   if (!session || typeof session.eventAt !== 'function') return ''
   const parts: string[] = []
   let seq = typeof session.seq === 'number' ? session.seq - 1 : -1
@@ -203,7 +209,7 @@ async function collectStream(stream: any) {
 }
 
 async function runPlanner(ctx: any, options: any) {
-  const { taskText, cwd, sessionId, modelSelection, signal, conversationContext = '' } = options
+  const { taskText, cwd, sessionId, modelSelection, signal, conversationContext = '', budget = {} } = options
   let lastErrors: string[] = []
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     if (signal.aborted) throw abortError()
@@ -214,7 +220,7 @@ async function runPlanner(ctx: any, options: any) {
       controller.abort(new PlanError('规划器超时', 'PLANNER_TIMEOUT'))
     }, PLANNER_TIMEOUT_MS)
     try {
-      let prompt = buildPlannerPrompt(taskText, cwd, conversationContext)
+      let prompt = buildPlannerPrompt(taskText, cwd, conversationContext, budget)
       if (lastErrors.length > 0) {
         prompt += [
           '',
@@ -362,7 +368,7 @@ export function normaliseIdleTimeout(value: any) {
  */
 function writeSubtaskStatus(record: any, subtaskId: any, patch: any, guard: SubtaskGuard) {
   if (guard.timedOut) return false
-  record.statuses = applyStatus(record.statuses, subtaskId, patch)
+  record.statuses = applyStatus(record.statuses, subtaskId, { updatedBy: 'child', ...patch })
   record.updatedAt = Date.now()
   return true
 }
@@ -372,9 +378,101 @@ function recordSubtaskError(record: any, subtaskId: any, message: any, guard: Su
   record.errors = [...record.errors, `${subtaskId}: ${truncate(message, 500)}`].slice(-20)
 }
 
+/**
+ * Resolve one artifact reference against the round's working directory.
+ *
+ * Relative refs are what a child is asked to report, so they must be resolved
+ * the same way for every check; an empty ref is never "present".
+ */
+function resolveArtifactPath(ref: any, cwd: any) {
+  const text = typeof ref === 'string' ? ref.trim() : ''
+  if (!text) return ''
+  if (isAbsolute(text)) return text
+  const base = typeof cwd === 'string' && cwd ? cwd : process.cwd()
+  return resolve(base, text)
+}
+
+/**
+ * [1.7.0] Check the files a child declared.
+ *
+ * Only `kind:'file'` is verifiable here. A url or a note is taken at face
+ * value; pretending to verify them would be worse than not checking at all.
+ * The verdict is recorded rather than enforced: a missing file makes the
+ * dependency gate fail, but it does not silently rewrite "done" to "blocked".
+ */
+export function checkArtifacts(artifacts: any, cwd: any, artifactExists: any = existsSync) {
+  const list = Array.isArray(artifacts) ? artifacts : []
+  const missingArtifacts: string[] = []
+  const checked = list.map((item: any) => {
+    if (!isRecord(item) || item.kind !== 'file') return item
+    const target = resolveArtifactPath(item.ref, cwd)
+    let exists = false
+    try {
+      exists = target ? artifactExists(target) === true : false
+    } catch {
+      exists = false
+    }
+    if (!exists) missingArtifacts.push(String(item.ref))
+    return { ...item, exists }
+  })
+  return { artifacts: checked, missingArtifacts }
+}
+
+/**
+ * Turn one child output into a status verdict.
+ *
+ * The decision lives in `adjudicateResult` (a pure function) so the runtime and
+ * the session replay cannot disagree. This wrapper only adds the two things
+ * that need the environment: the strict/legacy switch and the file check.
+ */
+function settleFromOutput(record: any, subtask: any, output: any, guard: SubtaskGuard, options: any) {
+  const verdict = adjudicateResult({ output, strict: options.strictEvidence !== false })
+  const checked = checkArtifacts(verdict.artifacts, options.cwd, options.artifactExists)
+  writeSubtaskStatus(record, subtask.id, {
+    status: verdict.status,
+    progress: 100,
+    finishedAt: Date.now(),
+    summary: truncate(output, 3000),
+    error: verdict.error,
+    verification: verdict.verification,
+    acceptance: verdict.acceptance,
+    artifacts: checked.artifacts.length > 0 ? checked.artifacts : undefined,
+    missingArtifacts: checked.missingArtifacts.length > 0 ? checked.missingArtifacts : undefined,
+    needs: verdict.needs.length > 0 ? verdict.needs : undefined,
+  }, guard)
+  if (verdict.status === 'blocked') {
+    recordSubtaskError(record, subtask.id, verdict.error ?? '未完成', guard)
+  } else if (checked.missingArtifacts.length > 0) {
+    recordSubtaskError(record, subtask.id, `声明产物缺失：${checked.missingArtifacts.join('、')}`, guard)
+  }
+  return verdict
+}
+
+/**
+ * Retry policy for one child attempt.
+ *
+ * A wedged child (no event for the whole idle window) is worth one fresh
+ * attempt. A hard ceiling means the budget is gone, and an abort is a decision,
+ * so neither is retried. `CHILD_NOT_COMPLETED` is retried only while there is
+ * more than one idle window left, otherwise the retry itself would just be
+ * killed by the same watchdog.
+ */
+export function shouldRetryAttempt(error: any, attempt: any, remainingMs: any, idleTimeoutMs: any) {
+  if (attempt >= 2) return false
+  const code = error?.code
+  if (code === 'CHILD_TIMEOUT' || code === 'ABORTED' || code === 'TOTAL_TIMEOUT') return false
+  if (/aborted|refusal/i.test(String(error?.message ?? ''))) return false
+  if (code === 'CHILD_STALLED') return true
+  if (code === 'CHILD_NOT_COMPLETED') {
+    return Number(remainingMs) > Number(idleTimeoutMs)
+  }
+  return true
+}
+
 async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, options: any) {
   const { parentSignal, deadline, modelSelection, conversationContext = '', child, guard } = options
   let lastError: any = null
+  let lastFailure: any = null
   try {
     if (!writeSubtaskStatus(record, subtask.id, {
       status: 'in_progress',
@@ -411,6 +509,8 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
                   })),
                 cwd: options.cwd,
                 conversationContext,
+                statuses: record.statuses,
+                previousFailure: attempt > 1 ? lastFailure : null,
               }),
             }],
             parent: options.agent,
@@ -482,50 +582,52 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
           )
         }
         if (!output) throw new PlanError('子 Agent 没有返回文本结果', 'EMPTY_CHILD_OUTPUT')
-        if (/^\s*BLOCKED\s*[:：]/i.test(output)) {
-          writeSubtaskStatus(record, subtask.id, {
-            status: 'blocked',
-            progress: 100,
-            finishedAt: Date.now(),
-            summary: truncate(output, 3000),
-            error: truncate(output.replace(/^\s*BLOCKED\s*[:：]\s*/i, ''), 2000),
-          }, guard)
-          recordSubtaskError(record, subtask.id, output, guard)
-          return
-        }
-        writeSubtaskStatus(record, subtask.id, {
-          status: 'done',
-          progress: 100,
-          finishedAt: Date.now(),
-          summary: truncate(output, 3000),
-          error: null,
-        }, guard)
+        /*
+         * [1.7.0] Evidence decides the verdict.
+         *
+         * The old rule was "not BLOCKED => done", so a child that reported
+         * unverified or failed self-checks was still counted as finished and
+         * the main Agent had nothing to review but prose. `adjudicateResult`
+         * is the single deterministic table; `settleFromOutput` adds the
+         * environment-dependent artifact check.
+         */
+        settleFromOutput(record, subtask, output, guard, options)
         return
       } catch (error: any) {
         lastError = error
         if (guard.timedOut) break
         const isAbort = parentSignal.aborted || child.controller.signal.aborted
+        const idleTimeoutMs = normaliseIdleTimeout(options.idleTimeoutMs)
+        const remaining = deadline - Date.now()
         /*
-         * Two failure kinds, two different correct reactions.
+         * [1.7.0] The retry carries the previous failure with it.
          *
-         * A stalled child is wedged — no event for the whole idle window — so
-         * one fresh attempt can succeed and is worth trying. A hard ceiling
-         * means the budget is gone, so retrying would only burn the plan's
-         * remaining time; it goes straight to blocked.
+         * Retrying with an identical prompt made the child repeat the same
+         * dead end and produced the same error twice. The next attempt now
+         * receives the code, message and attempt number, so it can change
+         * approach — or stop honestly.
          */
-        const stalled = error?.code === 'CHILD_STALLED'
-        if (stalled && attempt < 2 && !isAbort) {
+        lastFailure = {
+          attempt,
+          code: error?.code ?? 'UNKNOWN',
+          message: describeError(error),
+        }
+        const retry = !isAbort && shouldRetryAttempt(error, attempt, remaining, idleTimeoutMs)
+        if (retry) {
           record.errors = [
             ...record.errors,
-            `${subtask.id}: 第 ${attempt} 次执行无进展，已停止并重试`,
+            `${subtask.id}: 第 ${attempt} 次执行失败（${lastFailure.code}），已带上失败原因重试`,
           ].slice(-20)
           writeSubtaskStatus(record, subtask.id, { progress: 15 }, guard)
           continue
         }
-        if (isAbort || attempt >= 2 || error?.code === 'CHILD_NOT_COMPLETED' && /aborted|refusal/i.test(String(error?.message ?? ''))) {
-          break
+        if (!isAbort && remaining <= idleTimeoutMs && error?.code !== 'CHILD_TIMEOUT') {
+          record.errors = [
+            ...record.errors,
+            `${subtask.id}: 剩余预算不足（${Math.max(0, Math.round(remaining / 1000))}s），未重试`,
+          ].slice(-20)
         }
-        writeSubtaskStatus(record, subtask.id, { progress: 15 }, guard)
+        break
       } finally {
         if (activation) {
           await disposeActivation(activation, record, subtask.id, guard)
@@ -652,6 +754,31 @@ async function runWithConcurrency(items: any, limit: any, worker: any) {
  * @param limits - resolved runtime limits (the resume budget comes from here).
  * @returns a user message carrying the `workplan-result` payload.
  */
+/**
+ * The subtask rows a dispatch/status tool returns to the model.
+ *
+ * One definition, because the same plan was described in three slightly
+ * different shapes (dispatch tail, already-running branch, status tool) and the
+ * model could see three different answers in one turn.
+ */
+export function modelStatusLines(statuses: any) {
+  const list = Array.isArray(statuses) ? statuses : []
+  return list.map((item: any) => ({
+    subtaskId: item.subtaskId,
+    title: item.title,
+    department: item.department,
+    status: item.status,
+    progress: item.progress,
+    summary: truncate(item.summary ?? item.error ?? '', 2000),
+    error: item.error ?? null,
+    verification: item.verification ?? null,
+    revision: Number(item.revision ?? 0),
+    updatedBy: item.updatedBy ?? null,
+    missingArtifacts: Array.isArray(item.missingArtifacts) ? item.missingArtifacts : [],
+    needs: Array.isArray(item.needs) ? item.needs : [],
+  }))
+}
+
 export function buildRoundResult(record: any, sessionId: any, limits: any) {
   const { statuses, stats } = derivePlanSnapshot(record.statuses)
   return buildResultMessage({
@@ -725,7 +852,18 @@ export async function dispatchPlan(ctx: any, record: any, options: any) {
       if (guard > 200) throw new PlanError('调度次数异常', 'DISPATCH_LOOP')
       if (parentSignal.aborted) throw abortError()
       if (Date.now() >= deadline) throw new PlanError('总执行超时', 'TOTAL_TIMEOUT')
-      const ready = readySubtasks(record.plan, record.statuses)
+      /*
+       * [1.7.0] A `done` upstream only unblocks its dependents when the files it
+       * declared actually exist. The check is opt-out (`artifactGate:false`) so
+       * an older plan or a debugging session can keep plain status semantics.
+       */
+      const gate = options.artifactGate !== false
+      const ready = readySubtasks(record.plan, record.statuses, gate
+        ? {
+            dependencyOk: (dependency: any) => dependency?.status === 'done'
+              && !(Array.isArray(dependency?.missingArtifacts) && dependency.missingArtifacts.length > 0),
+          }
+        : {})
       if (ready.length === 0) {
         const pending = record.statuses.filter((item: any) => item.status === 'pending')
         for (const item of pending) {
@@ -752,13 +890,27 @@ export async function dispatchPlan(ctx: any, record: any, options: any) {
           modelSelection,
           cwd,
           conversationContext,
+          strictEvidence: options.strictEvidence,
+          artifactExists: options.artifactExists,
         })
       })
       const blocked = record.statuses
         .filter((item: any) => item.status === 'blocked')
         .map((item: any) => item.subtaskId)
       for (const id of blocked) {
-        record.statuses = markDependentsBlocked(record.plan, record.statuses, id)
+        /*
+         * Carry the actual cause downstream. The main Agent used to receive
+         * "上游子任务受阻: T2" with no reason and no missing artifacts, so it
+         * had to re-read the whole plan to guess what to repair.
+         */
+        const upstream = record.statuses.find((item: any) => item.subtaskId === id)
+        const cause = upstream
+          ? {
+              reason: upstream.error,
+              missingArtifacts: Array.isArray(upstream.missingArtifacts) ? upstream.missingArtifacts : [],
+            }
+          : null
+        record.statuses = markDependentsBlocked(record.plan, record.statuses, id, cause)
       }
       /*
        * No stats refresh here any more: `serialisePlan` derives the counts from
@@ -1093,6 +1245,29 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
         resultPhase = typeof result.phase === 'string' ? result.phase : ''
         resultSeen = true
       }
+      /*
+       * [1.7.0] Manual re-adjudications replay in order.
+       *
+       * `dsh_workplan_update` used to live only in the live cache, so a refresh
+       * reverted the dashboard to the child's original verdict. The durable
+       * `workplan-update` message is small and append-only, so replay is just
+       * "apply it when its turn comes"; a lower revision never overwrites a
+       * newer one (see `applyResultStatuses`).
+       */
+      const update = parseUpdateMessage(event.data)
+      if (update && plan && update.planId === plan.planId && typeof update.subtaskId === 'string') {
+        try {
+          statuses = applyStatus(statuses, update.subtaskId, {
+            status: update.status,
+            progress: typeof update.progress === 'number' ? update.progress : undefined,
+            summary: typeof update.note === 'string' ? update.note : undefined,
+            revision: Number.isInteger(update.revision) ? update.revision : undefined,
+            updatedBy: 'agent',
+          })
+        } catch {
+          // An invalid historical update is ignored; the rest still replays.
+        }
+      }
       const cancel = parseCancelMessage(event.data)
       if (cancel && plan && cancel.planId === plan.planId) {
         cancelled = true
@@ -1285,7 +1460,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     }
     if (downstream?.kind !== 'enter') return downstream
     try {
-      return await maybePlan(ctx, state, payload, downstream, options)
+      return await maybePlan(ctx, state, payload, downstream, { ...options, limits })
     } catch (error) {
       try {
         const session = payload.agent?.session
@@ -1340,14 +1515,77 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       ? args.evidence.filter((item: any) => typeof item === 'string').join('；')
       : ''
     const summary = [note, evidence].filter(Boolean).join('｜')
+    const current = record.statuses.find((item: any) => item.subtaskId === subtaskId)
+    /*
+     * [1.7.0] Two write guards, both non-throwing.
+     *
+     * 1. A stale revision means the caller is looking at an older snapshot; the
+     *    write is refused instead of silently overwriting newer evidence.
+     * 2. While the plan is running, the child owns the status of the subtask it
+     *    is executing. An agent edit would race the child's settlement (and the
+     *    child would overwrite it back). `force:true` is the explicit override,
+     *    recorded as a manual re-adjudication.
+     */
+    if (Number.isInteger(args?.expectedRevision) && (current?.revision ?? 0) !== args.expectedRevision) {
+      return {
+        ok: false,
+        code: 'STALE_WRITE',
+        planId: record.plan.planId,
+        subtaskId,
+        current: {
+          status: current?.status ?? null,
+          revision: current?.revision ?? 0,
+          updatedBy: current?.updatedBy ?? null,
+        },
+        hint: `该子任务已被更新（当前 revision ${current?.revision ?? 0}，你基于 ${args.expectedRevision}）；请重新读取状态后再改。`,
+      }
+    }
+    const running = Boolean(record.dispatchPromise)
+    const writeWhileRunning = running && !args?.force && (current?.status === 'pending' || current?.status === 'in_progress')
+    if (writeWhileRunning) {
+      return {
+        ok: false,
+        code: 'TASK_RUNNING',
+        planId: record.plan.planId,
+        subtaskId,
+        current: {
+          status: current?.status ?? null,
+          revision: current?.revision ?? 0,
+          updatedBy: current?.updatedBy ?? null,
+        },
+        hint: '该子任务正在执行；请等待本轮结束，或传 force:true 覆盖（会被记录为人工改判）。',
+      }
+    }
+    const revision = Number(current?.revision ?? 0) + 1
     record.statuses = applyStatus(record.statuses, subtaskId, {
       status,
       progress: typeof args?.progress === 'number' ? args.progress : undefined,
       summary: summary || undefined,
       error: status === 'blocked' ? (summary || '由主 Agent 标记为受阻') : undefined,
+      revision,
+      updatedBy: 'agent',
     })
     if (status === 'blocked') {
-      record.statuses = markDependentsBlocked(record.plan, record.statuses, subtaskId)
+      record.statuses = markDependentsBlocked(record.plan, record.statuses, subtaskId, { reason: summary || '主 Agent 标记受阻' })
+    }
+    /*
+     * [1.7.0] A re-adjudication is durable.
+     *
+     * `applyStatus` only touched the in-memory record, so after a refresh the
+     * manual verdict vanished and the dashboard fell back to the old child
+     * result. Appending one small message keeps the replay path honest.
+     */
+    try {
+      session.append('user/message', buildUpdateMessage({
+        planId: record.plan.planId,
+        subtaskId,
+        status,
+        progress: typeof args?.progress === 'number' ? args.progress : undefined,
+        note: summary || undefined,
+        revision,
+      }), { surfaceOp: 'append' })
+    } catch (error) {
+      pushRecordError(record, error)
     }
     /*
      * [1.5.2] 这里曾是「100% + 正在收尾」的直接入口。
@@ -1361,11 +1599,14 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     record.phase = reconcilePhase(record.phase, record.statuses)
     record.updatedAt = Date.now()
     const snapshot = derivePlanSnapshot(record.statuses)
+    const written = snapshot.statuses.find((item: any) => item.subtaskId === subtaskId)
     return {
       ok: true,
       planId: record.plan.planId,
       subtaskId,
-      status: snapshot.statuses.find((item: any) => item.subtaskId === subtaskId)?.status ?? status,
+      status: written?.status ?? status,
+      revision: written?.revision ?? revision,
+      updatedBy: written?.updatedBy ?? 'agent',
       stats: snapshot.stats,
     }
   }
@@ -1450,6 +1691,91 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     }
   }
 
+  /**
+   * Persist the round result and settle the phase.
+   *
+   * Extracted from the wait path so an async dispatch reaches exactly the same
+   * end state: a durable result message plus a reconciled phase. Anything less
+   * would make "start now, read later" a second, divergent code path.
+   */
+  function finishRound(record: any, session: any) {
+    if (!record.resultWritten) {
+      const resultMessage = buildRoundResult(record, session.id, limits)
+      try {
+        session.append('user/message', resultMessage, { surfaceOp: 'append' })
+        record.resultWritten = true
+      } catch (error) {
+        ctx.logger?.warn?.(`dsh-workplan: 写入结果消息失败：${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    /*
+     * [1.5.2] 终态不再依赖「结果消息写成功」这个副作用。
+     *
+     * 旧代码只有 `record.resultWritten === true` 时才把 phase 升成 done，
+     * 于是 session.append 抛错（或该轮根本没有派发）就会永久停在 integrating。
+     * 完成语义由 statuses 决定；结果消息只负责持久化，不负责定义完成。
+     */
+    record.phase = reconcilePhase(record.phase, record.statuses)
+    return record
+  }
+
+  function dispatchSnapshotOf(record: any, extra: any = {}) {
+    const snapshot = derivePlanSnapshot(record.statuses)
+    return {
+      ok: true,
+      planId: record.plan.planId,
+      alreadyRunning: false,
+      ...extra,
+      phase: record.phase,
+      stats: snapshot.stats,
+      statuses: modelStatusLines(snapshot.statuses),
+    }
+  }
+
+  /**
+   * Read-only progress probe for the main Agent.
+   *
+   * With async dispatch the model no longer blocks until the round ends, so it
+   * needs a supported way to answer "做成什么样了" without guessing. This is the
+   * only source it should read: same `derivePlanSnapshot` as the dashboard and
+   * the result message, so all three cannot disagree.
+   */
+  async function statusTool(agent: any, args: any) {
+    const session = agent?.session
+    if (!session) throw new PlanError('只能在会话内查看计划', 'NO_SESSION')
+    const requestedPlanId = typeof args?.planId === 'string' ? args.planId : undefined
+    let record = state.records.get(session.id)
+    if (!record?.plan || (requestedPlanId && record.plan.planId !== requestedPlanId)) {
+      const rebuilt = reconstructFromSession(session, requestedPlanId)
+      if (rebuilt?.plan) record = rebuilt
+    }
+    if (!record?.plan) {
+      return {
+        ok: false,
+        code: 'NO_PLAN',
+        running: false,
+        error: '当前会话没有可查看的计划',
+        hint: '先让本轮生成计划并调用 dsh_workplan_dispatch。',
+      }
+    }
+    const running = Boolean(record.dispatchPromise)
+    const snapshot = derivePlanSnapshot(record.statuses)
+    return {
+      ok: true,
+      planId: record.plan.planId,
+      running,
+      phase: record.phase,
+      elapsedMs: record.dispatchStartedAt ? Date.now() - record.dispatchStartedAt : null,
+      stats: snapshot.stats,
+      statuses: modelStatusLines(snapshot.statuses),
+      errors: (record.errors ?? []).slice(-10),
+      resumeLimit: Number(record.resumeLimit ?? limits.maxResumes),
+      ...(running
+        ? { hint: '计划仍在执行：先向用户报告进度，不要声称完成；等结果消息出现后再逐项核对证据。' }
+        : { hint: '当前没有正在执行的派发。若仍有 pending/blocked，可再次调用 dsh_workplan_dispatch 续跑。' }),
+    }
+  }
+
   async function dispatchTool(agent: any, args: any, signal: any) {
     const session = agent?.session
     if (!session) throw new PlanError('只能在会话内派发计划', 'NO_SESSION')
@@ -1491,6 +1817,35 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     if (args?.planId && record.plan.planId !== args.planId) {
       throw new PlanError('planId 与当前计划不匹配', 'PLAN_ID_MISMATCH')
     }
+    /*
+     * [1.7.0] Two dispatch modes.
+     *
+     * `wait` (default, backward compatible) blocks until the round ends.
+     * `async` starts the round and returns immediately, so the main Agent can
+     * answer the user and keep integrating instead of sitting blind inside a
+     * tool call for twenty minutes (the top-ranked collaboration break C1).
+     */
+    const mode = args?.mode === 'async' ? 'async' : 'wait'
+    if (mode === 'wait' && record.dispatchPromise) {
+      /*
+       * A wait caller that meets an in-flight round joins it instead of being
+       * told "already running" — the old answer carried no results at all, so
+       * a model that missed the async result message had nothing to integrate.
+       * A wedged promise keeps the old stale escape hatch (see below).
+       */
+      const startedAt = Number(record.dispatchStartedAt ?? 0)
+      const staleAfter = limits.totalTimeoutMs + 120000
+      if (!(startedAt > 0 && Date.now() - startedAt > staleAfter)) {
+        try {
+          await record.dispatchPromise
+        } catch (error) {
+          pushRecordError(record, error)
+        }
+        finishRound(record, session)
+        state.records.set(session.id, record)
+        return dispatchSnapshotOf(record, { joined: true })
+      }
+    }
     if (record.dispatchPromise) {
       /*
        * "Already running" must not become a permanent answer.
@@ -1517,7 +1872,25 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
           hint: '请主 Agent 直接接手完成剩余子任务，不要再次派发；并在答复中说明本次是直接执行而非派发。',
         }
       }
-      return { ok: true, planId: record.plan.planId, alreadyRunning: true, phase: record.phase, startedAt: startedAt || null }
+      /*
+       * [1.7.0] The idempotent answer now carries the progress itself.
+       *
+       * It used to say only `alreadyRunning: true`, so a second dispatch gave
+       * the model strictly less information than doing nothing.
+       */
+      const live = derivePlanSnapshot(record.statuses)
+      return {
+        ok: true,
+        planId: record.plan.planId,
+        alreadyRunning: true,
+        running: true,
+        phase: record.phase,
+        startedAt: startedAt || null,
+        elapsedMs: startedAt ? Date.now() - startedAt : null,
+        stats: live.stats,
+        statuses: modelStatusLines(live.statuses),
+        hint: '计划仍在执行：先向用户报告进度，不要声称完成；用 dsh_workplan_status 查看实时状态。',
+      }
     }
     /*
      * Refuse with an explanation instead of silently "succeeding".
@@ -1576,46 +1949,47 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       record.abortDispatch = null
       signal?.removeEventListener?.('abort', onToolAbort)
     })
-    await record.dispatchPromise
-    if (!record.resultWritten) {
-      const resultMessage = buildRoundResult(record, session.id, limits)
-      try {
-        session.append('user/message', resultMessage, { surfaceOp: 'append' })
-        record.resultWritten = true
-      } catch (error) {
-        ctx.logger?.warn?.(`dsh-workplan: 写入结果消息失败：${error instanceof Error ? error.message : String(error)}`)
+    if (mode === 'async') {
+      /*
+       * Settlement happens in the background: the same durable result message
+       * is appended when the round ends, so a page refresh (or a later turn)
+       * still sees the outcome. The returned values are a *starting* snapshot,
+       * never a completion claim.
+       */
+      const startedAt = record.dispatchStartedAt
+      record.dispatchPromise
+        .then(() => {
+          finishRound(record, session)
+          state.records.set(session.id, record)
+        })
+        .catch((error: any) => {
+          pushRecordError(record, error)
+          finishRound(record, session)
+          state.records.set(session.id, record)
+        })
+      const live = derivePlanSnapshot(record.statuses)
+      return {
+        ok: true,
+        planId: record.plan.planId,
+        mode: 'async',
+        running: true,
+        alreadyRunning: false,
+        phase: record.phase,
+        startedAt,
+        stats: live.stats,
+        statuses: modelStatusLines(live.statuses),
+        hint: '计划已开跑，尚未完成：先向用户说明“已派发、正在执行”，不要声称完成；'
+          + '结果消息会在本轮结束时自动出现，期间可用 dsh_workplan_status 查看进度。',
       }
     }
-    /*
-     * [1.5.2] 终态不再依赖「结果消息写成功」这个副作用。
-     *
-     * 旧代码只有 `record.resultWritten === true` 时才把 phase 升成 done，
-     * 于是 session.append 抛错（或该轮根本没有派发）就会永久停在 integrating。
-     * 完成语义由 statuses 决定；结果消息只负责持久化，不负责定义完成。
-     */
-    record.phase = reconcilePhase(record.phase, record.statuses)
+    await record.dispatchPromise
+    finishRound(record, session)
     /*
      * The model's dispatch result reports the same snapshot the dashboard will
      * show. It used to send `record.stats` while the status list below was read
      * fresh, so one reply could say “已完成 11” next to twelve finished rows.
      */
-    const snapshot = derivePlanSnapshot(record.statuses)
-    return {
-      ok: true,
-      planId: record.plan.planId,
-      alreadyRunning: false,
-      phase: record.phase,
-      stats: snapshot.stats,
-      statuses: snapshot.statuses.map((item: any) => ({
-        subtaskId: item.subtaskId,
-        title: item.title,
-        department: item.department,
-        status: item.status,
-        progress: item.progress,
-        summary: truncate(item.summary ?? item.error ?? '', 2000),
-        error: item.error ?? null,
-      })),
-    }
+    return dispatchSnapshotOf(record)
   }
 
   function plansPayload(sessionId: any) {
@@ -1694,6 +2068,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     updateStatus,
     cancelPlan,
     dispatchTool,
+    statusTool,
     plansPayload,
     route,
     dispose,
@@ -1799,6 +2174,18 @@ async function maybePlan(ctx: any, state: any, payload: any, downstream: any, op
       modelSelection,
       signal: payload.signal,
       conversationContext,
+      /*
+       * Hand the real limits to the planner. Without them it had no idea the
+       * round budget was 20 minutes and happily planned 15 heavy subtasks,
+       * which then died at the budget wall. The prompt now states the budget
+       * and asks for `estimateMinutes` on every subtask.
+       */
+      budget: {
+        totalMinutes: Math.max(1, Math.round(Number(options?.limits?.totalTimeoutMs ?? TOTAL_TIMEOUT_MS) / 60000)),
+        childMinutes: Math.max(1, Math.round(Number(options?.limits?.childTimeoutMs ?? CHILD_TIMEOUT_MS) / 60000)),
+        concurrency: MAX_CONCURRENT,
+        maxResumes: Number(options?.limits?.maxResumes ?? MAX_PLAN_RESUMES),
+      },
     })
   } catch (error) {
     if (payload.signal.aborted) return downstream
@@ -1859,7 +2246,10 @@ async function maybePlan(ctx: any, state: any, payload: any, downstream: any, op
    * tool appends the durable result after the children finish, and tools.guard
    * stops the main Agent from doing other work before dispatching.
    */
-  const planMessage = buildPlanMessage(fullPlan)
+  const planMessage = buildPlanMessage(fullPlan, {
+    totalBudgetMinutes: Math.max(1, Math.round(Number(options?.limits?.totalTimeoutMs ?? TOTAL_TIMEOUT_MS) / 60000)),
+    maxResumes: Number(options?.limits?.maxResumes ?? MAX_PLAN_RESUMES),
+  })
   if (!planMode) return enterDecision(downstream, [planMessage])
   /*
    * Plan mode is a planning-only collaboration state: the plugin must still
@@ -1909,6 +2299,28 @@ export function updateToolOutputSchema() {
   }
 }
 
+export function statusToolOutputSchema() {
+  return {
+    type: 'object',
+    properties: {
+      ok: { type: 'boolean' },
+      planId: { type: 'string' },
+      running: { type: 'boolean' },
+      phase: { type: 'string' },
+      elapsedMs: { type: ['number', 'null'] },
+      stats: { type: 'object' },
+      statuses: { type: 'array' },
+      errors: { type: 'array' },
+      resumeLimit: { type: 'number' },
+      hint: { type: 'string' },
+      error: { type: 'string' },
+      code: { type: 'string' },
+    },
+    required: ['ok'],
+    additionalProperties: true,
+  }
+}
+
 export function dispatchToolOutputSchema() {
   return {
     type: 'object',
@@ -1917,6 +2329,11 @@ export function dispatchToolOutputSchema() {
       planId: { type: 'string' },
       alreadyRunning: { type: 'boolean' },
       stale: { type: 'boolean' },
+      running: { type: 'boolean' },
+      joined: { type: 'boolean' },
+      mode: { type: 'string' },
+      elapsedMs: { type: 'number' },
+      statuses: { type: 'array' },
       phase: { type: 'string' },
       stats: { type: 'object' },
       error: { type: 'string' },

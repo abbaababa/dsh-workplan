@@ -1,3 +1,60 @@
+## 1.7.0 — 2026-10-30
+
+**「协作契约」版：让主 Agent 与各部门在全程共享同一份事实。**
+
+1.6.0 的协作审查（[docs/review-collaboration-20261030.md](docs/review-collaboration-20261030.md)，17 条断点 C1–C17）
+暴露了同一个根因：**派出去的部门与主 Agent 之间没有可核对的契约**。派发期间主 Agent 全盲；
+子 Agent 交回任何非空文本就算完成；依赖只看状态不看产物；主 Agent 的改判会被子 Agent 的结算覆盖，
+也活不过一次刷新。本版把「谁在做什么、凭什么算做完、改判以谁为准」收敛成代码里唯一的判定表。
+
+### 新增
+
+- **结构化结果契约**（`src/plan.ts#adjudicateResult`、`#parseEvidenceBlock`）：子 Agent 在输出末尾回传
+  `WORKPLAN_EVIDENCE` 块，含 `status` / `blockedReason` / `acceptance[]` / `artifacts[]` / `needs[]`。
+  八种情形写死在 `adjudicateResult`：`blocked` / `partial` → 受阻；任一验收 `fail` → 受阻（`failed`）；
+  全 `pass` → 完成（`structured`）；含 `unverified` → 完成但标 `unverified`；无块但首行 `BLOCKED:` → 旧格式受阻；
+  坏块 → 受阻（`unparsable`）。只有 `structured` 可直接采信，其余在结果消息「验收核对」段逐项列出，交给主 Agent 复核。
+- **异步派发与只读观测**：`dsh_workplan_dispatch` 新增 `mode: "wait" | "async"`（默认 `wait`）。`async` 立即返回
+  `running: true` 与实时状态，本轮结束时仍自动写入 durable 结果消息；新增只读工具 `dsh_workplan_status`，
+  可从会话记录重建计划，刷新或重启后也能回答「做到哪了」。`wait` 遇到进行中的派发会**汇合**（`joined: true`）
+  并返回完整结果，不再只回一个 `alreadyRunning: true`。
+- **写保护**：`dsh_workplan_update` 新增 `expectedRevision` 与 `force`。基于旧快照的写入返回 `STALE_WRITE`；
+  计划执行中改判运行中的子任务返回 `TASK_RUNNING`（`force: true` 才覆盖，并记录为人工改判）。每次写入递增
+  `revision`，人工改判以 durable `workplan-update` 消息落盘，刷新后仍然生效。
+- **产物门禁**：结算时逐个核实子 Agent 声明的 `file` 产物，缺失的记入 `missingArtifacts`；依赖它的下游不解锁，
+  受阻文案点名上游 `T1「标题」`、原因与缺失文件。可用 `artifactGate: false` 关闭（排障/旧计划回放）。
+- **跨部门 brief 与 needs 转达**：子 Agent 提示词带上「兄弟部门进展」（谁、做什么、产出什么、已完成摘要），
+  并明确「需要协作请写进 needs，由主 Agent 转达」；结果消息新增「跨部门待转达」段，要求逐条处理。
+- **重试回灌**：重试只发生一次且规则确定——硬超时/中止/预算到点不重试，停滞或未完成且剩余时间足够才重试；
+  第二次尝试的提示词带上一次的 `code` 与原因，不再原样重撞同一堵墙。
+- **时间预算预估**：规划器必须为每个子任务写 `estimateMinutes`，计划卡提示本轮预算是否够用。
+
+### 修正
+
+- 子 Agent 输出不再被二次截断：背景由「计划时刻采样并截断到 5000 字」改为派发前 `recentConversation` 的 7000 字，
+  `buildChildPrompt` 直接使用入参。
+- 依赖受阻文案从「依赖未完成或上游受阻」改为带上上游标题、原因与缺失产物。
+- 结构化证据块解析失败不再默认完成，而是显式 `blocked/unparsable`。
+
+### 兼容与迁移
+
+- 旧会话无需迁移：没有结构化块的旧结果按 `legacy` 读作「完成但未验证」，结果消息会提示主 Agent 复核；
+  `strict: false` 保留 1.6.0 的判定，供旧计划回放使用。
+- `update` 原有参数与语义不变，新增参数全部可选。
+- `PLAN_VERSION` 仍为 1；旧计划消息可原样回放。
+
+### 文档
+
+- 新增[协作契约](docs/collaboration.md)（角色、数据契约、状态机、失败恢复、写者所有权）与
+  [部门职责与交接约定](docs/departments.md)；新增 [RELEASING.md](RELEASING.md) 发布清单；
+  更新中英文 README 至 1.7.0 并去掉过期的测试数字硬编码。
+
+### 验收
+
+- `npm test` 179 个用例全绿；新增 7 个测试文件，覆盖证据契约、派发模式、写保护、产物门禁、
+  跨部门 brief、重试回灌与 host 工具 schema；`npm run check` 通过。
+- 原计划的 1.6.1（纯文档修复）已并入本版，不再单独发号。
+
 ## 1.6.0 — 2026-10-29
 
 **「会话终止」收敛版**。用户截图圈出 `session-7129faea-d4bd-4ed5-a081-769496e07ceb`：

@@ -180,6 +180,7 @@ window.__ModuleLoader__.load({
         "overview": "进度总览",
         "statusChart": "状态分布",
         "taskChart": "每个任务的进度",
+        "backToTop": "回到顶部",
         "jumpToTask": "跳转到任务明细",
         "scopeAll": "当前各会话最新计划汇总",
         "scopeThis": "本计划",
@@ -350,6 +351,7 @@ window.__ModuleLoader__.load({
         "overview": "Progress overview",
         "statusChart": "Status mix",
         "taskChart": "Progress by task",
+        "backToTop": "Back to top",
         "jumpToTask": "Jump to task details",
         "scopeAll": "Latest plan per live session",
         "scopeThis": "This plan",
@@ -536,6 +538,35 @@ window.__ModuleLoader__.load({
 }
 .dsh-wp-button:hover { background: var(--dsw-alias-bg-layer-2); }
 .dsh-wp-button:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 2px; }
+/* [T4] 回到顶部：sticky 的包含块与粘附视口就是 .dsh-wp 的 padding box，
+   钉住的是面板可视区右下角。禁止 fixed（钉到浏览器视口）与 absolute
+   （随内容滚走）。始终挂载、用 visibility 藏显，避免显隐改变 scrollHeight。 */
+.dsh-wp-backtop {
+  position: sticky;
+  bottom: 16px;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  margin: 12px 0 0 auto;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--dsw-alias-border-l1);
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  touch-action: manipulation;
+  visibility: hidden;
+  box-shadow: 0 2px 8px rgba(15,23,42,.18);
+}
+.dsh-wp-backtop[data-visible="true"], .dsh-wp-backtop:focus-within { visibility: visible; }
+.dsh-wp-backtop:hover { background: var(--dsw-alias-bg-layer-2); }
+.dsh-wp-backtop:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 2px; }
 .dsh-wp-banner {
   border: 1px solid var(--dsw-alias-border-l1);
   background: var(--dsw-alias-bg-layer-1);
@@ -2383,6 +2414,9 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /* [T4] 回到顶部的显示阈值（px）：scrollTop 严格大于该值才显示。 */
+    const BACK_TOP_THRESHOLD = 200
+
     function Dashboard({ t }: any) {
       const { sessions, error, loading, updatedAt, reload } = usePlans()
       const [openSessionId, setOpenSessionId] = useState(null)
@@ -2518,7 +2552,44 @@ window.__ModuleLoader__.load({
           value: planPercent(planCount(session.stats?.done), planCount(session.stats?.total)) ?? 0,
         }
       }), [groups, t])
-      return h('div', { className: 'dsh-wp' },
+      /*
+       * [T4] 回到顶部：用「状态当 ref」拿面板根节点（宿主兼容层不保证 useRef，
+       * 见 GroupCharts 的同一处理），滚动目标只能是 .dsh-wp 这个 overflow 容器。
+       */
+      const [panelEl, setPanelEl] = useState(null)
+      const [showBackTop, setShowBackTop] = useState(false)
+      useEffect(() => {
+        const panel: any = panelEl
+        if (!panel || typeof panel.addEventListener !== 'function') return
+        const onScroll = () => setShowBackTop(Number(panel.scrollTop) > BACK_TOP_THRESHOLD)
+        // 挂载与内容变化时先求一次初值：刷新后停在中间也必须显示按钮。
+        onScroll()
+        panel.addEventListener('scroll', onScroll, { passive: true })
+        return () => panel.removeEventListener('scroll', onScroll)
+      }, [panelEl, activeSessions.length])
+      const backToTop = useCallback((event?: any) => {
+        // 双保险：ref 尚未回填时，从事件目标向上找唯一的滚动容器。
+        let panel: any = panelEl
+        if (!panel && event && event.currentTarget && typeof event.currentTarget.closest === 'function') {
+          panel = event.currentTarget.closest('.dsh-wp')
+        }
+        if (!panel) return
+        const reduced = typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+          && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+        if (typeof panel.scrollTo === 'function') {
+          try {
+            panel.scrollTo({ top: 0, behavior: reduced ? 'auto' : 'smooth' })
+            return
+          } catch (error) {
+            /* 旧宿主不支持带参数的 scrollTo：落到下面的直接赋值。 */
+          }
+        }
+        panel.scrollTop = 0
+      }, [panelEl])
+      return h('div', {
+        className: 'dsh-wp',
+        ref: (node: any) => { if (node !== panelEl) setPanelEl(node) },
+      },
         h('header', { className: 'dsh-wp-header' },
           h('div', null,
             h('h1', { className: 'dsh-wp-title' }, t('title')),
@@ -2542,6 +2613,12 @@ window.__ModuleLoader__.load({
         activeSessions.length === 0
           ? h('div', { className: 'dsh-wp-empty' }, h('div', { style: { fontWeight: 650, marginBottom: '4px' } }, t('empty')), h('div', null, t('emptyHint')))
           : h('div', { className: 'dsh-wp-groups' },
+            // [用户要求] 总览块（完成率环 + 每个任务的进度）上移到分组之前：
+            // 用户要求红圈的「每个任务的进度」必须显示在「进行中」组之上。
+            activeSessions.length > 0 ? h('div', { className: 'dsh-wp-overview' },
+              h(Donut, { totals, t }),
+              h(TaskBars, { sessions: activeSessions, t, onSelect: selectSession }),
+            ) : null,
             /*
              * [1.6.0] 三组顺序：真的在跑 → 已结束（停在半路） → 已完成。
              * 「已结束」夹在中间是有意为之：它是用户最需要立刻知道的那一档
@@ -2552,18 +2629,23 @@ window.__ModuleLoader__.load({
               ? h(SessionGroup, { key: 'ended', group: 'ended', list: groups.ended, hasLive: groups.live.length > 0, urgent: groups.urgentEnded, t, openSessionId, setOpenSessionId })
               : null,
             h(SessionGroup, { key: 'done', group: 'done', list: groups.finished, hasLive: groups.live.length > 0 || groups.ended.length > 0, urgent: 0, t, openSessionId, setOpenSessionId }),
-            // 用户选择 B：总览块（完成率环 + 每个计划的进度条）同样下移到两组之后，
-            // 让开屏第一屏直接是「进行中」组的任务卡（此前统计条 → 总览 → 说明行 →
-            // 任务卡，第一张卡要下滑约一屏）。顶部只保留 5 格数字统计条与一行口径说明。
-            activeSessions.length > 0 ? h('div', { className: 'dsh-wp-overview' },
-              h(Donut, { totals, t }),
-              h(TaskBars, { sessions: activeSessions, t, onSelect: selectSession }),
-            ) : null,
             // 图表放两组之后：两张卡各 ≈246px，排在组前会让首屏看不到任何一张任务卡
             // （设计稿 §8 第 12 条，T8 复核时复现在 1.4.2 源码里）。
             // [1.6.0] 「未结束」= 进行中 + 已结束但未完成：两者都还没做完，都是用户要盯的对象。
             h(GroupCharts, { liveCount: groups.live.length + groups.ended.length, doneCount: groups.finished.length, liveBars, hiddenBars: Math.max(0, groups.live.length + groups.ended.length - 6), t }),
           ),
+        /*
+         * [T4] 始终挂载的回到顶部按钮：作为 .dsh-wp 的最后一个直接子元素，
+         * sticky 在面板滚动视口右下角；显隐只切换 data-visible，不增删节点。
+         */
+        h('button', {
+          type: 'button',
+          className: 'dsh-wp-backtop',
+          'data-visible': showBackTop ? 'true' : 'false',
+          'aria-label': t('backToTop'),
+          title: t('backToTop'),
+          onClick: backToTop,
+        }, h('span', { 'aria-hidden': 'true' }, '↑')),
       )
     }
 

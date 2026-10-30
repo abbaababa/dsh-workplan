@@ -13,6 +13,7 @@ import {
   createWorkplanRuntime,
   dispatchToolOutputSchema,
   plannerOutputSchema,
+  statusToolOutputSchema,
   updateToolOutputSchema,
 } from './runtime.js'
 import { isRecord } from './plan.js'
@@ -35,7 +36,7 @@ export const inject = ['tools', 'systemPrompt', 'llm', 'subagents', 'sessions']
 export const PROMPT_ORDER = 40
 
 const PROMPT_SECTION = [
-  '本会话已启用自动任务分解。系统会在每个新用户任务的第一个模型步骤前生成计划，并先把计划显示在对话里；收到【任务分解】后，必须先调用 dsh_workplan_dispatch，等它返回部门执行结果，再做任何其他工具调用或回答。',
+  '本会话已启用自动任务分解。系统会在每个新用户任务的第一个模型步骤前生成计划，并先把计划显示在对话里；收到【任务分解】后，必须先调用 dsh_workplan_dispatch（默认 wait 等结果；预计较久时用 mode:"async" 先开跑），再做任何其他工具调用或回答。',
   '如果当前是 plan 模式：不要调用 dsh_workplan_dispatch；先把计划展示给用户，等待用户审阅并退出 plan 模式后，再调用 dsh_workplan_dispatch 执行。',
   '纯问候、寒暄、致谢、告别、简单确认（如「你好」「谢谢」「好的」「再见」）不生成计划，也不启动子 Agent；直接自然、简短地回答。只有包含实际目标、问题或交付物的消息才进行分解。',
   '单独的「继续」「接着」「然后呢」「下一步」等没有新增任务内容的追问，不生成计划；由主 Agent 结合会话上下文继续，或先询问用户要延续哪件事。',
@@ -45,8 +46,25 @@ const PROMPT_SECTION = [
   '2. 核对每个完成子任务的证据与验收标准，不合格的要用 dsh_workplan_update 标记为 blocked 或 in_progress；',
   '3. 对受阻项向用户说明，必要时先询问再继续；',
   '4. 不要声称未经验证的完成，不要重复派发已完成的子任务。',
+  '结果消息里每个完成项都带 verification 与 acceptance：`structured` 是子 Agent 逐条自检通过，`unverified` 是自述但未逐条确认，`failed` 是自检失败（已按受阻处理），`legacy` 是旧格式回传。只把 structured 当作可直接采信，其余必须你自己核对产物。',
+  '子 Agent 通过 `needs` 提出的跨部门需求会列在结果消息的「跨部门待转达」里：由你逐条处理（补派、向用户确认或直接完成），不要忽略。',
+  '长任务可以用 `dsh_workplan_dispatch({ mode: "async" })` 先开跑并立即答复用户，再用 `dsh_workplan_status` 查看进度；async 返回的是“已开跑”，不是“已完成”。',
   '如果自动分解降级，先向用户说明失败原因并询问是否重试，在用户确认前不要开始执行任务。',
 ].join('\n')
+
+/**
+ * Seconds a dispatch has been running, from the payload only.
+ *
+ * `elapsedMs` is authoritative; `startedAt` is the fallback for a payload that
+ * carries no elapsed value. Computing this inside the template mixed `??` with
+ * a conditional and could silently print the wrong number.
+ */
+function elapsedSeconds(result: any) {
+  const elapsed = Number(result?.elapsedMs)
+  if (Number.isFinite(elapsed) && elapsed >= 0) return elapsed
+  const startedAt = Number(result?.startedAt)
+  return Number.isFinite(startedAt) && startedAt > 0 ? Date.now() - startedAt : 0
+}
 
 function textContent(text: any) {
   return [{ type: 'text', text }]
@@ -106,6 +124,14 @@ function createUpdateTool(runtime: any) {
           items: { type: 'string' },
           description: '支持该状态的证据（文件、命令输出、验收结果）。',
         },
+        expectedRevision: {
+          type: 'integer',
+          description: '你读取到的 revision。传入后若该子任务已被更新，会返回 STALE_WRITE 而不是覆盖新证据。',
+        },
+        force: {
+          type: 'boolean',
+          description: '计划执行中强行改判（默认拒绝并返回 TASK_RUNNING）。会记录为人工改判。',
+        },
         note: {
           type: 'string',
           description: '补充说明；会显示在任务卡片中。',
@@ -122,7 +148,7 @@ function createUpdateTool(runtime: any) {
         const text = result.ok
           ? `已更新子任务 ${String(result.subtaskId ?? '')}：${String(result.status ?? '')}`
             + `（完成 ${Number(stats.done ?? 0)}/${Number(stats.total ?? 0)}，受阻 ${Number(stats.blocked ?? 0)}）`
-          : `更新失败：${String(result.error ?? '未知错误')}`
+          : `更新失败${result.code ? `（${String(result.code)}）` : ''}：${String(result.error ?? result.hint ?? '未知错误')}`
         return textContent(text)
       },
     },
@@ -184,6 +210,46 @@ function createCancelTool(runtime: any) {
   }
 }
 
+function createStatusTool(runtime: any) {
+  return {
+    name: 'dsh_workplan_status',
+    description:
+      '只读查看当前计划各子任务的实时状态与进度，不启动任何 Agent、不改任何状态。'
+      + '在 async 派发之后、或用户问“做到哪了”时使用；它是进度问题的唯一可信来源。',
+    parameters: {
+      type: 'object',
+      properties: {
+        planId: {
+          type: 'string',
+          description: '计划 ID；省略时使用当前会话最新计划。',
+        },
+      },
+      additionalProperties: false,
+    },
+    output: {
+      schema: statusToolOutputSchema(),
+      render(_args: any, value: any) {
+        const result = isRecord(value) ? value : {}
+        const stats = isRecord(result.stats) ? result.stats : {}
+        if (!result.ok) return textContent(`查询失败：${String(result.error ?? '未知错误')}`)
+        const running = result.running === true
+        return textContent(
+          `计划 ${String(result.planId ?? '')}｜${running ? '执行中' : '未在执行'}` 
+          + `｜阶段：${phaseLabel(result.phase)}`
+          + `｜完成 ${Number(stats.done ?? 0)}/${Number(stats.total ?? 0)}，受阻 ${Number(stats.blocked ?? 0)}`
+          + (running && Number(result.elapsedMs ?? 0) > 0
+            ? `｜已 ${Math.round(Number(result.elapsedMs) / 1000)}s`
+            : ''),
+        )
+      },
+    },
+    async execute(args: any, exec: any) {
+      const parsed = asObject(args) ?? {}
+      return runtime.statusTool(exec.agent, parsed)
+    },
+  }
+}
+
 function createDispatchTool(runtime: any) {
   return {
     name: 'dsh_workplan_dispatch',
@@ -197,6 +263,12 @@ function createDispatchTool(runtime: any) {
           type: 'string',
           description: '计划 ID；省略时使用当前会话最新计划。',
         },
+        mode: {
+          type: 'string',
+          enum: ['wait', 'async'],
+          description: '默认 wait：等本轮结束后返回完整结果。async：立即返回 running，'
+            + '本轮结束时自动写入结果消息；期间用 dsh_workplan_status 查看进度。',
+        },
       },
       additionalProperties: false,
     },
@@ -209,7 +281,10 @@ function createDispatchTool(runtime: any) {
           result.ok
             ? `计划 ${String(result.planId ?? '')} 当前阶段：${phaseLabel(result.phase)}`
               + `（完成 ${Number(stats.done ?? 0)}/${Number(stats.total ?? 0)}，受阻 ${Number(stats.blocked ?? 0)}）`
-              + (result.alreadyRunning ? `｜仍在执行（已 ${Math.round(Number(result.elapsedMs ?? 0) / 1000)}s）` : '')
+              + (result.alreadyRunning || result.mode === 'async'
+                ? `｜已在执行（${Math.round(elapsedSeconds(result) / 1000)}s）`
+                : '')
+              + (result.joined ? '｜已加入进行中的派发并等到结果' : '')
             // The hint carries the recovery instruction (resume, or take the work
             // over directly); showing it in the rendered line keeps it visible
             // even when only the summary is read.
@@ -267,6 +342,7 @@ export function apply(ctx: any, config: WorkplanConfig = {}) {
 
   ctx.effect(() => ctx.tools.register(createUpdateTool(runtime)))
   ctx.effect(() => ctx.tools.register(createCancelTool(runtime)))
+  ctx.effect(() => ctx.tools.register(createStatusTool(runtime)))
   ctx.effect(() => ctx.tools.register(createDispatchTool(runtime)))
 
   /*
@@ -325,9 +401,9 @@ export function apply(ctx: any, config: WorkplanConfig = {}) {
 
 export const meta = {
   name,
-  version: '1.6.0',
+  version: '1.7.0',
   promptOrder: PROMPT_ORDER,
   routes: ['/dsh-workplan/plans', '/dsh-workplan/vendor/chart.umd.js'],
 }
 
-export { PROMPT_SECTION, createCancelTool, createDispatchTool, createUpdateTool, plannerOutputSchema }
+export { PROMPT_SECTION, createCancelTool, createDispatchTool, createStatusTool, createUpdateTool, plannerOutputSchema }

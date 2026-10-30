@@ -33,7 +33,7 @@
 ## 一键安装
 
 ```bash
-dsh plugin --profile web add dsh-workplan@1.4.3
+dsh plugin --profile web add dsh-workplan@1.7.0
 ```
 
 装完**重启一次 DSH Web**（或重新载入当前页面）让插件生效。
@@ -64,15 +64,27 @@ dsh plugin --profile web add "$(pwd)"
 
 纯打招呼、道谢、问「做到哪了」不会触发拆解，不会平白多出一堆子 Agent。
 
-## 三个模型工具（你不用直接调用）
+## 四个模型工具（你不用直接调用）
 
 | 工具 | 作用 |
 |---|---|
-| `dsh_workplan_dispatch` | 派发当前计划，等各部门子 Agent 完成，把结果写回会话。重复调用是幂等的。 |
-| `dsh_workplan_update` | 主 Agent 核对结果、修正某个子任务状态与证据。子 Agent 不能调用。 |
+| `dsh_workplan_dispatch` | 派发当前计划，把结果写回会话。默认 `mode:"wait"` 等结束；`mode:"async"` 立刻返回、后台继续。重复调用是幂等的。 |
+| `dsh_workplan_status` | 只读：问到哪了。重启或刷新后也能从会话记录重建。 |
+| `dsh_workplan_update` | 主 Agent 核对结果、修正某个子任务状态与证据。带 `expectedRevision` 防覆盖，运行中默认拒绝（`force:true` 才覆盖）。子 Agent 不能调用。 |
 | `dsh_workplan_cancel` | 取消还没派发的计划，不会伪造任何「已完成」。 |
 
 在 **plan 模式**下只会给你看计划，`dispatch` 会被明确拦下并说明原因，不会偷偷开跑。
+
+## 部门怎么协作（1.7.0 的真实能力）
+
+计划里的每件工作都带一个部门标签（工程研发、研究分析、设计、产品、数据、质量验证、安全、运维、文档写作、运营、法务合规、财务）。**标签决定提示词与统计口径，不是组织架构**：
+
+- 部门之间**不能直接对话**；跨部门信息由主 Agent 转达，或落到双方都能读的工作区文件。但每个子 Agent 的提示词里会带上**兄弟部门的只读一览**（谁、做什么、产出什么、已完成摘要），需要协作就写进 `needs`，结果消息会汇总成「跨部门待转达」交给主 Agent 逐条处理。
+- 下游只看到 `dependsOn` 里上游的**摘要**与完整体检结果，看不到上游的完整对话。所以上游必须把「产物绝对路径 + 怎么验收」写进摘要；声明为 `file` 的产物会被逐个核实，**缺失就不给下游解锁**。
+- 子 Agent 在输出末尾回传结构化证据块（`status` / `acceptance` / `artifacts` / `needs`）。**非空输出不再等于完成**：`partial`、任一条验收失败、坏块都判受阻，只有全 `pass` 才可直接采信，其余在结果消息里标「未验证」等主 Agent 核对。
+- 阶段（stage）只是展示分组，**不是执行门槛**；真正决定先后的是 `dependsOn`。
+
+完整的角色、数据契约、状态机、失败恢复与「改代码时必须同步的三处」，见 **[协作契约](https://github.com/abbaababa/dsh-workplan/blob/main/docs/collaboration.md)**；12 个部门的职责与交接清单见 **[部门职责与交接约定](https://github.com/abbaababa/dsh-workplan/blob/main/docs/departments.md)**。
 
 ## 预算、超时与续跑（知道这些就不会误以为卡死）
 
@@ -84,7 +96,7 @@ dsh plugin --profile web add "$(pwd)"
 | 自动续跑次数 | 4 次 | `DSH_WORKPLAN_MAX_RESUMES` |
 | 并发子 Agent | 5 个（固定） | — |
 
-预算用尽不是失败：计划会变成「**本轮预算用尽，可续跑**」，已完成的不重跑，剩下的下次接着做。被判定卡住的子任务只卡它自己，不会拖垮整个计划。
+预算用尽不是失败：计划会变成「**本轮预算用尽，可续跑**」，已完成的不重跑，剩下的下次接着做。被判定卡住的子任务只卡它自己，不会拖垮整个计划；重试只会发生一次，第二次的提示词会带上一次的失败原因，不会原样重撞。
 
 环境变量写在启动 DSH 的那个 shell 里，或者写进插件配置：
 
@@ -104,7 +116,7 @@ dsh plugin --profile web add "$(pwd)"
 自己复核：
 
 ```bash
-npm view dsh-workplan@1.4.3 dependencies     # 应为空
+npm view dsh-workplan@latest dependencies     # 应为空
 grep -RInE "writeFileSync|child_process|eval\(" src   # 应无命中
 npm audit --omit=dev
 ```
@@ -164,7 +176,7 @@ dsh plugin --profile web remove dsh-workplan
 ```bash
 npm ci
 npm run check     # tsc --noEmit
-npm test          # 99 个测试，含计数不变量、变异测试与进度图表用例
+npm test          # 全部测试（数量随版本变化，以命令输出与 CI 为准），含计数不变量与进度图表用例
 npm run build     # 编译 src/*.ts → lib/*.js、client.js
 npm run preview   # 重新生成 docs/preview 里的 1.4.3 / 1.5.0 卡头对比页
 ```

@@ -20,6 +20,19 @@ For every new task with a real goal, the plugin inserts three beats:
 
 Greetings, thanks, and status questions ("how far along are we?") do not trigger a plan.
 
+## How departments collaborate (what 1.7.0 actually does)
+
+Every work item carries a department label (Engineering, Research, Design, Product, Data, QA, Security, DevOps, Writing, Operations, Legal, Finance). **The label drives the prompt and the stats, not an org chart**:
+
+- Departments **cannot talk to each other directly**. Cross-department information goes through the main agent, or through files both sides can read.
+- A downstream task sees only the **summary** of its `dependsOn` upstreams — not sibling tasks, not the upstream's full conversation. Upstreams must put the artifact's absolute path and acceptance steps in the summary.
+- A stage is a display grouping, **not an execution gate**; `dependsOn` decides order.
+- Each child receives a **read-only brief of its sibling tasks** (who, what, expected outputs, summaries of finished work). It cannot contact them directly: cooperation requests go into `needs`, and the result message collects them under "cross-department hand-offs" for the main agent.
+- A child returns a structured evidence block (`status` / `acceptance` / `artifacts` / `needs`). **Non-empty output no longer means done**: `partial`, any failed acceptance item, or an unparsable block is blocked; only all-`pass` is trusted directly, everything else is flagged "unverified" for the main agent.
+- Declared `file` artifacts are checked; a missing artifact keeps downstream tasks locked and names the upstream plus the missing file.
+
+The full contract — roles, data shapes, state machine, recovery, and the three places to update together — is in **[Collaboration contract](https://github.com/abbaababa/dsh-workplan/blob/main/docs/collaboration.md)**; per-department duties and handoff checklists are in **[Departments and handoffs](https://github.com/abbaababa/dsh-workplan/blob/main/docs/departments.md)**.
+
 ## Requirements
 
 | Item | Detail |
@@ -31,7 +44,7 @@ Greetings, thanks, and status questions ("how far along are we?") do not trigger
 ## Install
 
 ```bash
-dsh plugin --profile web add dsh-workplan@1.4.3
+dsh plugin --profile web add dsh-workplan@1.7.0
 ```
 
 Restart the DSH Web process (or reload the page) so the bundle is picked up.
@@ -62,8 +75,9 @@ Every number is derived from the same task state — the panel can no longer cla
 
 | Tool | Purpose |
 |---|---|
-| `dsh_workplan_dispatch` | Dispatch the current plan, wait for department subagents, write results back. Idempotent. |
-| `dsh_workplan_update` | Main agent only: correct a subtask's status and evidence. |
+| `dsh_workplan_dispatch` | Dispatch the current plan and write results back. `mode:"wait"` (default) waits for the round; `mode:"async"` returns immediately and keeps running in the background. Idempotent. |
+| `dsh_workplan_status` | Read-only: ask how far along the plan is. Rebuilt from the session log, so it survives a restart or reload. |
+| `dsh_workplan_update` | Main agent only: correct a subtask's status and evidence. Takes `expectedRevision` to prevent lost updates; in-flight subtasks are refused unless `force:true`. |
 | `dsh_workplan_cancel` | Cancel a plan that has not been dispatched; never fabricates completion. |
 
 In **plan mode** the plan is shown for review and `dispatch` is explicitly refused with a reason.
@@ -97,7 +111,7 @@ Limits can also be set in the plugin config:
 Verify it yourself:
 
 ```bash
-npm view dsh-workplan@1.4.3 dependencies
+npm view dsh-workplan@latest dependencies
 grep -RInE "writeFileSync|child_process|eval\(" src
 npm audit --omit=dev
 ```
@@ -153,7 +167,7 @@ dsh plugin --profile web remove dsh-workplan
 ```bash
 npm ci
 npm run check     # tsc --noEmit
-npm test          # 99 tests, including count invariants, mutation tests and the progress chart
+npm test          # all tests (the count changes between versions; trust the output and CI), including count invariants and the progress chart
 npm run build     # src/*.ts → lib/*.js, client.js
 npm run preview   # regenerate the 1.4.3 / 1.5.0 card comparison under docs/preview
 ```
