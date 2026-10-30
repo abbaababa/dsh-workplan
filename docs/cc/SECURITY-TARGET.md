@@ -54,7 +54,7 @@
 | 接口 | 类型 | 方向 | 说明 |
 |---|---|---|---|
 | `/dsh-workplan/plans` | HTTP GET/HEAD | 入 | 返回当前会话计划 JSON；非 GET/HEAD 返回 405 |
-| `/dsh-workplan/vendor/chart.umd.js` | HTTP GET/HEAD | 入 | 返回图表库静态文件 |
+| `/dsh-workplan/vendor/chart.umd.js` | HTTP GET/HEAD | 入 | 返回随包固定的图表库静态文件；路径为常量，非 GET/HEAD 返回 405；**不经 `connection.requestRejection`**（公开静态资源，无用户数据，风险已声明于本文件 §9） |
 | `dsh_workplan_dispatch` | 模型工具 | 双向 | 派发计划；plan 模式下被 guard 拒绝 |
 | `dsh_workplan_status` | 模型工具 | 双向 | 只读查询进度 |
 | `dsh_workplan_update` | 模型工具 | 双向 | 更新子任务状态，需 `expectedRevision` |
@@ -158,6 +158,7 @@ TOE 应强制执行以下信息流控制策略：*受保护的计划数据只能
 
 **FDP_IFF.1 简单安全属性**
 TOE 应基于以下属性允许信息流：请求同源、方法 ∈ {GET, HEAD}、环境鉴权通过。
+- 适用范围：携带受保护计划数据的 `/dsh-workplan/plans`。`/dsh-workplan/vendor/chart.umd.js` 返回的是不含任何会话数据的固定第三方库文件，其信息流属性为「同源 + 方法 ∈ {GET, HEAD}」，不含鉴权属性（见 §9 残余风险）。
 - 理由：把"谁能看"变成可判定的布尔条件，而非策略口号。
 
 ### 6.2 识别（FIA_UID）
@@ -187,8 +188,10 @@ TOE 应在以下事件发生时生成可追溯记录：计划创建、派发开�
 ### 6.5 TSF 自测试（FPT_TST）
 
 **FPT_TST.1 TSF 自测试**
-TOE 应提供可重复执行的自测试，覆盖：计划模型校验、鉴权分支、方法限制、响应截断、看门狗超时、版本一致性、安全响应头。
-- 赋值：测试套件 = `npm run verify`（30 个文件 / 187 项测试）。
+TOE 应提供可重复执行的自测试，覆盖：计划模型校验、派发与取消语义、看门狗超时、预算与恢复、版本一致性、安全响应头、路由方法约束的源码级断言。
+
+- 赋值：测试套件 = `npm run verify`（31 个文件 / 188 项测试，CI 每次提交执行）。
+- **已知缺口（如实记录，不掩饰）**：`route()` 内部的鉴权分支（401/403）、405 分支与 2.5 MB 截断分支目前**没有**逐分支自动化用例，只有源码级断言（`tests/security-headers.test.ts` 断言加固头被注册、图表路由的 405 与方法限制存在）。补这些用例需要构造 DSH `connection` 桩件，属于待办而非已完成项，故本节不把「鉴权分支、方法限制、响应截断」列为已覆盖。
 - 理由：O-05、O-07 的可复现证据来源；对应 ATE 类的自测部分。
 
 ---
@@ -197,13 +200,13 @@ TOE 应提供可重复执行的自测试，覆盖：计划模型校验、鉴权�
 
 | 要求 | 实现位置 | 具体做法 | 复核命令 |
 |---|---|---|---|
-| FDP_IFC.1 / FDP_IFF.1 | `src/runtime.ts` `route()` | 仅注册 2 条 `exact` 路由；非 GET/HEAD → 405；响应带 `cache-control: no-store` | `grep -n "no-store" src/runtime.ts` |
+| FDP_IFC.1 / FDP_IFF.1 | `src/runtime.ts` `route()`、`src/host.ts` | 仅注册 2 条 `exact` 路由；两条都只答 GET/HEAD（其余 → 405）；`/plans` 响应带 `cache-control: no-store` | `grep -n "no-store" src/runtime.ts; grep -n "405" src/host.ts` |
 | FDP_IFC.1（无出站） | 全仓 | 除浏览器同源 `fetch('/dsh-workplan/plans')` 外无任何网络调用 | 见 §8 扫描命令 |
-| FIA_UID.1 | `src/runtime.ts` `route()` 开头 | 先 `await connectionCtx.connection.requestRejection(req)`，拒绝则直接返回 | `grep -n requestRejection src/runtime.ts` |
+| FIA_UID.1 | `src/runtime.ts` `route()` 开头（仅 `/plans`） | 先 `await connectionCtx.connection.requestRejection(req)`，拒绝则直接返回；图表路由不调用（公开静态资源） | `grep -n requestRejection src/runtime.ts src/host.ts` |
 | FMT_MOF.1 / FMT_SMF.1 | `src/host.ts` 工具注册 | 4 个工具；`update` 强制 `expectedRevision`，不匹配返回 `STALE_WRITE`；plan 模式下 `dispatch` 被 guard 拒绝 | `grep -n "expectedRevision" src/*.ts` |
 | FMT_SMR.1 | 同上 + 路由 | 浏览器角色只能 GET/HEAD；写操作只能经模型工具 | 同 FMT_MOF.1 |
 | FAU_GEN.1 | 会话事件 + 工具返回值 | 每次派发/完成/取消/拒绝均落会话事件，含证据字段 | 阅读 `dsh_workplan_status` 返回结构 |
-| FPT_TST.1 | `tests/` + `npm run verify` | 30 文件 187 项；CI 每次提交执行 | `npm run verify` |
+| FPT_TST.1 | `tests/` + `npm run verify` | 31 文件 188 项；CI 每次提交执行 | `npm run verify` |
 | O-05 资源有界 | `src/runtime.ts`、`src/watchdog.ts` | 响应 > 2.5 MB 截断；子代理与总预算双超时且被夹紧 | `grep -n "2_500_000" src/runtime.ts` |
 | O-02/O-03 硬化头 | `src/runtime.ts` `HARDENING_HEADERS` | `x-content-type-options: nosniff`、`referrer-policy: no-referrer` | `grep -n HARDENING_HEADERS src/runtime.ts` |
 | P-02 零运行时依赖 | `package.json` | `dependencies` 为空对象 | `npm ls --omit=dev` |
@@ -217,7 +220,7 @@ TOE 应提供可重复执行的自测试，覆盖：计划模型校验、鉴权�
 ```bash
 git clone https://github.com/abbaababa/dsh-workplan.git && cd dsh-workplan
 npm ci
-npm run verify            # 期望：tests 187 / pass 187 / fail 0
+npm run verify            # 期望：tests 188 / pass 188 / fail 0
 
 # 无危险 API
 grep -RInE "child_process|execSync|eval\(|new Function|writeFileSync|appendFileSync|mkdirSync|https?\.request" src || echo "0 命中（预期）"
@@ -237,3 +240,5 @@ grep -n "requestRejection\|HARDENING_HEADERS\|2_500_000\|expectedRevision" src/r
 2. §6 的 SFR 为**自选**，用于把实现约束写成可检查的条款；不是对任何 PP 的符合性声明。
 3. §7 的"实现如何做到"仅覆盖本文列出的要求，不覆盖 DSH 本体、Node.js、OS 的安全属性。
 4. 发现本文件与实现不一致时，**以实现与测试为准**，并按 `SECURITY.md` 渠道报告——这本身也是 T-07（虚假完成）在本项目上的应用。
+5. **已声明的残余风险 R-07**：`/dsh-workplan/vendor/chart.umd.js` 不调用 `connection.requestRejection`，任何人只要能连到 DSH 端口就能读到这个固定文件（Chart.js 4.6.1，MIT，210078 字节，sha256 见 `docs/SBOM.md`）。它不含任何会话数据，读走它不泄露任何用户信息；它的存在本身也不构成秘密。若你的部署要求"任何响应都必须先鉴权"，请在前置反向代理上统一拦截 `/dsh-workplan/*`。
+6. **已声明的测试缺口**：`route()` 的鉴权拒绝分支、405 分支、响应截断分支没有逐分支自动化用例（见 §6.5）。这些行为目前由代码阅读与源码级断言支撑，不是由测试支撑；补测需要构造 DSH `connection` 桩件。

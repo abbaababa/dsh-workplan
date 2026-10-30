@@ -76,7 +76,7 @@ shasum -a 256 vendor/chart.umd.js
 | `src/watchdog.ts` | 207 | 子代理超时与预算监控 |
 | `src/globals.d.ts` | 14 | 宿主 API 类型声明 |
 | **合计** | **8044** | |
-| `tests/*.test.ts` | **30 个文件 / 187 项测试** | 自动化验证 |
+| `tests/*.test.ts` | **31 个文件 / 188 项测试** | 自动化验证 |
 
 （行数取自 `wc -l src/*.ts`，v1.8.0 实测。）
 

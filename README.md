@@ -29,10 +29,10 @@
 | 逐类对照 + EAL1 就绪度 + 还缺什么 | 符合性自评估 | [docs/cc/CC-2026-ASSESSMENT.md](docs/cc/CC-2026-ASSESSMENT.md) |
 | 用了哪些别人的代码、许可证、哈希 | 生命周期（ALC） | [docs/SBOM.md](docs/SBOM.md) |
 | 漏洞怎么报、多久回、部署怎么配 | 安全策略 | [SECURITY.md](SECURITY.md) |
-| 187 项自动化测试，一条命令复跑 | 测试（ATE） | `npm run verify` |
+| 188 项自动化测试，一条命令复跑 | 测试（ATE） | `npm run verify` |
 
 **结论就三句**：
-1. 工程实践上，材料已接近 CC 最低等级 **EAL1** 的要求（14 项组件里 11 项已就绪、2 项部分具备、1 项**完全**必须靠外部实验室）；
+1. 工程实践上，材料已接近 CC 最低等级 **EAL1** 的要求（14 项组件里 10 项已就绪、3 项部分具备、1 项**完全**必须靠外部实验室）；
 2. 认证本身要花外部实验室的钱和时间，**不是改代码能解决的**，所以我们不吹；
 3. 我们吹的是**能被任何人 5 条命令验证的事实**——这比一句"已通过认证"值钱得多。
 
@@ -40,11 +40,15 @@
 
 ```bash
 git clone https://github.com/abbaababa/dsh-workplan.git && cd dsh-workplan
-npm ci && npm run verify                                  # 期望：tests 187 / pass 187 / fail 0
+npm ci && npm run verify                                  # 期望：tests 188 / pass 188 / fail 0
 grep -RInE "child_process|execSync|eval\(|writeFileSync" src || echo "0 命中（预期）"
 ```
 
 > 一句话记住：**"有证书"是第三方给的，"有证据"是自己挣的。我们给你后者，并且不冒充前者。**
+>
+> **自我更正记录**：v1.8.1 更正了 v1.8.0 里三处"文档写得比代码多"的地方（图表路由其实不鉴权、
+> 自测并未覆盖鉴权/截断分支、EAL1 矩阵把一个自相矛盾的组件判成就绪）。更正过程与原因记在
+> [CHANGELOG](CHANGELOG.md) 与 [自评估报告 §6.1](docs/cc/CC-2026-ASSESSMENT.md)。**我们连自己说错的话都会写出来。**
 
 ---
 
@@ -71,7 +75,7 @@ grep -RInE "child_process|execSync|eval\(|writeFileSync" src || echo "0 命中�
 ## 一键安装
 
 ```bash
-dsh plugin --profile web add dsh-workplan@1.8.0
+dsh plugin --profile web add dsh-workplan@1.8.1
 ```
 
 装完**重启一次 DSH Web**（或重新载入当前页面）让插件生效。

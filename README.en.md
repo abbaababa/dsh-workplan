@@ -29,10 +29,10 @@ So what did we do? **We produced the materials CC asks for, in the standard's ow
 | Class-by-class mapping, EAL1 readiness, what is still missing | Self-assessment | [docs/cc/CC-2026-ASSESSMENT.md](docs/cc/CC-2026-ASSESSMENT.md) |
 | Every third-party component, licence and hash | Life cycle (ALC) | [docs/SBOM.md](docs/SBOM.md) |
 | How to report a vulnerability, response times, deployment | Security policy | [SECURITY.md](SECURITY.md) |
-| 187 automated tests, one command to re-run | Testing (ATE) | `npm run verify` |
+| 188 automated tests, one command to re-run | Testing (ATE) | `npm run verify` |
 
 **Three sentences of conclusion:**
-1. On engineering evidence, the material is close to **EAL1** — the lowest CC level (11 of 14 components ready, 2 partial, 1 that **only** an external lab can provide);
+1. On engineering evidence, the material is close to **EAL1** — the lowest CC level (10 of 14 components ready, 3 partial, 1 that **only** an external lab can provide);
 2. Certification itself costs lab time and money and **cannot be achieved by editing code**, so we do not pretend otherwise;
 3. What we do claim is **checkable by anyone with 5 commands** — worth far more than the phrase "certified".
 
@@ -40,11 +40,13 @@ Verify it yourself (copy-paste):
 
 ```bash
 git clone https://github.com/abbaababa/dsh-workplan.git && cd dsh-workplan
-npm ci && npm run verify                                  # expect: tests 187 / pass 187 / fail 0
+npm ci && npm run verify                                  # expect: tests 188 / pass 188 / fail 0
 grep -RInE "child_process|execSync|eval\(|writeFileSync" src || echo "0 hits (expected)"
 ```
 
 > Remember one line: **a certificate is given by a third party; evidence is earned by the project. We give you the evidence, and we do not fake the certificate.**
+
+> **Self-correction record**: v1.8.1 fixed three places in v1.8.0 where the documentation promised more than the code did — the chart route is *not* auth-checked, the suite does *not* cover the auth/truncation branches, and the EAL1 matrix marked a self-contradicting component as ready. What we got wrong, and why, is recorded in the [CHANGELOG](CHANGELOG.md) and [§6.1 of the assessment](docs/cc/CC-2026-ASSESSMENT.md). **We even write down where we were wrong.**
 
 
 ---
@@ -83,7 +85,7 @@ The full contract — roles, data shapes, state machine, recovery, and the three
 ## Install
 
 ```bash
-dsh plugin --profile web add dsh-workplan@1.8.0
+dsh plugin --profile web add dsh-workplan@1.8.1
 ```
 
 Restart the DSH Web process (or reload the page) so the bundle is picked up.

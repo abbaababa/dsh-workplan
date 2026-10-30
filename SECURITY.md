@@ -53,7 +53,7 @@
 | 入口 | 方法 | 谁能到 | 鉴权 |
 |---|---|---|---|
 | `/dsh-workplan/plans` | GET / HEAD | 浏览器 | 走 DSH 的 `connection.requestRejection`，未通过返回 401/403 |
-| `/dsh-workplan/vendor/chart.umd.js` | GET / HEAD | 浏览器 | 同上（同源静态资源） |
+| `/dsh-workplan/vendor/chart.umd.js` | GET / HEAD | 浏览器 | **不鉴权**：随包固定的公开静态资源（MIT 图表库），不含任何用户数据；非 GET/HEAD 返回 405 |
 | `dsh_workplan_dispatch` 等 4 个工具 | 模型调用 | 仅主 Agent | plan 模式下 `dispatch` 被 guard 拒绝；写入带 `expectedRevision` 乐观锁 |
 
 **没有的东西（可自行 grep 复核）**：
@@ -66,6 +66,17 @@ grep -RInE "child_process|execSync|eval\(|new Function|writeFileSync|appendFileS
 - 不写用户磁盘：结果只进 DSH 会话记录。
 - 不外发数据：唯一的 `fetch` 是浏览器请求**同源**的 `/dsh-workplan/plans`。
 - 图表库 Chart.js 4.6.1（MIT）随包分发，不加载 CDN。
+
+> **两条路由的鉴权是不一样的，这里明说**：`/dsh-workplan/plans`（带数据的那个）在每个请求上先问 DSH 的 `connection.requestRejection`，未通过就 401/403；`/dsh-workplan/vendor/chart.umd.js`（一个固定文件）**没有**这一步，它公开可读、内容固定、路径写死、只答 GET/HEAD。这是设计选择，不是漏配：图表库挂了面板只是少一张图，而数据接口必须挡。
+>
+> 复核命令（两条都会给出可观察输出）：
+>
+> ```bash
+> # 1) 数据接口：方法限制 + 鉴权调用都在
+> grep -n "requestRejection\|allow: 'GET, HEAD'" src/runtime.ts
+> # 2) 静态资源：只有方法限制，没有 requestRejection
+> awk '/vendor\/chart.umd.js/,/^        },/' src/host.ts | grep -n "405\|requestRejection"
+> ```
 
 ---
 

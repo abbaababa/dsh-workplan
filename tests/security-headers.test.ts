@@ -55,3 +55,22 @@ test('两条路由的处理函数都调用加固助手', async () => {
   assert.match(runtimeSource, /async function route\([\s\S]{0,120}applyHardeningHeaders\(res\)/)
   assert.match(hostSource, /handler: \(req: any, res: any\) => \{\s*applyHardeningHeaders\(res\)/)
 })
+
+/*
+ * [1.8.1] The vendored-asset route answers GET/HEAD only.
+ *
+ * SECURITY.md used to claim this route ran the same auth check as `/plans`,
+ * which it never did — one `curl -X POST` proved the documentation wrong. The
+ * honest fix is twofold: the docs now state the asymmetry, and the route
+ * enforces the method restriction the docs claim. This test pins the second
+ * half so neither can drift again.
+ */
+test('图表库路由只服务 GET/HEAD，其余方法返回 405', async () => {
+  const { readFile } = await import('node:fs/promises')
+  const path = await import('node:path')
+  const hostSource = await readFile(path.resolve(process.cwd(), 'src/host.ts'), 'utf8')
+  const chartHandler = hostSource.slice(hostSource.indexOf('/dsh-workplan/vendor/chart.umd.js'))
+  assert.match(chartHandler, /if \(req\?\.method !== 'GET' && req\?\.method !== 'HEAD'\) \{\s*res\.statusCode = 405/)
+  assert.match(chartHandler, /res\.setHeader\('allow', 'GET, HEAD'\)/)
+  assert.match(chartHandler, /res\.end\(req\?\.method === 'HEAD' \? undefined : body\)/)
+})
