@@ -185,7 +185,7 @@ window.__ModuleLoader__.load({
         "scopeAll": "当前各会话最新计划汇总",
         "scopeThis": "本计划",
         "vizStageTitle": "分步进度",
-        "vizWeighted": "总体进度（加权）",
+        "vizOverall": "总体进度",
         "allPlansHint": "上面是当前各会话最新计划的合计；历史计划不在此汇总，下面每张卡片只统计本计划。",
         "openHint": "打开左侧「任务进度」看完整安排。"
       },
@@ -356,7 +356,7 @@ window.__ModuleLoader__.load({
         "scopeAll": "Latest plan per live session",
         "scopeThis": "This plan",
         "vizStageTitle": "Step progress",
-        "vizWeighted": "Overall progress (weighted)",
+        "vizOverall": "Overall progress",
         "allPlansHint": "These totals cover the latest plan in each live session; older plans are not included. Each card below counts only its own plan.",
         "openHint": "Open “Task progress” on the left for the full plan."
       }
@@ -1128,7 +1128,20 @@ window.__ModuleLoader__.load({
      * build a fresh plan. Say out loud how to resume instead.
      */
     function resumeHint(session: any, t: any) {
-      if (!session || session.phase !== 'blocked') return ''
+      /*
+       * [1.8.4] 谁承诺「可续跑」，谁就必须给出续跑方法。
+       *
+       * 旧实现只在 `phase === 'blocked'` 时给指令，而徽标在 ended 状态下拼的是
+       * 「已结束，可续跑 · 卡住了」——同一张卡一边承诺能续跑，一边返回空字符串
+       * 不给任何操作，这是事故截图里的第三处自相矛盾（T3 的互斥证据）。
+       * 现在凡是徽标会说出「可续跑」的阶段（blocked / paused / ended 且原阶段
+       * 是这类可续跑状态），一律给出同样的续跑指令。
+       */
+      if (!session) return ''
+      const phase = String(session.phase ?? '')
+      const suspended = String(session.suspendedPhase ?? '')
+      const resumable = phase === 'blocked' || phase === 'paused' || (phase === 'ended' && (suspended === '' || suspended === 'blocked' || suspended === 'paused' || suspended === 'executing' || suspended === 'planning'))
+      if (!resumable) return ''
       if (session.resumeAvailable) {
         const limit = Number(session.resumeLimit ?? 0)
         const used = Number(session.resumeCount ?? 0)
@@ -1609,15 +1622,22 @@ window.__ModuleLoader__.load({
     }
 
     /*
-     * [1.5.2] 加权总进度的展示口径：未全部完成时封顶 99。
+     * [1.8.4] 一张卡片的阶段只能有一个结论，且必须让「存活事实」拥有否决权。
      *
-     * 服务端 `deriveAggregates` 已做同样封顶；这里再算一次是为了让旧载荷/手工
-     * fixture 也守同一条不变量——「总体进度 100%」绝不能与「还有 N 项没完成」同屏。
+     * 事故截图（2026-10-30 20:06:33）里同一张卡在「已结束」组，第 4 步却写着
+     * 「正在做」。根因在后端（`turn/end` 早于异步派发结束），但展示层同样要能
+     * 自保：服务端现在把 `running` 一起下发，这里据此兜一层——载荷同时说
+     * 「已结束」和「派发仍在跑」时，以存活事实为准，绝不渲染「已结束」。
+     * 老载荷没有 `running` 字段（undefined），行为保持原样。
      */
-    function planWeightedPercent(stats: any, counts: PlanCounts): number {
-      const weighted = clampPct(stats?.progress ?? 0)
-      if (counts.total > 0 && counts.done === counts.total) return 100
-      return Math.min(99, weighted)
+    function sessionPhaseOf(session: any, counts?: PlanCounts): string {
+      const resolved = counts ?? planCounts(session?.stats || {})
+      const phase = planPhaseOf(session?.phase || 'pending', resolved)
+      if (phase === 'ended' && session?.running === true) {
+        const suspended = String(session?.suspendedPhase ?? '')
+        return suspended !== '' && suspended !== 'ended' ? suspended : 'executing'
+      }
+      return phase
     }
 
     function planStatusMap(statuses: any): Map<string, any> {
@@ -1858,7 +1878,7 @@ window.__ModuleLoader__.load({
       )
     }
 
-    // 展开后的「分步进度」：逐阶段行 + 加权总体进度，替代旧的一根计划级进度条。
+    // 展开后的「分步进度」：逐阶段行 + 总体进度（与环/组头同一个计数口径）。
     function PlanOverview({ t, stats, counts, rows }: { t: (key: string) => string; stats: any; counts: PlanCounts; rows: PlanStageRow[] }) {
       const stateOf = (tone: PlanTone): string => (tone === 'done'
         ? t('stats.done')
@@ -1873,7 +1893,15 @@ window.__ModuleLoader__.load({
           h('span', null, `${counts.done}/${counts.total} ${t('stats.done')}`),
         ),
         h('div', { className: 'dsh-wp-planoverview-stats' },
-          h('span', null, `${t('vizWeighted')} ${planWeightedPercent(stats, counts)}%`),
+          /*
+           * [1.8.4] 一张卡只允许一个百分比口径。
+           *
+           * 这里以前显示加权进度，卡片其余位置显示计数百分比，于是同一张卡同时
+           * 出现「73%」（环、组头、本计划 11/15）和「总体进度（加权）80%」——
+           * 两者都算得对，但用户看到的是自相矛盾（T3 实测）。展示口径统一为
+           * 计数百分比：它就是环、组头、图例共用的那个数，也是用户能数出来的数。
+           */
+          h('span', null, `${t('vizOverall')} ${counts.percent === null ? '—' : `${counts.percent}%`}`),
           h('span', null, `${counts.active} ${t('stats.inProgress')} · ${counts.pending} ${t('stats.pending')}`),
           counts.blocked > 0 ? h('span', null, `${counts.blocked} ${t('stats.blocked')}`) : null,
         ),
@@ -1916,7 +1944,7 @@ window.__ModuleLoader__.load({
        * 胶囊就必须是「已完成」，视觉档位也必须是 done。截图里那张卡之所以
        * 「100% + 正在收尾 + 留在进行中组」，就是因为这三个读者各读各的字段。
        */
-      const phase = planPhaseOf(session.phase || 'pending', counts)
+      const phase = sessionPhaseOf(session, counts)
       const tone = phaseTone(phase)
       const departments = Array.isArray(session.departments) ? session.departments : []
       const statuses = Array.isArray(session.statuses) ? session.statuses : []
@@ -2389,7 +2417,7 @@ window.__ModuleLoader__.load({
           const counts = planCounts(stats)
           // 同一套计数与对账：柱状图的百分比、文案、色调都不得自成一套。
           const percent = counts.percent ?? 0
-          const phase = planPhaseOf(session.phase || 'pending', counts)
+          const phase = sessionPhaseOf(session, counts)
           const tone = phaseTone(phase)
           return h('button', {
             key: session.sessionId,
@@ -2477,7 +2505,7 @@ window.__ModuleLoader__.load({
          * 这正是本次事故的现象：会话结束 4 小时后仍显示「进行中」。
          */
         for (const session of activeSessions) {
-          const phase = planPhaseOf(session.phase, planCounts(session.stats))
+          const phase = sessionPhaseOf(session)
           if (phase === 'done') finished.push(session)
           else if (phase === 'ended') ended.push(session)
           else live.push(session)
@@ -2498,7 +2526,7 @@ window.__ModuleLoader__.load({
           pending: 5,
           ended: 6,
         }
-        const rank = (session: any) => phaseRank[planPhaseOf(session.phase, planCounts(session.stats))] ?? 5
+        const rank = (session: any) => phaseRank[sessionPhaseOf(session)] ?? 5
         live.sort((a: any, b: any) => (rank(a) - rank(b))
           || ((Number(b.createdAt) || 0) - (Number(a.createdAt) || 0))
           || String(a.sessionId).localeCompare(String(b.sessionId)))
@@ -2667,7 +2695,7 @@ window.__ModuleLoader__.load({
        * 「侧栏已完成 / 对话里正在收尾」之间再次自相矛盾。
        */
       const stats = session.stats || {}
-      const phase = planPhaseOf(session.phase || 'pending', planCounts(stats))
+      const phase = sessionPhaseOf(session)
       const tone = phaseTone(phase)
       return h('div', { className: `dsh-wp-turn dsh-wp-tone-${tone}` },
         h('div', { className: 'dsh-wp-turn-title' },

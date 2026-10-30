@@ -1832,6 +1832,18 @@ export function aggregateInvariantViolations(snapshot: PlanSnapshot, phase?: any
       violations.push(`I10 子任务 ${String(item?.subtaskId)} 状态为 in_progress 但 progress=${item?.progress}`)
     }
   }
+  /*
+   * [1.8.4] I11：「已结束」与「正在做」不能同屏。
+   *
+   * 本次事故截图（session-b83e4a75…，2026-10-30 20:06:33）里，同一张卡片既在
+   * 「已结束」组、又在第 4 步写着「正在做」。根因是 `turn/end` 早于异步派发
+   * 结束（派发又跑了近 4 分钟）。修复后 `ended` 只在「没有任何活派发」时才会
+   * 出现，那时不可能还有子任务在跑；一旦这条关系被未来的改动破坏，
+   * 这个断言会把具体计数带出来，而不是等用户截图发现。
+   */
+  if (phase === 'ended' && stats.inProgress > 0) {
+    violations.push(`I11 phase=ended 但仍有 ${stats.inProgress} 个子任务 in_progress（已结束与正在做同屏）`)
+  }
 
   return violations
 }

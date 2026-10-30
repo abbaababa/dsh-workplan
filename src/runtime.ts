@@ -1060,8 +1060,49 @@ export function sessionTurnState(session: any) {
   return { state: 'unknown', reason: null, reasonDetail: null, at: null }
 }
 
+/*
+ * [1.8.4] 回合已经结束 ⇒ 没有任何子任务还可能在跑。
+ *
+ * `turn/end` 之后仍残留 `in_progress` 只有两种来源：派发被进程退出/崩溃打断，
+ * 或者某次状态写入没有配对收尾。无论哪种，把「正在做」原样留在载荷里都会让同一张
+ * 卡片同时说出「已结束」和「正在做」（本次事故截图的第二处矛盾：卡片已经在
+ * 「已结束」组里，第 4 步却写着「正在做」）。这里把这些条目改判为 `blocked`
+ * （＝需要人来续跑），保留原进度与已有错误说明，只在没有说明时补一句人话。
+ *
+ * 不引入 `Date.now()`：回放路径必须与实时路径给出同一结论，所以这份载荷
+ * 只依赖输入数组，不依赖当前时间。
+ */
+const STALE_INFLIGHT_NOTE = '本轮结束时这一步仍未完成，没有拿到结果；可以续跑。'
+function settleStaleInflight(raw: any): any {
+  const list = Array.isArray(raw) ? raw : []
+  if (!list.some((item: any) => item?.status === 'in_progress')) return raw
+  return list.map((item: any) =>
+    item?.status === 'in_progress'
+      ? {
+          ...item,
+          status: 'blocked',
+          error: typeof item.error === 'string' && item.error.trim() !== '' ? item.error : STALE_INFLIGHT_NOTE,
+        }
+      : item
+  )
+}
+
 function serialisePlan(record: any, session: any) {
   const plan = record.plan ?? null
+  /*
+   * [1.8.4] 先问「此刻还有没有东西在跑」，再决定这份载荷允不允许宣告结束。
+   *
+   * `record.dispatchPromise` 是插件内部唯一的权威存活信号：派发时赋值，
+   * `.finally()` 里置空（见 dispatchTool）。1.7.0 引入 async 派发后，宿主会在
+   * 派发真正结束**之前**就写下 `turn/end`：事故截图里 20:06:33 卡片已经
+   * 「已结束」，而同一计划的派发一直跑到 20:22:50 才写入结果消息。也就是说
+   * 「回合结束」不等于「没有东西在跑」——把前者当成结束证据，就是本次
+   * 「已结束 ∧ 正在做」的根因。存活信号在这里读一次，下面所有「收敛为 ended」
+   * 的判断都必须经过它。
+   */
+  const liveDispatch = Boolean(record.dispatchPromise)
+  const turn = liveDispatch ? null : sessionTurnState(session)
+  const turnEnded = turn?.state === 'ended'
   /*
    * Counts are derived here, once, from the very array that is shipped.
    *
@@ -1071,13 +1112,13 @@ function serialisePlan(record: any, session: any) {
    * built from `statuses` said otherwise. Deriving both from one normalised
    * snapshot makes that contradiction structurally impossible.
    */
-  const snapshot = derivePlanSnapshot(
+  const rawStatuses =
     Array.isArray(record.statuses) && record.statuses.length > 0
       ? record.statuses
       : plan
         ? createStatuses(plan)
         : []
-  )
+  const snapshot = derivePlanSnapshot(turnEnded ? settleStaleInflight(rawStatuses) : rawStatuses)
   const statuses = snapshot.statuses
   const stats = snapshot.stats
   /*
@@ -1107,23 +1148,24 @@ function serialisePlan(record: any, session: any) {
    *    重新开始（日志里出现新的 turn/start），下一份 payload 自然回到原来的
    *    派发状态，不需要任何反向迁移逻辑；
    *  - 实时路径与回放路径都经过本函数，因此刷新前后结论必然一致（T4 硬约束）。
+   *
+   * [1.8.4] 前置门：只有 `turnEnded && !liveDispatch` 才准许收敛。存活信号为真时
+   * 「回合已结束」仅仅说明宿主本轮不再收新消息，派发仍在跑，卡片必须继续显示
+   * 真实阶段（正在做 / 预算用完），不许降级成 ended。
    */
   let suspendedPhase: any = null
   let endReason: any = null
   let endReasonDetail: any = null
   let endedAt: any = null
-  if (phase !== 'done' && phase !== 'cancelled') {
-    const turn = sessionTurnState(session)
-    if (turn.state === 'ended') {
-      suspendedPhase = phase
-      endReason = turn.reason
-      endReasonDetail = turn.reasonDetail
-      endedAt = turn.at
-      phase = 'ended'
-    }
+  if (turnEnded && phase !== 'done' && phase !== 'cancelled') {
+    suspendedPhase = phase
+    endReason = turn.reason
+    endReasonDetail = turn.reasonDetail
+    endedAt = turn.at
+    phase = 'ended'
   }
   /*
-   * 每次真正下发前跑一遍跨字段不变量（I1–I10）。正常情况下恒为空；一旦某个
+   * 每次真正下发前跑一遍跨字段不变量（I1–I11）。正常情况下恒为空；一旦某个
    * 未来改动重新引入「进度与状态打架」，这里会把它连同具体字段值一起带出去，
    * 而不是等用户截图发现。附在 payload 上而不是抛错：展示层不应因自检而白屏。
    */
@@ -1150,6 +1192,15 @@ function serialisePlan(record: any, session: any) {
      * tell whether dispatch would actually run anything.
      */
     heartbeatAt: record.heartbeatAt ?? null,
+    /*
+     * [1.8.4] 存活事实跟着载荷一起下发。
+     *
+     * 之前只有模型侧 tool 结果带 `running`，面板拿不到，只能靠 `phase` 猜
+     * 「有没有东西在跑」；而 phase 既可能滞后（派发已结束、状态没回写），
+     * 也可能过早（回合结束、派发还在跑）。把存活信号原样交给展示层，
+     * 「已结束」与「正在做」就不可能再从两条互不知情的数据里各说各话。
+     */
+    running: liveDispatch,
     resumeCount: Number(record.resumeCount ?? 0),
     resumeLimit: Number(record.resumeLimit ?? MAX_PLAN_RESUMES),
     resumeAvailable: record.plan

@@ -124,6 +124,47 @@ test('a blocked plan with no budget tells the user to take over', async () => {
   assert.ok(html.includes('直接接手'), 'the exhausted case must name the fallback')
 })
 
+/*
+ * [1.8.4] 徽标承诺「可续跑」，卡片就必须给出续跑方法。
+ *
+ * 事故截图里同一张卡写着「已结束，可续跑 · 卡住了」，却不给任何操作提示——
+ * 因为旧 `resumeHint` 只在 `phase === 'blocked'` 时返回指令，而这张卡的 phase
+ * 是 `ended`。两条互斥的规则拼出了一张自相矛盾的卡（T3 的互斥证据）。
+ */
+test('an ended card with a blocked plan still explains how to resume', async () => {
+  const html = await renderDashboard(baseSession({
+    phase: 'ended',
+    suspendedPhase: 'blocked',
+    endedAt: Date.now(),
+  }))
+  assert.ok(html.includes('卡住了'), 'the suspended fact must stay visible')
+  assert.ok(html.includes('续跑'), 'the badge says 可续跑, so the card must also say how')
+  assert.ok(html.includes('还可续跑 2 次'), 'the remaining budget must still be shown')
+})
+
+/*
+ * [1.8.4] 展示层自保：载荷同时说「已结束」和「派发仍在跑」时，以存活事实为准。
+ *
+ * 服务端已按 `record.dispatchPromise` 门控；这条用例保证即使拿到一份不守规矩的
+ * 载荷（旧缓存、第三方构造的 payload），界面也不会重新说出「已结束」。
+ */
+test('an ended payload that still reports a live dispatch never renders 已结束', async () => {
+  const base = {
+    phase: 'ended',
+    suspendedPhase: 'executing',
+    stats: { total: 2, done: 1, blocked: 0, inProgress: 1, pending: 0, progress: 70 },
+    statuses: [
+      { subtaskId: 'T1', status: 'done', progress: 100 },
+      { subtaskId: 'T2', status: 'in_progress', progress: 40 },
+    ],
+  }
+  const withRunning = await renderDashboard(baseSession({ ...base, running: true }))
+  assert.equal(withRunning.includes('已结束'), false, '派发仍在跑时不得出现「已结束」')
+
+  const withoutRunning = await renderDashboard(baseSession({ ...base, running: false }))
+  assert.ok(withoutRunning.includes('已结束'), '没有活派发时仍应正常显示「已结束」')
+})
+
 test('a pending plan is not mislabelled as cancelled', async () => {
   const html = await renderDashboard(baseSession({
     phase: 'pending',
