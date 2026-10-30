@@ -2299,6 +2299,20 @@ export function updateToolOutputSchema() {
   }
 }
 
+export function cancelToolOutputSchema() {
+  return {
+    type: 'object',
+    properties: {
+      ok: { type: 'boolean' },
+      planId: { type: 'string' },
+      phase: { type: 'string' },
+      reason: { type: 'string' },
+    },
+    required: ['ok'],
+    additionalProperties: true,
+  }
+}
+
 export function statusToolOutputSchema() {
   return {
     type: 'object',
@@ -2307,7 +2321,9 @@ export function statusToolOutputSchema() {
       planId: { type: 'string' },
       running: { type: 'boolean' },
       phase: { type: 'string' },
-      elapsedMs: { type: ['number', 'null'] },
+      // The host accepts only a single type string per node; a nullable scalar
+      // is expressed with oneOf (type arrays throw JsonSchemaError at activation).
+      elapsedMs: { oneOf: [{ type: 'number' }, { type: 'null' }] },
       stats: { type: 'object' },
       statuses: { type: 'array' },
       errors: { type: 'array' },

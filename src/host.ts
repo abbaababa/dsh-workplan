@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs'
  */
 
 import {
+  cancelToolOutputSchema,
   createWorkplanRuntime,
   dispatchToolOutputSchema,
   plannerOutputSchema,
@@ -115,9 +116,7 @@ function createUpdateTool(runtime: any) {
         },
         progress: {
           type: 'integer',
-          minimum: 0,
-          maximum: 100,
-          description: '进度百分比；done 会自动置为 100。',
+          description: '进度百分比（0-100）；done 会自动置为 100。',
         },
         evidence: {
           type: 'array',
@@ -182,17 +181,7 @@ function createCancelTool(runtime: any) {
       additionalProperties: false,
     },
     output: {
-      schema: {
-        type: 'object',
-        properties: {
-          ok: { type: 'boolean' },
-          planId: { type: 'string' },
-          phase: { type: 'string' },
-          reason: { type: 'string' },
-        },
-        required: ['ok'],
-        additionalProperties: true,
-      },
+      schema: cancelToolOutputSchema(),
       render(_args: any, value: any) {
         const result = isRecord(value) ? value : {}
         return textContent(
@@ -401,7 +390,7 @@ export function apply(ctx: any, config: WorkplanConfig = {}) {
 
 export const meta = {
   name,
-  version: '1.7.0',
+  version: '1.7.1',
   promptOrder: PROMPT_ORDER,
   routes: ['/dsh-workplan/plans', '/dsh-workplan/vendor/chart.umd.js'],
 }

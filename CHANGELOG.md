@@ -1,3 +1,32 @@
+## 1.7.1 — 2026-10-30
+
+**修复：1.7.0 在宿主上无法激活（整个插件被跳过）。**
+
+现象：升级到 1.7.0 并重启 DSH Web 后，终端出现
+
+```
+dsh: warning: 1 entry did not activate
+dsh-workplan-plugin: JsonSchemaError: unsupported JSON schema:
+  schema.properties.elapsedMs.type must be a single type string (type arrays are not supported)
+```
+
+结果是任务进度面板与四个工具**全部消失**——不是功能降级，而是插件条目在激活阶段抛错被跳过。
+
+根因：`statusToolOutputSchema()` 用 `type: ['number', 'null']` 表达「可为空的耗时」，而宿主的
+`assertSupportedJsonSchema` 只接受**单一类型字符串**；同一处 `dsh_workplan_update` 的 `progress`
+还用了宿主子集不支持的 `minimum` / `maximum`。
+
+修复：
+
+- `elapsedMs` 改为 `oneOf: [{ type: 'number' }, { type: 'null' }]`；
+- `progress` 去掉 `minimum` / `maximum`，范围写进 `description`；
+- `cancel` 的输出 schema 提取为 `cancelToolOutputSchema()`，与其余 schema 接受同一套校验；
+- 新增 `tests/workplan-host-schema.test.ts`：按宿主子集规则递归校验全部工具的 `parameters` 与
+  `output.schema`，并锁死「可空标量只能经 `oneOf` 表达，不能写 type 数组」；
+- 另用宿主真实的 `assertSupportedJsonSchema` 对 4 个工具各跑一遍（开发期校验，不入测试依赖）。
+
+验证：`npm test` 183 通过，`npm run check` 通过，四个工具 schema 均通过宿主校验。
+
 ## 1.7.0 — 2026-10-30
 
 **「协作契约」版：让主 Agent 与各部门在全程共享同一份事实。**

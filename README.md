@@ -33,7 +33,7 @@
 ## 一键安装
 
 ```bash
-dsh plugin --profile web add dsh-workplan@1.7.0
+dsh plugin --profile web add dsh-workplan@1.7.1
 ```
 
 装完**重启一次 DSH Web**（或重新载入当前页面）让插件生效。
@@ -75,7 +75,7 @@ dsh plugin --profile web add "$(pwd)"
 
 在 **plan 模式**下只会给你看计划，`dispatch` 会被明确拦下并说明原因，不会偷偷开跑。
 
-## 部门怎么协作（1.7.0 的真实能力）
+## 部门怎么协作（1.7.1 的真实能力）
 
 计划里的每件工作都带一个部门标签（工程研发、研究分析、设计、产品、数据、质量验证、安全、运维、文档写作、运营、法务合规、财务）。**标签决定提示词与统计口径，不是组织架构**：
 

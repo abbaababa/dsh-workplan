@@ -20,7 +20,7 @@ For every new task with a real goal, the plugin inserts three beats:
 
 Greetings, thanks, and status questions ("how far along are we?") do not trigger a plan.
 
-## How departments collaborate (what 1.7.0 actually does)
+## How departments collaborate (what 1.7.1 actually does)
 
 Every work item carries a department label (Engineering, Research, Design, Product, Data, QA, Security, DevOps, Writing, Operations, Legal, Finance). **The label drives the prompt and the stats, not an org chart**:
 
@@ -44,7 +44,7 @@ The full contract — roles, data shapes, state machine, recovery, and the three
 ## Install
 
 ```bash
-dsh plugin --profile web add dsh-workplan@1.7.0
+dsh plugin --profile web add dsh-workplan@1.7.1
 ```
 
 Restart the DSH Web process (or reload the page) so the bundle is picked up.
