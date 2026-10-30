@@ -10,6 +10,45 @@
 
 ---
 
+## 🌍 International security standard: the full evidence chain, and the honest boundary
+
+**You have probably seen plugins claim "ISO/IEC 15408 / Common Criteria certified". For small open-source tools that claim is almost always false — CC's rules do not allow it.**
+
+In plain words:
+
+- **ISO/IEC 15408** (a.k.a. **CC**, Common Criteria) is an international standard that answers one question: *"what can this software actually secure, and why should anyone believe it?"* The current edition is **2026** (not 2022).
+- CC splits the work three ways: **the developer supplies evidence → an accredited lab evaluates it → a national scheme issues the certificate**. The certificate comes from a third party; **software cannot certify itself**.
+- So any claim of "fully satisfies ISO/IEC 15408" without a **certificate number** is a false statement. This plugin has no certificate, and we **will not** write that.
+
+So what did we do? **We produced the materials CC asks for, in the standard's own structure, and published them so you can verify everything yourself — without trusting us.**
+
+| What is published | What it is in the standard | Where |
+|---|---|---|
+| What this plugin protects, from whom, and where the boundary is | Security Target (ST) | [docs/cc/SECURITY-TARGET.md](docs/cc/SECURITY-TARGET.md) |
+| Attack surface, 7 threats, countermeasures, residual risk | Vulnerability assessment (AVA) | [docs/cc/AVA-VULNERABILITY-ANALYSIS.md](docs/cc/AVA-VULNERABILITY-ANALYSIS.md) |
+| Class-by-class mapping, EAL1 readiness, what is still missing | Self-assessment | [docs/cc/CC-2026-ASSESSMENT.md](docs/cc/CC-2026-ASSESSMENT.md) |
+| Every third-party component, licence and hash | Life cycle (ALC) | [docs/SBOM.md](docs/SBOM.md) |
+| How to report a vulnerability, response times, deployment | Security policy | [SECURITY.md](SECURITY.md) |
+| 187 automated tests, one command to re-run | Testing (ATE) | `npm run verify` |
+
+**Three sentences of conclusion:**
+1. On engineering evidence, the material is close to **EAL1** — the lowest CC level (11 of 14 components ready, 2 partial, 1 that **only** an external lab can provide);
+2. Certification itself costs lab time and money and **cannot be achieved by editing code**, so we do not pretend otherwise;
+3. What we do claim is **checkable by anyone with 5 commands** — worth far more than the phrase "certified".
+
+Verify it yourself (copy-paste):
+
+```bash
+git clone https://github.com/abbaababa/dsh-workplan.git && cd dsh-workplan
+npm ci && npm run verify                                  # expect: tests 187 / pass 187 / fail 0
+grep -RInE "child_process|execSync|eval\(|writeFileSync" src || echo "0 hits (expected)"
+```
+
+> Remember one line: **a certificate is given by a third party; evidence is earned by the project. We give you the evidence, and we do not fake the certificate.**
+
+
+---
+
 ## What it actually does
 
 For every new task with a real goal, the plugin inserts three beats:
@@ -44,7 +83,7 @@ The full contract — roles, data shapes, state machine, recovery, and the three
 ## Install
 
 ```bash
-dsh plugin --profile web add dsh-workplan@1.7.1
+dsh plugin --profile web add dsh-workplan@1.8.0
 ```
 
 Restart the DSH Web process (or reload the page) so the bundle is picked up.

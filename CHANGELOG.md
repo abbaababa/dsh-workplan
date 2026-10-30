@@ -1,3 +1,42 @@
+## 1.8.0 — 2026-10-30
+
+**本次发布只做一件事：把"安全"从形容词变成可核对的证据链 —— 按 ISO/IEC 15408:2026（CC）的结构公开自评估材料，并补上两处实现缺口。**
+
+> 明确声明：**本插件没有 CC 证书，也没有通过任何实验室评测。** 我们不宣称"完全满足 ISO/IEC 15408"。
+> 我们公开的是按标准结构组织的材料、可复跑的测试、以及逐条写明的边界。详见 `docs/cc/CC-2026-ASSESSMENT.md`。
+
+### 新增（标准材料）
+
+- `docs/cc/CC-2026-ASSESSMENT.md`：按 ISO/IEC 15408-3:2026 保证类（ASE/ADV/AGD/ALC/ATE/AVA/ACO/AMA）逐类判定，
+  并给出 **EAL1 就绪度矩阵**（14 项组件：11 项就绪、2 项部分具备、1 项完全依赖外部实验室）与未修复差距清单。
+- `docs/cc/SECURITY-TARGET.md`：按 ASE 族结构（INT/CCL/SPD/OBJ/ECD/REQ/TSS）编写的安全目标草案，
+  含 7 条威胁、3 条假设、3 条组织策略、5 个功能要求族共 8 个组件，以及逐条到实现的映射。
+  首行显式声明 **"Conformance claim: NONE"**。
+- `docs/cc/AVA-VULNERABILITY-ANALYSIS.md`：攻击面穷举（2 条只读路由 + 4 个模型工具 + 1 个随包文件）、
+  威胁→对策→残留风险表、8 项已识别缺陷（5 项本版修复、3 项写明接受理由）。
+- `docs/SBOM.md`：软件物料清单。运行时 **0** 依赖、6 个开发依赖（含传递）、1 个随包第三方文件
+  （Chart.js 4.6.1，MIT，sha256 `338399fb…f67fbf`）。
+- `SECURITY.md`：漏洞私密报告渠道、响应时限、攻击面摘要、部署建议、以及
+  **5 条"我们不做/不宣称的声明"**（无 CC 证书、非多租户、不替代 DSH 鉴权等）。
+
+### 变更（实现）
+
+- `src/runtime.ts`：新增冻结常量 `HARDENING_HEADERS`（`x-content-type-options: nosniff`、
+  `referrer-policy: no-referrer`）与 `applyHardeningHeaders(res)`，在 `route()` 入口统一应用。
+- `src/host.ts`：chart 静态文件路由同样调用 `applyHardeningHeaders`，避免两条路由的策略不一致。
+- `package.json`：`files` 增加 `SECURITY.md` 与 `docs`，使 npm 包内即可查阅合规材料。
+
+### 测试
+
+- 新增 `tests/security-headers.test.ts`（4 项）：断言响应头常量值、写入行为、
+  对无 `setHeader` 的对象保持静默、以及两条路由确实都调用了加固助手。
+- `npm run verify`：**187 tests / 187 pass / 0 fail**（1.7.1 基线为 183）。
+
+### 升级须知
+
+- 无破坏性变更，无新增运行时依赖；`dsh plugin --profile web add dsh-workplan@1.8.0` 即可。
+- 若你在反向代理后部署，请仍按 `SECURITY.md` §6 自行加 TLS 与认证——本插件不自带。
+
 ## 1.7.1 — 2026-10-30
 
 **修复：1.7.0 在宿主上无法激活（整个插件被跳过）。**

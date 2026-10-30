@@ -10,6 +10,44 @@
 
 ---
 
+## 🌍 国际安全标准：我们公开了完整证据链，也公开了边界
+
+**你可能在别的插件介绍里见过「通过 ISO/IEC 15408 / Common Criteria 认证」。这句话在开源小工具上基本都是假的，因为 CC 的规矩不允许。**
+
+先说人话版：
+
+- **ISO/IEC 15408**（简称 **CC**，通用准则）是一份国际标准，专门回答一个问题：*"一个软件在安全上到底能做到什么，凭什么让人信？"* 最新版是 **2026 年版**（不是 2022 版）。
+- CC 的规矩是三方分工：**写代码的人交材料 → 独立实验室去测 → 国家认证机构发证书**。证书由第三方签发，**软件自己不能给自己发**。
+- 所以任何"我这个插件完全满足 ISO/IEC 15408"的说法，只要没给出**证书编号**，就是不实陈述。本插件没有证书，我们**不会**这么写。
+
+那我们做了什么？**把 CC 要求的那套材料，按标准结构真做出来、公开出来、让任何人不信任我们也能自己核对。**
+
+| 我们公开的 | 对应标准里的东西 | 在哪儿看 |
+|---|---|---|
+| 这个插件保护什么、防谁、边界在哪 | 安全目标（ST） | [docs/cc/SECURITY-TARGET.md](docs/cc/SECURITY-TARGET.md) |
+| 攻击面、7 条威胁、对策、残留风险 | 脆弱性评定（AVA） | [docs/cc/AVA-VULNERABILITY-ANALYSIS.md](docs/cc/AVA-VULNERABILITY-ANALYSIS.md) |
+| 逐类对照 + EAL1 就绪度 + 还缺什么 | 符合性自评估 | [docs/cc/CC-2026-ASSESSMENT.md](docs/cc/CC-2026-ASSESSMENT.md) |
+| 用了哪些别人的代码、许可证、哈希 | 生命周期（ALC） | [docs/SBOM.md](docs/SBOM.md) |
+| 漏洞怎么报、多久回、部署怎么配 | 安全策略 | [SECURITY.md](SECURITY.md) |
+| 187 项自动化测试，一条命令复跑 | 测试（ATE） | `npm run verify` |
+
+**结论就三句**：
+1. 工程实践上，材料已接近 CC 最低等级 **EAL1** 的要求（14 项组件里 11 项已就绪、2 项部分具备、1 项**完全**必须靠外部实验室）；
+2. 认证本身要花外部实验室的钱和时间，**不是改代码能解决的**，所以我们不吹；
+3. 我们吹的是**能被任何人 5 条命令验证的事实**——这比一句"已通过认证"值钱得多。
+
+自己验证（复制即用）：
+
+```bash
+git clone https://github.com/abbaababa/dsh-workplan.git && cd dsh-workplan
+npm ci && npm run verify                                  # 期望：tests 187 / pass 187 / fail 0
+grep -RInE "child_process|execSync|eval\(|writeFileSync" src || echo "0 命中（预期）"
+```
+
+> 一句话记住：**"有证书"是第三方给的，"有证据"是自己挣的。我们给你后者，并且不冒充前者。**
+
+---
+
 ## 它到底做了什么（用大白话讲）
 
 平时你给 AI 一个复杂任务，它经常「一边想一边做」，做到一半你才发现方向不对。
@@ -33,7 +71,7 @@
 ## 一键安装
 
 ```bash
-dsh plugin --profile web add dsh-workplan@1.7.1
+dsh plugin --profile web add dsh-workplan@1.8.0
 ```
 
 装完**重启一次 DSH Web**（或重新载入当前页面）让插件生效。

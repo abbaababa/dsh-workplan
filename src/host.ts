@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs'
  */
 
 import {
+  applyHardeningHeaders,
   cancelToolOutputSchema,
   createWorkplanRuntime,
   dispatchToolOutputSchema,
@@ -369,6 +370,7 @@ export function apply(ctx: any, config: WorkplanConfig = {}) {
         kind: 'exact',
         path: '/dsh-workplan/vendor/chart.umd.js',
         handler: (req: any, res: any) => {
+          applyHardeningHeaders(res)
           try {
             const body = readFileSync(new URL('../vendor/chart.umd.js', import.meta.url))
             res.statusCode = 200
@@ -390,7 +392,7 @@ export function apply(ctx: any, config: WorkplanConfig = {}) {
 
 export const meta = {
   name,
-  version: '1.7.1',
+  version: '1.8.0',
   promptOrder: PROMPT_ORDER,
   routes: ['/dsh-workplan/plans', '/dsh-workplan/vendor/chart.umd.js'],
 }

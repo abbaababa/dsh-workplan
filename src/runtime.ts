@@ -1408,6 +1408,27 @@ export function buildPlansPayload(ctx: any, state: any, sessionId: any) {
   return { ok: true, now: Date.now(), sessions: items }
 }
 
+/**
+ * Fixed hardening headers for every response this plugin serves.
+ *
+ * Two routes are exposed to the DSH web server: the JSON plan feed and the
+ * vendored Chart.js file. Neither needs the browser to sniff a type, and a
+ * dashboard URL carries a session id, so it must not leak through `Referer`
+ * to anything the user clicks afterwards. Set once per response, before any
+ * `writeHead`, so a later `writeHead(status, headers)` cannot drop them.
+ */
+export const HARDENING_HEADERS: Readonly<Record<string, string>> = Object.freeze({
+  'x-content-type-options': 'nosniff',
+  'referrer-policy': 'no-referrer',
+})
+
+export function applyHardeningHeaders(res: any) {
+  if (typeof res?.setHeader !== 'function') return
+  for (const [name, value] of Object.entries(HARDENING_HEADERS)) {
+    res.setHeader(name, value)
+  }
+}
+
 function respondJson(res: any, status: any, payload: any) {
   const body = JSON.stringify(payload)
   res.writeHead(status, {
@@ -1997,6 +2018,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
   }
 
   async function route(req: any, res: any, connectionCtx: any = ctx) {
+    applyHardeningHeaders(res)
     let rejection
     try {
       rejection = await Promise.resolve(connectionCtx?.connection?.requestRejection?.(req))
