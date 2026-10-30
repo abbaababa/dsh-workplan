@@ -1,6 +1,6 @@
 # dsh-workplan
 
-> **两个卖点，一句话：安全证据按 ISO/IEC 15408:2026（CC）公开、自己就能验；安装只要一条命令、零第三方运行时依赖。**
+> **两个卖点，一句话：ISO/IEC 15408:2026 全套安全证据，5 条命令自己验；安装一条命令、零第三方运行时依赖。**
 
 [![verify](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml/badge.svg)](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml)
 
@@ -66,7 +66,7 @@ grep -RInE "child_process|execSync|eval\(|writeFileSync" src || echo "0 命中�
 ## 一键安装
 
 ```bash
-dsh plugin --profile web add dsh-workplan@1.8.2
+dsh plugin --profile web add dsh-workplan@1.8.3
 ```
 
 装完**重启一次 DSH Web**（或重新载入当前页面）让插件生效。

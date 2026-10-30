@@ -1,6 +1,6 @@
 # dsh-workplan
 
-> **Two selling points, one line: an ISO/IEC 15408:2026 (CC) evidence pack you can verify yourself, and a one-command install with zero runtime dependencies.**
+> **Two selling points, one line: a full ISO/IEC 15408:2026 evidence pack you can verify with 5 commands, and a one-command install with zero runtime dependencies.**
 
 [![verify](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml/badge.svg)](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml)
 
@@ -77,7 +77,7 @@ The full contract — roles, data shapes, state machine, recovery, and the three
 ## Install
 
 ```bash
-dsh plugin --profile web add dsh-workplan@1.8.2
+dsh plugin --profile web add dsh-workplan@1.8.3
 ```
 
 Restart the DSH Web process (or reload the page) so the bundle is picked up.
