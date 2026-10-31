@@ -323,7 +323,7 @@ async function disposeActivation(activation: any, record: any, subtaskId: string
   } catch (error: any) {
     if (!guard?.timedOut) {
       record.errors = [
-        ...record.errors,
+        ...(record.errors ?? []),
         `${subtaskId} dispose: ${truncate(String(error?.message ?? error), 300)}`,
       ].slice(-20)
     }
@@ -378,7 +378,7 @@ function writeSubtaskStatus(record: any, subtaskId: any, patch: any, guard: Subt
 
 function recordSubtaskError(record: any, subtaskId: any, message: any, guard: SubtaskGuard) {
   if (guard.timedOut) return
-  record.errors = [...record.errors, `${subtaskId}: ${truncate(message, 500)}`].slice(-20)
+  record.errors = [...(record.errors ?? []), `${subtaskId}: ${truncate(message, 500)}`].slice(-20)
 }
 
 /**
@@ -720,7 +720,7 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
         const retry = !isAbort && shouldRetryAttempt(error, attempt, remaining, idleTimeoutMs)
         if (retry) {
           record.errors = [
-            ...record.errors,
+            ...(record.errors ?? []),
             `${subtask.id}: 第 ${attempt} 次执行失败（${lastFailure.code}），已带上失败原因重试`,
           ].slice(-20)
           writeSubtaskStatus(record, subtask.id, { progress: 15 }, guard)
@@ -728,7 +728,7 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
         }
         if (!isAbort && remaining <= idleTimeoutMs && error?.code !== 'CHILD_TIMEOUT') {
           record.errors = [
-            ...record.errors,
+            ...(record.errors ?? []),
             `${subtask.id}: 剩余预算不足（${Math.max(0, Math.round(remaining / 1000))}s），未重试`,
           ].slice(-20)
         }
@@ -807,11 +807,11 @@ async function runSubtask(ctx: any, record: any, stage: any, subtask: any, optio
           error: message,
           summary: truncate(`未完成：${message}`, 3000),
         })
-        record.errors = [...record.errors, `${subtask.id}: ${message}`].slice(-20)
+        record.errors = [...(record.errors ?? []), `${subtask.id}: ${message}`].slice(-20)
         record.updatedAt = Date.now()
       } catch (error: any) {
         record.errors = [
-          ...record.errors,
+          ...(record.errors ?? []),
           `${subtask.id}: 超时状态写入失败：${truncate(String(error?.message ?? error), 500)}`,
         ].slice(-20)
       } finally {
@@ -1186,7 +1186,7 @@ export async function dispatchPlan(ctx: any, record: any, options: any) {
        * report for subtasks that were explicitly *not* failures.
        */
       record.errors = (record.errors ?? []).filter((line: string) => !/总执行超时/.test(String(line)))
-      if (!allDoneNow) record.errors = [...record.errors, record.error].slice(-20)
+      if (!allDoneNow) record.errors = [...(record.errors ?? []), record.error].slice(-20)
     } else {
       /*
        * `blocked` is a terminal state, so it always reports progress 100 — the
@@ -1530,6 +1530,15 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
     resultSeen: boolean
     resumeCount: number
     cancelled: boolean
+    /*
+     * [1.8.17] The durable result message carries the round's failure lines.
+     * Replay used to drop them, and the reconstructed record then had no
+     * `errors` field at all: the next dispatching round spread it
+     * (`[...record.errors, …]`) and died with
+     * `TypeError: record.errors is not iterable`, blocking every remaining
+     * subtask at the budget boundary (wp-40ce5eee, 17:51:37).
+     */
+    errors: string[]
   }
   /*
    * [1.8.9] 回放按 planId 分账，不按会话「最后一个计划」分账。
@@ -1553,6 +1562,7 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
         resultSeen: false,
         resumeCount: 0,
         cancelled: false,
+        errors: [],
       }
       snapshots.set(plan.planId, snap)
     }
@@ -1603,6 +1613,11 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
           snap.resumeCount = Number(result.resumeCount ?? snap.resumeCount) || 0
           snap.resultPhase = typeof result.phase === 'string' ? result.phase : ''
           snap.resultSeen = true
+          // [1.8.17] Keep the durable failure lines so a replayed record is
+          // shaped like a live one (never `undefined`).
+          if (Array.isArray(result.errors)) {
+            snap.errors = snap.errors.concat(result.errors.map((line: any) => String(line))).slice(-20)
+          }
           /*
            * [1.8.14] A cancel that lands while a dispatch is in flight writes no
            * separate cancel message (it aborts the dispatch instead), so the
@@ -1772,6 +1787,13 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
     updatedAt: Date.now(),
     createdTurn: plan.createdTurn,
     resumeCount,
+    /*
+     * [1.8.17] A reconstructed record must carry every field the live dispatch
+     * path spreads/pushes unconditionally. `errors` was the one that was
+     * missing; its absence turned a recoverable child failure into a round
+     * abort that marked the rest of the plan blocked.
+     */
+    errors: (chosen.errors ?? []).slice(-20),
     resumeLimit: MAX_PLAN_RESUMES,
     resumeAvailable: canResumePlan({ phase, statuses, resumeCount }, MAX_PLAN_RESUMES).resume,
     stale: stalePending,

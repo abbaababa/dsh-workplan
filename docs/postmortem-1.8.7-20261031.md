@@ -289,3 +289,47 @@ spawn 记录认亲、三处都无记录不激活、人工改判只写一次）�
 残余：`present` 没有参数声明「本次交付属于哪个计划」，所以只能按会话级
 保守规则判断。若未来引入多计划并行交付，需要在 `present` 载荷里显式携带
 planId，或把产物与计划建立持久关联。
+
+## 13. 1.8.17：回放记录缺 `errors` 字段导致整轮假受阻
+
+17:51:37，`wp-40ce5eee` 的派发在 20 分钟预算边界中止，结果消息把 T5–T10
+六项全部标成
+
+```
+error: record.errors is not iterable
+```
+
+其中 T5、T6、T7 已经启动了真实的子 Agent，T8–T10 还没轮到——它们不是失败，
+是被一个 `TypeError` 连坐。
+
+直接原因：
+
+1. 宿主在 17:30:21 重启，内存里没有 `wp-40ce5eee` 的记录；
+2. `dispatchTool` 走 `needsRebuild`，用 `reconstructFromSession` 从会话日志
+   重建记录；
+3. 重建返回的对象有 `plan/statuses/phase/createdAt/…`，没有 `errors`；
+4. 预算到点，`disposeActivation` 在清理子任务时写
+   `record.errors = [...record.errors, `${subtaskId} dispose: …`]`；
+5. 展开 `undefined` 抛出 `TypeError: record.errors is not iterable`，冒到本轮
+   调度器的 catch，把剩余子任务统一记为 blocked。
+
+这条链与事故现场的同类之处：**两条数据源（实时缓存 / 日志回放）形状不一致，
+失败在边界上被放大成「其余全部失败」**。回放是为了让重启后的计划还能继续，
+但它返回的记录比内存记录少一个字段，于是本该继续的那一轮被自己拦死。
+
+修复（1.8.17）：
+
+- `ReplaySnapshot` 增加 `errors: string[]`；回放结果消息时并入
+  `result.errors`（最近 20 条）；返回的记录始终带 `errors` 数组。
+- 所有 `[...record.errors, …]` 展开点补 `?? []`，覆盖 dispose 失败、重试说明、
+  剩余预算不足、子任务超时、超时写状态失败、预算收尾、错误记录七处。
+- `tests/workplan-replay-errors.test.ts` 两条：回放记录始终有 `errors` 数组并
+  保留 durable 失败行；回放记录再派发时子任务失败只记错、不炸整轮。
+
+验证：`npm run check` 无诊断；`npm test` 255/255；构建前后 5 个产物 sha256
+一致。
+
+残余：这次崩溃发生在「预算中止 + dispose 失败」的组合路径上；如果未来新增
+记录字段，仍可能出现「实时缓存有、回放没有」的同类漂移。更彻底的补法是让
+两条路径共用同一个 record 工厂，或在回放结束时跑一次形状校验（schema
+assertion）。这一条尚未实施。

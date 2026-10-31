@@ -1,3 +1,30 @@
+## 1.8.17 — 2026-10-31
+
+**修复：回放出来的记录缺少 `errors` 字段，预算到点清理子任务时整轮崩掉，剩余子任务被连带判为受阻。**
+
+> 背景：17:51:37 对 `wp-40ce5eee` 的派发在 20 分钟预算边界中止。宿主刚重启，
+> 内存里没有记录，`dispatchTool` 用 `reconstructFromSession` 从会话日志重建；
+> 重建出的记录带着 `plan/statuses/phase/…`，唯独没有 `errors`。预算中止时
+> `disposeActivation` 往 `record.errors` 里追一条清理失败信息，展开
+> `[...record.errors]` 抛出 `TypeError: record.errors is not iterable`，
+> 异常冒到本轮调度器，把还没跑的 T5–T10 一并标成受阻（6 项），其中三项
+> 其实已经开始执行。这不是子 Agent 的失败，而是记录形状不一致导致的假受阻。
+
+### 修复
+
+- `reconstructFromSession` 的每个快照新增 `errors: string[]`：回放结果消息时
+  把 durable 的失败行并入（`result.errors`，保留最近 20 条），返回的记录始终
+  带 `errors` 数组；`ReplaySnapshot` 接口同步。
+- 所有 `[...record.errors, …]` 展开点补 `?? []` 守卫（dispose 失败、子任务
+  重试说明、剩余预算不足、子任务超时、超时状态写入失败、预算收尾、子任务
+  错误记录），重建记录与内存记录的字段形状就此对齐。
+- 测试：新增 `tests/workplan-replay-errors.test.ts` 2 条——回放记录始终有
+  `errors` 数组并保留 durable 失败行；回放记录再派发时子任务失败只记错，
+  不再抛错炸掉整轮。
+
+验证：`npm run check` 无诊断；`npm test` 255/255；`npm run build` 前后
+5 个产物 sha256 一致。
+
 ## 1.8.16 — 2026-10-31
 
 **修复：`present` 闸门检查会话里所有未完成的计划，不再只看「本回合/最后定义」的那一个。**
