@@ -2470,6 +2470,28 @@ export function buildChildPrompt({
       ].join('\n')
     : ''
   /*
+   * [1.8.19] A retried subtask must not pretend the prior attempt never existed.
+   *
+   * The timeout/budget paths record the declared outputs that already landed on
+   * disk (`artifacts[].exists === true`). Feeding them back into the next
+   * attempt turns a 15-minute restart into "check what is there and finish",
+   * which is the difference between a recoverable ceiling and silent rework.
+   */
+  const previousStatus = Array.isArray(statuses)
+    ? statuses.find((item: any) => item && item.subtaskId === subtask?.id)
+    : null
+  const landedArtifacts = (Array.isArray(previousStatus?.artifacts) ? previousStatus.artifacts : [])
+    .filter((item: any) => item && item.exists === true && typeof item.ref === 'string')
+    .map((item: any) => String(item.ref))
+  const resumeHint = landedArtifacts.length > 0
+    ? [
+        '',
+        '上一次这一子任务被中止，但以下声明产物已经在盘上（先用 read/grep 核对，不要重写）：',
+        ...landedArtifacts.slice(0, 8).map((ref: string) => `- ${ref}`),
+        '已经覆盖验收标准的部分保持原样，只补缺失部分；结尾按契约给出证据块。',
+      ].join('\n')
+    : ''
+  /*
    * [1.8.12] 提示词整体过一遍 session-reference 消毒。
    *
    * 背景、依赖结果、兄弟部门摘要都可能是父会话原文的摘录，任何一处出现
@@ -2501,6 +2523,7 @@ export function buildChildPrompt({
     dependencies,
     ...(team ? ['', '兄弟部门进展（同一计划内的其他子任务；不要直接联系它们，需要协作请写进 needs 由主 Agent 转达）：', team] : []),
     ...(failure ? [failure] : []),
+    ...(resumeHint ? [resumeHint] : []),
     '',
     '执行要求：',
     '- 只完成本子任务，不擅自扩大范围；不要派生新的 Agent。',

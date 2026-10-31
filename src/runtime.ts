@@ -514,6 +514,71 @@ export function probeInterruptedEvidence(output: any, subtask: any, cwd: any, ar
 }
 
 /**
+ * [1.8.19] Find a subtask definition by id, without assuming the plan is valid.
+ */
+export function findSubtaskById(plan: any, subtaskId: string) {
+  for (const stage of Array.isArray(plan?.stages) ? plan.stages : []) {
+    for (const subtask of Array.isArray(stage?.subtasks) ? stage.subtasks : []) {
+      if (subtask?.id === subtaskId) return subtask
+    }
+  }
+  return null
+}
+
+/**
+ * [1.8.19] A hard per-subtask timeout must not erase what the child already wrote.
+ *
+ * Real incident (2026-10-31 23:23:38): T11/T12 were aborted by the 900 s
+ * per-subtask ceiling four seconds after their deliverables had landed
+ * (T11 32,996 B report + 140-row index; T12 51,547 B report). The parent only
+ * saw `blocked / 达到执行上限`, with no hint that the files existed, so the same
+ * work would be redone from scratch. This probe records the landed declared
+ * outputs in the status row and in the error text — it does not change the
+ * verdict (a timeout is still `blocked`), it only stops the evidence loss.
+ */
+export function timeoutBlockedPatch(subtask: any, cwd: any, message: string, artifactExists: any = existsSync) {
+  const evidence = probeInterruptedEvidence(null, subtask, cwd, artifactExists)
+  const landed = evidence.artifacts.filter((item: any) => item?.exists === true).map((item: any) => String(item.ref))
+  const artifactNote = landed.length > 0
+    ? `；该步声明的产物已在盘上：${landed.slice(0, 6).join('、')}（先核对，不要当作从未运行）`
+    : ''
+  return {
+    patch: {
+      status: 'blocked',
+      progress: 100,
+      finishedAt: Date.now(),
+      error: message + artifactNote,
+      summary: truncate(`未完成：${message}${artifactNote}`, 3000),
+      ...(evidence.artifacts.length > 0 ? { artifacts: evidence.artifacts } : {}),
+      ...(evidence.missingArtifacts.length > 0 ? { missingArtifacts: evidence.missingArtifacts } : {}),
+    },
+    landed,
+  }
+}
+
+/**
+ * [1.8.19] The round budget reset used to erase every trace of the attempt.
+ *
+ * The 20-minute `TOTAL_TIMEOUT` branch resets unfinished rows to `pending`, and
+ * `applyStatus` (by design) clears `childId / startedAt / finishedAt`. In the
+ * 2026-10-31 incident T10 had run for ~19 minutes and had already written its
+ * coverage report at 23:06:26 when the budget fired at 23:07:25; the card then
+ * said "not started" and the user asked "why did T10 stop by itself". The
+ * attempt provenance and any landed declared outputs now travel in the error
+ * text, so the reset stays a pause but stops being an erasure.
+ */
+export function budgetResetError(item: any, subtask: any, cwd: any, artifactExists: any = existsSync) {
+  const landed = probeInterruptedArtifacts(null, subtask, cwd, artifactExists)
+  const parts = ['本轮预算用尽，等待续跑']
+  if (item?.childId) parts.push(`上一轮子会话 ${String(item.childId).slice(0, 8)}`)
+  if (Number.isFinite(item?.startedAt) && Number.isFinite(item?.finishedAt)) {
+    parts.push(`运行 ${Math.max(0, Math.round((Number(item.finishedAt) - Number(item.startedAt)) / 1000))}s`)
+  }
+  if (landed.length > 0) parts.push(`声明产物已在盘上：${landed.slice(0, 6).join('、')}`)
+  return parts.join('；')
+}
+
+/**
  * Turn one child output into a status verdict.
  *
  * The decision lives in `adjudicateResult` (a pure function) so the runtime and
@@ -822,14 +887,10 @@ async function runSubtask(ctx: any, record: any, stage: any, subtask: any, optio
       // plain "too slow" and the next investigation goes down the wrong path.
       const message = `子任务 ${subtask.id} 达到执行上限（${childTimeoutMs}ms），已强制结束`
       try {
-        record.statuses = applyStatus(record.statuses, subtask.id, {
-          status: 'blocked',
-          progress: 100,
-          finishedAt: Date.now(),
-          error: message,
-          summary: truncate(`未完成：${message}`, 3000),
-        })
-        record.errors = [...(record.errors ?? []), `${subtask.id}: ${message}`].slice(-20)
+        // [1.8.19] Keep the evidence of what already landed on disk.
+        const { patch } = timeoutBlockedPatch(subtask, options.cwd, message, options.artifactExists)
+        record.statuses = applyStatus(record.statuses, subtask.id, patch)
+        record.errors = [...(record.errors ?? []), `${subtask.id}: ${patch.error}`].slice(-20)
         record.updatedAt = Date.now()
       } catch (error: any) {
         record.errors = [
@@ -1179,9 +1240,12 @@ export async function dispatchPlan(ctx: any, record: any, options: any) {
       let reset = record.statuses
       for (const item of record.statuses) {
         if (item.status === 'done') continue
+        // [1.8.19] Carry the aborted attempt's provenance and landed files into
+        // the pause reason instead of silently erasing them.
+        const definition = findSubtaskById(record.plan, item.subtaskId)
         reset = applyStatus(reset, item.subtaskId, {
           status: 'pending',
-          error: '本轮预算用尽，等待续跑',
+          error: budgetResetError(item, definition, options.cwd, options.artifactExists),
         })
       }
       record.statuses = reset
