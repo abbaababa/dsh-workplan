@@ -381,3 +381,97 @@ test('人工改判只写一次：durable update 与配对的 tool/result 不得�
   const fallback: any = reconstructFromSession({ seq: onlyTool.length, header: { createdAt: 1000 }, eventAt: (n: number) => onlyTool[n] })
   assert.equal(fallback.statuses[1].status, 'done', '没有 durable 消息时，tool/result 必须独立生效')
 })
+
+/*
+ * [1.8.14] N5：默认回放保持「最后定义」契约，显式 planId 才能选中旧计划。
+ *
+ * 事故会话先定义了 A、又生成了 B，随后 A 的结果与人工改判继续到达。旧实现把
+ * 「最后一个 plan 消息」当成当前计划，重启后收尾闸门按 B 判定——即使 B 从未派发。
+ * 试过把默认回放改成「最后活动」，但默认目标同时喂给 dispatch：旧计划会截获
+ * 新任务的默认派发目标，风险更大；因此默认契约不动，收尾闸门改为按本回合结算
+ * 消息里点名的计划重建（见 workplan-turn-stop-gate 的 N5 用例）。
+ */
+test('旧计划后收到结果时仍可按显式 planId 还原；默认回放保持「最后定义」契约', () => {
+  const planA = {
+    planId: 'wp-last-activity-a',
+    sessionId: 'session-last-activity',
+    createdTurn: 1,
+    createdAt: 1000,
+    title: '计划 A',
+    contradictions: { primary: { statement: 'A 仍在推进' } },
+    stages: [{ id: 'S1', subtasks: [{ id: 'T1', dependsOn: [] }] }],
+  }
+  const planB = {
+    planId: 'wp-last-activity-b',
+    sessionId: 'session-last-activity',
+    createdTurn: 2,
+    createdAt: 2000,
+    title: '计划 B',
+    contradictions: { primary: { statement: 'B 只是被生成' } },
+    stages: [{ id: 'S1', subtasks: [{ id: 'T1', dependsOn: [] }] }],
+  }
+  const statusesA = createStatuses(planA).map((item: any) => ({
+    ...item,
+    status: 'done',
+    progress: 100,
+  }))
+  const resultA = buildResultMessage({
+    planId: planA.planId,
+    sessionId: planA.sessionId,
+    dispatchedAt: 2000,
+    statuses: statusesA,
+    errors: [],
+    stats: computeStats(statusesA),
+  })
+  const events = [
+    { seq: 0, type: 'user/message', data: buildPlanMessage(planA) },
+    { seq: 1, type: 'user/message', data: buildPlanMessage(planB) },
+    // A 的结果晚于 B 的定义到达：A 才是会话正在收尾的那个计划。
+    { seq: 2, type: 'user/message', data: resultA },
+  ]
+  const session = { seq: events.length, header: { createdAt: 1000 }, eventAt: (n: number) => events[n] }
+
+  const byDefault: any = reconstructFromSession(session)
+  assert.equal(byDefault.plan.planId, planB.planId, '默认回放保持「最后定义」契约，不能由旧计划截获派发目标')
+
+  const explicitB: any = reconstructFromSession(session, planB.planId)
+  assert.equal(explicitB.plan.planId, planB.planId, '显式 planId 必须能选中任意计划')
+  const explicitA: any = reconstructFromSession(session, planA.planId)
+  assert.equal(explicitA.plan.planId, planA.planId)
+  assert.equal(explicitA.statuses[0].status, 'done', '按 A 的 planId 回放必须吃进 A 的结果消息')
+})
+
+/*
+ * [1.8.14] 派发途中取消只写结果消息（phase=cancelled），不写 cancel 消息。
+ * 如果回放只看 cancel 消息，重启后计划会重新变回「正在做」——取消被静默丢失。
+ */
+test('派发途中取消（结果消息 phase=cancelled）在回放后仍是已取消', () => {
+  const plan = {
+    planId: 'wp-cancel-inflight',
+    sessionId: 'session-cancel-inflight',
+    createdTurn: 1,
+    createdAt: 1000,
+    title: '途中取消',
+    contradictions: { primary: { statement: '取消必须持久' } },
+    stages: [{ id: 'S1', subtasks: [{ id: 'T1', dependsOn: [] }] }],
+  }
+  const statuses = createStatuses(plan).map((item: any) => ({ ...item, status: 'in_progress', progress: 0 }))
+  const result = buildResultMessage({
+    planId: plan.planId,
+    sessionId: plan.sessionId,
+    dispatchedAt: 2000,
+    statuses,
+    errors: [],
+    stats: computeStats(statuses),
+    phase: 'cancelled',
+  })
+  const events = [
+    { seq: 0, type: 'user/message', data: buildPlanMessage(plan) },
+    { seq: 1, type: 'user/message', data: result },
+  ]
+  const session = { seq: events.length, header: { createdAt: 1000 }, eventAt: (n: number) => events[n] }
+  const record: any = reconstructFromSession(session)
+  assert.equal(record.phase, 'cancelled', '结果消息里的 cancelled 必须在回放时生效')
+  assert.equal(record.cancelled, true)
+  assert.equal(record.cancelRecorded, true, '取消已由 durable 结果消息记录')
+})

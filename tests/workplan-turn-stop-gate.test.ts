@@ -22,6 +22,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  buildPlanMessage,
   buildResultMessage,
   buildResultSummary,
   buildStopSteerText,
@@ -485,3 +486,54 @@ test('剩余项全部 blocked：不再空转 steer，但 present 仍被拒绝', 
   assert.match(denied, /未完成/, '未完成的产物仍不得 present')
 })
 
+
+/*
+ * [1.8.14] N5：重启后内存为空时，闸门判的必须是「这一回合结算对应的计划」，
+ * 而不是「最后一个 plan 消息定义的计划」。
+ *
+ * 事故会话先定义 A 并派发，之后又生成了 B；A 的结果与人工改判还在陆续到达。
+ * 1.8.13 的默认回放只看最后一条 plan 消息，于是闸门按从未派发的 B 判定。修复
+ * 让 onTurnStopping 从本回合的 workplan-result 里取出 planId，再按它回放
+ * （显式 planId 还能触发 1.8.10 的窗口前移）。
+ */
+test('重启后按本回合结算消息点名的计划判定，而不是最后生成的计划', async () => {
+  const withBasics = (plan: any) => ({
+    ...plan,
+    taskUnderstanding: { originalRequest: '重启后按结算消息认计划', deliverable: '闸门按 A 判定' },
+    contradictions: { primary: { statement: '闸门必须按本回合结算对应的计划判定' }, secondary: [], transformationConditions: [] },
+  })
+  const planA = withBasics(makePlan('wp-gate-n5-a'))
+  const planB = withBasics(makePlan('wp-gate-n5-b'))
+  const session = makeSession()
+  session.append('user/message', buildPlanMessage(planA))
+  session.append('user/message', buildPlanMessage(planB))
+  const statusesA: any[] = createStatuses(planA)
+  statusesA[0].status = 'done'
+  statusesA[0].progress = 100
+  statusesA[0].verification = 'structured'
+  statusesA[0].acceptance = [{ criterion: '第一步验收', result: 'pass', evidence: '测试通过' }]
+  statusesA[1].status = 'in_progress'
+  const resultA = buildResultMessage({
+    planId: planA.planId,
+    sessionId: session.id,
+    dispatchedAt: 2000,
+    statuses: statusesA,
+    errors: [],
+    stats: derivePlanSnapshot(statusesA).stats,
+    phase: 'executing',
+  })
+  session.append('turn/start', { turn: 1 })
+  session.append('user/message', resultA)
+
+  const runtime: any = makeRuntime(makeRecord(planA), session)
+  // 重启后的真实状态：内存里没有计划记录，只能靠会话日志回放。
+  runtime.state.records.clear()
+  const { agent, steered } = steerableAgent(session)
+  await runtime.onTurnStopping({ agent, turn: 1 })
+
+  assert.equal(steered.length, 1, 'A 未完成，本回合必须被拦下')
+  const text = textOf(steered[0])
+  assert.match(text, /wp-gate-n5-a/, '必须按 A 判定（本回合结算消息点名的计划）')
+  assert.doesNotMatch(text, /wp-gate-n5-b/, '不能按后定义、从未派发的 B 判定')
+  assert.match(text, /未完成/)
+})

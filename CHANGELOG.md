@@ -1,3 +1,50 @@
+## 1.8.14 — 2026-10-31
+
+**修复：事故报告 §12.6 表 A 里仍然开放的运行态/持久化缺口（N1、N5、N8、N12、N13），并让「重启后到底加载了哪份构建」可以自证。**
+
+> 背景：1.8.13 把「完成」收敛成一个谓词，但重启复验仍然只能靠
+> `ps`/`lsof`/文件 mtime 推断进程加载了什么；同时回放、取消、结果写入
+> 三个持久化边界仍有可复现缺口。本轮按「运行态自证 → 持久化一致性 →
+> 可观测性」的顺序修，全部以测试钉住。
+
+### 修复
+
+- **N1 运行态自证**：`dsh_workplan_status`（以及 `dispatch`）新增 `runtime`
+  字段：`version / pid / startedAt / uptimeMs / entryPath / buildHash`。
+  宿主在激活时对实际加载的 `host.js + runtime.js + plan.js` 做 sha256
+  （取前 16 位），因此同一版本号重新构建、或 profile 重组后内存里仍是旧模块，
+  都会被指纹区分出来；`startedAt` 由 `process.uptime()` 推导，是真实进程
+  启动时间，不是插件构造时间。
+- **无计划时也回答身份**：`status` 的 `NO_PLAN` 分支过去只有错误文案，导致
+  报告 §14.6 第 2 步（新会话里调 `status` 确认版本）无法执行。现在该分支同样
+  返回 `version` 与 `runtime`，渲染行也显示 `v…｜build …｜pid …｜启动 …`。
+- **N5 默认回放选「最后活动的计划」**：`reconstructFromSession` 默认选中的
+  计划从「最后一个 `plan` 消息」改为「最后一条提到任何计划的 durable 消息」
+  （plan / result / update / cancel）。事故会话里 A 未完成时又定义了 B，
+  A 的结果和人工改判随后到达——旧实现重启后按 B 判定，现在仍按 A。
+  显式传 `planId` 的行为不变。
+- **N8 取消幂等**：第二次取消不再追加第二条取消消息，而是返回
+  `alreadyCancelled: true`；已取消状态在回放里由 cancel 消息**或**
+  结果消息的 `phase: 'cancelled'` 任一方确认。
+- **派发途中取消持久化**：1.8.13 在中止分支直接 `return`，不写任何 durable
+  消息；若随后结果消息写入失败，重启会把计划当成仍在执行。现在中止分支也写
+  取消消息，并在返回值里报告 `cancelRecorded`。
+- **N12 取消写入失败可报告**：取消消息的 `session.append` 加了 `try/catch`，
+  失败进入 `record.errors` 并返回 `cancelRecorded: false`，不再抛出后留下
+  「UI 已取消、日志没有」的分裂状态。
+- **N13 结果写入失败可报告**：结果消息 `append` 失败时除宿主日志外，
+  同时 `pushRecordError`，`status.errors` 与 UI 都能看到本轮结果未落盘。
+- **取消途中的回放**：结果消息 `phase: 'cancelled'` 现在会让回放快照进入
+  已取消，不再依赖是否存在 cancel 消息。
+
+### 测试
+
+- 新增 6 条回归：默认回放跟随最后活动计划；途中取消（结果 phase）回放仍取消；
+  连续两次取消只写一条消息；中止分支写 durable 取消；取消写失败报告
+  `cancelRecorded:false`；结果写失败进入 `errors`；无计划时 `status` 返回
+  版本与构建指纹。
+- `npm run check` 无诊断；`npm test` 全绿（见发布记录）。
+
 ## 1.8.13 — 2026-10-31
 
 **修复：四套「完成」判定各自为政——全 done 无证据仍可交付、取消后仍可 present、补证无法持久化。**

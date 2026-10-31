@@ -198,3 +198,56 @@ test('重启后 status 工具可以从会话记录重建计划并读到完成项
   assert.equal(rebuilt.stats.done, 1)
   assert.equal(rebuilt.running, false)
 })
+
+/*
+ * [1.8.14] N1：重启核验不能靠 ps/lsof 推断。status 在没有计划时也必须回答
+ * 「哪个版本、哪份构建、哪个进程」——报告 §14.6 第 2 步照做的正是这条路径。
+ */
+test('status 在无计划时也给出加载的版本与构建指纹', async () => {
+  const session = makeSession('session-identity')
+  const ctx = {
+    logger: { warn() {} },
+    subagents: { startActivation: async () => ({ childId: 'x', result: Promise.resolve(completed()), dispose: async () => {} }) },
+    sessions: { get: () => undefined, list: () => [], eventAt: () => undefined },
+  }
+  const runtime: any = createWorkplanRuntime(ctx, {
+    version: '1.8.14',
+    build: { pid: 4242, startedAt: 1000, entryPath: '/tmp/lib/host.js', buildHash: 'feedfacecafebeef' },
+  })
+  const out: any = await runtime.statusTool({ session }, {})
+  assert.equal(out.ok, false)
+  assert.equal(out.code, 'NO_PLAN')
+  assert.equal(out.version, '1.8.14', '无计划时也必须报告版本')
+  assert.equal(out.runtime?.buildHash, 'feedfacecafebeef', '必须报告实际加载的构建指纹')
+  assert.equal(out.runtime?.pid, 4242)
+  assert.equal(out.runtime?.startedAt, 1000)
+  assert.match(String(out.runtime?.entryPath), /host\.js$/)
+  assert.ok(Number(out.runtime?.uptimeMs) >= 0)
+})
+
+/*
+ * [1.8.14] N13：结果消息写失败过去只写进宿主日志，模型和 UI 完全看不到。
+ * 现在必须进入 durable errors，并在 dispatch 的返回值里可见。
+ */
+test('结果消息写入失败会登记到 errors，而不是只打日志', async () => {
+  const gate = deferred()
+  const { session, runtime } = makeRuntime(gate.promise)
+  const originalAppend = session.append.bind(session)
+  session.append = (type: string, data: any) => {
+    /*
+     * 结果消息的 kind 在正文标记之间，不在信封上——用生产解析器判断，
+     * 不要假设 data.kind 存在（第一版测试就因此从未真正抛错）。
+     */
+    if (type === 'user/message' && parseResultMessage(data)) throw new Error('log full')
+    return originalAppend(type, data)
+  }
+  setTimeout(() => gate.release(completed()), 0)
+  const out: any = await runtime.dispatchTool({ session, options: {} }, {}, new AbortController().signal)
+  const record: any = runtime.state.records.get(session.id)
+  assert.ok(record, '派发必须建立记录')
+  assert.ok(
+    (record.errors ?? []).some((line: string) => /写入结果消息失败/.test(line)),
+    '写失败必须进入 durable 错误列表',
+  )
+  assert.equal(out.ok, true, '结果写失败不改变本轮已完成的事实')
+})

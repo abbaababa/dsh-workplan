@@ -13,6 +13,7 @@ import {
   buildCancelMessage,
   buildPlanMessage,
   createStatuses,
+  parseCancelMessage,
   deliveryReadiness,
   derivePlanSnapshot,
 } from '../src/plan.js'
@@ -209,4 +210,113 @@ test('present：全 done 无证据、取消未完成一律拒绝；取消文案�
   assert.match(text, /取消不等于完成/)
   assert.match(text, /不要调用 present/)
   assert.match(text, /未完成：剩余 N 项/)
+})
+
+/*
+ * [1.8.14] N8：取消是幂等的。第二次取消不得再往会话日志里追加一条取消消息，
+ * 否则刷新后同一件事显示两次，且日志会无限增长。
+ */
+test('连续两次取消只写一条取消消息，并如实报告已取消', async () => {
+  const plan = makePlan('wp-cancel-once')
+  const session = makeSession()
+  session.append('user/message', buildPlanMessage(plan))
+  const record: any = {
+    plan,
+    planId: plan.planId,
+    title: plan.title,
+    phase: 'pending',
+    statuses: createStatuses(plan),
+    errors: [],
+    degraded: false,
+    createdAt: plan.createdAt,
+    updatedAt: Date.now(),
+  }
+  const runtime: any = makeRuntime(record, session)
+  // 取消消息的 kind 在正文标记之间，用生产解析器判断，不能看信封 data.kind。
+  const countCancels = () => session.events.filter((event: any) => parseCancelMessage(event.data)).length
+
+  const first: any = await runtime.cancelPlan({ session }, { reason: '第一次' })
+  assert.equal(first.ok, true)
+  assert.equal(first.cancelRecorded, true)
+  assert.equal(countCancels(), 1, '第一次取消必须落一条 durable 消息')
+
+  const second: any = await runtime.cancelPlan({ session }, { reason: '第二次' })
+  assert.equal(second.ok, true)
+  assert.equal(second.alreadyCancelled, true)
+  assert.equal(second.cancelRecorded, true)
+  assert.equal(countCancels(), 1, '重复取消不得再写一条')
+
+  const replayed: any = reconstructFromSession(session)
+  assert.equal(replayed.phase, 'cancelled', '取消必须能回放')
+})
+
+/*
+ * [1.8.14] 派发途中取消：1.8.13 在这里直接 return，不落任何 durable 消息。
+ * 如果随后结果消息写入失败，重启就会把计划当成仍在执行。现在必须落取消消息。
+ */
+test('派发途中取消也会写入 durable 取消消息', async () => {
+  const plan = makePlan('wp-cancel-inflight')
+  const session = makeSession()
+  session.append('user/message', buildPlanMessage(plan))
+  const record: any = {
+    plan,
+    planId: plan.planId,
+    title: plan.title,
+    phase: 'executing',
+    statuses: createStatuses(plan),
+    errors: [],
+    degraded: false,
+    dispatchPromise: Promise.resolve(),
+    abortDispatch: () => { record.aborted = true },
+    createdAt: plan.createdAt,
+    updatedAt: Date.now(),
+  }
+  const runtime: any = makeRuntime(record, session)
+  const out: any = await runtime.cancelPlan({ session }, { reason: '中止' })
+  assert.equal(out.ok, true)
+  assert.equal(out.phase, 'cancelled')
+  assert.equal(out.abortedRunning, true)
+  assert.equal(out.cancelRecorded, true, '中止路径同样必须可持久')
+  assert.equal(session.events.filter((event: any) => parseCancelMessage(event.data)).length, 1)
+})
+
+/*
+ * [1.8.14] N12：取消消息写失败必须被报告，而不是抛出后让 UI 显示「已取消」、
+ * 日志里却没有任何取消记录。
+ */
+test('取消消息写失败时报告 cancelRecorded=false 并登记错误', async () => {
+  const events: any[] = []
+  const session: any = {
+    id: 'session-cancel-fail',
+    header: { createdAt: 1000 },
+    get seq() { return events.length },
+    append(type: string, data: any) {
+      if (type === 'user/message' && parseCancelMessage(data)) throw new Error('disk full')
+      events.push({ type, data })
+      return data
+    },
+    eventAt: (n: number) => events[n],
+    events,
+  }
+  const plan = makePlan('wp-cancel-fail')
+  session.append('user/message', buildPlanMessage(plan))
+  const record: any = {
+    plan,
+    planId: plan.planId,
+    title: plan.title,
+    phase: 'pending',
+    statuses: createStatuses(plan),
+    errors: [],
+    degraded: false,
+    createdAt: plan.createdAt,
+    updatedAt: Date.now(),
+  }
+  const runtime: any = makeRuntime(record, session)
+  const out: any = await runtime.cancelPlan({ session }, { reason: '失败演练' })
+  assert.equal(out.ok, true)
+  assert.equal(out.cancelRecorded, false, '写失败必须如实报告，不能假装已持久')
+  assert.ok(
+    (record.errors ?? []).some((line: string) => /写入取消消息失败/.test(line)),
+    '失败必须进入 durable 错误列表',
+  )
 })

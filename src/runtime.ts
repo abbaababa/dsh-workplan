@@ -1557,6 +1557,14 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
           snap.resumeCount = Number(result.resumeCount ?? snap.resumeCount) || 0
           snap.resultPhase = typeof result.phase === 'string' ? result.phase : ''
           snap.resultSeen = true
+          /*
+           * [1.8.14] A cancel that lands while a dispatch is in flight writes no
+           * separate cancel message (it aborts the dispatch instead), so the
+           * only durable trace of that cancellation is `phase: 'cancelled'` in
+           * the round result. Without this the plan reopens as "executing"
+           * after a restart — the cancel is silently lost.
+           */
+          if (snap.resultPhase === 'cancelled') snap.cancelled = true
         }
       }
       /*
@@ -1719,6 +1727,14 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
     resumeLimit: MAX_PLAN_RESUMES,
     resumeAvailable: canResumePlan({ phase, statuses, resumeCount }, MAX_PLAN_RESUMES).resume,
     stale: stalePending,
+    /*
+     * [1.8.14] Two facts, one from the log: whether the plan is cancelled and
+     * whether that cancellation is durably recorded. For replay they are the
+     * same; the live `cancelPlan` uses `cancelRecorded` to make a second
+     * cancel a no-op instead of appending a duplicate message (N8).
+     */
+    cancelled,
+    cancelRecorded: cancelled,
   }
 }
 
@@ -1812,6 +1828,24 @@ export type WorkplanRuntimeOptions = {
    * with every status/dispatch answer.
    */
   version?: string
+  /**
+   * [1.8.14] Identity of the modules this process actually loaded.
+   *
+   * 1.8.13 made the *package version* visible, but the incident's N1 stayed
+   * open: a version string cannot distinguish "this build" from "the same
+   * version rebuilt", and after a profile recomposition the in-memory modules
+   * may not be the files on disk. The host therefore hashes the loaded
+   * `lib/host.js` + `lib/runtime.js` + `lib/plan.js` at module-init time and
+   * passes the digest (plus PID and process start time) here. `status` answers
+   * it even when there is no plan, so the "did the restart load the fix"
+   * question needs no PID archaeology.
+   */
+  build?: {
+    pid?: number
+    startedAt?: number
+    entryPath?: string
+    buildHash?: string
+  }
 }
 
 export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions = {}) {
@@ -1825,6 +1859,38 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
    * resume, cancel, the host's tool timeout) agrees on the same numbers.
    */
   const pluginVersion = typeof options.version === 'string' && options.version ? options.version : 'unknown'
+  /*
+   * [1.8.14] Build identity, captured once.
+   *
+   * `startedAt` is derived from `process.uptime()` so it is the real process
+   * start, not the plugin's construction time; `uptimeMs` is computed live.
+   * Tests construct the runtime without a `build` option, so every field is
+   * optional and the answer degrades to `unknown` instead of failing.
+   */
+  const buildInfo = {
+    pid: Number.isInteger(options.build?.pid) && Number(options.build?.pid) > 0
+      ? Number(options.build!.pid)
+      : process.pid,
+    startedAt: Number.isFinite(Number(options.build?.startedAt)) && Number(options.build?.startedAt) > 0
+      ? Number(options.build!.startedAt)
+      : Math.round(Date.now() - process.uptime() * 1000),
+    entryPath: typeof options.build?.entryPath === 'string' && options.build.entryPath
+      ? options.build.entryPath
+      : '',
+    buildHash: typeof options.build?.buildHash === 'string' && options.build.buildHash
+      ? options.build.buildHash
+      : 'unknown',
+  }
+  function runtimeIdentity() {
+    return {
+      version: pluginVersion,
+      pid: buildInfo.pid,
+      startedAt: buildInfo.startedAt,
+      uptimeMs: Math.max(0, Date.now() - buildInfo.startedAt),
+      entryPath: buildInfo.entryPath,
+      buildHash: buildInfo.buildHash,
+    }
+  }
   const limits = {
     childTimeoutMs: normaliseChildTimeout(options.childTimeoutMs),
     idleTimeoutMs: normaliseIdleTimeout(options.idleTimeoutMs),
@@ -2093,6 +2159,49 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         stats: before.stats,
       }
     }
+    /*
+     * [1.8.14] N8: a second cancel used to append a second cancel message.
+     *
+     * Cancelling is idempotent by definition: once the cancellation is durably
+     * recorded, repeating it must not grow the log — every duplicate is
+     * replayed and shows up as another "取消" line in the transcript, which is
+     * exactly the kind of "did it happen twice?" noise this incident was made
+     * of. `dispatchPromise` is excluded because an in-flight dispatch may still
+     * need aborting; that path returns without appending (see below).
+     */
+    if (record.phase === 'cancelled' && record.cancelRecorded === true && !record.dispatchPromise) {
+      state.records.set(session.id, record)
+      return {
+        ok: true,
+        planId: record.plan.planId,
+        phase: 'cancelled',
+        reason: typeof record.cancelReason === 'string' && record.cancelReason ? record.cancelReason : reason,
+        alreadyCancelled: true,
+        abortedRunning: false,
+        cancelRecorded: true,
+        stats: before.stats,
+      }
+    }
+    const cancelMessage = buildCancelMessage(record.plan.planId, reason)
+    /*
+     * [1.8.14] N12: the durable cancel used to be the only append without a
+     * try/catch. A failing append threw out of the tool after the in-memory
+     * phase had already flipped to `cancelled`, leaving the UI saying
+     * "已取消" while the log said nothing — the next restart silently undid it.
+     * Record the failure and report `cancelRecorded: false` instead.
+     */
+    const appendCancelRecord = () => {
+      try {
+        session.append('user/message', cancelMessage, { surfaceOp: 'append' })
+        record.cancelRecorded = true
+        record.cancelReason = reason
+        return true
+      } catch (error: any) {
+        record.cancelRecorded = false
+        pushRecordError(record, `写入取消消息失败：${error instanceof Error ? error.message : String(error)}`)
+        return false
+      }
+    }
     if (record.dispatchPromise) {
       /*
        * Cancel must always work.
@@ -2113,26 +2222,35 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       } catch (error: any) {
         record.errors = [...(record.errors ?? []), `取消时中止执行失败：${String(error?.message ?? error)}`].slice(-20)
       }
+      /*
+       * [1.8.14] The abort path now writes the cancel durably too. 1.8.13
+       * returned here without touching the log, so a later failed result write
+       * left no trace of the cancellation at all and a restart reopened the
+       * plan as "executing".
+       */
+      const recorded = appendCancelRecord()
+      state.records.set(session.id, record)
       return {
         ok: true,
         planId: record.plan.planId,
         phase: 'cancelled',
         reason,
         abortedRunning: aborted,
+        cancelRecorded: recorded,
         stats: derivePlanSnapshot(record.statuses).stats,
       }
     }
     record.phase = 'cancelled'
     record.error = `计划已取消：${reason}`
     record.updatedAt = Date.now()
-    const message = buildCancelMessage(record.plan.planId, reason)
-    session.append('user/message', message, { surfaceOp: 'append' })
+    const recorded = appendCancelRecord()
     state.records.set(session.id, record)
     return {
       ok: true,
       planId: record.plan.planId,
       phase: 'cancelled',
       reason,
+      cancelRecorded: recorded,
       stats: derivePlanSnapshot(record.statuses).stats,
     }
   }
@@ -2152,6 +2270,12 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         record.resultWritten = true
       } catch (error) {
         ctx.logger?.warn?.(`dsh-workplan: 写入结果消息失败：${error instanceof Error ? error.message : String(error)}`)
+        /*
+         * [1.8.14] N13: a failed result write is a real, user-visible failure —
+         * the round summary is absent from the transcript and a restart can
+         * disagree with the live phase. Log it durably, not only in the host log.
+         */
+        pushRecordError(record, `写入结果消息失败：${error instanceof Error ? error.message : String(error)}`)
       }
     }
     /*
@@ -2201,6 +2325,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     return {
       ok: true,
       version: pluginVersion,
+      runtime: runtimeIdentity(),
       planId: record.plan.planId,
       alreadyRunning: false,
       ...completionFields(snapshot, record.phase),
@@ -2229,10 +2354,19 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       if (rebuilt?.plan) record = rebuilt
     }
     if (!record?.plan) {
+      /*
+       * [1.8.14] N1/§14.6 step 2: the identity of the loaded build must be
+       * answerable even before a plan exists. 1.8.13 returned NO_PLAN with no
+       * version here, so the documented restart check ("call status, confirm
+       * the version") failed on a fresh session — the check itself was wrong,
+       * not just the docs.
+       */
       return {
         ok: false,
         code: 'NO_PLAN',
         running: false,
+        version: pluginVersion,
+        runtime: runtimeIdentity(),
         error: '当前会话没有可查看的计划',
         hint: '先让本轮生成计划并调用 dsh_workplan_dispatch。',
       }
@@ -2243,6 +2377,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     return {
       ok: true,
       version: pluginVersion,
+      runtime: runtimeIdentity(),
       planId: record.plan.planId,
       running,
       phase: record.phase,
@@ -2592,6 +2727,46 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     return ids
   }
 
+  /*
+   * [1.8.14] N5：结算回合要判的是「这条结算对应的计划」，不是「最后生成的计划」。
+   *
+   * 重启后内存为空时，收尾闸门原本走默认回放（最后一个 plan 消息）：事故会话在
+   * A 未完成时又生成了 B，A 的结果随后到达，闸门于是按 B 判定。结算输入
+   * （workplan-result）自带 planId；显式传 planId 还能触发 1.8.10 的窗口前移，
+   * 旧计划落在 2000 事件窗口外时也能重建。
+   */
+  function planIdFromTurn(session: any, turn: number): string | undefined {
+    if (typeof session?.eventAt !== 'function' || !(turn >= 1)) return undefined
+    let started = -1
+    for (let i = session.seq - 1; i >= 0; i -= 1) {
+      const event = session.eventAt(i)
+      if (event?.type === 'turn/start' && Number(event.data?.turn) === turn) {
+        started = i
+        break
+      }
+    }
+    if (started < 0) return undefined
+    for (let i = started + 1; i < session.seq; i += 1) {
+      const event = session.eventAt(i)
+      if (!event) continue
+      if (event.type === 'turn/end' && Number(event.data?.turn) === turn) break
+      if (event.type !== 'user/message') continue
+      const data = event.data?.message ?? event.data
+      if (!data || typeof data !== 'object') continue
+      /*
+       * planId 不在信封上：结果消息的 planId 在正文标记之间的 JSON 里，
+       * plan 消息的 planId 在 plan 对象里。两者都走已有的解析器，避免
+       * 对消息形状再发明一套假设。
+       */
+      const result = parseResultMessage(data)
+      if (result && typeof result.planId === 'string' && result.planId) return result.planId
+      const planMessage = parseWorkplanMessage(data)
+      const planId = planMessage?.plan?.planId
+      if (typeof planId === 'string' && planId) return planId
+    }
+    return undefined
+  }
+
   /**
    * [1.8.8] 结算/结果唤醒的回合也属于“本回合的任务”。
    *
@@ -2654,7 +2829,8 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       if (isPlanModeActive(ctx, session)) return
       let record = known
       if (!record?.plan) {
-        record = reconstructFromSession(session)
+        // [1.8.14] N5：优先按本回合结算消息里点名的计划重建，而不是最后生成的计划。
+        record = reconstructFromSession(session, planIdFromTurn(session, turn))
         if (record?.plan) state.records.set(session.id, record)
       }
       if (!stopGateApplies(record)) return
@@ -3097,6 +3273,14 @@ export function cancelToolOutputSchema() {
       planId: { type: 'string' },
       phase: { type: 'string' },
       reason: { type: 'string' },
+      /*
+       * [1.8.14] `cancelRecorded` is the difference between "the UI says
+       * cancelled" and "a restart will still say cancelled". A cancel whose
+       * durable append failed reports false so the caller does not build on it.
+       */
+      cancelRecorded: { type: 'boolean' },
+      alreadyCancelled: { type: 'boolean' },
+      abortedRunning: { type: 'boolean' },
     },
     required: ['ok'],
     additionalProperties: true,
@@ -3119,6 +3303,9 @@ export function statusToolOutputSchema() {
       errors: { type: 'array' },
       resumeLimit: { type: 'number' },
       version: { type: 'string' },
+      // [1.8.14] Loaded-build identity: version alone cannot prove which bytes
+      // the process is running after a rebuild or a profile recomposition.
+      runtime: { type: 'object' },
       deliveryReady: { type: 'boolean' },
       deliveryBlockers: { type: 'array' },
       deliveryRemaining: { type: 'array' },
@@ -3153,6 +3340,7 @@ export function dispatchToolOutputSchema() {
       deliveryBlockers: { type: 'array' },
       deliveryRemaining: { type: 'array' },
       version: { type: 'string' },
+      runtime: { type: 'object' },
       elapsedMs: { type: 'number' },
       statuses: { type: 'array' },
       phase: { type: 'string' },
