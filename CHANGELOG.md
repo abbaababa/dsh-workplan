@@ -1,3 +1,37 @@
+## 1.8.15 — 2026-10-31
+
+**修复：取消成为真正的终态；长会话默认回放不再丢掉计划；`present` 按本回合的计划判定；构建指纹覆盖 `watchdog.js`。**
+
+> 背景：对 1.8.13 / 1.8.14 字节的独立复核（T4e、T5c、T3 三份报告）实测出
+> 四类缺陷：取消之后 `dispatch` 仍会真的启动部门 Agent；派发途中第二次取消
+> 会再写一条取消消息；已取消回合的结果消息仍教模型「继续派发」；超过 2000
+> 事件的会话里默认回放返回 null，`present` 因看不到计划而静默放行。另外
+> `buildHash` 未覆盖 `lib/watchdog.js`，`/dsh-workplan/plans` 载荷没有版本
+> 身份，UI 无法判断进程加载的是不是旧构建。
+
+### 修复
+
+- **取消是终态**：`dispatch` 遇到 `phase: 'cancelled'` 的计划直接返回
+  `ok: false / code: 'PLAN_CANCELLED'`，不启动任何部门 Agent；已取消回合的
+  结果摘要与正文改成「已取消……不得交付，也不要再次派发」，不再教模型
+  「再次调用 dispatch 即可继续跑」。
+- **取消幂等覆盖派发途中**：派发进行中收到取消时记录 `abortRequested`，
+  第二次取消返回 `alreadyCancelled: true`，durable 取消消息只写一条。
+- **长会话默认回放**：窗口起点会向前回扫到最后定义的计划消息，避免
+  `reconstructFromSession` 在长会话里返回 null 而让交付闸门静默失效。
+- **`present` 按本回合的计划判定**：新增 `currentTurnOf`，`present` 闸门优先
+  用本回合消息里点名的 `planId` 重建；默认回放保持「最后定义的计划」契约，
+  因为同一个默认答案也喂给 `dispatch`，改成「最后活动」会让旧计划截获新任务
+  的默认派发目标。
+- **构建指纹**：`buildHash` 的哈希文件加入 `lib/watchdog.js`。
+- **UI 身份**：`/dsh-workplan/plans` 载荷返回 `version` 与 `runtime`
+  （pid / startedAt / entryPath / buildHash）。
+- **测试**：新增 `tests/workplan-1815-guards.test.ts` 6 条；订正 1.8.14 发布
+  说明里与实现不符的 N5 描述。
+
+验证：`npm run check` 无诊断；`npm test` 252/252；`npm run build` 前后 5 个
+产物 sha256 一致；`git diff --exit-code -- lib client.js` 为空。
+
 ## 1.8.14 — 2026-10-31
 
 **修复：事故报告 §12.6 表 A 里仍然开放的运行态/持久化缺口（N1、N5、N8、N12、N13），并让「重启后到底加载了哪份构建」可以自证。**
@@ -18,11 +52,11 @@
 - **无计划时也回答身份**：`status` 的 `NO_PLAN` 分支过去只有错误文案，导致
   报告 §14.6 第 2 步（新会话里调 `status` 确认版本）无法执行。现在该分支同样
   返回 `version` 与 `runtime`，渲染行也显示 `v…｜build …｜pid …｜启动 …`。
-- **N5 默认回放选「最后活动的计划」**：`reconstructFromSession` 默认选中的
-  计划从「最后一个 `plan` 消息」改为「最后一条提到任何计划的 durable 消息」
-  （plan / result / update / cancel）。事故会话里 A 未完成时又定义了 B，
-  A 的结果和人工改判随后到达——旧实现重启后按 B 判定，现在仍按 A。
-  显式传 `planId` 的行为不变。
+- **N5 收尾闸门按本回合结算消息认计划**：`onTurnStopping` 先用本回合 durable
+  消息里点名的 `planId` 重建，再退回收尾检查。默认回放**仍保持「最后定义的
+  计划」契约**——它同时是 `dispatch` 的默认目标，改成「最后活动」会让旧计划
+  截获新任务的派发目标。1.8.14 发布说明初稿曾写成「默认回放改最后活动」，
+  与实现不符，已在 1.8.15 更正。
 - **N8 取消幂等**：第二次取消不再追加第二条取消消息，而是返回
   `alreadyCancelled: true`；已取消状态在回放里由 cancel 消息**或**
   结果消息的 `phase: 'cancelled'` 任一方确认。

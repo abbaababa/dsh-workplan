@@ -1477,6 +1477,52 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
       }
     }
   }
+  /*
+   * [1.8.15] Default replay keeps the "last defined plan" contract, but it
+   * must still find that plan when its message predates the 2000-event window.
+   *
+   * T3 B4 measured the window failure on 1.8.14: on a >2000-event session the
+   * window started after the plan message, the default replay returned null,
+   * and `present` had no plan to judge — the delivery was silently allowed.
+   * The scan reads backwards for the last `workplan` definition and moves the
+   * window start to it.
+   *
+   * The "newest activity" variant was deliberately NOT adopted: the same
+   * default answer also feeds `dispatch`, so an older plan that merely kept
+   * receiving result/update messages would hijack a new task's default
+   * dispatch target (the reason N5 in 1.8.14 left the contract alone). The
+   * turn-scoped fixes (`planIdFromTurn`, the present gate) name the plan
+   * explicitly instead of changing the default.
+   */
+  let defaultPlanId: string | null = null
+  if (!targetPlanId) {
+    for (let seq = session.seq - 1; seq >= 0; seq -= 1) {
+      let event
+      try {
+        event = session.eventAt(seq)
+      } catch {
+        continue
+      }
+      if (!event || event.type !== 'user/message') continue
+      const planMessage = parseWorkplanMessage(event.data)
+      const planId = planMessage?.plan?.planId
+      if (typeof planId !== 'string' || planId === '') continue
+      defaultPlanId = planId
+      let planStart = seq
+      for (let back = seq - 1; back >= 0; back -= 1) {
+        let prior
+        try {
+          prior = session.eventAt(back)
+        } catch {
+          continue
+        }
+        if (!prior || prior.type !== 'user/message') continue
+        if (parseWorkplanMessage(prior.data)?.plan?.planId === planId) planStart = back
+      }
+      if (planStart < start) start = planStart
+      break
+    }
+  }
   interface ReplaySnapshot {
     plan: any
     statuses: any[]
@@ -1666,11 +1712,13 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
       }
     }
   }
-  const chosen = targetPlanId
-    ? snapshots.get(targetPlanId) ?? null
-    : currentId
-      ? snapshots.get(currentId) ?? null
-      : null
+  /*
+   * [1.8.15] Prefer the explicitly named plan, then the plan that owns the
+   * newest activity, then the last definition seen in the replay window.
+   */
+  const chosenId = targetPlanId ?? defaultPlanId ?? currentId
+  let chosen = chosenId ? snapshots.get(chosenId) ?? null : null
+  if (!chosen && currentId) chosen = snapshots.get(currentId) ?? null
   if (!chosen) {
     if (!degraded) return null
     return {
@@ -2166,10 +2214,16 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
      * recorded, repeating it must not grow the log — every duplicate is
      * replayed and shows up as another "取消" line in the transcript, which is
      * exactly the kind of "did it happen twice?" noise this incident was made
-     * of. `dispatchPromise` is excluded because an in-flight dispatch may still
-     * need aborting; that path returns without appending (see below).
+     * of.
+     *
+     * [1.8.15] The abort path was the exception that still duplicated: while
+     * `dispatchPromise` was in flight the guard fell through every time, so two
+     * cancels during one dispatch appended two messages (T4e F2). Once the
+     * abort has been requested there is nothing left to stop, so the presence
+     * of an in-flight promise is no longer a reason to append again.
      */
-    if (record.phase === 'cancelled' && record.cancelRecorded === true && !record.dispatchPromise) {
+    if (record.phase === 'cancelled' && record.cancelRecorded === true
+      && (!record.dispatchPromise || record.abortRequested === true)) {
       state.records.set(session.id, record)
       return {
         ok: true,
@@ -2217,6 +2271,12 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       record.updatedAt = Date.now()
       let aborted = false
       try {
+        /*
+         * [1.8.15] Mark the abort before asking for it. The idempotency guard
+         * above keys on this flag, so a second cancel that arrives while the
+         * dispatch promise is still settling cannot append a second message.
+         */
+        record.abortRequested = true
         record.abortDispatch?.(reason)
         aborted = true
       } catch (error: any) {
@@ -2439,6 +2499,31 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     if (!record?.plan) throw new PlanError('当前会话没有可派发的计划', 'NO_PLAN')
     if (args?.planId && record.plan.planId !== args.planId) {
       throw new PlanError('planId 与当前计划不匹配', 'PLAN_ID_MISMATCH')
+    }
+    /*
+     * [1.8.15] Cancelled is terminal: dispatch must refuse, not resurrect.
+     *
+     * T4e F1/C16 proved the old path answered `ok: true` and really started
+     * department Agents on a cancelled plan (`activationCalled: true`), and a
+     * 2/2-done cancelled plan was silently rewritten to `phase: done`. Cancel
+     * is the user's stop signal; the only honest answer is a refusal that says
+     * how to continue deliberately (a new plan, or the main Agent takes over).
+     */
+    if (record.phase === 'cancelled' || record.cancelled === true) {
+      const snapshot = derivePlanSnapshot(record.statuses)
+      return {
+        ok: false,
+        planId: record.plan.planId,
+        phase: 'cancelled',
+        running: false,
+        alreadyRunning: false,
+        complete: false,
+        remaining: Math.max(0, Number(snapshot.stats.total ?? 0) - Number(snapshot.stats.done ?? 0)),
+        stats: snapshot.stats,
+        code: 'PLAN_CANCELLED',
+        error: '计划已取消：取消只停止执行，不会再启动任何部门 Agent',
+        hint: '不要再次派发。如需继续这项工作，请向用户确认后重新生成计划；或由主 Agent 直接接手剩余项，并在答复中说明这是直接执行而非派发。',
+      }
     }
     /*
      * [1.7.0] Two dispatch modes.
@@ -2768,6 +2853,33 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
   }
 
   /**
+   * [1.8.15] 当前正在进行的回合号；没有打开中的回合时返回 undefined。
+   *
+   * `present` 的闸门需要知道「这一回合在结算哪个计划」。默认回放回答的是
+   * 「最后定义的计划」，在 A 定义、B 后定义、A 的结果在 B 之后到达时会判错
+   * 计划（T3 B5）。这里不新增状态，只从会话尾部回扫 `turn/start`；遇到
+   * `turn/end` 说明当前没有打开中的回合。
+   */
+  function currentTurnOf(session: any): number | undefined {
+    if (typeof session?.eventAt !== 'function') return undefined
+    for (let i = session.seq - 1; i >= 0; i -= 1) {
+      let event
+      try {
+        event = session.eventAt(i)
+      } catch {
+        return undefined
+      }
+      if (!event) continue
+      if (event.type === 'turn/start') {
+        const turn = Number(event.data?.turn)
+        return Number.isFinite(turn) && turn >= 1 ? turn : undefined
+      }
+      if (event.type === 'turn/end') return undefined
+    }
+    return undefined
+  }
+
+  /**
    * [1.8.8] 结算/结果唤醒的回合也属于“本回合的任务”。
    *
    * 事故 turn 2 由 `subagent-settled` 消息唤醒：它不是 human task，
@@ -2896,8 +3008,17 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     if (!session || !isRootSession(session)) return undefined
     if (isPlanModeActive(ctx, session)) return undefined
     let record = state.records.get(session.id)
+    /*
+     * [1.8.15] A live record may belong to another plan (the default dispatch
+     * target of an earlier turn). When the current turn names a plan — its
+     * settlement message or its plan definition — judge that plan instead of
+     * the last defined one (T3 B5).
+     */
+    const turn = currentTurnOf(session)
+    const turnPlanId = turn ? planIdFromTurn(session, turn) : undefined
+    if (turnPlanId && record?.plan && record.plan.planId !== turnPlanId) record = undefined
     if (!record?.plan) {
-      record = reconstructFromSession(session)
+      record = reconstructFromSession(session, turnPlanId)
       if (record?.plan) state.records.set(session.id, record)
     }
     if (!record?.plan) return undefined
@@ -2942,7 +3063,18 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
   }
 
   function plansPayload(sessionId: any) {
-    return buildPlansPayload(ctx, state, sessionId)
+    /*
+     * [1.8.15] The feed must carry build identity too.
+     *
+     * `status` learned version/runtime in 1.8.14, but the Web UI reads this
+     * feed only — so after a rebuild the card could not tell "the process is
+     * still running yesterday's bytes" (T5c §6.2). Same helpers, one source.
+     */
+    return {
+      ...buildPlansPayload(ctx, state, sessionId),
+      version: pluginVersion,
+      runtime: runtimeIdentity(),
+    }
   }
 
   async function route(req: any, res: any, connectionCtx: any = ctx) {

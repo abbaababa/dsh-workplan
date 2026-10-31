@@ -221,3 +221,44 @@ spawn 记录认亲、三处都无记录不激活、人工改判只写一次）�
 该计划」；同一会话里两个未完成计划并存时，任一子 Agent 结算都可能让闸门
 为当前记录 steer。这个偏差不会放行未完成交付，只会多要求一次续跑。要彻底
 消除，需要把 childId→planId 的归属在 spawn 时持久化（1.8.12 候选）。
+
+## 11. 1.8.15：取消终态、长会话回放与 present 的计划选择
+
+1.8.14 发布后，三份独立复核（T4e 取消语义、T5c 运行态身份、T3 边界地毯）
+在 1.8.13 / 1.8.14 字节上又测到四类缺陷：
+
+- **取消后 dispatch 仍会启动部门 Agent。** `dispatchTool` 只检查内存里的
+  `record.phase`，取消只把计划标成 cancelled，并没有把派发入口关死；
+  `activationCalled: true`、`ok: true`，2/2 全 done 的 cancelled 计划还会被
+  静默改写成 `phase: 'done'`。
+- **派发途中第二次取消再写一条取消消息。** 幂等守卫要求
+  `!record.dispatchPromise`，而取消正发生在派发进行中，守卫被绕过。
+- **已取消回合的结果消息仍教「继续派发」。** 摘要与第 3/4 条职责不带取消
+  分支，与 stop-steer 的「不要 dispatch」自相矛盾（T4e F3、T3 C14/C15）。
+- **长会话默认回放返回 null。** `MAX_HISTORY_EVENTS = 2000` 的窗口起点可能
+  落在计划消息之后，`reconstructFromSession` 返回 null，`present` 看不到计划
+  而静默放行（T3 B4）。另外 `buildHash` 未覆盖 `lib/watchdog.js`，
+  `/dsh-workplan/plans` 载荷没有版本身份（T5c）。
+
+1.8.15 的补法：
+
+- `dispatch` 对 `cancelled` 计划返回 `ok: false / code: 'PLAN_CANCELLED'`，
+  在启动任何子 Agent 之前返回。
+- `cancelPlan` 在派发途中记录 `abortRequested`；第二次取消返回
+  `alreadyCancelled: true`，不再追加 durable 消息。
+- `buildResultSummary` / `buildResultMessage` 增加取消分支：只完成 X/Y 时
+  明确「已取消，不得交付」，并禁止再次派发。
+- 默认回放窗口向前回扫到最后定义的计划消息；**默认契约仍是「最后定义」**，
+  因为同一个默认答案也喂给 `dispatch`，改成「最后活动」会让旧计划截获新任务
+  的派发目标。`present` 改为优先按本回合消息点名的 `planId` 重建
+  （`currentTurnOf` + 已有的 `planIdFromTurn`），从而在 A 定义、B 后定义、
+  A 的结果最后到达时判 A 而不是 B。
+- `buildHash` 纳入 `watchdog.js`；`plansPayload` 返回 `version` 与 `runtime`。
+
+验证：`npm run check` 无诊断；`npm test` 252/252（新增
+`tests/workplan-1815-guards.test.ts` 6 条，覆盖上述四类缺陷与身份字段）。
+
+残余：P3 cancelled 后 present 的拒绝由 `deliveryReadiness` 统一承担，测试
+钉住的是「拒绝 + 文案」；没有活体会话内的端到端 present 证据。默认回放与
+`present` 的「本回合计划」判定依赖会话日志里的 `turn/start` 与结算消息，
+日志被归档/截断的会话只能退回默认回放。
