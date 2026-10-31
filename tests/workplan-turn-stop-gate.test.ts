@@ -50,8 +50,15 @@ function makePlan(planId = 'wp-stop-gate') {
 }
 
 function makeRecord(plan: any): any {
-  const statuses = createStatuses(plan)
+  const statuses: any[] = createStatuses(plan)
   statuses[0].status = 'done'
+  /*
+   * [1.8.13] A done row must carry structured evidence, otherwise the plan is
+   * not deliverable and the gate is expected to object. Tests that want the
+   * "complete and deliverable" state use `markDelivered` below.
+   */
+  statuses[0].verification = 'structured'
+  statuses[0].acceptance = [{ criterion: '第一步验收', result: 'pass', evidence: '测试通过' }]
   return {
     plan,
     planId: plan.planId,
@@ -64,6 +71,17 @@ function makeRecord(plan: any): any {
     updatedAt: Date.now(),
     resultWritten: true,
   }
+}
+
+function markDelivered(record: any) {
+  for (const item of record.statuses) {
+    item.status = 'done'
+    item.progress = 100
+    item.verification = 'structured'
+    item.acceptance = [{ criterion: `${item.subtaskId} 验收`, result: 'pass', evidence: 'npm test 通过' }]
+    item.missingArtifacts = []
+  }
+  record.phase = 'done'
 }
 
 function makeSession() {
@@ -140,7 +158,7 @@ test('未完成的结果消息只命令续跑，完成的结果消息才命令�
   assert.match(incomplete, /再次调用 dsh_workplan_dispatch/)
   assert.doesNotMatch(incomplete, /3\. 给出最终答复/)
 
-  for (const item of inbox.statuses) item.status = 'done'
+  markDelivered(inbox)
   const finished = textOf(buildResultMessage({
     planId: 'wp-stop-gate',
     sessionId: 'session-stop-gate',
@@ -151,6 +169,25 @@ test('未完成的结果消息只命令续跑，完成的结果消息才命令�
   }))
   assert.match(finished, /3\. 给出最终答复/)
   assert.doesNotMatch(finished, /【未完成，禁止交付】/)
+
+  /*
+   * [1.8.13] T5-B/D: all rows done but no structured evidence used to produce
+   * the same "give the final answer" instruction. It must now forbid delivery
+   * and offer the repair path instead.
+   */
+  const bare = makeRecord(makePlan('wp-result-bare'))
+  for (const item of bare.statuses) item.status = 'done'
+  const evidenceBlocked = textOf(buildResultMessage({
+    planId: 'wp-result-bare',
+    sessionId: 'session-stop-gate',
+    statuses: bare.statuses,
+    stats: derivePlanSnapshot(bare.statuses).stats,
+    phase: 'done',
+    errors: [],
+  }))
+  assert.match(evidenceBlocked, /【证据未通过，禁止交付】/)
+  assert.match(evidenceBlocked, /dsh_workplan_update/)
+  assert.doesNotMatch(evidenceBlocked, /3\. 给出最终答复/)
 })
 
 test('收尾指令写清剩余量、禁止交付与唯一恢复动作', () => {
@@ -178,7 +215,7 @@ test('未完成且是本回合的任务：收尾被 steer 拦住，且每回合�
 
   await runtime.onTurnStopping({ agent, turn: 1 })
   assert.equal(steered.length, 1, '第一次收尾必须被拦下')
-  assert.match(textOf(steered[0]), /计划没做完，这个回合不关闭/)
+  assert.match(textOf(steered[0]), /计划未通过交付就绪检查，这个回合暂不关闭/)
   assert.equal(record.stopSteers.turn, 1)
   assert.equal(record.stopSteers.count, 1)
 
@@ -189,19 +226,18 @@ test('未完成且是本回合的任务：收尾被 steer 拦住，且每回合�
   assert.equal(steered.length, 2, '到达上限后不再 steer，避免死循环')
 })
 
-test('全部完成、已取消、非本回合任务都直接放行', async () => {
-  // 全部完成
+test('完成且证据通过才放行；已取消/证据缺口会被拦住；非本回合任务放行', async () => {
+  // 全部完成且证据通过
   {
     const session = makeSession()
     const record = makeRecord(makePlan('wp-complete'))
-    for (const item of record.statuses) item.status = 'done'
-    record.phase = 'done'
+    markDelivered(record)
     const runtime = makeRuntime(record, session)
     const { agent, steered } = steerableAgent(session)
     await runtime.onTurnStopping({ agent, turn: 1 })
-    assert.equal(steered.length, 0, '完成的计划不得被拦')
+    assert.equal(steered.length, 0, '完成且证据通过的计划不得被拦')
   }
-  // 已取消
+  // 已取消但未完成（T5-C）：取消不等于完成，不再直接放行
   {
     const session = makeSession()
     const record = makeRecord(makePlan('wp-cancelled'))
@@ -209,7 +245,22 @@ test('全部完成、已取消、非本回合任务都直接放行', async () =>
     const runtime = makeRuntime(record, session)
     const { agent, steered } = steerableAgent(session)
     await runtime.onTurnStopping({ agent, turn: 1 })
-    assert.equal(steered.length, 0, '用户取消后不得再强制续跑')
+    assert.equal(steered.length, 1, '取消只停止执行，未完成项仍不得被当成完成')
+    assert.match(textOf(steered[0]), /计划已取消但未完成/)
+    assert.match(textOf(steered[0]), /不要调用 present/)
+    assert.doesNotMatch(textOf(steered[0]), /1\. 调用 dsh_workplan_dispatch/)
+  }
+  // 全部 done 但证据缺口（T5-B/D）：也要拦，不能让回合安静收尾
+  {
+    const session = makeSession()
+    const record = makeRecord(makePlan('wp-bare-done'))
+    for (const item of record.statuses) item.status = 'done'
+    record.phase = 'done'
+    const runtime = makeRuntime(record, session)
+    const { agent, steered } = steerableAgent(session)
+    await runtime.onTurnStopping({ agent, turn: 1 })
+    assert.equal(steered.length, 1, '全 done 但没有结构化证据，不得按完成收尾')
+    assert.match(textOf(steered[0]), /证据未通过/)
   }
   // 不是本回合产生的任务（例如进度询问的回合）
   {
@@ -355,7 +406,7 @@ test('计划、谱系、spawn 记录三处都没有的结算，不得激活闸�
   assert.equal(steered.length, 0, '无关后台任务的结算不能把未完成计划强行续跑')
 })
 
-test('present 在计划未完成时被硬拒绝，完成/取消/子会话放行', () => {
+test('present：未完成/全 done 无证据/已取消都拒绝，证据补齐后才放行', () => {
   const session = makeSession()
   const record = makeRecord(makePlan('wp-present'))
   const runtime: any = makeRuntime(record, session)
@@ -368,13 +419,20 @@ test('present 在计划未完成时被硬拒绝，完成/取消/子会话放行'
 
   for (const item of record.statuses) item.status = 'done'
   record.phase = 'done'
-  assert.equal(runtime.presentDenialReason({ session }), undefined, '计划完成后必须放行')
+  const withoutEvidence = runtime.presentDenialReason({ session })
+  assert.match(withoutEvidence, /证据未通过/, '状态全 done 不等于可交付')
+  assert.match(withoutEvidence, /dsh_workplan_update/)
+
+  markDelivered(record)
+  assert.equal(runtime.presentDenialReason({ session }), undefined, '证据补齐后才允许交付')
 
   const cancelledSession = makeSession()
   const cancelled = makeRecord(makePlan('wp-present-cancelled'))
   cancelled.phase = 'cancelled'
   const cancelledRuntime: any = makeRuntime(cancelled, cancelledSession)
-  assert.equal(cancelledRuntime.presentDenialReason({ session: cancelledSession }), undefined, '已取消的计划必须放行')
+  const cancelledDenial = cancelledRuntime.presentDenialReason({ session: cancelledSession })
+  assert.match(cancelledDenial, /已取消/, '取消 1/3 不得放行（T5-C）')
+  assert.match(cancelledDenial, /不得调用 present/)
 
   const childSession = { ...makeSession(), header: { origin: 'subagent' } }
   const childRuntime: any = makeRuntime(makeRecord(makePlan('wp-present-child')), childSession)
@@ -397,10 +455,15 @@ test('全部 done 但证据有硬缺口时，present 仍被拒绝', () => {
   assert.match(denied, /缺少声明产物/)
   assert.match(denied, /dsh_workplan_update/)
 
-  // 清掉硬缺口后放行；legacy（没有结构化证据）不在此层拦截。
+  /*
+   * [1.8.13] Clearing the hard gaps made the old gate pass; a legacy row with no
+   * structured evidence is still not deliverable. Only real evidence flips it.
+   */
   record.statuses[0].verification = undefined
   record.statuses[1].acceptance = undefined
   record.statuses[2].missingArtifacts = undefined
+  assert.match(runtime.presentDenialReason({ session }), /证据未通过/, 'legacy/无证据不得放行')
+  markDelivered(record)
   assert.equal(runtime.presentDenialReason({ session }), undefined)
 })
 
@@ -414,9 +477,11 @@ test('剩余项全部 blocked：不再空转 steer，但 present 仍被拒绝', 
   const { agent, steered } = steerableAgent(session)
 
   await runtime.onTurnStopping({ agent, turn: 1 })
-  assert.equal(steered.length, 0, '没有可运行的子任务时，强制续跑只会空转')
+  assert.equal(steered.length, 1, '没有可运行项时仍要阻止“已完成”的收尾')
+  assert.match(textOf(steered[0]), /剩余项全部受阻/)
+  assert.doesNotMatch(textOf(steered[0]), /1\. 调用 dsh_workplan_dispatch/)
 
   const denied = runtime.presentDenialReason({ session })
-  assert.match(denied, /未完成/, '虽然不续跑，未完成的产物仍不得 present')
+  assert.match(denied, /未完成/, '未完成的产物仍不得 present')
 })
 

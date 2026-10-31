@@ -1,3 +1,60 @@
+## 1.8.13 — 2026-10-31
+
+**修复：四套「完成」判定各自为政——全 done 无证据仍可交付、取消后仍可 present、补证无法持久化。**
+
+> 背景：1.8.9 声称修好「按 planId 分账 / 结算回合识别 / present 证据闸门」，
+> 但重启后的行为探针（T5、T6、T6b）证明仍有四个可复现缺口：
+> B（全 done 但 legacy/空 acceptance/缺产物只拦一部分）、C（取消 1/3 后
+> `planIncomplete` 直接 false，present 放行）、D（结构化结果 acceptance 为空
+> 仍被判 structured）、A1（预算重置清空 `childId` 后结算回合不被武装）。
+> 根因不是某条分支写错，而是「计划完成」「证据通过」「可以交付」三个事实
+> 没有单一事实源：结果消息、回合闸门、present、dispatch 快照各算各的。
+
+### 修复
+
+- 新增唯一的 `deliveryReadiness(plan snapshot, { phase })`（`src/plan.ts`）：
+  每个子任务必须 `status=done`、`verification=structured`、`acceptance` 非空
+  且每项 `result=pass`、无 `missingArtifacts`、无 `artifacts[].exists=false`；
+  未完成项进入 `remaining`，其余进入可命名的 `blockers`。
+  `ready = total > 0 && remaining 为空 && blockers 为空`。
+- 取消不再豁免：`cancelled` 仍有未完成项时，`blockers` 头部写明
+  「计划已取消但只完成 X/Y：取消只停止执行，不等于完成」。
+- `adjudicateResult`：空 `acceptance` 从 `structured` 降级为 `unverified`
+  （没有验收项不等于验收通过，T5-D 根因）。
+- 四处判定统一改用 `deliveryReadiness`：
+  - 结果消息：全部 done 但证据未通过时，第 3 条改为
+    「【证据未通过，禁止交付】」，第 4 条给出补证/改 blocked 的出路；
+    未完成时仍为「【未完成，禁止交付】」；
+  - 回合收尾闸门：不再只看 pending/in_progress，取消、全 blocked、
+    证据缺口都会注入 steer；取消/受阻分支明确要求「不要 dispatch、
+    不要 present、按未完成口径收尾」；
+  - `present` 工具闸门：`ready` 才放行；拒绝文案不再把 cancel 写成交付许可；
+  - `dispatch` 快照 / `status` 工具：新增 `deliveryReady`、
+    `deliveryBlockers`、`deliveryRemaining` 与插件 `version`，模型与 UI
+    看到的是同一个结论。
+- `dsh_workplan_update` 新增 `verification`、`acceptance`、`artifacts`、
+  `missingArtifacts` 参数；这些字段写入 `workplan-update` 消息并进入回放，
+  人工补证后刷新/重启仍然生效（此前只接字符串 evidence，且不落盘）。
+- 提示词第 5 条改为「全部 done **且** deliveryReady=true」；明确
+  「用户取消 ≠ 完成」；取消文案、dispatch render、status render 同步。
+- 顺带修复：`present` 取消分支的重复句；`modelStatusLines` 补充
+  `acceptance` 摘要，主 Agent 能看到每项验收的 criterion/result。
+
+### 验证
+
+- `npm run check` 无诊断；`npm test`：**238 tests / 238 pass / 0 fail**
+  （1.8.12 基线 233，新增 5 条：`tests/delivery-gate.test.ts` 4 条 +
+  证据契约新增「空 acceptance→unverified」1 条；相对 1.8.8 的 220 条累计 +18）。
+- 行为探针 `docs/rca-99984ebd-20261031/probes/T6b-delivery-gate-probes.mjs`
+  在构建产物上逐项复现：B0–B5 全部拒绝；C0/C1 拒绝；D0=
+  `done/unverified`；G0/G1 放行；S0/S1/S2 各 steer 1 次、S3 steer 0；
+  U0 补证后 `deliveryReady` 由 false 变 true 且回放仍为 true；
+  V0 `status` 返回 `version` 与 `deliveryReady`。
+- **运行进程仍是 1.8.9（PID 16366），必须重启 `dsh web` 后上述行为才会
+  在真实会话中生效**；重启后用
+  `node docs/rca-99984ebd-20261031/probes/T6b-delivery-gate-probes.mjs`
+  与 `dsh_workplan_status` 的 `version` 字段复核。
+
 ## 1.8.12 — 2026-10-31
 
 **修复：部门子 Agent 首轮「处理失败」——提示词里的 `包名:行号` 被 Harness 当成跨会话引用。**

@@ -43,6 +43,12 @@ test('结构化结果：全部验收通过才算 structured/done', () => {
   assert.equal(verdict.error, null)
 })
 
+test('结构化结果：acceptance 为空不得算 structured（T5-D）', () => {
+  const verdict = adjudicateResult({ output: block(donePayload({ acceptance: [] })) })
+  assert.equal(verdict.status, 'done', '没有验收项不等于失败，但也不等于已验证')
+  assert.equal(verdict.verification, 'unverified', '空验收必须降级为 unverified，不能冒充 structured')
+})
+
 test('结构化结果：存在 unverified 验收项 → done 但标记 unverified', () => {
   const verdict = adjudicateResult({
     output: block(donePayload({ acceptance: [{ criterion: '接口可用', result: 'unverified' }] })),
