@@ -241,3 +241,106 @@ test('后台派发仍在跑时先等结果，再决定是否拦', async () => {
   await stopping
   assert.equal(steered.length, 1, '等到的结果仍未完成，必须拦住收尾')
 })
+
+/*
+ * [1.8.8] 事故 turn 2 的绕过路径：它由 `subagent-settled` 消息唤醒，
+ * 不是 human task，`maybePlan` 不写 activeTurns；旧闸门在第一行就放行，
+ * 模型因此还能在 11/13 时收尾。以下用例按真实事件形状复现。
+ */
+function settlementMessage(childId: string, kind = 'subagent-settled') {
+  return {
+    id: 'msg-settled',
+    role: 'user',
+    content: [{ type: 'text', text: 'Background subagent finished and will do no further work unless you send it more.' }],
+    source: { kind, senderSessionId: childId },
+  }
+}
+
+function planWithChild(record: any, index: number, childId: string) {
+  record.statuses[index].childId = childId
+  return record
+}
+
+test('结算唤醒的回合：没有 human task 也必须被收尾闸门拦住', async () => {
+  const session = makeSession()
+  const record = planWithChild(makeRecord(makePlan('wp-settled')), 1, 'child-T2')
+  session.append('turn/start', { turn: 2 })
+  session.append('user/message', settlementMessage('child-T2'))
+  const runtime = makeRuntime(record, session)
+  runtime.state.activeTurns.set(session.id, 1) // 只有 turn 1 是 human task
+  const { agent, steered } = steerableAgent(session)
+
+  await runtime.onTurnStopping({ agent, turn: 2 })
+  assert.equal(steered.length, 1, '结算回合同样装载了本计划的续跑输入，必须续跑')
+  assert.equal(record.stopSteers.turn, 2)
+})
+
+test('无关子 Agent 的结算不得把闸门误激活', async () => {
+  const session = makeSession()
+  const record = planWithChild(makeRecord(makePlan('wp-unrelated')), 1, 'child-T2')
+  session.append('turn/start', { turn: 2 })
+  session.append('user/message', settlementMessage('child-someone-else'))
+  const runtime = makeRuntime(record, session)
+  const { agent, steered } = steerableAgent(session)
+
+  await runtime.onTurnStopping({ agent, turn: 2 })
+  assert.equal(steered.length, 0, '无关后台任务的结算不能触发计划续跑')
+
+  // 对照：真实的人类追问回合也不该被这套 fallback 拦住（仍由 activeTurns 决定）。
+  const human = makeSession()
+  const humanRecord = makeRecord(makePlan('wp-human'))
+  human.append('turn/start', { turn: 2 })
+  human.append('user/message', {
+    id: 'msg-human',
+    role: 'user',
+    content: [{ type: 'text', text: '进度如何？' }],
+    source: { kind: 'user' },
+  })
+  const humanRuntime = makeRuntime(humanRecord, human)
+  const humanAgent = steerableAgent(human)
+  await humanRuntime.onTurnStopping({ agent: humanAgent.agent, turn: 2 })
+  assert.equal(humanAgent.steered.length, 0, '非任务回合（如进度询问）不得被强制续跑')
+})
+
+test('present 在计划未完成时被硬拒绝，完成/取消/子会话放行', () => {
+  const session = makeSession()
+  const record = makeRecord(makePlan('wp-present'))
+  const runtime: any = makeRuntime(record, session)
+
+  const denied = runtime.presentDenialReason({ session })
+  assert.match(denied, /未完成/)
+  assert.match(denied, /禁止调用 present|不得调用 present/)
+  assert.match(denied, /1\/3/)
+  assert.match(denied, /T2/)
+
+  for (const item of record.statuses) item.status = 'done'
+  record.phase = 'done'
+  assert.equal(runtime.presentDenialReason({ session }), undefined, '计划完成后必须放行')
+
+  const cancelledSession = makeSession()
+  const cancelled = makeRecord(makePlan('wp-present-cancelled'))
+  cancelled.phase = 'cancelled'
+  const cancelledRuntime: any = makeRuntime(cancelled, cancelledSession)
+  assert.equal(cancelledRuntime.presentDenialReason({ session: cancelledSession }), undefined, '已取消的计划必须放行')
+
+  const childSession = { ...makeSession(), header: { origin: 'subagent' } }
+  const childRuntime: any = makeRuntime(makeRecord(makePlan('wp-present-child')), childSession)
+  assert.equal(childRuntime.presentDenialReason({ session: childSession }), undefined, '子 Agent 的 present 不受父计划约束')
+})
+
+test('剩余项全部 blocked：不再空转 steer，但 present 仍被拒绝', async () => {
+  const session = makeSession()
+  const record = makeRecord(makePlan('wp-all-blocked'))
+  record.statuses[1].status = 'blocked'
+  record.statuses[2].status = 'blocked'
+  record.phase = 'blocked'
+  const runtime: any = makeRuntime(record, session)
+  const { agent, steered } = steerableAgent(session)
+
+  await runtime.onTurnStopping({ agent, turn: 1 })
+  assert.equal(steered.length, 0, '没有可运行的子任务时，强制续跑只会空转')
+
+  const denied = runtime.presentDenialReason({ session })
+  assert.match(denied, /未完成/, '虽然不续跑，未完成的产物仍不得 present')
+})
+

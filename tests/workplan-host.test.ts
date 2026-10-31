@@ -16,6 +16,7 @@ import {
   createDispatchTool,
   createStatusTool,
   createUpdateTool,
+  toolGuardReason,
 } from '../src/host.js'
 import { plannerOutputSchema, statusToolOutputSchema } from '../src/runtime.js'
 
@@ -65,6 +66,23 @@ test('规划器输出 schema 要求 ok，并允许完整计划', () => {
   const schema = plannerOutputSchema()
   assert.deepEqual(schema.required, ['ok'])
   assert.equal(schema.additionalProperties, true)
+})
+
+test('工具闸门：present 交给 runtime 判定，dispatch 保持 plan 模式限制，其余放行', () => {
+  const runtime = {
+    planModeActive: (session: any) => session?.id === 'plan-session',
+    presentDenialReason: (agent: any) => (agent?.session?.id === 'blocked' ? '计划未完成：1/3' : undefined),
+  }
+  assert.equal(
+    toolGuardReason({ name: 'present', agent: { session: { id: 'blocked' } } }, runtime),
+    '计划未完成：1/3',
+  )
+  assert.equal(toolGuardReason({ name: 'present', agent: { session: { id: 'ok' } } }, runtime), undefined)
+  assert.match(
+    String(toolGuardReason({ name: 'dsh_workplan_dispatch', agent: { session: { id: 'plan-session' } } }, runtime)),
+    /plan 模式/,
+  )
+  assert.equal(toolGuardReason({ name: 'bash', agent: { session: { id: 'blocked' } } }, runtime), undefined)
 })
 
 test('系统提示词教会主 Agent 使用 async/status 并逐条转达 needs', () => {

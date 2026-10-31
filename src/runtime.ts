@@ -2340,12 +2340,81 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
    */
   const STOP_STEER_LIMIT = 2
 
-  function stopGateApplies(record: any) {
+  function planIncomplete(record: any) {
     if (!record?.plan) return false
     if (record.degraded) return false
     if (record.phase === 'cancelled') return false
     const snapshot = derivePlanSnapshot(record.statuses)
     return snapshot.stats.total > 0 && snapshot.stats.done < snapshot.stats.total
+  }
+
+  function hasRunnable(record: any) {
+    const snapshot = derivePlanSnapshot(record.statuses)
+    return snapshot.statuses.some((item: any) => item.status === 'pending' || item.status === 'in_progress')
+  }
+
+  function stopGateApplies(record: any) {
+    /*
+     * [1.8.8] 剩余项全部 blocked 时不再 steer：派发没有可运行的子任务，
+     * 每回合强行“续跑”只会空转，模型永远无法合法收尾。present 仍按
+     * planIncomplete 拦截，模型必须先 cancel 或等用户决策。
+     */
+    return planIncomplete(record) && hasRunnable(record)
+  }
+
+  function planChildIds(record: any) {
+    const ids = new Set<string>()
+    for (const item of record?.statuses ?? []) {
+      if (typeof item?.childId === 'string' && item.childId) ids.add(item.childId)
+    }
+    for (const stage of record?.plan?.stages ?? []) {
+      for (const subtask of stage?.subtasks ?? []) {
+        if (typeof subtask?.childId === 'string' && subtask.childId) ids.add(subtask.childId)
+      }
+    }
+    return ids
+  }
+
+  const PLAN_CONTINUATION_KINDS = new Set(['subagent-settled', 'workplan-result', 'workplan-continue'])
+
+  /**
+   * [1.8.8] 结算/结果唤醒的回合也属于“本回合的任务”。
+   *
+   * 事故 turn 2 由 `subagent-settled` 消息唤醒：它不是 human task，
+   * `humanMessages()` 不认，`maybePlan()` 不会写 `state.activeTurns`，
+   * 收尾闸门因此在 turn 2 直接放行，模型又在 11/13 时收尾。
+   * 这里按会话事件判断“这一回合是否装载了本计划的续跑输入”，
+   * 只认三类来源，且子 Agent 结算必须来自本计划派出过的 child，
+   * 避免无关后台任务把闸门误激活。
+   */
+  function turnCarriesPlanWork(session: any, turn: number, record: any) {
+    if (typeof session?.eventAt !== 'function' || !(turn >= 1)) return false
+    const childIds = planChildIds(record)
+    let started = -1
+    for (let i = session.seq - 1; i >= 0; i -= 1) {
+      const event = session.eventAt(i)
+      if (event?.type === 'turn/start' && Number(event.data?.turn) === turn) {
+        started = i
+        break
+      }
+    }
+    if (started < 0) return false
+    for (let i = started + 1; i < session.seq; i += 1) {
+      const event = session.eventAt(i)
+      if (!event) continue
+      if (event.type === 'turn/end' && Number(event.data?.turn) === turn) break
+      if (event.type !== 'user/message') continue
+      const message = event.data?.message ?? event.data
+      const source = message?.source ?? {}
+      const kind = String(source.kind ?? '')
+      if (!PLAN_CONTINUATION_KINDS.has(kind)) continue
+      if (kind === 'subagent-settled' && childIds.size > 0) {
+        const sender = String(source.senderSessionId ?? '')
+        if (!childIds.has(sender)) continue
+      }
+      return true
+    }
+    return false
   }
 
   async function onTurnStopping(payload: any) {
@@ -2355,9 +2424,15 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       if (!agent || !session || !isRootSession(session)) return
       if (typeof agent.steer !== 'function') return
       const turn = Number(payload?.turn ?? 0)
-      if (state.activeTurns?.get?.(session.id) !== turn) return
+      const known = state.records.get(session.id)
+      /*
+       * [1.8.8] 不再只认 human task 标记的 activeTurns：结算唤醒的回合
+       * （subagent-settled / workplan-result / workplan-continue）同样装载
+       * 了本计划的续跑输入，必须受同一道收尾闸门约束。
+       */
+      if (state.activeTurns?.get?.(session.id) !== turn && !turnCarriesPlanWork(session, turn, known)) return
       if (isPlanModeActive(ctx, session)) return
-      let record = state.records.get(session.id)
+      let record = known
       if (!record?.plan) {
         record = reconstructFromSession(session)
         if (record?.plan) state.records.set(session.id, record)
@@ -2400,6 +2475,36 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     } catch (error) {
       ctx.logger?.warn?.(`dsh-workplan: 回合收尾检查失败：${error instanceof Error ? error.message : String(error)}`)
     }
+  }
+
+  /**
+   * [1.8.8] present 的硬闸门：计划未完成时不允许把产物作为成品交付。
+   *
+   * 1.8.7 只把这条规则写进提示词；事故里模型在回合中途直接 present，
+   * 交付卡片先出现、收尾闸门后到，卡片无法撤回。这里在工具执行前拒绝，
+   * 与回合闸门形成前后两道防线。
+   */
+  function presentDenialReason(agent: any) {
+    const session = agent?.session
+    if (!session || !isRootSession(session)) return undefined
+    if (isPlanModeActive(ctx, session)) return undefined
+    let record = state.records.get(session.id)
+    if (!record?.plan) {
+      record = reconstructFromSession(session)
+      if (record?.plan) state.records.set(session.id, record)
+    }
+    if (!planIncomplete(record)) return undefined
+    const snapshot = derivePlanSnapshot(record.statuses)
+    const remaining = snapshot.statuses
+      .filter((item: any) => item.status !== 'done')
+      .map((item: any) => String(item.subtaskId ?? ''))
+      .filter(Boolean)
+    const blocked = Number(snapshot.stats.blocked ?? 0)
+    const shown = remaining.slice(0, 10).join('、')
+    return `计划 ${record.plan?.planId ?? record.planId} 未完成：完成 ${snapshot.stats.done}/${snapshot.stats.total}，`
+      + `受阻 ${blocked}，剩余 ${remaining.length} 项${shown ? `（${shown}${remaining.length > 10 ? '…' : ''}）` : ''}。`
+      + '在计划全部 done 之前不得调用 present 交付产物；请先 dsh_workplan_dispatch 续跑剩余项；'
+      + '确实无法继续时，先调用 dsh_workplan_cancel 取消计划，并在正文按「未完成：剩余 N 项与原因」说明。'
   }
 
   function plansPayload(sessionId: any) {
@@ -2477,6 +2582,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     limits,
     onPreStep,
     onTurnStopping,
+    presentDenialReason,
     updateStatus,
     cancelPlan,
     dispatchTool,

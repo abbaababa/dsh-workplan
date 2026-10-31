@@ -96,8 +96,10 @@ T12、T13 从此再没执行。这不是用户误判，也不是「报告写得�
   （插件在 `dsh web` 启动时加载，**必须重启一次才生效**）。当前只有类型定义、
   `dsh-agent-loop` 源码与同仓用例三处间接证据。
 - `state.activeTurns` 只在「真实任务回合」置位；由用户一句「继续」触发的回合
-  不会置位（`isVagueContinuation` 提前返回），因此该回合不设收尾闸门。这类回合
-  通常直接续跑，风险较低，但未单独验证。
+  不会置位（`isVagueContinuation` 提前返回）。1.8.8 已用
+  `turnCarriesPlanWork()` 补上「子 Agent 结算 / workplan 结果 / 续跑指令」
+  唤醒的回合，但纯人工「继续」回合仍不 steer；该回合的 `present` 仍会被工具级
+  闸门拒绝，纯文本收尾则只受提示词第 5、6 条约束。
 - 每回合最多 2 次 steer：极端情况下第三轮仍可能带着未完成项收尾；此时界面与
   文案会明确写「未完成」，但不会无限阻止模型结束回合。
 - 事故会话本身仍停在 11/13；如需补齐 T12/T13，应对主 Agent 说「续跑这个计划」。
@@ -109,6 +111,31 @@ T12、T13 从此再没执行。这不是用户误判，也不是「报告写得�
 ```bash
 cd /Users/open/Documents/Stocks/plugins/dsh-workplan
 npm run check          # tsc --noEmit，期望无输出
-npm test               # 期望 215 tests / 215 pass / 0 fail
+npm test               # 期望 220 tests / 220 pass / 0 fail
 git log --oneline -3   # 期望看到本次 1.8.7 提交
 ```
+
+## 7. 1.8.8 补丁：补上审计发现的第二个绕过路径
+
+1.8.7 上线后，审计计划 `wp-6753e19f` 的 T7 复核事故 turn 2 时发现：1.8.7 的闸门
+只覆盖「有真实任务标记的回合」，而事故的第二个回合是被 T11 子 Agent 的结算通知
+（`subagent-settled`）唤醒的——`humanMessages()` 只认人类 `user` 消息，`maybePlan`
+在这类回合提前返回，`state.activeTurns` 没有置位，`onTurnStopping` 首行即放行。
+同时 `present` 仍只有提示词约束，没有工具级拦截。两条合起来，正是事故里
+「11/13 收尾 + 呈现半成品」的完整路径（H9、H10）。
+
+1.8.8 的补法：
+
+- **H9**：新增 `turnCarriesPlanWork(session, turn, record)`，从 `session.seq - 1`
+  回扫本回合事件，识别 `subagent-settled` / `workplan-result` /
+  `workplan-continue` 三类来源；`subagent-settled` 还要求
+  `source.senderSessionId` 属于本计划的子会话，无关子 Agent 的结算不会误激活。
+  `onTurnStopping` 改为「不在本回合任务标记里 **且** 本回合不携带计划工作」才放行。
+- **H10**：新增 `presentDenialReason(agent)`，在 `src/host.ts` 的
+  `ctx.tools.guard` 中对 `present` 执行前拦截；根会话计划未完成即拒绝，文案列出
+  剩余项，并给出「先续跑 / 确实无法继续先 `dsh_workplan_cancel`」两条出路。
+- **附带**：全部剩余项都 blocked 时不再空转 steer（没有可运行子任务，steer 只会
+  消耗回合），但 `present` 仍被拒绝。
+
+验证：`npm run check` 无诊断；`npm test` 220/220；`npm run build` 五个产物
+sha256 前后一致。运行中的 `dsh web` 仍需重启后生效。

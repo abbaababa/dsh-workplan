@@ -1,3 +1,43 @@
+## 1.8.8 — 2026-10-31
+
+**补丁：把 1.8.7 的收尾闸门补到「结算唤醒的回合」与 `present` 工具层。**
+
+> 背景：审计计划 `wp-6753e19f` 的 T7 在复核事故 turn 2 时发现，1.8.7 仍有两个
+> 绕过路径，而这两条正是事故第二个回合的真实路径：它在 11/13 收尾，却由
+> `subagent-settled` 消息唤醒，既没有人工任务标记，也没被 `present` 层拦住。
+
+### 修复
+
+- **H9 结算唤醒的回合绕过闸门**：`humanMessages()` 只认人类 `user` 消息，
+  由子 Agent 结算通知（`subagent-settled`）或 workplan 结果消息唤醒的回合不会
+  写 `activeTurns`，`onTurnStopping` 首行直接放行。新增
+  `turnCarriesPlanWork()`：从 `session.seq - 1` 回扫本回合事件，识别
+  `subagent-settled` / `workplan-result` / `workplan-continue` 三类来源；
+  对 `subagent-settled` 还要求 `senderSessionId` 属于本计划的子会话，
+  无关子 Agent 的结算不会误激活闸门。
+- **H10 `present` 没有工具级闸门**：1.8.7 只把「未完成不得交付」写进
+  `PROMPT_SECTION`，模型仍可在回合中途 `present`。新增
+  `presentDenialReason()` 并接入 `ctx.tools.guard`：根会话的计划未完成时，
+  `present` 在执行前被拒绝，拒绝文案列出剩余项，并给出两条出路——
+  先 `dsh_workplan_dispatch` 续跑，或确认无法继续时先 `dsh_workplan_cancel`。
+- **全部剩余项都 blocked 时不再空转 steer**：没有可运行子任务时，每回合
+  steer 只会消耗回合而不推进；现在只拦 `present`，不再 steer。
+- 闸门仍按回合计数、上限 2 次，避免死循环。
+
+### 验证
+
+- `npm run check` 无诊断。
+- `npm test` → **220 tests / 220 pass / 0 fail**（1.8.7 基线 215，新增 5 条：
+  结算唤醒拦截、无关结算不误激活、`present` 拒绝/放行、全 blocked 行为）。
+- `npm run build` 确定性：`lib/host.js`、`lib/runtime.js`、`lib/plan.js`、
+  `lib/watchdog.js`、`client.js` 五个产物构建前后 sha256 一致。
+
+### 说明
+
+- 版本同步：`package.json`、`package-lock.json`、`README.md` / `README.en.md`
+  安装命令、`src/host.ts` 的 `meta.version` 均为 1.8.8。
+- 本次未改 `client.ts`；运行中的 `dsh web` 需要重启后才会加载新 `lib/*.js`。
+
 ## 1.8.7 — 2026-10-31
 
 **修复：计划没做完就把中间结果当成品交付——「未完成即输出」的根治。**
