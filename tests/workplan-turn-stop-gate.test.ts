@@ -1,0 +1,243 @@
+/*
+ * [1.8.7] 「未完成即输出」的回归防线。
+ *
+ * 事故 session-99984ebd-7d13-47d5-87a0-e9ba7271b883（2026-10-31）：
+ *  - 计划 wp-66f57fa3 只完成 10/13，`dsh_workplan_dispatch({mode:"wait"})`
+ *    返回「本轮预算用尽，可续跑（完成 10/13）｜已加入进行中的派发并等到结果」；
+ *  - 同一秒注入的「部门执行结果」第 3 条写着「给出最终答复」，第 4 条又写
+ *    「再次调用 dsh_workplan_dispatch」，两条命令互相抵触；
+ *  - 模型照第 3 条执行：12:04:22 present 报告、12:04:25 turn/end completed；
+ *    12:13 第二个回合又把进度写成「11/13，可续跑，不是失败」，随后会话永久
+ *    停在 11/13，T12/T13 再没跑过。
+ *
+ * 修复分四层，本文件逐层钉住：
+ *  1. 摘要与结果消息：未完成时第一句就是「未完成」，且只有未完成才出现
+ *     「禁止交付」，完成时才允许「给出最终答复」；
+ *  2. `buildStopSteerText`：回合收尾前注入的强制续跑指令；
+ *  3. `agent/turn-stopping` 闸门：未完成 ⇒ steer；完成/已取消/非本回合任务
+ *     ⇒ 放行；后台派发仍在跑 ⇒ 先等结果再判断；
+ *  4. 每次 steer 有上限，不会把会话锁死。
+ */
+import test from 'node:test'
+import assert from 'node:assert/strict'
+
+import {
+  buildResultMessage,
+  buildResultSummary,
+  buildStopSteerText,
+  createStatuses,
+  derivePlanSnapshot,
+} from '../src/plan.js'
+import { createWorkplanRuntime } from '../src/runtime.js'
+
+function makePlan(planId = 'wp-stop-gate') {
+  return {
+    planId,
+    sessionId: 'session-stop-gate',
+    createdTurn: 1,
+    createdAt: 1000,
+    title: '未完成禁止交付回归',
+    stages: [{
+      id: 'S1',
+      name: '实施',
+      subtasks: [
+        { id: 'T1', title: '第一步', department: 'engineering', dependsOn: [] },
+        { id: 'T2', title: '第二步', department: 'engineering', dependsOn: ['T1'] },
+        { id: 'T3', title: '第三步', department: 'engineering', dependsOn: ['T2'] },
+      ],
+    }],
+  }
+}
+
+function makeRecord(plan: any): any {
+  const statuses = createStatuses(plan)
+  statuses[0].status = 'done'
+  return {
+    plan,
+    planId: plan.planId,
+    title: plan.title,
+    phase: 'paused',
+    statuses,
+    errors: [],
+    degraded: false,
+    createdAt: plan.createdAt,
+    updatedAt: Date.now(),
+    resultWritten: true,
+  }
+}
+
+function makeSession() {
+  const events: any[] = []
+  return {
+    id: 'session-stop-gate',
+    header: { createdAt: 1000 },
+    get seq() {
+      return events.length
+    },
+    append(type: string, data: any) {
+      events.push({ type, data })
+      return data
+    },
+    eventAt: (seq: number) => events[seq],
+    events,
+  }
+}
+
+function makeRuntime(record: any, session: any) {
+  const ctx = {
+    logger: { warn() {} },
+    subagents: { startActivation: async () => { throw new Error('this test never dispatches') } },
+    sessions: { get: () => undefined, list: () => [], eventAt: () => undefined },
+  }
+  const runtime: any = createWorkplanRuntime(ctx, { totalTimeoutMs: 60_000 })
+  runtime.state.records.set(session.id, record)
+  runtime.state.activeTurns.set(session.id, 1)
+  return runtime
+}
+
+function steerableAgent(session: any) {
+  const steered: any[] = []
+  return {
+    steered,
+    agent: {
+      session,
+      steer(message: any) {
+        steered.push(message)
+      },
+    },
+  }
+}
+
+function textOf(message: any) {
+  const block = Array.isArray(message?.content) ? message.content[0] : undefined
+  return String(block?.text ?? '')
+}
+
+test('结果摘要未完成时先写「未完成」，不再说「请核对并整合」', () => {
+  const paused = buildResultSummary({ stats: { done: 10, total: 13, blocked: 0 }, phase: 'paused' })
+  assert.match(paused, /【部门执行结果】未完成/)
+  assert.match(paused, /10\/13/)
+  assert.match(paused, /剩余 3 项/)
+  assert.doesNotMatch(paused, /请主 Agent 核对并整合/)
+
+  const complete = buildResultSummary({ stats: { done: 3, total: 3, blocked: 0 }, phase: 'done' })
+  assert.match(complete, /【部门执行结果】完成 3\/3/)
+  assert.doesNotMatch(complete, /未完成/)
+})
+
+test('未完成的结果消息只命令续跑，完成的结果消息才命令收尾', () => {
+  const inbox = makeRecord(makePlan())
+  const incomplete = textOf(buildResultMessage({
+    planId: 'wp-stop-gate',
+    sessionId: 'session-stop-gate',
+    statuses: inbox.statuses,
+    stats: derivePlanSnapshot(inbox.statuses).stats,
+    phase: 'paused',
+    errors: [],
+  }))
+  assert.match(incomplete, /【未完成，禁止交付】/)
+  assert.match(incomplete, /不要调用 present/)
+  assert.match(incomplete, /再次调用 dsh_workplan_dispatch/)
+  assert.doesNotMatch(incomplete, /3\. 给出最终答复/)
+
+  for (const item of inbox.statuses) item.status = 'done'
+  const finished = textOf(buildResultMessage({
+    planId: 'wp-stop-gate',
+    sessionId: 'session-stop-gate',
+    statuses: inbox.statuses,
+    stats: derivePlanSnapshot(inbox.statuses).stats,
+    phase: 'done',
+    errors: [],
+  }))
+  assert.match(finished, /3\. 给出最终答复/)
+  assert.doesNotMatch(finished, /【未完成，禁止交付】/)
+})
+
+test('收尾指令写清剩余量、禁止交付与唯一恢复动作', () => {
+  const record = makeRecord(makePlan())
+  const statuses = record.statuses
+  const text = buildStopSteerText({
+    planId: 'wp-stop-gate',
+    stats: derivePlanSnapshot(statuses).stats,
+    statuses,
+    attempt: 2,
+  })
+  assert.match(text, /【计划未完成 · 禁止收尾】/)
+  assert.match(text, /1\/3/)
+  assert.match(text, /T2、T3/)
+  assert.match(text, /不要调用 present/)
+  assert.match(text, /第 2 次提醒/)
+  assert.doesNotMatch(text, /计划已完成|已经完成/)
+})
+
+test('未完成且是本回合的任务：收尾被 steer 拦住，且每回合最多 2 次', async () => {
+  const session = makeSession()
+  const record = makeRecord(makePlan())
+  const runtime = makeRuntime(record, session)
+  const { agent, steered } = steerableAgent(session)
+
+  await runtime.onTurnStopping({ agent, turn: 1 })
+  assert.equal(steered.length, 1, '第一次收尾必须被拦下')
+  assert.match(textOf(steered[0]), /计划没做完，这个回合不关闭/)
+  assert.equal(record.stopSteers.turn, 1)
+  assert.equal(record.stopSteers.count, 1)
+
+  await runtime.onTurnStopping({ agent, turn: 1 })
+  assert.equal(steered.length, 2, '同一回合允许第二次提醒（覆盖两轮预算）')
+
+  await runtime.onTurnStopping({ agent, turn: 1 })
+  assert.equal(steered.length, 2, '到达上限后不再 steer，避免死循环')
+})
+
+test('全部完成、已取消、非本回合任务都直接放行', async () => {
+  // 全部完成
+  {
+    const session = makeSession()
+    const record = makeRecord(makePlan('wp-complete'))
+    for (const item of record.statuses) item.status = 'done'
+    record.phase = 'done'
+    const runtime = makeRuntime(record, session)
+    const { agent, steered } = steerableAgent(session)
+    await runtime.onTurnStopping({ agent, turn: 1 })
+    assert.equal(steered.length, 0, '完成的计划不得被拦')
+  }
+  // 已取消
+  {
+    const session = makeSession()
+    const record = makeRecord(makePlan('wp-cancelled'))
+    record.phase = 'cancelled'
+    const runtime = makeRuntime(record, session)
+    const { agent, steered } = steerableAgent(session)
+    await runtime.onTurnStopping({ agent, turn: 1 })
+    assert.equal(steered.length, 0, '用户取消后不得再强制续跑')
+  }
+  // 不是本回合产生的任务（例如进度询问的回合）
+  {
+    const session = makeSession()
+    const record = makeRecord(makePlan('wp-other-turn'))
+    const runtime = makeRuntime(record, session)
+    runtime.state.activeTurns.set(session.id, 7)
+    const { agent, steered } = steerableAgent(session)
+    await runtime.onTurnStopping({ agent, turn: 1 })
+    assert.equal(steered.length, 0, '非任务回合不得被强制续跑')
+  }
+})
+
+test('后台派发仍在跑时先等结果，再决定是否拦', async () => {
+  const session = makeSession()
+  const record = makeRecord(makePlan('wp-joined'))
+  let release!: () => void
+  record.dispatchPromise = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const runtime = makeRuntime(record, session)
+  const { agent, steered } = steerableAgent(session)
+
+  const stopping = runtime.onTurnStopping({ agent, turn: 1 })
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.equal(steered.length, 0, '派发还没结束就不能判定完成度')
+
+  release()
+  await stopping
+  assert.equal(steered.length, 1, '等到的结果仍未完成，必须拦住收尾')
+})

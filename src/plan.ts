@@ -943,8 +943,21 @@ export function buildDegradedMessage(options: any) {
 
 export function buildResultSummary(result: any) {
   const stats = result.stats ?? { done: 0, total: 0, blocked: 0 }
+  const done = Number(stats.done ?? 0)
+  const total = Number(stats.total ?? 0)
+  const remaining = Math.max(0, total - done)
+  /*
+   * [1.8.7] 「请主 Agent 核对并整合」在未完成时也是一条误导：它把这一轮当成
+   * 已经可以交付，只差整合。剩余项必须出现在摘要第一句，模型只读摘要也能看到。
+   */
+  if (remaining > 0) {
+    return truncate(
+      `【部门执行结果】未完成：完成 ${done}/${total}，剩余 ${remaining} 项，受阻 ${Number(stats.blocked ?? 0)}；请主 Agent 核对后继续派发，完成前不得交付`,
+      300,
+    )
+  }
   return truncate(
-    `【部门执行结果】完成 ${stats.done}/${stats.total}，受阻 ${stats.blocked}，请主 Agent 核对并整合`,
+    `【部门执行结果】完成 ${done}/${total}，受阻 ${Number(stats.blocked ?? 0)}，请主 Agent 核对并整合`,
     300,
   )
 }
@@ -1004,27 +1017,42 @@ export function buildResultMessage(result: any) {
   if (missingArtifacts.length > 0) {
     review.push(`- 声明产物缺失：${missingArtifacts.slice(0, 10).join('；')}`)
   }
+  /*
+   * [1.8.7] 未完成时不能再命令「给出最终答复」。
+   *
+   * 事故（session-99984ebd…，2026-10-31 12:02）：预算到点返回 10/13，本条消息
+   * 第 3 条却写着「给出最终答复」，第 4 条又要求「再次派发续跑」。两条命令
+   * 互相抵触，模型照前者收尾，于是用户在计划只完成 10/13 时拿到了「成品」。
+   * 现在：未完成时第 3 条改为「禁止交付」，恢复动作固定为第 4 条；只有全部
+   * 子任务 done 才允许收尾。
+   */
+  const doneCount = Number(result.stats?.done ?? 0)
+  const totalCount = Number(result.stats?.total ?? 0)
+  const remaining = Math.max(0, totalCount - doneCount)
+  const incomplete = totalCount > 0 && remaining > 0
+  const recovery = blocked > 0
+    ? (result.resumeAvailable === false
+        ? `本计划已用尽自动续跑额度（${Number(result.resumeCount ?? 0)}/${MAX_PLAN_RESUMES}），受阻项不会再自动重跑：请主 Agent 直接接手完成剩余 ${remaining} 项，完成前同样不得交付。`
+        : `受阻项可再次调用 dsh_workplan_dispatch 从受阻处续跑（已完成的不会重跑，本计划剩余续跑额度 ${MAX_PLAN_RESUMES - Number(result.resumeCount ?? 0)} 次）。`)
+    : paused
+      ? `本轮执行预算用尽，剩余 ${Number(result.stats?.pending ?? 0)} 项未完成（不是失败、未计入续跑额度）：再次调用 dsh_workplan_dispatch 即可从剩下的步骤继续，已完成的不重跑。`
+      : `剩余 ${remaining} 项子任务还没有完成：再次调用 dsh_workplan_dispatch 即可继续跑，已完成的不重跑。`
   const lines = [
     summary,
     '',
     '各部门子任务结果如下，请主 Agent：',
     '1. 核对每个完成项的证据与验收标准；',
     '2. 处理受阻项，必要时向用户确认；',
-    '3. 给出最终答复，不要声称未验证的完成。',
+    ...(incomplete
+      ? [
+          `3. 【未完成，禁止交付】计划只完成 ${doneCount}/${totalCount}，还有 ${remaining} 项没做完：不要调用 present 交付当前产物，不要写“已完成/最终版/已交付”，也不要给出收尾性最终答复，不要声称未验证的完成。`,
+          `4. ${recovery}`,
+        ]
+      : ['3. 给出最终答复，不要声称未验证的完成。']),
     ...(review.length > 0 ? ['', '验收核对：', ...review] : []),
     ...(needs.length > 0
       ? ['', '跨部门待转达（子 Agent 提出的需求，请逐条处理）：', ...needs.slice(0, 10).map((line: string) => `- ${line}`)]
       : []),
-    // A blocked plan used to look identical to a finished one. State the exact
-    // recovery move so the model retries the failed work instead of rebuilding
-    // the whole plan or stopping to ask the user for a repeated request.
-    ...(blocked > 0
-      ? [result.resumeAvailable === false
-          ? `4. 本计划已用尽自动续跑额度（${Number(result.resumeCount ?? 0)}/${MAX_PLAN_RESUMES}），受阻项不会再自动重跑：请主 Agent 直接接手完成，不要重复派发。`
-          : `4. 受阻项可再次调用 dsh_workplan_dispatch 从受阻处续跑（已完成的不会重跑，本计划剩余续跑额度 ${MAX_PLAN_RESUMES - Number(result.resumeCount ?? 0)} 次）。`]
-      : paused
-        ? [`4. 本轮执行预算用尽，剩余 ${Number(result.stats?.pending ?? 0)} 项未完成（不是失败、未计入续跑额度）：再次调用 dsh_workplan_dispatch 即可从剩下的步骤继续，已完成的不重跑。`]
-        : []),
     '',
     RESULT_MARKER_BEGIN,
     JSON.stringify(payload),
@@ -1035,6 +1063,39 @@ export function buildResultMessage(result: any) {
     form: 'notice',
     summary,
   })
+}
+
+/**
+ * [1.8.7] 回合收尾前注入的「计划没做完」指令。
+ *
+ * 事故（session-99984ebd…）里，计划停在 10/13，主 Agent 却已经 present 了报告
+ * 并给出收尾答复。软约束（系统提示词）挡不住这种收尾，所以由 runtime 在
+ * `agent/turn-stopping` 里 `agent.steer()` 这条消息，强制再跑一步去续跑。
+ *
+ * 措辞必须同时做到三件事：说清剩余量、禁止交付措辞、给出唯一恢复动作；不含
+ * 任何「已完成」的暗示，也不假装这是用户说的话（source.kind 单独标记）。
+ */
+export function buildStopSteerText(input: any) {
+  const stats = input?.stats ?? {}
+  const total = Number(stats.total ?? 0)
+  const done = Number(stats.done ?? 0)
+  const remaining = Math.max(0, total - done)
+  const ids = (Array.isArray(input?.statuses) ? input.statuses : [])
+    .filter((item: any) => item?.status !== 'done')
+    .map((item: any) => String(item?.subtaskId ?? ''))
+    .filter((id: string) => id !== '')
+    .slice(0, 10)
+  const attempt = Number(input?.attempt ?? 1)
+  return [
+    `【计划未完成 · 禁止收尾】计划 ${String(input?.planId ?? '')} 只完成 ${done}/${total}，还有 ${remaining} 项没做完${ids.length > 0 ? `（${ids.join('、')}）` : ''}。`,
+    '',
+    '现在不能把当前内容当作最终结果交付。请立即继续：',
+    '1. 调用 dsh_workplan_dispatch（默认 wait）续跑剩余子任务；已完成的不重跑。',
+    '2. 在全部子任务 done 之前：不要调用 present；不要写“已完成/最终版/已交付”；不要输出收尾性最终结论。',
+    '3. 若续跑被拒绝或持续失败，答复开头必须写「未完成：剩余 N 项（列出 ID）与原因」，不得把它包装成成品。',
+    '',
+    `（这是 dsh-workplan 在回合收尾前自动发出的第 ${attempt} 次提醒：计划没做完，这个回合不关闭。）`,
+  ].join('\n')
 }
 
 function extractBetween(text: any, begin: any, end: any) {

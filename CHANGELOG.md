@@ -1,3 +1,106 @@
+## 1.8.7 — 2026-10-31
+
+**修复：计划没做完就把中间结果当成品交付——「未完成即输出」的根治。**
+
+> 事故（2026-10-31，会话 `session-99984ebd-7d13-47d5-87a0-e9ba7271b883`，
+> 计划 `wp-66f57fa3…`，13 项子任务）：11:48:54 主 Agent 调
+> `dsh_workplan_dispatch({mode:"wait"})`；12:02:54 计划以「本轮预算用尽，可续跑
+> （完成 10/13，受阻 0）｜已加入进行中的派发并等到结果」返回，同一秒注入的
+> 「部门执行结果」第 3 条写着「给出最终答复」、第 4 条又写「再次调用
+> dsh_workplan_dispatch」；模型照第 3 条执行，12:04:22 `present` 了报告、
+> 12:04:25 `turn/end` 记 `completed`。12:13 的第二个回合把进度写成
+> 「11/13，可续跑，不是失败」后再次收尾，T12/T13 再没跑过。用户看到的就是一份
+> 半成品「成品报告」。
+
+### 根因（五层，缺一层都拦不住）
+
+1. **结果消息自相矛盾**：未完成时仍写「3. 给出最终答复」，与「4. 再派发续跑」
+   直接冲突（`src/plan.ts` `buildResultMessage`）；摘要也固定写「请主 Agent
+   核对并整合」（`buildResultSummary`），把暂停包装成交付。
+2. **工具返回误导**：`ok: true` + 「已加入进行中的派发并等到结果」读起来像成功，
+   且没有任何 `complete` 字段可供模型判断（`src/host.ts` dispatch render、
+   `dispatchToolOutputSchema`）。
+3. **提示词只有软约束**：只说「不要声称未经验证的完成」，没有「未完成禁止
+   present／禁止写已完成」的硬规则。
+4. **回合结束不受约束**：插件只订阅 `agent/pre-step`，模型随时可以收尾；
+   预算暂停只是提示「可续跑」，没有强制点。
+5. **没有回归用例**：上一版 1.8.4 只修了「已结束 ∧ 正在做」，没有覆盖
+   「已结束 ∧ 还有 pending/blocked」。
+
+### 修复
+
+- **结果消息分叉**：`buildResultSummary` / `buildResultMessage` 在
+  `done < total` 时第一句即「未完成：完成 d/t，剩余 N 项」，职责清单改为
+  「【未完成，禁止交付】」+ 恢复动作；只有全部 done 才出现「给出最终答复」。
+- **工具文案分开**：dispatch render 三种口径——「已开跑，尚未完成」/「未完成：
+  完成 d/t，剩余 N 项」/「已完成：完成 d/t」；schema 增加 `complete` 与
+  `remaining`；工具描述写明 `complete=false` 必须续跑。
+- **提示词硬规则**：`PROMPT_SECTION` 新增第 5、6 条：完成唯一判据是全部 done；
+  `ok:true` 不等于完成；未完成时禁止 `present`、禁止「已完成/最终版/已交付」、
+  禁止收尾答复，必须先续跑；确有阻碍时答复开头必须写「未完成：剩余 N 项」。
+- **回合收尾闸门**：`src/runtime.ts` 新增 `onTurnStopping`，在官方
+  `agent/turn-stopping`（serial、边界提交前 await）里检查本会话计划：仍有
+  未完成项时先等正在跑的派发，再用 `agent.steer()` 注入「计划没做完，这个回合
+  不关闭」并附续跑指令；每回合最多 2 次，全 done／已取消／非任务回合直接放行。
+
+### 测试
+
+- 新增 `tests/workplan-turn-stop-gate.test.ts`（6 条）：摘要/结果消息在未完成与
+  完成时的分叉、收尾指令文案、steer 拦截与上限、全 done/已取消/非本回合放行、
+  后台派发仍在跑时先等结果再判定。
+- `npm test` → **215 tests / 215 pass / 0 fail**；`npm run check` 无诊断。
+
+### 升级
+
+```bash
+dsh plugin --profile web add dsh-workplan@1.8.7
+```
+
+插件在 `dsh web` 启动时加载，**升级后需重启一次 `dsh web` 才生效**（重启会中断正在
+运行的会话）。
+
+---
+
+## 1.8.6 — 2026-10-30
+
+**修复：子 Agent 被中断时「证据已在盘上却不被承认」，以及把「待跑」冒充成「卡住」。**
+
+> 事故（2026-10-30 21:34:54，ETF 计划 `wp-008107ca…`）里 T6 的子 Agent 在写出
+> 38,140 字节产物后被打断（`turn/end` 记 `aborted`、`reason.kind = "user"`）。
+> 计划把它判成受阻，并把 T7–T12 六个下游一并级联成 blocked；主 Agent 只能自己
+> 逐条核对「文件其实已经在盘上」。同一轮里另有一处：`ready` 为空时所有 pending
+> 被改写成 blocked，预算暂停与真失败在卡片上长得一模一样。
+
+### 修复
+
+- **D5 中断也要留证据**：新增 `probeInterruptedEvidence()`，中断时把「声明过的产物」
+  与「核到在盘上的文件」取并集写进该步的 `artifacts` / `missingArtifacts`（不再只
+  拼进报错字符串）；状态仍是 `blocked`，判定不放宽。
+- **D5 不再连坐下游**：`dispatchPlan` 用 `interruptedIds` 记住被中断的步骤，级联时
+  跳过它们，并在 `errors` 里写明「被中断但产物已核对，未自动级联下游；请据实改判
+  或续跑」。
+- **D8 不再把 pending 写成 blocked**：新增 `describePendingCause()`，按上游状态、
+  缺失产物、legacy 回执分别给出原因；本轮结束时 pending 保持 pending，阶段为
+  `paused`（没有真失败项时），不再被覆盖成 `blocked`。
+
+### 测试
+
+- 新增 4 条：中断写入 `artifacts`/`missingArtifacts`、下游保持 `pending` 且阶段为
+  `blocked`（真有失败项时）、上游产物缺失时下游 `pending` + 阶段 `paused`、全部完成
+  时不多写解释文案。
+- `npm test` → **209 tests / 209 pass / 0 fail**；`npm run check` 无诊断。
+
+### 升级
+
+```bash
+dsh plugin --profile web add dsh-workplan@1.8.6
+```
+
+插件在 `dsh web` 启动时加载，**升级后需重启一次 `dsh web` 才生效**（重启会中断正在
+运行的会话）。
+
+---
+
 ## 1.8.4 — 2026-10-30
 
 **修复：左侧栏「任务进度」同时显示「已结束」和「正在做」。**

@@ -66,7 +66,7 @@ grep -RInE "child_process|execSync|eval\(|writeFileSync" src || echo "0 命中�
 ## 一键安装
 
 ```bash
-dsh plugin --profile web add dsh-workplan@1.8.4
+dsh plugin --profile web add dsh-workplan@1.8.7
 ```
 
 装完**重启一次 DSH Web**（或重新载入当前页面）让插件生效。

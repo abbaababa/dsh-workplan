@@ -44,6 +44,8 @@ window.__ModuleLoader__.load({
                 "helpTitle": "先看这三句",
                 "helpWhat": "这件事",
                 "helpWho": "现在谁在做",
+                /* [1.8.5] 「已结束」的计划下面不许再写「现在谁在做」。 */
+                "helpWhere": "停在哪一步",
                 "helpNext": "接下来做什么",
                 "helpNobody": "还没开始",
                 "helpDone": "都做完了",
@@ -215,6 +217,7 @@ window.__ModuleLoader__.load({
                 "helpTitle": "Start with these three",
                 "helpWhat": "This task",
                 "helpWho": "Who is doing it now",
+                "helpWhere": "Where it stopped",
                 "helpNext": "What happens next",
                 "helpNobody": "Not started yet",
                 "helpDone": "Everything is done",
@@ -1123,6 +1126,18 @@ window.__ModuleLoader__.load({
             return t('helpNobody');
         }
         /*
+         * [1.8.5] 「谁在做」这三个字只能用在真的有东西在跑的时候。
+         *
+         * 事故（2026-10-30 21:38）：计划已经「已结束，可续跑 · 卡住了」，卡片却仍写着
+         * 「现在谁在做：研究分析 · 人性自私与利益博弈推演（卡住了）」，用户据此认为
+         * 子智能体还在跑、报告和状态互相矛盾。同一句话在「没人跑」时应改口径为
+         * 「停在哪一步」，把「现在进行时」换成「过去时」，不留误读空间。
+         */
+        function workerLabel(session, t) {
+            const active = findEntry(session, 'in_progress');
+            return active ? t('helpWho') : t('helpWhere');
+        }
+        /*
          * A blocked card used to read "卡住了" and stop there: no hint that the plan
          * is recoverable, so the only visible option was to restate the request and
          * build a fresh plan. Say out loud how to resume instead.
@@ -1197,7 +1212,7 @@ window.__ModuleLoader__.load({
         function Guide({ session, t }) {
             const task = session.taskUnderstanding || {};
             const what = task.deliverable || session.title || t('panel');
-            return h('section', { className: 'dsh-wp-guide', 'aria-label': t('helpTitle') }, h('div', { className: 'dsh-wp-guide-title' }, t('helpTitle')), h('div', { className: 'dsh-wp-guide-body' }, h('div', { className: 'dsh-wp-guide-row' }, h('div', { className: 'dsh-wp-guide-label' }, t('helpWhat')), h('div', { className: 'dsh-wp-guide-value' }, what)), h('div', { className: 'dsh-wp-guide-row' }, h('div', { className: 'dsh-wp-guide-label' }, t('helpWho')), h('div', { className: 'dsh-wp-guide-value' }, workerText(session, t))), h('div', { className: 'dsh-wp-guide-row' }, h('div', { className: 'dsh-wp-guide-label' }, t('helpNext')), h('div', { className: 'dsh-wp-guide-value' }, nextText(session, t)))), h('div', { className: 'dsh-wp-guide-hint' }, t('helpHint')));
+            return h('section', { className: 'dsh-wp-guide', 'aria-label': t('helpTitle') }, h('div', { className: 'dsh-wp-guide-title' }, t('helpTitle')), h('div', { className: 'dsh-wp-guide-body' }, h('div', { className: 'dsh-wp-guide-row' }, h('div', { className: 'dsh-wp-guide-label' }, t('helpWhat')), h('div', { className: 'dsh-wp-guide-value' }, what)), h('div', { className: 'dsh-wp-guide-row' }, h('div', { className: 'dsh-wp-guide-label' }, workerLabel(session, t)), h('div', { className: 'dsh-wp-guide-value' }, workerText(session, t))), h('div', { className: 'dsh-wp-guide-row' }, h('div', { className: 'dsh-wp-guide-label' }, t('helpNext')), h('div', { className: 'dsh-wp-guide-value' }, nextText(session, t)))), h('div', { className: 'dsh-wp-guide-hint' }, t('helpHint')));
         }
         function Pill({ children, tone = 'idle' }) {
             return h('span', { className: `dsh-wp-pill dsh-wp-tone-${tone}` }, h('span', { className: 'dsh-wp-dot' }), children);
@@ -2384,7 +2399,7 @@ window.__ModuleLoader__.load({
             const stats = session.stats || {};
             const phase = sessionPhaseOf(session);
             const tone = phaseTone(phase);
-            return h('div', { className: `dsh-wp-turn dsh-wp-tone-${tone}` }, h('div', { className: 'dsh-wp-turn-title' }, h('span', null, session.title || t('panel')), h(Pill, { tone }, phaseLabel(phase, session, t))), h('div', { className: 'dsh-wp-muted', style: { marginTop: '6px' } }, `${t('helpWho')}：${workerText(session, t)}`), h('div', { className: 'dsh-wp-muted', style: { marginTop: '2px' } }, `${t('helpNext')}：${nextText(session, t)}`), h('div', { className: 'dsh-wp-progress-meta' }, h('span', null, `${stats.done ?? 0}/${stats.total ?? 0} ${t('stats.done')} · ${stats.blocked ?? 0} ${t('stats.blocked')}`), h('span', { className: 'dsh-wp-muted' }, t('viewHint'))));
+            return h('div', { className: `dsh-wp-turn dsh-wp-tone-${tone}` }, h('div', { className: 'dsh-wp-turn-title' }, h('span', null, session.title || t('panel')), h(Pill, { tone }, phaseLabel(phase, session, t))), h('div', { className: 'dsh-wp-muted', style: { marginTop: '6px' } }, `${workerLabel(session, t)}：${workerText(session, t)}`), h('div', { className: 'dsh-wp-muted', style: { marginTop: '2px' } }, `${t('helpNext')}：${nextText(session, t)}`), h('div', { className: 'dsh-wp-progress-meta' }, h('span', null, `${stats.done ?? 0}/${stats.total ?? 0} ${t('stats.done')} · ${stats.blocked ?? 0} ${t('stats.blocked')}`), h('span', { className: 'dsh-wp-muted' }, t('viewHint'))));
         }
         function contentText(block) {
             if (!block || !Array.isArray(block.content))

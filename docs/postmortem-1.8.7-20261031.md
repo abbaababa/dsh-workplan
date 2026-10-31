@@ -1,0 +1,114 @@
+# 复盘：计划没做完就把中间结果当成品交付（2026-10-31，dsh-workplan 1.8.7）
+
+## 0. 结论先行
+
+用户看到的现象是真的：会话
+`session-99984ebd-7d13-47d5-87a0-e9ba7271b883` 在计划只完成 **10/13** 时
+`present` 了报告并结束回合；第二个回合把进度改成 **11/13** 后再次结束，
+T12、T13 从此再没执行。这不是用户误判，也不是「报告写得好不好」的问题，
+而是**「完成」的判据分散在四处、且没有任何一处能在回合边界上强制生效**：
+
+| 谁在宣告「完成」 | 当时的实际行为 | 缺陷 |
+|---|---|---|
+| 结果消息（`buildResultMessage`） | 第 3 条命令「给出最终答复」，第 4 条又命令「再派发续跑」 | 两条命令互斥，模型照前者收尾 |
+| 工具返回（dispatch render/schema） | `ok:true` +「已加入进行中的派发并等到结果」 | 没有 `complete` 字段，暂停读起来像成功 |
+| 系统提示词（`PROMPT_SECTION`） | 只有「不要声称未经验证的完成」 | 没有「未完成禁止交付」的硬规则 |
+| 回合边界（官方 `agent/turn-stopping`） | 插件**没有订阅**该事件 | 模型随时可以收尾，没有强制点 |
+
+## 1. 时间线（全部来自原始事件日志，可复核）
+
+证据文件：`~/.dsh/sessions/--Users-open-Documents-Stocks--/`
+`session-99984ebd-7d13-47d5-87a0-e9ba7271b883/session.v4.jsonl.zstd`
+（658,957 字节；解压后 598 个事件）。计划 ID：`wp-66f57fa3-fc71-4f8e-b8dd-b3e67c279467`。
+
+| 时刻（本机 +08:00） | 事件 | 证据 |
+|---|---|---|
+| 11:41:34 | turn 1 `turn/start`（真实任务回合） | 会话日志 |
+| 11:42:54 | 首个工具调用 `dsh_workplan_dispatch({"mode":"async"})`（seq 25） | 会话日志 |
+| 11:46:44 | 主 Agent 先写出一版报告 `159667_2026年11月走势预判报告.md` | 会话日志 |
+| 11:48:54 | 再调 `dsh_workplan_dispatch({"mode":"wait"})`，阻塞约 14 分钟 | 会话日志 |
+| 11:49:19–12:00:12 | 后台依次创建 T8/T9/T10/T11 四个子 Agent；T11（排版设计）到预算点仍在跑 | `subagent/catalog` 事件 |
+| 12:02:54 | 派发返回：**「本轮预算用尽，可续跑（完成 10/13，受阻 0）｜已加入进行中的派发并等到结果」** | `tool/result` 原文 |
+| 12:02:54 | 同一秒注入「【部门执行结果】完成 10/13，受阻 0，请主 Agent 核对并整合」，正文含「3. 给出最终答复」与「4. 再次调用 dsh_workplan_dispatch」 | `user/message`，`source.kind=workplan-result` |
+| 12:03:08–12:03:54 | 模型修正报告日期/权重/表格，未再派发 | 会话日志 |
+| 12:04:22 | `present` 报告（`deliverables/presented`） | 会话日志 |
+| 12:04:25 | turn 1 `turn/end`，`reason.kind=completed`（计划 10/13） | 会话日志 |
+| 12:12:34 | T11 完成通知（`subagent-settled`）触发 turn 2 `turn/start` | 会话日志 |
+| 12:13:10 | 报告 E/G/I 行改为「11/13（T1–T11）」；T12/T13 未跑 | 会话日志 |
+| 12:13:16 | turn 2 `turn/end`，`reason.kind=completed`（计划 11/13） | 会话日志 |
+| 之后 | 没有第三个回合；计划永久停在 11/13 | 事件流结束 |
+
+用户在 12:04 之后拿到的是「已 present 的报告 + 收尾性答复」；计划卡片同时显示
+「已结束 · 本轮预算用尽，可续跑」。**聊天里的成品口径与卡片里的未完成口径不一致，
+而用户读的是聊天。**
+
+## 2. 5-Why
+
+1. **为什么用户在没做完时看到了结果？**
+   因为 12:04:22 调用了 `present`、12:04:25 回合以 `completed` 关闭，而计划
+   `10/13`；12:13 的第二回合又以 `11/13` 关闭。
+2. **为什么模型会认为可以收尾？**
+   模型收到的结果消息第 3 条就是「给出最终答复」；工具返回 `ok:true` 且写着
+   「已加入进行中的派发并等到结果」，没有任何字段说明「还剩 3 项」。
+3. **为什么结果消息会自相矛盾？**
+   `buildResultMessage` 把「核对证据 / 处理受阻 / 给出最终答复」写死成职责清单，
+   未完成分支再追加第 4 条「再次派发」；`buildResultSummary` 也固定写
+   「请主 Agent 核对并整合」。**同一份控制消息里同时存在「收尾」和「续跑」两条命令。**
+4. **为什么没有任何机制拦住收尾？**
+   插件只订阅 `agent/pre-step`，不订阅回合结束事件；官方提供的
+   `agent/turn-stopping`（serial、边界提交前 await、监听器可 `agent.steer()`
+   让机器重读 inbox）完全没有被使用。预算暂停只是文案上的「可续跑」。
+5. **为什么没有回归测试发现？**
+   1.8.4 只修了「已结束 ∧ 正在做」（I11），`workplan-budget-pause.test.ts`
+   只断言暂停后的状态列表，从不断言「未完成时给模型的指令是什么」。
+
+系统层原因：**「完成」有四个宣告者（模型叙述、工具返回、状态列表、回合边界），
+但没有任何仲裁规则；唯一有强制力的边界事件没有被订阅。** 只要异步派发把
+「预算到点」和「子任务结算」的时间拉开，这个缺口就必然被踩中。
+
+## 3. 已落地的修复（1.8.7）
+
+| 层 | 改动 | 落点 | 验证 |
+|---|---|---|---|
+| 结果消息 | 未完成时首句「未完成：完成 d/t，剩余 N 项」；职责第 3 条改为「【未完成，禁止交付】」，恢复动作固定为第 4 条；只有全 done 才出现「给出最终答复」 | `src/plan.ts` `buildResultSummary` / `buildResultMessage` | `tests/workplan-turn-stop-gate.test.ts` 用例 1、2 |
+| 收尾指令 | 新增 `buildStopSteerText()`：说清剩余量/ID、禁止 present 与「已完成」措辞、给出唯一恢复动作 | `src/plan.ts` | 用例 3 |
+| 工具返回 | render 分三态：「已开跑，尚未完成」/「未完成：完成 d/t，剩余 N 项」/「已完成」；schema 增加 `complete`、`remaining`；工具描述写明 `complete=false` 必须续跑 | `src/host.ts` `createDispatchTool`；`src/runtime.ts` `dispatchToolOutputSchema`、`completionFields` | `npm run check` + 用例 2 |
+| 提示词 | 新增第 5、6 条：完成唯一判据是全部 done；`ok:true` 不等于完成；未完成禁止 `present`/「已完成」/收尾答复；确有阻碍时答复开头必须写「未完成：剩余 N 项与原因」 | `src/host.ts` `PROMPT_SECTION` | `tests/workplan-host.test.ts` |
+| 回合边界 | 新增 `onTurnStopping` 并注册到官方 `agent/turn-stopping`：仍有未完成项时先等正在跑的派发，再 `agent.steer()` 注入「计划没做完，这个回合不关闭」；每回合最多 2 次；全 done/已取消/非任务回合直接放行 | `src/runtime.ts`、`src/host.ts` | 用例 4、5、6 |
+
+## 4. 为什么这次能真正阻断
+
+`agent/turn-stopping` 的语义（`@deepseek-ai/dsh-agent` 的
+`lib/types/runtime-types.d.ts` 原文）：
+
+> Awaited before the boundary commits — a listener that objects steers
+> (`agent.steer(...)`) and the machine re-reads its inbox: fresh steering runs
+> another step, none closes the turn.
+
+即：监听器在边界提交前被 await；只要 `steer` 注入新消息，机器会多跑一步而不关闭
+回合。同仓的 `@deepseek-ai/dsh-workspace-changes` 就注册在插件根 `ctx` 上
+（`lib/index.js:1067`），证明该 agent 作用域事件能到达根监听器。**提示词和文案
+只能说服模型，这个事件能拦住收尾本身——两者叠加才是根治。**
+
+## 5. 仍待验证 / 残余风险（不当结论）
+
+- `agent/turn-stopping` 的实机行为尚未在本机重启后的 `dsh web` 上复现验证
+  （插件在 `dsh web` 启动时加载，**必须重启一次才生效**）。当前只有类型定义、
+  `dsh-agent-loop` 源码与同仓用例三处间接证据。
+- `state.activeTurns` 只在「真实任务回合」置位；由用户一句「继续」触发的回合
+  不会置位（`isVagueContinuation` 提前返回），因此该回合不设收尾闸门。这类回合
+  通常直接续跑，风险较低，但未单独验证。
+- 每回合最多 2 次 steer：极端情况下第三轮仍可能带着未完成项收尾；此时界面与
+  文案会明确写「未完成」，但不会无限阻止模型结束回合。
+- 事故会话本身仍停在 11/13；如需补齐 T12/T13，应对主 Agent 说「续跑这个计划」。
+- 客户端卡片仍沿用「已结束 · 本轮预算用尽，可续跑」；本轮未改卡片措辞，只保证
+  聊天答复不再冒充成品。
+
+## 6. 复现与验证命令
+
+```bash
+cd /Users/open/Documents/Stocks/plugins/dsh-workplan
+npm run check          # tsc --noEmit，期望无输出
+npm test               # 期望 215 tests / 215 pass / 0 fail
+git log --oneline -3   # 期望看到本次 1.8.7 提交
+```
