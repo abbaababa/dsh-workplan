@@ -1,6 +1,6 @@
 {
   "name": "dsh-workplan",
-  "version": "1.8.9",
+  "version": "1.8.10",
   "description": "Automatic task decomposition, real department subagents, and a responsive workplan dashboard for DeepSeek Harness.",
   "type": "module",
   "license": "MIT",

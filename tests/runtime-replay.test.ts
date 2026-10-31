@@ -166,3 +166,42 @@ test('a second plan must not freeze the earlier plan’s later result or update'
   assert.equal(b.plan.planId, 'wp-b', '不指定 planId 时仍回到最新计划')
   assert.equal(b.phase, 'pending')
 })
+
+test('回放窗口仍要够到 MAX_HISTORY_EVENTS 之前的旧计划', () => {
+  /*
+   * 长会话（>2000 事件）里，窗口起点会越过最早的 plan 消息。旧代码按
+   * planId 重建只会得到 null，dispatch 与 status 一起退回新计划。
+   */
+  const planOld = {
+    planId: 'wp-old',
+    sessionId: 'session-replay-window',
+    createdTurn: 1,
+    createdAt: 1000,
+    title: '旧计划',
+    contradictions: { primary: { statement: '旧计划仍可续跑' } },
+    stages: [{ id: 'S1', subtasks: [{ id: 'T1', dependsOn: [] }, { id: 'T2', dependsOn: ['T1'] }] }],
+  }
+  const planNew = {
+    planId: 'wp-new',
+    sessionId: 'session-replay-window',
+    createdTurn: 3,
+    createdAt: 9000,
+    title: '新计划',
+    contradictions: { primary: { statement: '新计划是默认目标' } },
+    stages: [{ id: 'S1', subtasks: [{ id: 'T1', dependsOn: [] }] }],
+  }
+  const filler = Array.from({ length: 2098 }, () => ({ type: 'assistant/message', data: {} }))
+  const events = [
+    { type: 'user/message', data: buildPlanMessage(planOld) },
+    ...filler,
+    { type: 'user/message', data: buildPlanMessage(planNew) },
+  ]
+  const session = { seq: events.length, header: { createdAt: 1000 }, eventAt: (n: number) => events[n] }
+
+  const old: any = reconstructFromSession(session, 'wp-old')
+  assert.equal(old?.plan?.planId, 'wp-old', '窗口外的旧计划必须仍可按 planId 重建')
+  assert.equal(old.statuses.length, 2)
+
+  const latest: any = reconstructFromSession(session)
+  assert.equal(latest.plan.planId, 'wp-new', '不指定计划时窗口行为不变')
+})

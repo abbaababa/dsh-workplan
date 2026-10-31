@@ -171,3 +171,19 @@ sha256 前后一致。运行中的 `dsh web` 仍需重启后生效。
 残余：取消计划后 `planIncomplete` 为 `false`，`present` 会放行（当前语义是
 「取消即只交付中间结果，正文须写明未完成」）；`status === 'done'` 但
 `acceptance` 为空时仍按结构化证据接收，只能靠自检失败拦住明确错误的证据。
+
+## 9. 1.8.10 补丁：回放窗口越过 plan 消息
+
+1.8.9 的按 planId 分账在短日志上验证通过，但重启后对 `wp-6753e19f` 仍然
+返回最新计划。原因是回放窗口固定为最近 `MAX_HISTORY_EVENTS`（2000）个事件，
+而本会话已增长到 2256 个事件，`wp-6753e19f` 的 plan 消息在 seq 22，早已在
+窗口之外：`ensure()` 从未执行，快照不存在，`reconstructFromSession` 返回
+`null`，`status` 与 `dispatch` 一起退回内存里的新计划。
+
+1.8.10 在显式传入 `targetPlanId` 且窗口内找不到该计划时，从窗口起点向前
+扫描 plan 消息，把回放起点前移；默认回放不变。同一份 2256 事件日志重放
+`wp-6753e19f` 得到 13/14（仅 T5 blocked）。`npm run check` 无诊断；
+`npm test` 224/224。
+
+残余：默认回放仍只保证最新计划，多计划并存的会话里续跑旧计划必须显式传
+`planId`。
