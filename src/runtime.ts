@@ -60,6 +60,28 @@ import {
 } from './plan.js'
 import { createProgressWatchdog, describeError } from './watchdog.js'
 
+/**
+ * [1.8.18] How many subtasks the plan *defines*.
+ *
+ * `deliveryReadiness` counts the derived statuses, and `ready` requires
+ * `total > 0`, so a plan with `stages: []` can never be ready. Such a plan is
+ * not a delivery object at all: normal planning rejects it (`validatePlan`),
+ * and it can only reach replay from a malformed historical message. Judging it
+ * as "0/0 unfinished forever" was U6 (T5 P13): present was refused with the
+ * false copy "0 个子任务虽都已 done".
+ *
+ * A malformed plan that reaches this function still counts as deliverable
+ * (`MAX_SAFE_INTEGER`); plans failing reconstruction earlier are dropped by
+ * `sessionPlanRecords` — a known fail-open boundary (T5 A9), not closed here.
+ */
+function definedSubtaskCount(plan: any): number {
+  try {
+    return flattenSubtasks(plan).length
+  } catch {
+    return Number.MAX_SAFE_INTEGER
+  }
+}
+
 export const PLANNER_TIMEOUT_MS = 120000
 /**
  * Absolute ceiling for one child execution.
@@ -3056,6 +3078,39 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     return records
   }
 
+  /**
+   * [1.8.18] The last plan that actually defines work, for the restart replay.
+   *
+   * The gate used to fall back only to the live record or the turn's plan. After
+   * a restart both are gone, so a session whose last action was cancelling an
+   * unfinished plan allowed `present` — contradicting the cancel tool's own
+   * contract ("取消后如仍有未完成项或证据缺口，present 仍会被拒绝"). T5 E1/E6
+   * pinned that hole.
+   *
+   * Empty plans are skipped: they are not delivery objects (U6), and accepting
+   * one as "the last plan" would let a builder cancel real work and define an
+   * empty plan as a shield. Older cancelled plans still do not block a newer
+   * plan, so cancelling a stale plan does not deadlock the session.
+   */
+  function lastGateablePlanRecord(session: any): any {
+    if (typeof session?.eventAt !== 'function') return undefined
+    for (let i = session.seq - 1; i >= 0; i -= 1) {
+      let event
+      try {
+        event = session.eventAt(i)
+      } catch {
+        continue
+      }
+      if (!event || event.type !== 'user/message') continue
+      const plan = parseWorkplanMessage(event.data)?.plan
+      if (!plan || typeof plan.planId !== 'string' || plan.planId === '') continue
+      if (definedSubtaskCount(plan) === 0) continue
+      const record = reconstructFromSession(session, plan.planId)
+      if (record?.plan && definedSubtaskCount(record.plan) > 0) return record
+    }
+    return undefined
+  }
+
   function presentDenialReason(agent: any) {
     const session = agent?.session
     if (!session || !isRootSession(session)) return undefined
@@ -3081,7 +3136,16 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       if (named?.plan) candidates.push(named)
     }
     if (candidates.length === 0) return undefined
-    const unresolved = candidates
+    /*
+     * [U6] a plan with zero defined subtasks is not a delivery object.
+     * `deliveryReadiness` can never call it ready (`total > 0`), so judging it
+     * only produced the false refusal "0 个子任务虽都已 done". Filter by the
+     * definition itself — not by `statuses.length` — so a real plan whose
+     * statuses failed to derive is still judged (and stays closed).
+     */
+    const gateable = candidates.filter((item: any) => definedSubtaskCount(item.plan) > 0)
+    if (gateable.length === 0) return undefined
+    const unresolved = gateable
       .map((item: any) => ({
         record: item,
         readiness: deliveryReadiness(derivePlanSnapshot(item.statuses), { phase: item.phase }),
@@ -3090,8 +3154,9 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
        * A cancelled plan is not a delivery blocker for *other* plans — the
        * incident session accumulates cancelled plans that will never be
        * finished, and blocking on them forever would deadlock delivery. It is
-       * still checked below when it is the plan this turn (or the live record)
-       * is about: cancel stops execution, it does not make the work deliverable.
+       * still checked below when it is the plan this turn (or the live record,
+       * or the last defined plan after a restart) is about: cancel stops
+       * execution, it does not make the work deliverable.
        */
       .filter((entry: any) => entry.record.phase !== 'cancelled' && !entry.readiness.ready)
     if (unresolved.length > 1) {
@@ -3116,11 +3181,16 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       /*
        * No unfinished active plan. The plan this turn is about (or the live
        * record) may still be a cancelled one that never finished — T5-C pins
-       * that `present` must be refused for it.
+       * that `present` must be refused for it. After a restart neither exists,
+       * so fall back to the last plan that defines work; otherwise the
+       * sequence "cancel an unfinished plan, restart, present" silently
+       * bypasses the cancel tool's own contract (T5 E1/E6).
        */
       record = state.records.get(session.id)
       if (turnPlanId) record = reconstructFromSession(session, turnPlanId) ?? record
+      if (!record?.plan) record = lastGateablePlanRecord(session)
       if (!record?.plan) return undefined
+      if (definedSubtaskCount(record.plan) === 0) return undefined
       readiness = deliveryReadiness(derivePlanSnapshot(record.statuses), { phase: record.phase })
       if (readiness.ready) return undefined
     }
@@ -3161,6 +3231,100 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       + '在计划通过交付就绪检查之前不得调用 present 交付产物：先调用 dsh_workplan_dispatch 续跑剩余项；'
       + '证据缺口用 dsh_workplan_update 补齐；确实无法继续时，把答复写成「未完成：剩余 N 项与原因」。'
       + '取消只停止执行，不会改变“未完成”的结论。'
+  }
+
+  /*
+   * [1.8.18] 已交付文件的写保护（T7-N2）。
+   *
+   * `present` 不复制内容（工具描述原文：the user opens the current files），
+   * write/edit 也不校验路径是否已经交付。事故的迟到回合在 12:13 两次原地改写
+   * 12:04 已 present 的报告，卡片背后的文件因此变了。这里把「present 时点
+   * 已经定义过的计划」记到路径上：只要这些计划至今仍未通过交付就绪检查，
+   * 根会话对同一路径的 write/edit 就被拒绝。present 之后才定义的新计划不在
+   * 集合里，所以“用户要求改版 → 新计划”不会被写保护卡死；cancel 仍是显式出路。
+   */
+  const presentedPaths = new Map<string, {
+    scannedTo: number
+    planIds: Set<string>
+    entries: Array<{ raw: string; canonical?: string; planIds: string[] }>
+  }>()
+
+  function canonicalPath(session: any, value: any) {
+    if (typeof value !== 'string' || value.trim() === '') return undefined
+    if (isAbsolute(value)) return resolve(value)
+    const cwd = session?.header?.cwd ?? options.cwd
+    return typeof cwd === 'string' && cwd ? resolve(cwd, value) : undefined
+  }
+
+  function presentedEntries(session: any) {
+    if (typeof session?.eventAt !== 'function' || !(Number(session.seq) >= 0)) return []
+    const cache = presentedPaths.get(session.id)
+    const reusable = cache !== undefined && cache.scannedTo <= Number(session.seq)
+    const from = reusable ? cache.scannedTo : 0
+    const seen = new Set<string>(reusable ? cache.planIds : [])
+    const entries = reusable ? cache.entries.slice() : []
+    for (let i = from; i < Number(session.seq); i += 1) {
+      let event
+      try {
+        event = session.eventAt(i)
+      } catch {
+        continue
+      }
+      if (!event) continue
+      if (event.type === 'user/message') {
+        const planId = parseWorkplanMessage(event.data)?.plan?.planId
+        if (typeof planId === 'string' && planId) seen.add(planId)
+        continue
+      }
+      if (event.type !== 'deliverables/presented') continue
+      const planIds = [...seen]
+      for (const file of event.data?.files ?? []) {
+        if (typeof file?.path !== 'string' || file.path.trim() === '') continue
+        entries.push({ raw: file.path, canonical: canonicalPath(session, file.path), planIds })
+      }
+    }
+    presentedPaths.set(session.id, {
+      scannedTo: Number(session.seq),
+      planIds: seen,
+      entries,
+    })
+    return entries
+  }
+
+  function recordForPlan(session: any, planId: string) {
+    const live = state.records.get(session.id)
+    if (live?.plan?.planId === planId) return live
+    return reconstructFromSession(session, planId)
+  }
+
+  function presentedWriteDenialReason(agent: any, args: any) {
+    const session = agent?.session
+    if (!session || !isRootSession(session)) return undefined
+    if (isPlanModeActive(ctx, session)) return undefined
+    const entries = presentedEntries(session)
+    if (entries.length === 0) return undefined
+    const requested = args?.file_path ?? args?.path
+    if (typeof requested !== 'string' || requested.trim() === '') return undefined
+    const canonical = canonicalPath(session, requested)
+    const matched = entries.filter((entry: any) =>
+      entry.raw === requested
+      || (canonical !== undefined && entry.canonical !== undefined && entry.canonical === canonical))
+    if (matched.length === 0) return undefined
+    const planIds = new Set<string>()
+    for (const entry of matched) for (const planId of entry.planIds) planIds.add(planId)
+    if (planIds.size === 0) return undefined
+    const unresolved = [...planIds]
+      .map((planId) => recordForPlan(session, planId))
+      .filter((record: any) => record?.plan
+        && record.phase !== 'cancelled'
+        && !deliveryReadiness(derivePlanSnapshot(record.statuses), { phase: record.phase }).ready)
+    if (unresolved.length === 0) return undefined
+    const ids = unresolved.slice(0, 4).map((record: any) => record.plan.planId)
+    return `文件 ${requested} 已通过 present 交付给用户，而交付时点已存在的计划`
+      + `${ids.length ? ` ${ids.join('、')}` : ''} 仍未通过交付就绪检查。`
+      + '计划未就绪期间不得原地改写已交付文件：先调用 dsh_workplan_dispatch 续跑剩余项，'
+      + '完成后重新 present 新版本；确实不做的计划用 dsh_workplan_cancel 显式取消。'
+      + '（present 之后新建的计划不受此限制。）'
   }
 
   function plansPayload(sessionId: any) {
@@ -3250,6 +3414,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     onPreStep,
     onTurnStopping,
     presentDenialReason,
+    presentedWriteDenialReason,
     updateStatus,
     cancelPlan,
     dispatchTool,

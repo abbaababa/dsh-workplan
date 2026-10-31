@@ -1,3 +1,45 @@
+## 1.8.18 — 2026-10-31
+
+**修复：`present` 对空计划与「取消后重启」两条边界的判定，并补上已交付文件的写保护。**
+
+> 背景：1.8.16 的 `present` 闸门已按计划逐个检查，但 T5/T7 的边界复验发现两处
+> 判定偏差：一个空计划（`stages: []`，只可能来自畸形历史消息）永远到不了
+> `ready`，`present` 会拿「0 个子任务虽都已 done」这种错文案永久拒绝；反过来，
+> 取消一个未完成计划再重启宿主，回放时既没有 live record 也没有本回合计划，
+> 闸门会放行——这和取消工具自己的契约「取消后如仍有未完成项或证据缺口，
+> present 仍会被拒绝」直接矛盾。另有一处交付完整性缺口：`present` 不复制文件，
+> `write`/`edit` 也不校验路径，事故的迟到回合就在卡片发出后原地改写了同一份
+> 报告。
+
+### 修复
+
+- `src/runtime.ts` 新增 `definedSubtaskCount(plan)`：闸门按「计划定义了几个子任务」
+  判断是不是交付对象。空计划不再进入禁止清单（消除 U6 假拒绝），但畸形计划
+  （`flattenSubtasks` 抛错）仍按「不可判断」失败关闭。
+- `presentDenialReason` 的候选集增加 `lastGateablePlanRecord(session)`：重启后
+  live record 与本回合计划都不存在时，回退到最近一个「定义了工作」的计划；
+  被取消但未完成的计划因此仍拒绝 `present`。较新的已就绪计划不受历史取消项
+  阻塞；空计划不能拿来当挡箭牌（A8）。
+- 新增写保护：`present` 时把「当时已定义的计划 id + 交付路径」钉进会话事件快照；
+  新的 `fileWriteGuardReason`（`src/host.ts`，注册在 `ctx.tools.guard`）在根会话
+  对同一路径的 `write`/`edit`/`str_replace_editor` 请求上检查，只要这些计划仍未
+  通过交付就绪检查就拒绝，并给出续跑 / 取消 / 重新 present 三个出口。`present`
+  之后才定义的新计划不在快照里，所以「用户要求改版 → 新计划」不会被卡死；
+  plan 模式、子会话、其它路径一律放行。
+- 两条 guard 是并列的单调拒绝（`tools.guard` 的 `guardReason` 逐条求值，取第一个
+  非空原因），互不覆盖。
+
+### 测试
+
+- `tests/present-gate-evidence.test.ts`：A1–A8（未完成必拒、全 done 无证据必拒、
+  空计划放行、plan 模式防死锁、按定义而非状态过滤、取消后重启仍拒、旧计划取消
+  不阻塞新计划、空计划挡箭牌无效）。
+- `tests/workplan-presented-write-guard.test.ts`：7 条（拒绝与出口、相对/绝对路径
+  归一、present 后新计划放行、就绪放行、取消放行、非根会话/plan 模式放行、
+  只接管三个写工具）。
+- 全量 `npm test` = 270 pass / 0 fail；`npm run check` 无诊断；两次构建的 5 个
+  产物 sha256 一致。
+
 ## 1.8.17 — 2026-10-31
 
 **修复：回放出来的记录缺少 `errors` 字段，预算到点清理子任务时整轮崩掉，剩余子任务被连带判为受阻。**

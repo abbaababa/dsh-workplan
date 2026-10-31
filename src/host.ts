@@ -562,6 +562,7 @@ export function apply(ctx: any, config: WorkplanConfig = {}) {
    * 提示词和工具文案只能说服模型，这个事件能拦住收尾本身。
    */
   ctx.effect(() => ctx.on('agent/turn-stopping', runtime.onTurnStopping))
+  ctx.effect(() => ctx.tools.guard((exec: any) => fileWriteGuardReason(exec, runtime)))
 
   ctx.inject(['webServer', 'connection'], (scope: any) => {
     scope.effect(() =>
@@ -620,9 +621,24 @@ export function apply(ctx: any, config: WorkplanConfig = {}) {
 
 export const meta = {
   name,
-  version: '1.8.17',
+  version: '1.8.18',
   promptOrder: PROMPT_ORDER,
   routes: ['/dsh-workplan/plans', '/dsh-workplan/vendor/chart.umd.js'],
 }
 
 export { PROMPT_SECTION, createCancelTool, createDispatchTool, createStatusTool, createUpdateTool, plannerOutputSchema }
+
+/**
+ * [1.8.18] 写工具的路径级闸门（T7-N2），与 `toolGuardReason` 分开注册。
+ *
+ * present/dispatch 的语义是「计划未就绪不能交付」；这里管的是「已交付的
+ * 文件不能在计划未就绪时被原地改写」。两条守卫都返回拒绝原因，harness
+ * 取第一个非空原因，互不覆盖。
+ */
+export function fileWriteGuardReason(
+  exec: any,
+  runtime: { presentedWriteDenialReason(agent: any, args: any): string | undefined },
+) {
+  if (exec?.name !== 'write' && exec?.name !== 'edit' && exec?.name !== 'str_replace_editor') return undefined
+  return runtime.presentedWriteDenialReason(exec?.agent, exec?.arguments)
+}
