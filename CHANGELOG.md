@@ -1,3 +1,50 @@
+## 1.8.9 — 2026-10-31
+
+**修复：重启后计划进度回退，以及结算回合认亲与 `present` 的证据闸门。**
+
+> 背景：1.8.8 上线后重启 Web 服务，`wp-6753e19f` 从 13/14 退回 5/14。
+> 排查发现回放只保留“最后一个计划”的状态：会话里出现第二个计划后，前一个
+> 计划迟到的 result 与 update 全部被丢弃。同时 T5 审计指出两条剩余绕过路径，
+> 一并修复。
+
+### 修复
+
+- **回放按 planId 分账**：旧 `reconstructFromSession` 只有一组 `plan/statuses`。
+  当“继续”被误判生成第二个计划（事故里是 `wp-dd26f206`），前一个计划被压进
+  冻结快照，后续 `result.planId` / `update.planId` 不匹配而被丢弃，重启后永远
+  回到冻结时的 5/14。现在每个计划独立快照，按载荷里的 `planId` 路由；
+  显式传入 `targetPlanId` 时优先返回该计划。真实会话日志重放已从 5/14 恢复为
+  13/14，与重启前一致。
+- **结算回合按会话谱系认亲**：预算暂停会把未完成项重置为 `pending`，而
+  `normaliseStatusEntry` 对 `pending` 强制 `childId: null`（不变量 I6 不允许
+  `pending` 携带 `childId`），事故里的 T11 因此从 `planChildIds` 消失，turn 2
+  仍能绕过收尾闸门。新增 `isChildSessionOf()`：`subagent-settled` 的发送者
+  只要 `header.parentSession` 指向当前会话，就仍视为本计划的子会话。
+- **`present` 的证据硬缺口**：计划全部 `done` 但存在自检失败
+  （`verification === 'failed'`）、验收项失败（`acceptance[].result === 'fail'`）
+  或缺失声明产物（`missingArtifacts` 非空）时，`present` 在工具执行前被拒绝，
+  并提示先用 `dsh_workplan_update` 复核补证，或把对应子任务改回 `blocked`。
+  `legacy`／无结构化证据的软缺口不在此层拦截：拦死会让所有旧计划永久不可
+  交付、只剩 `cancel` 一条逃生路，反而制造新的死锁；软缺口仍由提示词与结果
+  消息约束。
+
+### 验证
+
+- `npm run check` 无诊断。
+- `npm test` → **223 tests / 223 pass / 0 fail**（1.8.8 基线 220，新增 3 条：
+  第二个计划不得冻结前一个计划的 result/update、`childId` 被清空后结算回合
+  仍被拦截、全 `done` 但有证据硬缺口时 `present` 仍被拒绝）。
+- 用 1657 事件的真实会话日志重放 `wp-6753e19f`：13 个 `done`（T1–T4、T6–T14），
+  仅 T5 `blocked`。
+
+### 残余
+
+- 取消计划后 `planIncomplete` 为 `false`，`present` 会放行。当前语义是
+  “取消即表示剩余产物只能作为中间结果交付”，拒绝文案也要求先取消再在正文
+  说明；是否要在取消后仍禁止 `present` 属于产品决策，本轮未改。
+- `payload.status === 'done'` 但 `acceptance` 为空时仍按结构化证据接收，
+  只能靠自检失败拦住明确错误的证据。
+
 ## 1.8.8 — 2026-10-31
 
 **补丁：把 1.8.7 的收尾闸门补到「结算唤醒的回合」与 `present` 工具层。**

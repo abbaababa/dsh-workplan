@@ -83,11 +83,11 @@ function makeSession() {
   }
 }
 
-function makeRuntime(record: any, session: any) {
+function makeRuntime(record: any, session: any, childSessions: Record<string, any> = {}) {
   const ctx = {
     logger: { warn() {} },
     subagents: { startActivation: async () => { throw new Error('this test never dispatches') } },
-    sessions: { get: () => undefined, list: () => [], eventAt: () => undefined },
+    sessions: { get: (id: string) => childSessions[id], list: () => [], eventAt: () => undefined },
   }
   const runtime: any = createWorkplanRuntime(ctx, { totalTimeoutMs: 60_000 })
   runtime.state.records.set(session.id, record)
@@ -302,6 +302,24 @@ test('无关子 Agent 的结算不得把闸门误激活', async () => {
   assert.equal(humanAgent.steered.length, 0, '非任务回合（如进度询问）不得被强制续跑')
 })
 
+test('预算重置清空 childId 后，结算回合仍按会话谱系被拦住', async () => {
+  const session = makeSession()
+  const record = makeRecord(makePlan('wp-lineage'))
+  // 预算暂停会把未完成项重置为 pending，normaliseStatusEntry 同时清空 childId；
+  // 事故里的 T11 正是这样从 planChildIds 里消失，turn 2 才绕过了 1.8.8。
+  record.statuses[1].status = 'pending'
+  record.statuses[1].childId = null
+  record.phase = 'paused'
+  session.append('turn/start', { turn: 2 })
+  session.append('user/message', settlementMessage('child-cleared'))
+  const runtime = makeRuntime(record, session, { 'child-cleared': { header: { parentSession: session.id } } })
+  const { agent, steered } = steerableAgent(session)
+
+  await runtime.onTurnStopping({ agent, turn: 2 })
+  assert.equal(steered.length, 1, 'childId 被清空不等于结算与计划无关：谱系仍然成立')
+  assert.equal(record.stopSteers.turn, 2)
+})
+
 test('present 在计划未完成时被硬拒绝，完成/取消/子会话放行', () => {
   const session = makeSession()
   const record = makeRecord(makePlan('wp-present'))
@@ -326,6 +344,29 @@ test('present 在计划未完成时被硬拒绝，完成/取消/子会话放行'
   const childSession = { ...makeSession(), header: { origin: 'subagent' } }
   const childRuntime: any = makeRuntime(makeRecord(makePlan('wp-present-child')), childSession)
   assert.equal(childRuntime.presentDenialReason({ session: childSession }), undefined, '子 Agent 的 present 不受父计划约束')
+})
+
+test('全部 done 但证据有硬缺口时，present 仍被拒绝', () => {
+  const session = makeSession()
+  const record = makeRecord(makePlan('wp-present-evidence'))
+  for (const item of record.statuses) item.status = 'done'
+  record.phase = 'done'
+  record.statuses[0].verification = 'failed'
+  record.statuses[1].acceptance = [{ criterion: '逐条核对', result: 'fail', evidence: '' }]
+  record.statuses[2].missingArtifacts = ['reports/missing.md']
+  const runtime: any = makeRuntime(record, session)
+
+  const denied = runtime.presentDenialReason({ session })
+  assert.match(denied, /自检失败/)
+  assert.match(denied, /验收未通过/)
+  assert.match(denied, /缺少声明产物/)
+  assert.match(denied, /dsh_workplan_update/)
+
+  // 清掉硬缺口后放行；legacy（没有结构化证据）不在此层拦截。
+  record.statuses[0].verification = undefined
+  record.statuses[1].acceptance = undefined
+  record.statuses[2].missingArtifacts = undefined
+  assert.equal(runtime.presentDenialReason({ session }), undefined)
 })
 
 test('剩余项全部 blocked：不再空转 steer，但 present 仍被拒绝', async () => {

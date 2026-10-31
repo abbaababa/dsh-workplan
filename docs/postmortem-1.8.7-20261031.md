@@ -139,3 +139,35 @@ git log --oneline -3   # 期望看到本次 1.8.7 提交
 
 验证：`npm run check` 无诊断；`npm test` 220/220；`npm run build` 五个产物
 sha256 前后一致。运行中的 `dsh web` 仍需重启后生效。
+
+## 8. 1.8.9 补丁：重启后的进度回退与剩余两条绕过路径
+
+1.8.8 上线、用户重启 Web 服务后，`wp-6753e19f` 从 13/14 退回 5/14。根因不在
+写入而在回放：`reconstructFromSession` 只有一组 `plan/statuses`，会话里出现
+第二个计划（「继续」被误判生成的 `wp-dd26f206`，seq 1223）时，前一个计划被
+压进冻结快照并停止接收后续事件。`wp-6753e19f` 迟到的 7/14 结果（seq 1337）
+与六条 T9–T14 的 `done` 改判（seq 1517–1532）因 `planId` 不匹配被丢弃，
+重启后永远回到冻结时的 5/14。
+
+1.8.9 的补法：
+
+- **回放按 planId 分账**：`ReplaySnapshot` 以 `plan.planId` 为键；`plan` /
+  `result` / `update` / `cancel` 与 `dsh_workplan_update` 的工具调用都按载荷
+  里的 `planId` 路由，`targetPlanId` 显式指定时优先返回该计划。用 1657 事件的
+  真实日志重放，`wp-6753e19f` 恢复为 13/14（仅 T5 blocked）。
+- **结算回合按会话谱系认亲**：预算暂停把未完成项重置为 `pending`，而
+  `normaliseStatusEntry` 对 `pending` 强制清空 `childId`（不变量 I6 也不允许
+  `pending` 携带 `childId`）。事故里的 T11 因此从 `planChildIds` 消失。新增
+  `isChildSessionOf()`，用 `header.parentSession` 判定谱系，不再依赖易失字段。
+- **`present` 的证据硬缺口**：全部 `done` 但存在 `verification === 'failed'`、
+  `acceptance[].result === 'fail'` 或非空 `missingArtifacts` 时，`present` 在
+  执行前被拒绝，并提示先 `dsh_workplan_update` 补证或改回 `blocked`。
+  `legacy`／无结构化证据属于软缺口，仍由提示词与结果消息约束；拦死它们会让
+  旧计划永久不可交付，只剩 `cancel` 一条路，是新的死锁。
+
+验证：`npm run check` 无诊断；`npm test` 223/223；新增三条回归用例
+（回放分账、`childId` 清空后的结算拦截、`present` 证据缺口）。
+
+残余：取消计划后 `planIncomplete` 为 `false`，`present` 会放行（当前语义是
+「取消即只交付中间结果，正文须写明未完成」）；`status === 'done'` 但
+`acceptance` 为空时仍按结构化证据接收，只能靠自检失败拦住明确错误的证据。

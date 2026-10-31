@@ -1431,29 +1431,44 @@ function readToolArguments(value: any) {
 
 export function reconstructFromSession(session: any, targetPlanId?: string) {
   const start = Math.max(0, session.seq - MAX_HISTORY_EVENTS)
-  let plan: any = null
-  let statuses: any[] = []
-  let degraded: any = null
-  let resultSeen = false
-  // A round-budget pause must survive a page refresh; otherwise the replayed
-  // plan looks “executing” forever (nothing is running) and the card stops
-  // telling the user it can simply be dispatched again.
-  let resultPhase = ''
-  let cancelled = false
-  let resumeCount = 0
+  interface ReplaySnapshot {
+    plan: any
+    statuses: any[]
+    resultPhase: string
+    resultSeen: boolean
+    resumeCount: number
+    cancelled: boolean
+  }
   /*
-   * Older plans stay dispatchable.
+   * [1.8.9] 回放按 planId 分账，不按会话「最后一个计划」分账。
    *
-   * The replayed state used to be "whatever the newest plan message says", so a
-   * plan paused before a restart became unreachable the moment the next turn
-   * generated a new plan: the rebuild answered with the new plan and every
-   * dispatch of the old one failed with PLAN_ID_MISMATCH. Keep a snapshot per
-   * plan and let the caller ask for a specific one.
+   * 旧实现只有一组 plan/statuses：中途出现第二个计划（这次事故里是「继续」被
+   * 误判后生成的 wp-dd26f206）时，第一个计划的快照被冻结在当时，之后所有属于
+   * 它的结果消息与人工改判都被丢弃——重启后卡片从 13/14 掉回 5/14，而会话
+   * 日志里明明有 7/14 的结果消息和 6 条 done 改判。现在每个计划各一份快照，
+   * 每条 durable 消息只写给 planId 指定的那个计划。
    */
-  const finished: any[] = []
+  const snapshots = new Map<string, ReplaySnapshot>()
+  let currentId: string | null = null
+  let degraded: any = null
+  const ensure = (plan: any): ReplaySnapshot => {
+    let snap = snapshots.get(plan.planId)
+    if (!snap) {
+      snap = {
+        plan,
+        statuses: createStatuses(plan),
+        resultPhase: '',
+        resultSeen: false,
+        resumeCount: 0,
+        cancelled: false,
+      }
+      snapshots.set(plan.planId, snap)
+    }
+    currentId = plan.planId
+    return snap
+  }
   /** [1.6.0] callId → 待确认的 update 写入；只有配对的 tool/result 才能定案。 */
   const pendingToolCalls = new Map<string, any>()
-  const snapshot = () => ({ plan, statuses, resultPhase, resultSeen, resumeCount, cancelled })
   for (let seq = start; seq < session.seq; seq += 1) {
     let event
     try {
@@ -1466,34 +1481,27 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
       const payload = parseWorkplanMessage(event.data)
       if (payload?.degraded) {
         degraded = payload
-        plan = null
-        statuses = []
-        cancelled = false
+        currentId = null
       } else if (payload?.plan) {
-        if (plan) finished.push(snapshot())
-        plan = payload.plan
-        statuses = createStatuses(plan)
-        cancelled = false
-        /*
-         * A new plan must not inherit the previous plan's round phase.
-         *
-         * `resultPhase` outlived the old plan, so after a paused plan the next
-         * plan in the same session replayed as `paused` before its first
-         * dispatch — the card claimed the new plan was out of budget when it had
-         * not started. Only a result message for *this* plan may set it.
-         */
-        resultPhase = ''
-        resultSeen = false
-        resumeCount = 0
+        ensure(payload.plan)
       }
+      /*
+       * Every result message is routed by its own planId. A result that arrives
+       * after a newer plan was generated must still update the plan it names —
+       * that was the 13/14 → 5/14 replay regression. A plan never inherits
+       * another plan's round phase or resume counter (each snapshot owns them).
+       */
       const result = parseResultMessage(event.data)
-      if (result && plan && result.planId === plan.planId) {
-        statuses = applyResultStatuses(statuses, result)
-        // Resume bookkeeping must survive a page refresh, otherwise the budget
-        // silently resets and a never-succeeding subtask can loop forever.
-        resumeCount = Number(result.resumeCount ?? resumeCount) || 0
-        resultPhase = typeof result.phase === 'string' ? result.phase : ''
-        resultSeen = true
+      if (result && typeof result.planId === 'string') {
+        const snap = snapshots.get(result.planId)
+        if (snap) {
+          snap.statuses = applyResultStatuses(snap.statuses, result)
+          // Resume bookkeeping must survive a page refresh, otherwise the budget
+          // silently resets and a never-succeeding subtask can loop forever.
+          snap.resumeCount = Number(result.resumeCount ?? snap.resumeCount) || 0
+          snap.resultPhase = typeof result.phase === 'string' ? result.phase : ''
+          snap.resultSeen = true
+        }
       }
       /*
        * [1.7.0] Manual re-adjudications replay in order.
@@ -1505,24 +1513,28 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
        * newer one (see `applyResultStatuses`).
        */
       const update = parseUpdateMessage(event.data)
-      if (update && plan && update.planId === plan.planId && typeof update.subtaskId === 'string') {
-        try {
-          statuses = applyStatus(statuses, update.subtaskId, {
-            status: update.status,
-            progress: typeof update.progress === 'number' ? update.progress : undefined,
-            summary: typeof update.note === 'string' ? update.note : undefined,
-            revision: Number.isInteger(update.revision) ? update.revision : undefined,
-            updatedBy: 'agent',
-          })
-        } catch {
-          // An invalid historical update is ignored; the rest still replays.
+      if (update && typeof update.planId === 'string' && typeof update.subtaskId === 'string') {
+        const snap = snapshots.get(update.planId)
+        if (snap) {
+          try {
+            snap.statuses = applyStatus(snap.statuses, update.subtaskId, {
+              status: update.status,
+              progress: typeof update.progress === 'number' ? update.progress : undefined,
+              summary: typeof update.note === 'string' ? update.note : undefined,
+              revision: Number.isInteger(update.revision) ? update.revision : undefined,
+              updatedBy: 'agent',
+            })
+          } catch {
+            // An invalid historical update is ignored; the rest still replays.
+          }
         }
       }
       const cancel = parseCancelMessage(event.data)
-      if (cancel && plan && cancel.planId === plan.planId) {
-        cancelled = true
+      if (cancel && typeof cancel.planId === 'string') {
+        const snap = snapshots.get(cancel.planId)
+        if (snap) snap.cancelled = true
       }
-    } else if (event.type === 'tool/call' && plan) {
+    } else if (event.type === 'tool/call') {
       /*
        * [1.6.0] 只登记，不下结论。
        *
@@ -1536,7 +1548,8 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
       if (data?.name === 'dsh_workplan_update' && typeof data.callId === 'string') {
         const args = readToolArguments(data.arguments)
         if (args && typeof args.subtaskId === 'string' && typeof args.status === 'string') {
-          pendingToolCalls.set(data.callId, { args, planId: plan.planId })
+          const planId = typeof args.planId === 'string' ? args.planId : currentId
+          if (planId) pendingToolCalls.set(data.callId, { args, planId })
         }
       }
     } else if (event.type === 'tool/result') {
@@ -1545,14 +1558,15 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
       if (typeof callId !== 'string') continue
       const pending = pendingToolCalls.get(callId)
       pendingToolCalls.delete(callId)
-      if (!pending || !plan || pending.planId !== plan.planId) {
+      const snap = pending && typeof pending.planId === 'string' ? snapshots.get(pending.planId) : null
+      if (!snap) {
         // 结果晚于新计划到达：旧计划的写入不污染新计划的状态表。
       } else if (message.isError === true) {
         // 失败的更新不是完成：状态表保持原样。
       } else {
         const args = pending.args
         try {
-          statuses = applyStatus(statuses, args.subtaskId, {
+          snap.statuses = applyStatus(snap.statuses, args.subtaskId, {
             status: args.status,
             progress: typeof args.progress === 'number' ? args.progress : undefined,
             summary: typeof args.note === 'string' ? args.note : undefined,
@@ -1563,8 +1577,13 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
       }
     }
   }
-  if (!plan && !degraded) return null
-  if (degraded) {
+  const chosen = targetPlanId
+    ? snapshots.get(targetPlanId) ?? null
+    : currentId
+      ? snapshots.get(currentId) ?? null
+      : null
+  if (!chosen) {
+    if (!degraded) return null
     return {
       plan: null,
       planId: degraded.planId ?? null,
@@ -1578,12 +1597,12 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
       createdTurn: degraded.createdTurn ?? null,
     }
   }
-  if (!plan) return null
-  if (targetPlanId && plan.planId !== targetPlanId) {
-    const hit = finished.find((item: any) => item.plan?.planId === targetPlanId)
-    if (!hit) return null
-    ;({ plan, statuses, resultPhase, resultSeen, resumeCount, cancelled } = hit)
-  }
+  const plan = chosen.plan
+  const statuses = chosen.statuses
+  const resultPhase = chosen.resultPhase
+  const resultSeen = chosen.resultSeen
+  const resumeCount = chosen.resumeCount
+  const cancelled = chosen.cancelled
   let phase = planPhase(statuses, resultSeen)
   if (resultPhase === 'paused' && statuses.some((item: any) => item.status !== 'done')) phase = 'paused'
   if (cancelled) phase = 'cancelled'
@@ -2378,6 +2397,26 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
   const PLAN_CONTINUATION_KINDS = new Set(['subagent-settled', 'workplan-result', 'workplan-continue'])
 
   /**
+   * [1.8.9] 子会话谱系判定。
+   *
+   * `childId` 在预算重置时会被清空（`applyStatus({status:'pending'})` 走
+   * `normaliseStatusEntry` 强制 childId=null），事故里的 T11 因此不在
+   * planChildIds 中，turn 2 又一次绕过闸门。`header.parentSession` 是子会话
+   * 自身的身份，预算与重启都不会改写它，用它旁证“这条结算来自本计划的执行者”。
+   */
+  function isChildSessionOf(senderId: string, session: any) {
+    if (!senderId) return false
+    try {
+      const child = ctx.sessions?.get?.(senderId)
+      const header = child?.header
+      if (!header) return false
+      return header.parentSession === session.id
+    } catch {
+      return false
+    }
+  }
+
+  /**
    * [1.8.8] 结算/结果唤醒的回合也属于“本回合的任务”。
    *
    * 事故 turn 2 由 `subagent-settled` 消息唤醒：它不是 human task，
@@ -2408,9 +2447,14 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       const source = message?.source ?? {}
       const kind = String(source.kind ?? '')
       if (!PLAN_CONTINUATION_KINDS.has(kind)) continue
-      if (kind === 'subagent-settled' && childIds.size > 0) {
+      if (kind === 'subagent-settled') {
         const sender = String(source.senderSessionId ?? '')
-        if (!childIds.has(sender)) continue
+        /*
+         * 只认“本计划派出过的 child”或“本会话的真实子会话”。后者覆盖
+         * childId 被预算重置清空的情况；两者都不命中时，无关后台任务不能
+         * 把闸门误激活。
+         */
+        if (!childIds.has(sender) && !isChildSessionOf(sender, session)) continue
       }
       return true
     }
@@ -2484,6 +2528,28 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
    * 交付卡片先出现、收尾闸门后到，卡片无法撤回。这里在工具执行前拒绝，
    * 与回合闸门形成前后两道防线。
    */
+  /**
+   * [1.8.9] 全部 done 但仍不可交付的证据缺口。
+   *
+   * status 只回答“子任务说自己完成了”，不回答“证据是否成立”。事故里的 T4
+   * 是 legacy 回传（没有结构化证据块），报告仍带着缺口被 present。这里只拦
+   * 机器可判定的硬缺口：自检失败、验收项失败、声明产物缺失。legacy／无证据
+   * 属于“主 Agent 必须自行核对”的软缺口，仍由提示词与结果消息约束——把它
+   * 也拦死会让所有旧计划永久不可交付，只剩 cancel 一条路，反而制造新死锁。
+   */
+  function deliveryBlockers(record: any) {
+    const blockers: string[] = []
+    for (const item of record?.statuses ?? []) {
+      if (item?.status !== 'done') continue
+      const id = String(item.subtaskId ?? '')
+      if (item.verification === 'failed') blockers.push(`${id} 自检失败`)
+      const acceptance = Array.isArray(item.acceptance) ? item.acceptance : []
+      if (acceptance.some((entry: any) => entry && entry.result === 'fail')) blockers.push(`${id} 验收未通过`)
+      if (Array.isArray(item.missingArtifacts) && item.missingArtifacts.length > 0) blockers.push(`${id} 缺少声明产物`)
+    }
+    return blockers
+  }
+
   function presentDenialReason(agent: any) {
     const session = agent?.session
     if (!session || !isRootSession(session)) return undefined
@@ -2493,7 +2559,15 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       record = reconstructFromSession(session)
       if (record?.plan) state.records.set(session.id, record)
     }
-    if (!planIncomplete(record)) return undefined
+    if (!record?.plan) return undefined
+    if (!planIncomplete(record)) {
+      const blockers = deliveryBlockers(record)
+      if (blockers.length === 0) return undefined
+      const shown = blockers.slice(0, 8).join('；')
+      return `计划 ${record.plan.planId} 的子任务状态已全部 done，但证据未通过：${shown}。`
+        + '在这些缺口修好之前，产物不得作为成品交付：先用 dsh_workplan_update 复核并补证据，'
+        + '或把对应子任务改回 blocked 后写明原因；不要调用 present。'
+    }
     const snapshot = derivePlanSnapshot(record.statuses)
     const remaining = snapshot.statuses
       .filter((item: any) => item.status !== 'done')
