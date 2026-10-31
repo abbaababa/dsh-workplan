@@ -1,3 +1,44 @@
+## 1.8.12 — 2026-10-31
+
+**修复：部门子 Agent 首轮「处理失败」——提示词里的 `包名:行号` 被 Harness 当成跨会话引用。**
+
+> 现象：同一轮派出的 4 个子会话（`0d55b72d`、`37e6b366`、`5964c07d`、`538a8fef`）
+> 都在 `turn 1` 的 37ms 内结束，`turn/end` 的 reason 是
+> `invalid session reference URI "dsh-session:1980"`，没有任何模型步。
+> 对用户来说，这就是「处理失败」，且主 Agent 侧只看到子任务立刻结束。
+>
+> 成因：Harness 的 `@deepseek-ai/dsh-session-reference` 在 `agent/pre-step`
+> 扫描每条 `source.kind === 'user'` 消息的文本块，裸的
+> `dsh-session:<payload>` 会被当作引用候选去 base64url 解码 + `JSON.parse`；
+> `1980` 解出的字节不是合法 UTF-8 JSON，抛 `SessionReferenceError`，整个
+> turn 在第一次模型调用之前中止。该文本来自前一个子任务的完成摘要——它在
+> 报告里把 `ctx.sessions.get()` 的源码位置写成 `dsh-session:1980`——再经
+> 「兄弟部门进展」进入后续子任务的提示词。子 Agent 的首条消息正是
+> `source.kind === 'user'`，于是必炸。
+
+### 修复
+
+- `buildChildPrompt` 的唯一出口统一调用新增的
+  `defuseSessionReferenceText()`：无法规范化的裸 token 转义成
+  `dsh-session\:<payload>`（文字与行号保留，只是不再命中引用正则）；
+  规范 URI（真正的跨会话引用）原样保留；显式 Markdown 引用
+  `@[label](dsh-session:…)` 的语义不变，仍由 Harness 严格校验。
+- 消毒覆盖整段提示词：全局任务、对话背景、依赖结果、兄弟部门摘要、
+  失败重试说明；任一处出现 citation 都不会再让子任务在首轮死亡。
+- 新增 `isCanonicalSessionUri()`，规范化判断与 Harness 的
+  `encodeSessionReferenceUri` 逐字节一致。
+
+### 验证
+
+- `npm run check` 无诊断。
+- `npm test`：233 tests / 233 pass / 0 fail（新增 5 条：转义与正则不命中、
+  规范 URI 保留、幂等、背景消毒、原始请求/依赖结果消毒）。
+- 用事故原始提示词（23,098 字符，`/tmp/t9_prompt.txt`）回放打补丁后的
+  Harness 解析器：不再抛错、`references` 为 0、文本未变。
+- 附带的 Harness 本地热修复（见
+  `docs/rca-99984ebd-20261031/harness-hotfix/`）在模块级验证 5/5 通过；
+  **需要重启 DSH 进程后才能生效**，升级 Harness 后要重跑 apply 脚本。
+
 ## 1.8.11 — 2026-10-31
 
 **修复两处在真实生命周期下仍会漏拦的缺陷：结算回合的谱系认亲、人工改判的重复回放。**

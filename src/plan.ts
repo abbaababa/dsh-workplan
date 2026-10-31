@@ -94,6 +94,44 @@ export function messageText(message: any) {
 }
 
 /*
+ * [1.8.12] 不能让正文里的「包名:行号」变成跨会话引用。
+ *
+ * Harness 的 session-reference 在 `agent/pre-step` 阶段扫描每条
+ * `source.kind === 'user'` 消息的文本块，正则会把裸的
+ * `dsh-session:<payload>` 当成引用候选；候选无法按 base64url+JSON 解码时抛
+ * SessionReferenceError，整个 turn 在第一次模型调用之前就结束。部门子 Agent
+ * 的首条消息正是 user 消息，所以父会话历史里只要有人写过
+ * `dsh-session:1980`（“dsh-session 包第 1980 行”），子任务就会表现为
+ * “处理失败 / 无响应”，且没有任何模型步可以解释。
+ *
+ * 插件侧的防线：拼装子任务提示词时，把无法规范化的裸 token 转义成
+ * `dsh-session\:<payload>`，肉眼仍是同一段文字，但不再命中引用正则。
+ * 规范 URI（真正的跨会话引用）保持原样。
+ */
+const SESSION_URI_PREFIX = 'dsh-session:'
+const BARE_SESSION_URI = /dsh-session:([A-Za-z0-9_-]+)/gu
+
+export function isCanonicalSessionUri(uri: any) {
+  if (typeof uri !== 'string' || !uri.startsWith(SESSION_URI_PREFIX)) return false
+  const payload = uri.slice(SESSION_URI_PREFIX.length)
+  if (!/^[A-Za-z0-9_-]+$/.test(payload)) return false
+  try {
+    const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'))
+    return typeof decoded === 'string'
+      && Buffer.from(JSON.stringify(decoded), 'utf8').toString('base64url') === payload
+  } catch {
+    return false
+  }
+}
+
+export function defuseSessionReferenceText(text: any) {
+  if (typeof text !== 'string' || !text.includes(SESSION_URI_PREFIX)) return text
+  return text.replace(BARE_SESSION_URI, (match: string, payload: string) => (
+    isCanonicalSessionUri(`${SESSION_URI_PREFIX}${payload}`) ? match : `dsh-session\\:${payload}`
+  ))
+}
+
+/*
  * Lightweight conversational inputs must not start the planning pipeline.
  *
  * This is deliberately a conservative, deterministic token list rather than a
@@ -2182,7 +2220,14 @@ export function buildChildPrompt({
         '请针对上面这个原因调整做法，不要重复相同的失败路径；如果仍然无法完成，第一行输出 `BLOCKED: 原因` 并说明缺少什么。',
       ].join('\n')
     : ''
-  return [
+  /*
+   * [1.8.12] 提示词整体过一遍 session-reference 消毒。
+   *
+   * 背景、依赖结果、兄弟部门摘要都可能是父会话原文的摘录，任何一处出现
+   * 裸的 `dsh-session:<payload>` 都会让子 Agent 的首轮在 harness 里直接失败。
+   * 在唯一的出口统一消毒，避免逐个字段漏掉。
+   */
+  return defuseSessionReferenceText([
     `你是「${departmentLabel(subtask.department)}」部门的执行 Agent，只负责下面这一个子任务。`,
     '',
     `全局任务：${understanding.originalRequest ?? '（未记录）'}`,
@@ -2227,5 +2272,5 @@ export function buildChildPrompt({
     '- artifacts 写你实际产出或修改的文件（kind=file，ref 用相对路径）、链接（kind=url）或说明（kind=note）。',
     '- 需要其他部门配合时写进 needs（每条一句话），主 Agent 会转达；不要直连其他子 Agent。',
     '- 整块不超过 8000 字符；不要把这段模板本身抄进结果块。',
-  ].join('\n')
+  ].join('\n'))
 }
