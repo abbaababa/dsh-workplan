@@ -1,3 +1,39 @@
+## 1.8.11 — 2026-10-31
+
+**修复两处在真实生命周期下仍会漏拦的缺陷：结算回合的谱系认亲、人工改判的重复回放。**
+
+> 背景：1.8.10 的重启后核验（wp-91b6a96b）用真实字节与真实日志做了 8 项探针，
+> 其中两项证明 1.8.7–1.8.10 的闸门仍有漏洞：
+>
+> 1. `subagent-settled` 到达父会话时，子会话已经被
+>    `dsh-subagent` 的 `finishDisposal` dispose 掉（dispose 在 notifySettlement
+>    之前），`ctx.sessions.get(senderId)` 恒为 undefined，1.8.9 的
+>    `isChildSessionOf` 在真实生命周期下从未成立过——事故 turn 2 的路径仍然
+>    可以绕过关卡。
+> 2. 一次 `dsh_workplan_update` 会在会话里留下 durable `workplan-update` 消息
+>    与配对的 `tool/result` 两份记录；回放两份都应用，第二次以 `system` 身份
+>    把 revision 再抬一级并覆盖 summary，人工改判的作者与证据后缀丢失。
+
+### 修复
+
+- `turnCarriesPlanWork` 的 `subagent-settled` 认亲新增第三来源：父会话自己的
+  `subagent/catalog` 事件（spawn 时追加，重启、回放、预算重置都不会改写）。
+  判定顺序仍是 childId → live 会话谱系 → spawn 记录；三处都不命中才放行，
+  无关后台任务不会误激活闸门。扫描结果按 `session.seq` 缓存。
+- `reconstructFromSession` 记录每条 durable `workplan-update` 的 seq 与状态；
+  配对的 `tool/result` 若在它之后且状态相同，则不再重复 `applyStatus`。
+  durable 消息缺席时，`tool/result` 仍独立生效（保持 1.6.0 的容错语义）。
+
+### 验证
+
+- `npm run check` 无诊断。
+- `npm test`：228 tests / 228 pass / 0 fail（新增 3 条：dispose 后按 spawn 记录
+  认亲、三处都无记录不激活、人工改判只写一次）。
+- 真实生命周期探针（T7）报告在 1.8.9 上 A1a 为 steered:0；「dispose 在
+  notifySettlement 之前」的顺序已由我独立复读 `dsh-subagent/lib/index.js`
+  确认（`:2026` dispose → `:2040` notify）。本版的对应语义由新增用例覆盖：
+  父会话事件里只剩 catalog 记录、live 会话为空时，闸门仍 steer 一次。
+
 ## 1.8.10 — 2026-10-31
 
 **修复：长会话的回放窗口越过 plan 消息，旧计划无法按 planId 重建。**

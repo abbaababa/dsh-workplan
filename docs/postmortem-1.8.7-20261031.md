@@ -187,3 +187,37 @@ sha256 前后一致。运行中的 `dsh web` 仍需重启后生效。
 
 残余：默认回放仍只保证最新计划，多计划并存的会话里续跑旧计划必须显式传
 `planId`。
+
+## 10. 1.8.11 补丁：真实生命周期下的谱系与重复回放
+
+1.8.9 的谱系判定与 1.7.0 的改判回放各有一个只有在真实生命周期里才暴露的
+缺陷，由 1.8.10 的重启后核验（wp-91b6a96b 的 T3、T7）定位：
+
+- **谱系判定在结算消息到达时必然失效。** `dsh-subagent` 的
+  `finishDisposal` 先 `await activation.handle.dispose()`（`lib/index.js:2026`），
+  之后才 `notifySettlement`（`:2040`）。父会话收到 `subagent-settled` 时，
+  子会话已从 live 存储移除，`ctx.sessions.get(senderId)` 恒为 `undefined`。
+  1.8.9 的 `isChildSessionOf()` 因此从未在真实生命周期里成立，事故 turn 2
+  的路径仍可绕过闸门；T7 探针 A1a（真实 dispose 顺序）测得 steered:0。
+- **人工改判被回放两次。** 一次 `dsh_workplan_update` 同时留下 durable
+  `workplan-update` 消息与配对的 `tool/result`。回放先按消息应用
+  （revision 4、`updatedBy: agent`），再按工具结果应用一次
+  （revision 5、`updatedBy: system`、summary 被覆盖），T3 在六个 `done`
+  改判上复现。
+
+1.8.11 的补法：
+
+- 认亲增加第三来源：父会话自己的 `subagent/catalog` 事件（spawn 时追加，
+  重启、回放、预算重置都不改写）。顺序为 childId → live 谱系 → spawn 记录；
+  三处都不命中才放行。扫描按 `session.seq` 缓存，避免每回合 O(n) 重扫。
+- 回放记录每条 durable 改判的 seq 与状态；配对 `tool/result` 在其后且状态
+  相同时跳过第二次 `applyStatus`。durable 消息缺席时仍由 `tool/result`
+  独立生效，保持 1.6.0 的容错语义。
+
+验证：`npm run check` 无诊断；`npm test` 228/228（新增 3 条：dispose 后按
+spawn 记录认亲、三处都无记录不激活、人工改判只写一次）。
+
+残余：`subagent/catalog` 只能证明「本会话 spawn 过它」，不能证明「它属于
+该计划」；同一会话里两个未完成计划并存时，任一子 Agent 结算都可能让闸门
+为当前记录 steer。这个偏差不会放行未完成交付，只会多要求一次续跑。要彻底
+消除，需要把 childId→planId 的归属在 spawn 时持久化（1.8.12 候选）。

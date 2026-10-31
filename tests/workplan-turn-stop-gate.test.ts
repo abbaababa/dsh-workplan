@@ -320,6 +320,41 @@ test('预算重置清空 childId 后，结算回合仍按会话谱系被拦住',
   assert.equal(record.stopSteers.turn, 2)
 })
 
+test('子会话已 dispose 时，父会话的 spawn 记录（subagent/catalog）仍能认亲', async () => {
+  const session = makeSession()
+  const record = makeRecord(makePlan('wp-catalog'))
+  record.statuses[1].status = 'pending'
+  record.statuses[1].childId = null
+  record.phase = 'paused'
+  session.append('turn/start', { turn: 2 })
+  /*
+   * 真实生命周期里 `subagent-settled` 到达前子会话已经被 dispose，ctx.sessions
+   * 取不到 header；只有父会话自己追加的 subagent/catalog 还留着 childId。
+   */
+  session.append('subagent/catalog', { childId: 'child-disposed', mode: 'continuable', label: 'engineering:T9' })
+  session.append('user/message', settlementMessage('child-disposed'))
+  const runtime = makeRuntime(record, session, {})
+  const { agent, steered } = steerableAgent(session)
+
+  await runtime.onTurnStopping({ agent, turn: 2 })
+  assert.equal(steered.length, 1, 'spawn 记录是 dispose 之后唯一可靠的父链证据')
+})
+
+test('计划、谱系、spawn 记录三处都没有的结算，不得激活闸门', async () => {
+  const session = makeSession()
+  const record = makeRecord(makePlan('wp-stranger'))
+  record.statuses[1].status = 'pending'
+  record.phase = 'paused'
+  session.append('turn/start', { turn: 2 })
+  session.append('subagent/catalog', { childId: 'child-known', label: 'engineering:T1' })
+  session.append('user/message', settlementMessage('child-stranger'))
+  const runtime = makeRuntime(record, session, {})
+  const { agent, steered } = steerableAgent(session)
+
+  await runtime.onTurnStopping({ agent, turn: 2 })
+  assert.equal(steered.length, 0, '无关后台任务的结算不能把未完成计划强行续跑')
+})
+
 test('present 在计划未完成时被硬拒绝，完成/取消/子会话放行', () => {
   const session = makeSession()
   const record = makeRecord(makePlan('wp-present'))
