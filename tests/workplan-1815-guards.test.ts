@@ -188,3 +188,43 @@ test('/dsh-workplan/plans 载荷带版本与运行态身份', () => {
   assert.equal(payload.runtime.buildHash, 'deadbeefcafe1234')
   assert.equal(payload.runtime.pid, 4321)
 })
+
+test('会话里还有未完成计划时 present 不得放行，即使最后定义的计划已就绪', () => {
+  const session = makeSession()
+  session.append('turn/start', { turn: 1 })
+  session.append('user/message', buildPlanMessage(makePlan('wp-a')))
+  const planB = {
+    ...makePlan('wp-b'),
+    stages: [{ id: 'S1', name: '实施', subtasks: [{ id: 'T1', title: '唯一一步', department: 'engineering', dependsOn: [] }] }],
+  }
+  session.append('user/message', buildPlanMessage(planB))
+  session.append('user/message', buildResultMessage({
+    planId: 'wp-b',
+    sessionId: session.id,
+    dispatchedAt: 1,
+    statuses: [{
+      subtaskId: 'T1',
+      status: 'done',
+      progress: 100,
+      verification: 'structured',
+      acceptance: [{ criterion: '结论可复现', result: 'pass', evidence: 'probe.out' }],
+      artifacts: [],
+      missingArtifacts: [],
+    }],
+    stats: { done: 1, total: 1, blocked: 0, pending: 0 },
+    phase: 'done',
+    resumeCount: 0,
+    resumeAvailable: true,
+  }))
+  const runtime: any = createWorkplanRuntime(makeCtx(session, () => hangingChild()), { version: 'test-version' })
+
+  const denial = runtime.presentDenialReason({ session })
+  assert.ok(denial, 'an unfinished plan must block the delivery even when another plan is ready')
+  assert.match(String(denial), /wp-a/)
+  assert.match(String(denial), /交付就绪检查/)
+
+  session.append('user/message', buildCancelMessage('wp-a', '不再推进'))
+  const after = runtime.presentDenialReason({ session })
+  assert.ok(after, 'cancel only stops execution; it never makes unfinished work deliverable')
+  assert.match(String(after), /已取消/)
+})

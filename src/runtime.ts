@@ -3003,28 +3003,107 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
    *  - 拒绝文案必须给出可执行的出路（dispatch / update 补证 / 改 blocked），
    *    cancel 不再被写成交付许可。
    */
+  /**
+   * [1.8.16] 会话里所有「定义过」的计划。
+   *
+   * `reconstructFromSession(session)` 只回答「默认该看哪个计划」，而 `present`
+   * 需要回答「会话里还有没有没交付完的计划」。1.8.15 的活体 E2E 暴露了这个差
+   * 距：wp-6753e19f 停在 13/14，但最后定义的计划已就绪，`present` 仍然交付了
+   * 报告。这里按日志里出现的 planId 逐个重建；数量极少（本会话只有 4 个），
+   * 每个重建各自带回扫窗口，因此旧计划不会因为超过 2000 事件而消失。
+   */
+  function sessionPlanRecords(session: any): any[] {
+    if (typeof session?.eventAt !== 'function') return []
+    const ids = new Set<string>()
+    for (let i = 0; i < session.seq; i += 1) {
+      let event
+      try {
+        event = session.eventAt(i)
+      } catch {
+        continue
+      }
+      if (!event || event.type !== 'user/message') continue
+      const planId = parseWorkplanMessage(event.data)?.plan?.planId
+      if (typeof planId === 'string' && planId) ids.add(planId)
+    }
+    const records: any[] = []
+    for (const planId of ids) {
+      const record = reconstructFromSession(session, planId)
+      if (record?.plan) records.push(record)
+    }
+    return records
+  }
+
   function presentDenialReason(agent: any) {
     const session = agent?.session
     if (!session || !isRootSession(session)) return undefined
     if (isPlanModeActive(ctx, session)) return undefined
-    let record = state.records.get(session.id)
     /*
-     * [1.8.15] A live record may belong to another plan (the default dispatch
-     * target of an earlier turn). When the current turn names a plan — its
-     * settlement message or its plan definition — judge that plan instead of
-     * the last defined one (T3 B5).
+     * [1.8.16] Every plan in the session matters, not just the turn's plan.
+     *
+     * 1.8.15 taught this gate to prefer the plan named by the current turn's
+     * messages, but a session can hold several plans at once (the incident
+     * session itself ended with four). A live E2E on 1.8.15 showed the hole:
+     * wp-6753e19f was still 13/14, the last defined plan was ready, and
+     * `present` delivered the report. The gate now asks every plan in the log;
+     * `dsh_workplan_cancel` is the documented escape hatch for a plan that
+     * will not be finished.
      */
     const turn = currentTurnOf(session)
     const turnPlanId = turn ? planIdFromTurn(session, turn) : undefined
-    if (turnPlanId && record?.plan && record.plan.planId !== turnPlanId) record = undefined
-    if (!record?.plan) {
-      record = reconstructFromSession(session, turnPlanId)
-      if (record?.plan) state.records.set(session.id, record)
+    const candidates = sessionPlanRecords(session)
+    const live = state.records.get(session.id)
+    if (live?.plan && !candidates.some((item: any) => item.plan.planId === live.plan.planId)) candidates.push(live)
+    if (turnPlanId && !candidates.some((item: any) => item.plan.planId === turnPlanId)) {
+      const named = reconstructFromSession(session, turnPlanId)
+      if (named?.plan) candidates.push(named)
     }
-    if (!record?.plan) return undefined
+    if (candidates.length === 0) return undefined
+    const unresolved = candidates
+      .map((item: any) => ({
+        record: item,
+        readiness: deliveryReadiness(derivePlanSnapshot(item.statuses), { phase: item.phase }),
+      }))
+      /*
+       * A cancelled plan is not a delivery blocker for *other* plans — the
+       * incident session accumulates cancelled plans that will never be
+       * finished, and blocking on them forever would deadlock delivery. It is
+       * still checked below when it is the plan this turn (or the live record)
+       * is about: cancel stops execution, it does not make the work deliverable.
+       */
+      .filter((entry: any) => entry.record.phase !== 'cancelled' && !entry.readiness.ready)
+    if (unresolved.length > 1) {
+      const lines = unresolved.slice(0, 6).map((entry: any) => {
+        const ids = entry.readiness.remaining.slice(0, 6).join('、')
+        const suffix = ids ? `（${ids}${entry.readiness.remaining.length > 6 ? '…' : ''}）` : ''
+        const gaps = entry.readiness.blockers.slice(0, 4).join('；')
+        return `- 计划 ${entry.record.plan.planId}：完成 ${entry.readiness.done}/${entry.readiness.total}${suffix}`
+          + `${gaps ? `；证据缺口：${gaps}` : ''}`
+      })
+      return `本会话还有 ${unresolved.length} 个计划未通过交付就绪检查：\n${lines.join('\n')}\n`
+        + '在它们全部通过交付就绪检查之前，不得调用 present 交付任何产物：'
+        + '先调用 dsh_workplan_dispatch 续跑，证据缺口用 dsh_workplan_update 补齐。'
+        + '取消只停止执行，不会让未完成的计划变成可交付，也不能用来绕过这道检查。'
+    }
+    let record: any
+    let readiness: any
+    if (unresolved.length === 1) {
+      record = unresolved[0].record
+      readiness = unresolved[0].readiness
+    } else {
+      /*
+       * No unfinished active plan. The plan this turn is about (or the live
+       * record) may still be a cancelled one that never finished — T5-C pins
+       * that `present` must be refused for it.
+       */
+      record = state.records.get(session.id)
+      if (turnPlanId) record = reconstructFromSession(session, turnPlanId) ?? record
+      if (!record?.plan) return undefined
+      readiness = deliveryReadiness(derivePlanSnapshot(record.statuses), { phase: record.phase })
+      if (readiness.ready) return undefined
+    }
+    if (record?.plan) state.records.set(session.id, record)
     const snapshot = derivePlanSnapshot(record.statuses)
-    const readiness = deliveryReadiness(snapshot, { phase: record.phase })
-    if (readiness.ready) return undefined
     const planId = record.plan?.planId ?? record.planId
     const ids = readiness.remaining.slice(0, 10).join('、')
     const idSuffix = ids ? `（${ids}${readiness.remaining.length > 10 ? '…' : ''}）` : ''
@@ -3036,7 +3115,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
        * same sentence twice. Only the *evidence* gaps belong in this suffix.
        */
       const gaps = readiness.blockers
-        .filter((line) => !line.startsWith('计划已取消但只完成'))
+        .filter((line: string) => !line.startsWith('计划已取消但只完成'))
         .slice(0, 10)
         .join('；')
       if (readiness.remaining.length === 0) {
