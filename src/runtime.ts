@@ -13,7 +13,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { existsSync } from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
 
 import {
@@ -65,6 +65,7 @@ import type { PresentDenialVerdict, PresentDenyCode } from './plan.js'
 import { computeMappingDigest, verifyMappingDigest } from './supersede-digest.js'
 import { supersedePlanRecord } from './supersede.js'
 import { createProgressWatchdog, describeError } from './watchdog.js'
+import { AUTO_RESUME_DEFAULTS, autoResumeAttemptCap, decideAutoResume } from './auto-resume.js'
 
 /**
  * [1.8.18] How many subtasks the plan *defines*.
@@ -520,6 +521,61 @@ export function probeInterruptedEvidence(output: any, subtask: any, cwd: any, ar
 }
 
 /**
+ * [1.10.6] Fingerprint the files a timed-out attempt already wrote.
+ *
+ * T6 (G3) found that the retry decision never looked at the disk: a second
+ * attempt could silently overwrite a deliverable the first attempt had already
+ * produced, turning "the child stopped early" into "the deliverable was
+ * rewritten". This snapshot (path + size + mtime) is the record the retry is
+ * compared against.
+ *
+ * A missing file is not a conflict — it simply has no fingerprint. `stat` is
+ * injectable so the check can be tested without touching the real filesystem.
+ */
+export function fingerprintArtifacts(refs: any, cwd: any, stat: any = statSync) {
+  const list = Array.isArray(refs) ? refs : []
+  const out: { ref: string; size: number; mtimeMs: number }[] = []
+  const seen = new Set<string>()
+  for (const item of list) {
+    const ref = typeof item === 'string' ? item.trim() : ''
+    if (!ref || seen.has(ref)) continue
+    seen.add(ref)
+    const target = resolveArtifactPath(ref, cwd)
+    if (!target) continue
+    try {
+      const info = stat(target)
+      if (!info) continue
+      out.push({ ref, size: Number(info.size), mtimeMs: Number(info.mtimeMs) })
+    } catch {
+      // Missing or unreadable: nothing to protect, and not a conflict.
+    }
+  }
+  return out
+}
+
+/**
+ * [1.10.6] Which landed artifacts changed since the snapshot was taken.
+ *
+ * Size or mtime differing is enough to call it a conflict: the file the first
+ * attempt produced is no longer the file on disk, so a retry that rewrites it
+ * would destroy work rather than finish it.
+ */
+export function diffArtifactFingerprints(before: any, after: any) {
+  const previous = new Map<string, any>()
+  for (const item of Array.isArray(before) ? before : []) {
+    if (item && typeof item.ref === 'string') previous.set(item.ref, item)
+  }
+  const conflicts: string[] = []
+  for (const item of Array.isArray(after) ? after : []) {
+    if (!item || typeof item.ref !== 'string') continue
+    const recorded = previous.get(item.ref)
+    if (!recorded) continue
+    if (recorded.size !== item.size || recorded.mtimeMs !== item.mtimeMs) conflicts.push(item.ref)
+  }
+  return conflicts
+}
+
+/**
  * [1.8.19] Find a subtask definition by id, without assuming the plan is valid.
  */
 export function findSubtaskById(plan: any, subtaskId: string) {
@@ -618,15 +674,37 @@ function settleFromOutput(record: any, subtask: any, output: any, guard: Subtask
  * Retry policy for one child attempt.
  *
  * A wedged child (no event for the whole idle window) is worth one fresh
- * attempt. A hard ceiling means the budget is gone, and an abort is a decision,
- * so neither is retried. `CHILD_NOT_COMPLETED` is retried only while there is
- * more than one idle window left, otherwise the retry itself would just be
- * killed by the same watchdog.
+ * attempt. `CHILD_NOT_COMPLETED` is retried only while there is more than one
+ * idle window left, otherwise the retry itself would just be killed by the same
+ * watchdog.
+ *
+ * [1.10.3] 单个子任务撞上 900 秒硬上限时，只要整轮预算还够再跑一轮，就自动重试
+ * 一次。用户 2026-11-01 的质疑是对的：此前这一支被无条件 `return false`，
+ * 于是「预算没花完、只是这一步慢了」也被判成阻塞，必须等主 Agent 人工改判或
+ * 重新派发——而 `attempt` 已经是 1、产物又都在盘上，重跑一次往往就能过。
+ *
+ * 仍然**不自动重试**的两种情况，理由不变：
+ *  - `TOTAL_TIMEOUT`：整轮预算已经用光，重试必然再被同一把闸刀砍掉，只会空耗；
+ *  - `ABORTED`：那是「有人决定停」而不是「跑不完」，自动重来等于违背决定。
  */
 export function shouldRetryAttempt(error: any, attempt: any, remainingMs: any, idleTimeoutMs: any) {
   if (attempt >= 2) return false
   const code = error?.code
-  if (code === 'CHILD_TIMEOUT' || code === 'ABORTED' || code === 'TOTAL_TIMEOUT') return false
+  if (code === 'CHILD_TIMEOUT') {
+    /*
+     * 重试要有意义，必须给它留够「至少再跑一次短任务」的时间。
+     *
+     * [1.10.6] 这里**不能**再拿空闲窗口当门槛（旧式 `max(idle, 120s)`）：
+     * 出厂配置是 ceiling=900s / idle=300s / round=1200s，撞上限后剩下约
+     * 300s，而 `remaining > 300s` 恒为假——用户要的「有预算就自动重试一次」
+     * 会在默认配置下永远不触发，正是 T6 记录的那类「策略说会、链路不会」。
+     * 固定 120s 是「够跑一次短任务」的下限，同时保证不会刚重试就被砍掉。
+     * `tests/workplan-retry-feedback.test.ts` 的 60s 反例与 600s 正例都仍然成立。
+     */
+    const floor = 120000
+    return Number(remainingMs) > floor
+  }
+  if (code === 'ABORTED' || code === 'TOTAL_TIMEOUT') return false
   if (/aborted|refusal/i.test(String(error?.message ?? ''))) return false
   if (code === 'CHILD_STALLED') return true
   if (code === 'CHILD_NOT_COMPLETED') {
@@ -638,7 +716,17 @@ export function shouldRetryAttempt(error: any, attempt: any, remainingMs: any, i
 async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, options: any) {
   const { parentSignal, deadline, modelSelection, conversationContext = '', child, guard } = options
   let lastError: any = null
-  let lastFailure: any = null
+  /*
+   * [1.10.6] A retry that starts after a *ceiling* timeout is a second attempt
+   * even though this function is entered afresh. `attemptOffset` keeps the
+   * numbering honest (`第 2 次尝试`) and, with the loop condition below, keeps
+   * the cap at two real activations instead of letting the new call spend its
+   * own two.
+   */
+  const firstAttempt = Number.isInteger(options.attemptOffset) && options.attemptOffset > 1
+    ? options.attemptOffset
+    : 1
+  let lastFailure: any = options.priorFailure ?? null
   /*
    * [1.8.6] The interrupt has to outlive the thrown error.
    *
@@ -655,7 +743,7 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
       startedAt: Date.now(),
     }, guard)) return
 
-    for (let attempt = 1; attempt <= 2; attempt += 1) {
+    for (let attempt = firstAttempt; attempt <= 2; attempt += 1) {
       if (guard.timedOut) return
       interruptedEvidence = null
       if (parentSignal.aborted) throw abortError()
@@ -819,7 +907,8 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
           writeSubtaskStatus(record, subtask.id, { progress: 15 }, guard)
           continue
         }
-        if (!isAbort && remaining <= idleTimeoutMs && error?.code !== 'CHILD_TIMEOUT') {
+        /* [1.10.3] CHILD_TIMEOUT 现在也会在预算充足时重试，所以「预算不足未重试」这条说明对它同样成立。 */
+        if (!isAbort && remaining <= idleTimeoutMs) {
           record.errors = [
             ...(record.errors ?? []),
             `${subtask.id}: 剩余预算不足（${Math.max(0, Math.round(remaining / 1000))}s），未重试`,
@@ -871,30 +960,57 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
 }
 
 /*
- * Runs one subtask under a deadline that belongs to that subtask alone.
+ * One attempt under a deadline that belongs to that attempt alone.
  *
- * The subtask timer is a full settlement guarantee, not just an abort hint: if
- * the child activation ignores its abort signal, or never settles at all, the
- * race below still resolves, that subtask is recorded as blocked, and the
- * dispatcher keeps scheduling the rest of the DAG. This function never throws
- * on a per-subtask timeout, so one slow child can no longer blanket-block the
- * whole plan — only that subtask (and its real dependents) is affected.
+ * [1.10.6] Split out of `runSubtask` so a ceiling timeout can be retried with a
+ * *fresh* timer. The old code armed a single timer for the whole subtask (shared
+ * by both attempts), so even once the retry decision became reachable the second
+ * attempt would have had no time left — a patch that changes nothing.
+ *
+ * The timer remains a full settlement guarantee, not just an abort hint: if the
+ * child activation ignores its abort signal, or never settles at all, the race
+ * below still resolves, the subtask is recorded as blocked, and the dispatcher
+ * keeps scheduling the rest of the DAG.
  */
-async function runSubtask(ctx: any, record: any, stage: any, subtask: any, options: any) {
-  const childTimeoutMs = normaliseChildTimeout(options.childTimeoutMs)
+async function runSubtaskAttempt(
+  ctx: any,
+  record: any,
+  stage: any,
+  subtask: any,
+  options: any,
+  timeoutMs: number,
+) {
   const child = createChildController(options.parentSignal)
   const guard: SubtaskGuard = { timedOut: false }
   let timer: ReturnType<typeof setTimeout> | null = null
+  let ceilingFired = false
+  // [1.10.6] What the ceiling left on disk, in the words of the same probe the
+  // blocked row records. The retry is compared against exactly this list.
+  let ceilingLanded: string[] = []
+  /*
+   * [1.10.6] Snapshot taken *at the moment the ceiling fires*, not later.
+   *
+   * The first cut of this check fingerprinted the same refs twice, back to back,
+   * immediately before the retry. Two reads of the same instant can never
+   * differ, so the conflict branch was unreachable in production (only a test
+   * injecting a mutating `stat` could reach it). The record must be taken while
+   * the timeout is being recorded; the pre-retry read is compared against it.
+   */
+  let ceilingFingerprint: any[] = []
+  const stat = typeof options.artifactStat === 'function' ? options.artifactStat : statSync
   const deadlinePromise = new Promise<void>((resolve) => {
     timer = setTimeout(() => {
+      ceilingFired = true
       guard.timedOut = true
       // Reached only when the child ignored both its idle window and its
       // abort signal; the message says so, otherwise the cause looks like a
       // plain "too slow" and the next investigation goes down the wrong path.
-      const message = `子任务 ${subtask.id} 达到执行上限（${childTimeoutMs}ms），已强制结束`
+      const message = `子任务 ${subtask.id} 达到执行上限（${timeoutMs}ms），已强制结束`
       try {
         // [1.8.19] Keep the evidence of what already landed on disk.
-        const { patch } = timeoutBlockedPatch(subtask, options.cwd, message, options.artifactExists)
+        const { patch, landed } = timeoutBlockedPatch(subtask, options.cwd, message, options.artifactExists)
+        ceilingLanded = Array.isArray(landed) ? landed : []
+        ceilingFingerprint = fingerprintArtifacts(ceilingLanded, options.cwd, stat)
         record.statuses = applyStatus(record.statuses, subtask.id, patch)
         record.errors = [...(record.errors ?? []), `${subtask.id}: ${patch.error}`].slice(-20)
         record.updatedAt = Date.now()
@@ -910,13 +1026,13 @@ async function runSubtask(ctx: any, record: any, stage: any, subtask: any, optio
         child.disposeListener()
         resolve()
       }
-    }, childTimeoutMs)
+    }, timeoutMs)
     timer.unref?.()
   })
   try {
     // [1.8.6] The outcome (`{interrupted:true}`) has to reach the dispatcher;
     // swallowing it here is why an interrupted child looked like any failure.
-    return await Promise.race([
+    const outcome = await Promise.race([
       executeSubtask(ctx, record, stage, subtask, {
         ...options,
         child,
@@ -924,6 +1040,7 @@ async function runSubtask(ctx: any, record: any, stage: any, subtask: any, optio
       }),
       deadlinePromise,
     ])
+    return { outcome, ceilingFired, ceilingLanded, ceilingFingerprint }
   } finally {
     if (timer) {
       clearTimeout(timer)
@@ -932,6 +1049,88 @@ async function runSubtask(ctx: any, record: any, stage: any, subtask: any, optio
     child.disposeListener()
     if (!child.controller.signal.aborted) child.controller.abort()
   }
+}
+
+/*
+ * Runs one subtask, retrying **once** when the per-subtask ceiling fired and the
+ * round budget can still pay for a second attempt (T6 G1/G3/G4).
+ *
+ * The retry is deliberately narrow:
+ *  - only the ceiling (`CHILD_TIMEOUT`) qualifies; a user abort and a round
+ *    budget timeout stay non-retryable, because retrying them would be killed by
+ *    the same guillotine;
+ *  - at most one retry (`attemptOffset: 2` caps the inner loop at a single run);
+ *  - before it starts, the artifacts the first attempt landed are fingerprinted
+ *    (path + size + mtime) and re-checked. If any of them changed since the
+ *    timeout was recorded, something else owns that file now: the retry is
+ *    skipped and the row is marked `artifactConflict` instead of overwriting it.
+ */
+async function runSubtask(ctx: any, record: any, stage: any, subtask: any, options: any) {
+  const childTimeoutMs = normaliseChildTimeout(options.childTimeoutMs)
+  const first = await runSubtaskAttempt(ctx, record, stage, subtask, options, childTimeoutMs)
+  if (!first.ceilingFired) return first.outcome
+
+  const idleTimeoutMs = normaliseIdleTimeout(options.idleTimeoutMs)
+  const now = Date.now()
+  const deadline = Number.isFinite(options.deadline) ? Number(options.deadline) : now + childTimeoutMs
+  const remaining = deadline - now
+  const message = `子任务 ${subtask.id} 达到执行上限（${childTimeoutMs}ms）`
+  /*
+   * [1.8.6] A parent abort outranks a retry: the round is being stopped on
+   * purpose, and a second child would only be aborted on arrival.
+   */
+  if (options.parentSignal?.aborted) return first.outcome
+  if (!shouldRetryAttempt({ code: 'CHILD_TIMEOUT', message }, 1, remaining, idleTimeoutMs)) {
+    record.errors = [
+      ...(record.errors ?? []),
+      `${subtask.id}: 达到执行上限，剩余预算 ${Math.max(0, Math.round(remaining / 1000))}s 不足，未重试`,
+    ].slice(-20)
+    return first.outcome
+  }
+  /*
+   * [1.10.6] T6 G3: never retry over work that already exists.
+   *
+   * `ceilingFingerprint` was taken the moment the ceiling fired (inside the
+   * timeout callback); the same refs are re-read right before the retry starts.
+   * A size or mtime difference means the file was written by somebody else in
+   * between, so a retry would overwrite it rather than finish it.
+   */
+  const stat = typeof options.artifactStat === 'function' ? options.artifactStat : statSync
+  const current = fingerprintArtifacts(first.ceilingLanded, options.cwd, stat)
+  const conflicts = diffArtifactFingerprints(first.ceilingFingerprint, current)
+  const row: any = Array.isArray(record.statuses)
+    ? record.statuses.find((item: any) => item.subtaskId === subtask.id)
+    : null
+  if (conflicts.length > 0) {
+    const note = `重试前核对发现已落盘产物在超时后被改动（${conflicts.join('、')}），为避免覆盖已跳过自动重试，请人工核对`
+    record.statuses = applyStatus(record.statuses, subtask.id, {
+      artifactConflict: conflicts,
+      error: truncate(`${truncate(String(row?.error ?? message), 1500)}；${note}`, 2000),
+    })
+    record.errors = [...(record.errors ?? []), `${subtask.id}: ${note}`].slice(-20)
+    record.updatedAt = Date.now()
+    return first.outcome
+  }
+
+  record.statuses = applyStatus(record.statuses, subtask.id, {
+    status: 'in_progress',
+    progress: 15,
+    // Clearing `error` moves the timeout text to `lastError` (applyStatus does
+    // that move), so the row no longer claims "blocked" while it is retrying.
+    error: null,
+  })
+  record.errors = [
+    ...(record.errors ?? []),
+    `${subtask.id}: 第 1 次执行达到上限（CHILD_TIMEOUT），已核对产物无冲突，自动重试一次`,
+  ].slice(-20)
+  record.updatedAt = Date.now()
+  const retryTimeoutMs = Math.max(MIN_CHILD_TIMEOUT_MS, Math.min(childTimeoutMs, remaining))
+  const second = await runSubtaskAttempt(ctx, record, stage, subtask, {
+    ...options,
+    attemptOffset: 2,
+    priorFailure: { attempt: 1, code: 'CHILD_TIMEOUT', message: `${message}，已强制结束` },
+  }, retryTimeoutMs)
+  return second.outcome
 }
 
 async function runWithConcurrency(items: any, limit: any, worker: any) {
@@ -1081,7 +1280,13 @@ export async function dispatchPlan(ctx: any, record: any, options: any) {
         `第 ${record.resumeCount} 次续跑：已重置 ${resume.failed} 个受阻子任务（已完成的不重跑）`,
       ].slice(-20)
     } else {
-      record.errors = (record.errors ?? []).filter((line: string) => !/预算|续跑/.test(String(line))).slice(-20)
+      /*
+       * [1.10.4] 保留自动续跑的审计行：它们必然含「续跑/预算」字样，旧过滤器
+       * 会把「为什么自动续跑、停在哪个判定码」一起擦掉，正好毁掉事后取证。
+       */
+      record.errors = (record.errors ?? [])
+        .filter((line: string) => !/预算|续跑/.test(String(line)) || String(line).includes('[auto-resume]'))
+        .slice(-20)
     }
   }
   const parentSignal = signal
@@ -1164,6 +1369,9 @@ export async function dispatchPlan(ctx: any, record: any, options: any) {
           conversationContext,
           strictEvidence: options.strictEvidence,
           artifactExists: options.artifactExists,
+          // [1.10.6] Injectable stat for the pre-retry fingerprint check; tests
+          // use it so the conflict branch is provable without real files.
+          artifactStat: options.artifactStat,
         })
         // [1.8.6] Remember which failures were interrupts, so the cascade below
         // can leave their dependents pending instead of blaming them.
@@ -1419,7 +1627,19 @@ function serialisePlan(record: any, session: any) {
       : plan
         ? createStatuses(plan)
         : []
-  const snapshot = derivePlanSnapshot(turnEnded ? settleStaleInflight(rawStatuses) : rawStatuses)
+  /*
+   * [1.10.0] 分母来自计划定义，并允许「明细行少于定义」时按 pending 补齐。
+   * `definedSubtaskCount` 对畸形计划返回 MAX_SAFE_INTEGER，那种情况下退回
+   * 「只数明细行」，避免把一个坏计划直接判成 0/天文数字。
+   */
+  const defined = plan ? definedSubtaskCount(plan) : 0
+  const expectedTotal = Number.isFinite(defined) && defined > 0 && defined < Number.MAX_SAFE_INTEGER
+    ? defined
+    : undefined
+  const snapshot = derivePlanSnapshot(
+    turnEnded ? settleStaleInflight(rawStatuses) : rawStatuses,
+    expectedTotal,
+  )
   const statuses = snapshot.statuses
   const stats = snapshot.stats
   /*
@@ -1481,7 +1701,18 @@ function serialisePlan(record: any, session: any) {
     ...(violations.length ? { violations } : {}),
     degraded: record.degraded === true,
     error: record.error ? truncate(record.error, 2000) : null,
-    errors: (record.errors ?? []).slice(-20),
+    /*
+     * [1.10.0] C-18：「已结束 / 已完成」的计划不再把上一轮的失败文本摆在首页。
+     *
+     * 1.9.1 把 `record.errors`（"本轮执行预算已到：已完成 9/13…" 之类）无条件
+     * 下发，界面又无条件渲染，于是 13/13 完成的那一帧下面还挂着一句「这件事没有
+     * 做完」。现在：计划已 done 或 cancelled 时，这批文本改挂 `archivedErrors`，
+     * 供折叠区/审计使用；`errors` 只在计划仍需处理时下发。
+     */
+    errors: phase === 'done' || phase === 'cancelled' ? [] : (record.errors ?? []).slice(-20),
+    ...(phase === 'done' || phase === 'cancelled'
+      ? { archivedErrors: (record.errors ?? []).slice(-20) }
+      : {}),
     createdAt: record.createdAt ?? plan?.createdAt ?? session.header.createdAt,
     updatedAt: record.updatedAt ?? Date.now(),
     createdTurn: plan?.createdTurn ?? record.createdTurn ?? null,
@@ -2024,6 +2255,16 @@ export type WorkplanRuntimeOptions = {
   /** How many times a blocked plan may be resumed. */
   maxResumes?: number
   /**
+   * [1.10.4] 整轮预算到点后自动开始下一轮。**默认关闭**：默认值来自
+   * `AUTO_RESUME_DEFAULTS.enabled=false`，必须由宿主显式打开。
+   *
+   * 它只续跑 `paused`（预算到点）的计划，不动 `blocked`（真实失败），
+   * 也不重跑任何 `done` 项；自动续跑本身不做任何证据判定。
+   */
+  autoResume?: boolean
+  /** 自动续跑轮次上限（0–4，默认 2）。 */
+  autoResumeMaxAttempts?: number
+  /**
    * [1.8.13] Package version, supplied by the host from its `meta.version`.
    *
    * `dsh_workplan_status` used to say nothing about which build answered, so a
@@ -2104,6 +2345,10 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     maxResumes: Number.isFinite(Number(options.maxResumes)) && Number(options.maxResumes) >= 0
       ? Math.min(5, Math.floor(Number(options.maxResumes)))
       : MAX_PLAN_RESUMES,
+    autoResume: {
+      enabled: options.autoResume === true,
+      maxAttempts: autoResumeAttemptCap(options.autoResumeMaxAttempts),
+    },
   }
 
   async function onPreStep(payload: any, next: any) {
@@ -2190,6 +2435,8 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     if (!record?.plan) record = reconstructFromSession(session, args?.planId)
     record = adoptRequestedPlan(session, record, args?.planId)
     if (!record?.plan) throw new PlanError('当前会话还没有已生成的计划', 'NO_PLAN')
+    // [1.10.4] 人工改判优先于任何已排期的自动续跑：先撤销定时器，再写状态。
+    clearAutoResumeTimer(record, 'manual-update')
     const subtaskId = typeof args?.subtaskId === 'string' ? args.subtaskId : ''
     if (!subtaskId) throw new PlanError('缺少 subtaskId', 'MISSING_SUBTASK')
     const status = typeof args?.status === 'string' ? args.status : ''
@@ -2380,6 +2627,8 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     const reason = typeof args?.reason === 'string' && args.reason.trim()
       ? args.reason.trim()
       : '用户取消'
+    // [1.10.4] 取消是终态：必须撤销已排期的自动续跑，否则定时器会在取消之后复活计划。
+    clearAutoResumeTimer(record, 'cancelled')
     /*
      * [1.5.2] 已完成即终态：取消不再把 100% 的计划改写成「已取消」。
      *
@@ -2509,6 +2758,218 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       cancelRecorded: recorded,
       stats: derivePlanSnapshot(record.statuses).stats,
     }
+  }
+
+  /*
+   * [1.10.4][auto-resume] 自动续跑的记账与排期。
+   *
+   * 为什么在工具层而不是 `dispatchPlan` 里：被整轮预算中止时，这一轮已经没有
+   * 预算可用，轮内重试必然再被同一把闸刀砍掉（`shouldRetryAttempt` 对
+   * `TOTAL_TIMEOUT` / `ABORTED` 恒为 false 是正确的）。能重试的只有「下一轮」：
+   * 新预算、新截止时间，未完成项由 `resetBlockedStatuses` 放回 pending，
+   * done 项永不重跑。所以调度点属于「谁结束了一轮」，也就是这里。
+   *
+   * 所有停止分支都由纯函数 `decideAutoResume` 判定，本层只负责：
+   *  - 记录 done 水位与连续无进展轮数（防止空转）；
+   *  - 用 unref 的定时器排期，并在取消/人工派发/进程销毁时撤销；
+   *  - 起跑前再核对一次记录身份与阶段（定时器期间状态可能已变）。
+   */
+  function autoResumeBook(record: any) {
+    if (!record.autoResume || typeof record.autoResume !== 'object') {
+      record.autoResume = {
+        attempt: 0,
+        noProgressRounds: 0,
+        doneBefore: null,
+        nextAt: null,
+        timer: null,
+        lastDecision: null,
+        history: [],
+      }
+    }
+    return record.autoResume
+  }
+
+  function clearAutoResumeTimer(record: any, reason: string) {
+    const book = record?.autoResume
+    if (!book) return false
+    book.nextAt = null
+    if (!book.timer) return false
+    clearTimeout(book.timer)
+    book.timer = null
+    book.lastStopReason = reason
+    return true
+  }
+
+  function autoResumeView(record: any) {
+    const book = record?.autoResume
+    return {
+      enabled: limits.autoResume.enabled,
+      attempt: Number(book?.attempt ?? 0),
+      maxAttempts: limits.autoResume.maxAttempts,
+      armed: Boolean(book?.timer),
+      nextInMs: book?.nextAt ? Math.max(0, Number(book.nextAt) - Date.now()) : null,
+      lastCode: book?.lastDecision?.code ?? null,
+      lastReason: book?.lastDecision?.reason ?? null,
+      lastStopReason: book?.lastStopReason ?? null,
+    }
+  }
+
+  /**
+   * 在一轮结束后决定是否再开一轮。
+   *
+   * @param record - 当前计划记录。
+   * @param session - 根会话（结果消息与子 Agent 都归属它）。
+   * @param base - 本轮派发的可复用参数（agent / modelSelection / cwd / conversationContext）。
+   */
+  function armAutoResume(record: any, session: any, base: any) {
+    const book = autoResumeBook(record)
+    clearAutoResumeTimer(record, 'rearmed')
+    const snapshot = derivePlanSnapshot(record.statuses)
+    const stats: any = snapshot.stats ?? {}
+    const statuses: any[] = Array.isArray(record.statuses) ? record.statuses : []
+    const done = Number(stats.done ?? 0)
+    const doneBefore = Number.isFinite(Number(book.doneBefore)) ? Number(book.doneBefore) : done
+    /*
+     * 「有进展」只认新增的 done 行。被预算中止的子任务会把 error 从 pending
+     * 一路写到重置，只有真正完成才会抬高 done；用 done 作水位既不会把
+     * 「重跑一次又失败」误判成进展，也不会因错误文案变化而空转。
+     */
+    if (done > doneBefore) book.noProgressRounds = 0
+    else if (Number(book.attempt ?? 0) > 0) book.noProgressRounds = Number(book.noProgressRounds ?? 0) + 1
+    book.doneBefore = done
+    const pending = statuses.filter((item: any) => item?.status === 'pending').length
+    const blocked = statuses.filter((item: any) => item?.status === 'blocked').length
+    /*
+     * [1.10.4 / D6] 正常完成的计划不许留「停止」噪音。
+     *
+     * T7 实测：`armAutoResume` 在每一轮结束后都会被调用，正常完成的轮也会走到
+     * `PHASE_NOT_PAUSED` 分支，于是每个顺利结束的计划都在 `record.errors` 里多一条
+     * 「[auto-resume] 停止」——把真正需要看的中止信息埋掉。全部 done 且没有
+     * pending/blocked 时，直接静默收尾，不写台账。
+     */
+    if (Number(stats.total ?? 0) > 0 && pending === 0 && blocked === 0 && done === Number(stats.total ?? 0)) {
+      book.lastDecision = { at: Date.now(), phase: record.phase, action: 'stop', code: 'NOTHING_PENDING', reason: '全部子任务已 done，无需自动续跑' }
+      return book.lastDecision
+    }
+    const decision = decideAutoResume({
+      enabled: limits.autoResume.enabled,
+      phase: record.phase,
+      cancelled: record.cancelled === true,
+      degraded: record.degraded === true,
+      planMode: isPlanModeActive(ctx, session),
+      running: Boolean(record.dispatchPromise),
+      total: Number(stats.total ?? 0),
+      done,
+      pending,
+      blocked,
+      attempt: Number(book.attempt ?? 0),
+      maxAttempts: limits.autoResume.maxAttempts,
+      noProgressRounds: Number(book.noProgressRounds ?? 0),
+      stallLimit: AUTO_RESUME_DEFAULTS.stallLimit,
+      baseDelayMs: AUTO_RESUME_DEFAULTS.baseDelayMs,
+      maxDelayMs: AUTO_RESUME_DEFAULTS.maxDelayMs,
+    })
+    book.lastDecision = { at: Date.now(), phase: record.phase, ...decision }
+    book.history = [...(book.history ?? []), {
+      at: Date.now(),
+      phase: record.phase,
+      done,
+      pending,
+      blocked,
+      attempt: Number(book.attempt ?? 0),
+      action: decision.action,
+      code: decision.code,
+    }].slice(-10)
+    if (decision.action !== 'schedule') {
+      /*
+       * 关闭开关时不写错误行：默认关闭不是一次「失败」，不该污染计划台账。
+       * 其余停止原因都要留痕，否则「为什么没有自动续跑」又变成考古。
+       */
+      if (decision.code !== 'AUTO_RESUME_DISABLED') {
+        record.errors = [...(record.errors ?? []),
+          `[auto-resume] 停止（${decision.code}）：${decision.reason}`].slice(-20)
+      }
+      return decision
+    }
+    const attempt = Number(book.attempt ?? 0) + 1
+    book.attempt = attempt
+    book.nextAt = Date.now() + decision.delayMs
+    record.errors = [...(record.errors ?? []),
+      `[auto-resume] 已排期第 ${attempt}/${limits.autoResume.maxAttempts} 次自动续跑：`
+      + `${Math.round(decision.delayMs / 1000)}s 后开始（本轮预算到点，仍有 ${pending} 项 pending；done 项不重跑）`].slice(-20)
+    const timer = setTimeout(() => {
+      book.timer = null
+      book.nextAt = null
+      try {
+        /*
+         * 排期到点后逐项复核，任何一项不成立都安静退出：定时器活过了一个
+         * 回合，期间用户可能已经取消、主 Agent 可能已经手动派发、页面可能
+         * 已经换了一份计划记录。
+         */
+        /*
+         * [1.10.4 / D1] 复核失败必须留下停止码。
+         *
+         * T5 的 I9：任何一次「本应自动续跑却没有发生」都要可解释。原先这里五个
+         * 分支全是裸 `return`，计划停在 paused 而台账里没有任何痕迹，用户只能再
+         * 做一次考古。现在每个分支都写 `lastStopReason`，并把原因追加到 history。
+         */
+        const stopTimer = (code: string) => {
+          book.lastStopReason = code
+          book.lastDecision = { at: Date.now(), phase: record.phase, action: 'stop', code, reason: '定时器复核未通过' }
+          book.history = [...(book.history ?? []), {
+            at: Date.now(), phase: record.phase, action: 'stop', code,
+          }].slice(-10)
+          return
+        }
+        if (state.records.get(session.id) !== record) return stopTimer('SCHEDULE_REVOKED_RECORD_REPLACED')
+        if (record.dispatchPromise) return stopTimer('SCHEDULE_REVOKED_ALREADY_RUNNING')
+        if (record.cancelled === true) return stopTimer('CANCELLED')
+        if (isTerminalPhase(record.phase)) return stopTimer('PHASE_TERMINAL')
+        if (isPlanModeActive(ctx, session)) return stopTimer('PLAN_MODE')
+        if (record.phase !== 'paused') return stopTimer('PHASE_NOT_PAUSED')
+        const live = derivePlanSnapshot(record.statuses)
+        const livePending = (record.statuses ?? []).filter((item: any) => item?.status === 'pending').length
+        if (Number(live.stats?.total ?? 0) === 0 || livePending === 0) return stopTimer('NOTHING_PENDING')
+        const controller = new AbortController()
+        record.abortRequested = false
+        record.abortDispatch = (reason: string) => {
+          if (!controller.signal.aborted) controller.abort(new PlanError(`计划已取消：${reason}`, 'CANCELLED'))
+        }
+        record.dispatchStartedAt = Date.now()
+        // 新一轮必须写一条新的结果消息，否则主 Agent 永远看不到自动续跑的结局。
+        record.resultWritten = false
+        book.doneBefore = Number(live.stats?.done ?? 0)
+        record.dispatchPromise = dispatchPlan(ctx, record, {
+          ...base,
+          signal: controller.signal,
+          childTimeoutMs: limits.childTimeoutMs,
+          idleTimeoutMs: limits.idleTimeoutMs,
+          totalTimeoutMs: limits.totalTimeoutMs,
+          maxResumes: limits.maxResumes,
+        })
+          .then(() => finishRound(record, session))
+          .catch((error: any) => {
+            pushRecordError(record, error)
+            finishRound(record, session)
+          })
+          .finally(() => {
+            record.dispatchPromise = null
+            record.dispatchStartedAt = null
+            record.abortDispatch = null
+            armAutoResume(record, session, base)
+          })
+        ctx.logger?.warn?.(
+          `dsh-workplan: 计划 ${record.plan?.planId ?? '?'} 自动续跑第 ${attempt}/${limits.autoResume.maxAttempts} 轮已开始`
+          + `（remaining ${Number(live.stats?.total ?? 0) - Number(live.stats?.done ?? 0)}）`,
+        )
+      } catch (error) {
+        pushRecordError(record, error)
+        ctx.logger?.warn?.(`dsh-workplan: 自动续跑失败：${error instanceof Error ? error.message : String(error)}`)
+      }
+    }, decision.delayMs)
+    timer.unref?.()
+    book.timer = timer
+    return decision
   }
 
   /**
@@ -2642,6 +3103,8 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       statuses: modelStatusLines(snapshot.statuses),
       errors: (record.errors ?? []).slice(-10),
       resumeLimit: Number(record.resumeLimit ?? limits.maxResumes),
+      // [1.10.4] 自动续跑的可观测面：开关、已用轮次、是否已排期、上一次判定码。
+      autoResume: autoResumeView(record),
       deliveryReady: readiness.ready,
       deliveryBlockers: readiness.blockers.slice(0, 12),
       deliveryRemaining: readiness.remaining.slice(0, 20),
@@ -2760,6 +3223,18 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       }
     }
     if (!record?.plan) throw new PlanError('当前会话没有可派发的计划', 'NO_PLAN')
+    /*
+     * [1.10.4] 人工/工具派发优先于自动续跑：撤销待触发的定时器，并把自动
+     * 轮次计数归零（这一次是外部授权的新起点）。done 水位取当前值，下一轮
+     * 结束后才能正确判断「有没有新增完成项」。
+     */
+    clearAutoResumeTimer(record, 'manual-dispatch')
+    {
+      const book = autoResumeBook(record)
+      book.attempt = 0
+      book.noProgressRounds = 0
+      book.doneBefore = Number(derivePlanSnapshot(record.statuses).stats?.done ?? 0)
+    }
     if (args?.planId && record.plan.planId !== args.planId) {
       throw new PlanError('planId 与当前计划不匹配', 'PLAN_ID_MISMATCH')
     }
@@ -2914,12 +3389,15 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         dispatchController.abort(new PlanError(`计划已取消：${reason}`, 'CANCELLED'))
       }
     }
-    record.dispatchPromise = dispatchPlan(ctx, record, {
+    const roundOptions = {
       agent,
-      signal: dispatchController.signal,
       modelSelection: selection.provider && selection.model ? selection : record.modelSelection,
       cwd: session.header?.cwd ?? options.cwd,
       conversationContext: record.conversationContext ?? '',
+    }
+    record.dispatchPromise = dispatchPlan(ctx, record, {
+      ...roundOptions,
+      signal: dispatchController.signal,
       childTimeoutMs: limits.childTimeoutMs,
       idleTimeoutMs: limits.idleTimeoutMs,
       totalTimeoutMs: limits.totalTimeoutMs,
@@ -2942,11 +3420,13 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         .then(() => {
           finishRound(record, session)
           state.records.set(session.id, record)
+          armAutoResume(record, session, roundOptions)
         })
         .catch((error: any) => {
           pushRecordError(record, error)
           finishRound(record, session)
           state.records.set(session.id, record)
+          armAutoResume(record, session, roundOptions)
         })
       const live = derivePlanSnapshot(record.statuses)
       return {
@@ -2967,6 +3447,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     }
     await record.dispatchPromise
     finishRound(record, session)
+    armAutoResume(record, session, roundOptions)
     /*
      * The model's dispatch result reports the same snapshot the dashboard will
      * show. It used to send `record.stats` while the status list below was read
@@ -3747,6 +4228,8 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
   }
 
   function dispose() {
+    // [1.10.4] 定时器不能吊住进程，也不能在记录清空后复活一个已销毁的计划。
+    for (const record of state.records.values()) clearAutoResumeTimer(record, 'dispose')
     state.records.clear()
   }
 

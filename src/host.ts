@@ -22,6 +22,7 @@ import {
   updateToolOutputSchema,
 } from './runtime.js'
 import { isRecord } from './plan.js'
+import { autoResumeEnabledFrom } from './auto-resume.js'
 
 /*
  * [1.8.14] Identity of the modules this process actually loaded (N1).
@@ -153,6 +154,16 @@ export type WorkplanConfig = {
   idleTimeoutMs?: number
   totalTimeoutMs?: number
   maxResumes?: number
+  /**
+   * [1.10.4] 整轮预算到点后自动开始下一轮。默认 **false**。
+   *
+   * 打开方式（部署时二选一）：profile 配置 `autoResume: true`，或环境变量
+   * `DSH_WORKPLAN_AUTO_RESUME=1`。默认关闭是刻意的：自动续跑会自己消耗
+   * 模型额度，必须先在小流量 profile 上验证过状态机与证据门禁再开。
+   */
+  autoResume?: boolean
+  /** 自动续跑轮次上限（0–4，默认 2）；环境变量 `DSH_WORKPLAN_AUTO_RESUME_MAX`。 */
+  autoResumeMaxAttempts?: number
 }
 
 function createUpdateTool(runtime: any) {
@@ -586,6 +597,27 @@ function createDispatchTool(runtime: any) {
  * short of editing the source, so any machine with slower subagents hit the
  * wall on every plan. These knobs let operations tune it without a rebuild.
  */
+/**
+ * [1.10.4] 布尔开关：配置项优先，其次环境变量。
+ *
+ * 与 `numericSetting` 不同，显式 `false` 必须能被表达，所以先判 boolean；
+ * 环境变量只接受 1/true/yes/on，大小写不敏感。未配置时返回 `false`。
+ *
+ * [1.10.6] 注意：`autoResume` 已改用 `autoResumeEnabledFrom`（默认开启，
+ * 且 `0/false/no/off` 可以显式关闭）。本函数保留给「默认关闭」语义的开关。
+ */
+function booleanSetting(configValue: any, envName: string) {
+  if (typeof configValue === 'boolean') return configValue
+  const raw = typeof process !== 'undefined' ? process.env?.[envName] : undefined
+  if (raw === undefined || raw === '') return false
+  return /^(1|true|yes|on)$/i.test(String(raw).trim())
+}
+
+/** [1.10.6] 原样读取环境变量，供三态解析使用（未设置返回 undefined）。 */
+function settingEnv(envName: string) {
+  return typeof process !== 'undefined' ? process.env?.[envName] : undefined
+}
+
 function numericSetting(configValue: any, envName: string) {
   if (configValue !== undefined && configValue !== null && configValue !== '') {
     const numeric = Number(configValue)
@@ -636,6 +668,13 @@ export function apply(ctx: any, config: WorkplanConfig = {}) {
     idleTimeoutMs: numericSetting(config.idleTimeoutMs, 'DSH_WORKPLAN_IDLE_TIMEOUT_MS'),
     totalTimeoutMs: numericSetting(config.totalTimeoutMs, 'DSH_WORKPLAN_TOTAL_TIMEOUT_MS'),
     maxResumes: numericSetting(config.maxResumes, 'DSH_WORKPLAN_MAX_RESUMES'),
+    /*
+     * [1.10.6] 三态解析：显式配置 > 显式环境变量 > 默认开启。
+     * 旧实现用 `booleanSetting(..., false)`，未配置即等于关闭，于是「预算到点
+     * 自动续跑」这个能力在用户机器上从来没打开过（1h57m 空窗的直接原因）。
+     */
+    autoResume: autoResumeEnabledFrom(config.autoResume, settingEnv('DSH_WORKPLAN_AUTO_RESUME')),
+    autoResumeMaxAttempts: numericSetting(config.autoResumeMaxAttempts, 'DSH_WORKPLAN_AUTO_RESUME_MAX'),
   })
 
   ctx.effect(() =>
@@ -730,7 +769,7 @@ export function apply(ctx: any, config: WorkplanConfig = {}) {
 
 export const meta = {
   name,
-  version: '1.9.1',
+  version: '1.10.6',
   promptOrder: PROMPT_ORDER,
   routes: ['/dsh-workplan/plans', '/dsh-workplan/vendor/chart.umd.js'],
 }

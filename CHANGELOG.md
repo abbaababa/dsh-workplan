@@ -1,3 +1,198 @@
+## 1.10.6 — 2026-11-01
+
+**修复：单个子任务超时后的「自动重试一次」在真实链路里是死代码；自动续跑开关默认关闭，等于从来没有打开过。**
+
+> 用户 19:40 的原话：「超时的已分配子任务不会自动完美重试吗？这不是严重缺陷吗？」
+> 上一轮 1.10.3 声称修好了，但本轮 T6 的探针实测：`CHILD_TIMEOUT` 场景
+> `activationCalls=1`（策略函数返回 true，真实调度却只跑一次）。
+
+### 根因（两处，缺一不可）
+
+1. `src/runtime.ts` 里 900s 上限计时器先置 `guard.timedOut=true`，`catch` 首行
+   `if (guard.timedOut) break` 在调用重试策略**之前**就跳出循环；同一计时器
+   还 `abort` 了 `child.controller`，于是 `isAbort` 恒真。策略正确，链路不可达。
+2. 「重试前的产物核对」在修复前是**同一瞬间读两次**（recorded / current 背靠背），
+   生产环境永远不可能不一致 —— 「冲突不覆盖」只在注入假 `stat` 的测试里成立。
+
+### 修复
+
+- 把重试从 `executeSubtask` 内层循环**移到 `runSubtask` 外层**（新增
+  `runSubtaskAttempt`），每次尝试拿一个全新的 `child controller`，不再被上一次
+  的 `abort` 与 `guard.timedOut` 拦住；最多重试一次（`attemptOffset: 2` 双闸门）。
+- 产物指纹改为**上限触发那一刻**取快照，重试前再读一次比对；不一致则跳过重试、
+  行上写 `artifactConflict`，绝不覆盖别人刚写的文件。
+- 重试前把 `CHILD_TIMEOUT` 作为 `priorFailure` 注入子 Agent 提示词，并附上
+  「已在盘上的产物清单，先核对再补缺口」（1.8.19 的 resumeHint 复用）。
+- **自动续跑默认开启**：`AUTO_RESUME_DEFAULTS.enabled` 由 `false` 改为 `true`，
+  host 侧新增 `autoResumeEnabledFrom()` 三态解析（配置 > 环境变量 > 默认开启），
+  `autoResume: false` 或 `DSH_WORKPLAN_AUTO_RESUME=0` 可显式关闭。
+  旧实现里 `=0` 也等于「没配」，唯一结果是默认关闭 —— 这就是 1h57m 空窗的开关原因。
+
+### 测试
+
+`npm test` 331 → 332 全绿；新增 `tests/workplan-auto-retry.test.ts`（2 条真实调度
+链路用例，含负控制：换回旧代码 → `2 !== 1` 失败）与 `autoResumeEnabledFrom` 的
+11 条解析用例。
+
+## 1.10.5 — 2026-11-01
+
+**修复：1.10.4 漏拷 `lib/auto-resume.js`，导致插件整包加载失败（`ERR_MODULE_NOT_FOUND`）。**
+
+> 现象（用户 19:32 重启后的终端）：`dsh: warning: 1 entry did not activate`
+> `dsh-workplan-plugin ... failed to import: Cannot find module
+> '.../lib/auto-resume.js' imported from '.../lib/runtime.js'` —— 工作台工具在
+> 该进程里全部不可用（`unknown tool "dsh_workplan_status"`）。
+
+### 根因
+
+`npm run build` 用的是**写死的文件名列表** `cp dist/plan.js dist/runtime.js … lib/`。
+1.10.4 新增 `src/auto-resume.ts` 后，`tsc` 生成了 `dist/auto-resume.js`，但列表没加它，
+于是 `lib/runtime.js` 里 `import './auto-resume.js'` 在运行时解析失败。
+`tsc` 与单测都发现不了：它们只编译，不按包内相对路径去解析 `lib/`。
+
+### 修复
+
+- `package.json` 的 build 改为 `cp dist/*.js lib/ && cp dist/client.js client.js`——
+  以后再加模块不会漏。
+- 新增 `tests/build-artifacts.test.ts`（2 例）：**dist 里每个 .js 都必须在 lib 有同名文件**，
+  且 `client.js` 与 `dist/client.js` 字节一致。漏拷会让 `npm test` 直接红。
+- 重建后 `lib/` 共 8 个 js；用真实 profile 软链 `import('~/.dsh/profiles/web/node_modules/dsh-workplan/lib/host.js')`
+  实测 **HOST IMPORT OK**，导出 13 个符号。
+- 全量 `npm test`：**329 pass / 0 fail**。
+
+## 1.10.4 — 2026-11-01
+
+**新增：自动续跑（auto-resume）——回合结束后自己再开一轮，直到做完或命中停止码。**
+
+> 背景：用户连问三次「超时的已分配子任务不会自动完美重试吗」「不能全面预防吗」
+> 「它不会主动告诉负责人发生了什么、负责人也不能追问吗」。取证结论：插件有
+> `dispatch`（4 次额度）、`followup`（无额度、保留子会话上下文）、`turn-stopping`
+> 施压三种**人工**入口，唯独没有「回合结束后自己开一轮」的驱动——这是实现缺口
+> （T3 定性），严重度 S2（T4，场景 A/B 均已发生，4/4 中止子会话靠人工恢复）。
+
+### 新增
+
+- `src/auto-resume.ts`（新模块，纯函数）：`decideAutoResume()` 判定「是否再开一轮」，
+  返回唯一继续码 `SCHEDULED` 或 11 个停止码（DISABLED / NO_PLAN / CANCELLED /
+  SUPERSEDED / ALREADY_RUNNING / PLAN_MODE / PHASE_NOT_PAUSED / NOTHING_PENDING /
+  HAS_BLOCKED / BUDGET_EXHAUSTED / NO_PROGRESS）；指数退避 `min(300s, 30s·2^n)`。
+- `src/runtime.ts`：轮结束钩子记账 + 定时器 + 5 条撤销路径；每轮上限
+  `maxAttempts=2`、硬上限 4，与既有 `MAX_PLAN_RESUMES=4`（仅 blocked 修复计费、
+  paused 不计）**正交**。定时器 `unref()`，不会阻止进程退出。
+- `src/host.ts`：开关默认**关闭**（`autoResume:true` 或 `DSH_WORKPLAN_AUTO_RESUME=1`），
+  先灰度再默认开启。
+- **D6 修复**：正常完成（全部 done、无 pending/blocked）的轮不再写
+  「[auto-resume] 停止（PHASE_NOT_PAUSED）」噪音行。
+- **D1 修复**：定时器到点后的五道复核不再裸 `return`，每个分支都写停止码
+  （`SCHEDULE_REVOKED_*` / `CANCELLED` / `PHASE_TERMINAL` / `PLAN_MODE` /
+  `PHASE_NOT_PAUSED` / `NOTHING_PENDING`），满足 I9 可见性。
+
+### 回归
+
+- 新增 9 条纯函数单测（`tests/auto-resume.test.ts`）＋既有套件：**327 pass / 0 fail**。
+- `qa/replay_check.py` 64 项只读断言（含 T12 事故重放）通过；`design/verify_retry_patch.py` 12/12。
+- 未验证：定时器跨回合真正拉起子 Agent 需 build + 重启 + 开灰度后实测（需主 Agent）。
+
+## 1.10.3 — 2026-11-01
+
+**修复：单个子任务撞上 900 秒硬上限时，只要整轮预算还够再跑一次，就自动重试。**
+
+> 背景：用户问「超时的已分配子任务不会自动完美重试吗？这不是严重缺陷吗」。
+> 核对源码：`shouldRetryAttempt` 对 `CHILD_TIMEOUT` 无条件 `return false`，
+> 即使整轮 20 分钟里还剩十几分钟可用也一样——于是「只是这一步慢了」被判成阻塞，
+> 必须等主 Agent 人工改判或重新派发。`CHILD_STALLED`（无事件）本来就会自动重试，
+> 硬超时反而不重试，口径不一致。
+
+### 修复
+
+- `src/runtime.ts` `shouldRetryAttempt`：`CHILD_TIMEOUT` 改为「剩余预算 >
+  max(空闲窗口, 120s) 时自动重试一次」，仍然最多两次尝试（`attempt >= 2` 直接停），
+  不会形成重试风暴；重试沿用 1.7.0 的「带上一次失败原因」提示词。
+- 「剩余预算不足，未重试」的说明原先显式排除 `CHILD_TIMEOUT`，现已一并覆盖。
+- `TOTAL_TIMEOUT`（整轮预算用光）与 `ABORTED`（有人决定停）仍**不自动重试**：
+  前者重试必被同一把闸刀砍掉，后者重试等于违背决定。
+- `tests/workplan-retry-feedback.test.ts`：新增两条断言（剩余 10 分钟→重试；
+  第二次超时→不重试）。全量 **318 pass / 0 fail**。
+
+### 边界（如实）
+
+- 这只解决「单个子任务超时」。**整轮预算耗尽仍是暂停 + 需一次续跑指令**，
+  没有做「自动重新派发」——那会在用户不知情时继续消耗时间与 token。
+- 若一次超时发生在整轮预算只剩 < 2 分钟，仍会直接判阻塞并写明原因。
+
+## 1.10.2 — 2026-11-01
+
+**补漏：即使调用方显式传 `error`，`done` 结果也一律清空 `error`；并补一条真实渲染 A/B 回归、一道单行一致性门禁。**
+
+> 背景：1.10.1 只在 `patch.error === undefined/null` 时清空，而回放子会话 result 的
+> `done+error`、或任何显式传字符串 error 的写入，仍能把「完成 + 失败文本」写进
+> 持久化记录（实测写入 `{"status":"done","error":"HOSTILE-1"}` 成立）。读侧自愈能
+> 兜住展示，但记录层仍脏。本版把写入口收敛为无条件清空，旧文本先归档 `lastError`。
+
+### 修复
+
+- `src/plan.ts` `applyStatus`：done 分支改为**无条件** `next.error = null`（非空文本先由
+  上方逻辑归档进 `lastError/lastErrorAt`），覆盖 `applyStatus` 与 `applyResultStatuses` 两条入口。
+- 新增 `tests/status-truth.test.ts` 的「显式 error 的 done 也必须清空」用例。
+
+### 回归
+
+- 新增 `tests/client-done-error-render.test.ts`（4 例）：用**真实 `client.js` 构建产物** +
+  最小脏数据夹具渲染，并用 `DSH_WP_CLIENT_BUNDLE` 对 1.9.1 旧 bundle 做 A/B 对照
+  ——旧版 3 失败（done 行显示原因、无留档、文本重复）、新版 4/4 通过、pending 对照组两版都过。
+- 全量 `npm test`：**318 pass / 0 fail**（1.10.1 为 313）。
+
+### 门禁
+
+- `fix/progress_gate.py` 新增 **GC-08**：任一 `status=done` 的子任务归一后 `error` 非空即阻断
+  （不套 100% 前置条件）。自证用例 7→9（V8/V9），对真实 85% 中途快照 `_result_step_76.json`
+  命中此前漏检的 T7。
+
+### 已知未修
+
+- `src/client.ts:1112` `plainError` 会把含「未完成」的子任务 summary 整句改写为
+  「这件事没有做完。」（首页实测 2 处误报）；属独立缺陷，本版未改。
+
+## 1.10.1 — 2026-11-01
+
+**修复：`done` 行残留 `error`，导致「已完成 13/13（100%）」与「卡住原因：本轮预算用尽」同屏。**
+
+> 背景：用户截图显示 T12 子会话已中止（27 秒、无最终答复），面板侧栏却是
+> 13/13 完成。根因不是百分比算错，而是同一个状态行上 `status=done` 与
+> `error="本轮预算用尽，等待续跑"` 并存：`applyStatus` 的 done 分支从不清理
+> `error`，改判路径又传 `undefined`（被解释为「保留旧值」），而客户端无条件
+> 把 `error` 渲染成「卡住原因」。同类缺陷另见 equal-revision 二次回放、
+> 分母取 `statuses.length`（写 5 行即可 100%）、`deliveryReady` 下发却无人消费。
+
+### 修复
+
+- `plan.ts` `applyStatus`：`done` 时把旧 `error` 迁入 `lastError` 并清空
+  `error`（I12：完成的行没有「卡住原因」）；显式 `error: null` 同样先留档；
+  新增 `completedBy / attemptOutcome / attemptEndedAt / priorOutcome`。
+- `plan.ts` `normaliseStatusEntry`：读侧迁移历史脏数据（`done+error` →
+  `done+lastError`），刷新即干净，不必重写会话日志。
+- `plan.ts` `applyResultStatuses`：相等 `revision` 的结果快照不再二次应用
+  （此前每次回放把 T1–T7 各抬一级 revision）。
+- `plan.ts` `deriveAggregates` / `derivePlanSnapshot`：分母改为计划定义条数
+  `N`，缺失行按 pending 计入；`progress` 未全部完成时封顶 99。
+- `plan.ts` `aggregateInvariantViolations`：I1 改为「不得小于」并新增
+  I12（done 行不得带 error）、I13（进度与计数必须一致）。
+- `runtime.ts` `serialisePlan`：下发时传定义条数；计划 `done/cancelled` 时把
+  计划级 `errors` 归档为 `archivedErrors`，不再与 100% 同屏。
+- `client.ts`：`error` 只对非 done 行渲染（blocked →「卡住原因」，
+  其余 →「还没做完的原因」），done 行改为灰色「上一轮的失败记录（仅留档）」；
+  新增「还不能交付」横幅，消费此前从未被读取的 `deliveryReady/deliveryBlockers`；
+  `100%` 需同时满足加权进度 100（`cappedPercent`）。
+- `locale`：新增 `pendingReason / lastErrorNote / notDeliverable / notDeliverableHint`。
+- **1.10.1 追加（DF-05，P0）**：`deliveryReadiness` 对账分母——状态明细少于计划定义时
+  记为阻塞，修掉「定义 13 项、只写 5 行且全 done ⇒ `ready=true`」的放行漏洞。
+
+### 回归
+
+- 新增 `tests/status-truth.test.ts`（7 例）：done 清 error 并留档、读侧迁移、
+  I12、分母对账、I13、回放幂等、全 done 一致性。
+- 全量 `npm test`：**313 pass / 0 fail**（1.9.1 为 306）。
+
 ## 1.9.1 — 2026-11-01
 
 **新增：`dsh_workplan_followup` —— 用户授权后，向直接子会话补发 follow-up。**

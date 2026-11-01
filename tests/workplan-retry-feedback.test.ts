@@ -40,7 +40,12 @@ function makePlan() {
 test('只重试一次，且只重试可能自行恢复的失败', () => {
   assert.equal(shouldRetryAttempt({ code: 'CHILD_STALLED' }, 1, 60_000, 10_000), true)
   assert.equal(shouldRetryAttempt({ code: 'CHILD_STALLED' }, 2, 60_000, 10_000), false, '第二次失败不再重试')
-  assert.equal(shouldRetryAttempt({ code: 'CHILD_TIMEOUT' }, 1, 60_000, 10_000), false, '硬超时重试只会再超时')
+  assert.equal(shouldRetryAttempt({ code: 'CHILD_TIMEOUT' }, 1, 60_000, 10_000), false,
+    '1.10.3：硬超时只有在剩余预算足够再跑一次时才重试；60s 不够')
+  assert.equal(shouldRetryAttempt({ code: 'CHILD_TIMEOUT' }, 1, 600_000, 10_000), true,
+    '整轮还剩 10 分钟：这一次超时值得自动重试一次（用户 2026-11-01 的质疑）')
+  assert.equal(shouldRetryAttempt({ code: 'CHILD_TIMEOUT' }, 2, 600_000, 10_000), false,
+    '重试仍然只有一次，不构成重试风暴')
   assert.equal(shouldRetryAttempt({ code: 'ABORTED' }, 1, 60_000, 10_000), false, '用户取消/中止不得重试')
   assert.equal(shouldRetryAttempt({ code: 'TOTAL_TIMEOUT' }, 1, 60_000, 10_000), false)
   assert.equal(shouldRetryAttempt({ code: 'CHILD_NOT_COMPLETED' }, 1, 5_000, 10_000), false, '剩余时间不足一个空闲窗口时不重试')

@@ -117,6 +117,10 @@ window.__ModuleLoader__.load({
                 "willDeliver": "做完交付",
                 "waitFor": "要等",
                 "blockedReason": "卡住原因",
+                "pendingReason": "还没做完的原因",
+                "lastErrorNote": "上一轮的失败记录（已完成，仅留档）",
+                "notDeliverable": "还不能交付",
+                "notDeliverableHint": "「全部做完」不等于「可以交付」：交付还需要每一行都有可核对的证据。下面是没有通过的部分。",
                 "progressLabel": "进度",
                 "more": "更多细节（不看也不影响理解）",
                 "why": "为什么这样安排",
@@ -289,6 +293,10 @@ window.__ModuleLoader__.load({
                 "willDeliver": "What it delivers",
                 "waitFor": "Waits for",
                 "blockedReason": "Why it is stuck",
+                "pendingReason": "Why it is not finished yet",
+                "lastErrorNote": "Previous attempt's failure (done, kept for the record)",
+                "notDeliverable": "Not deliverable yet",
+                "notDeliverableHint": "All rows done does not mean deliverable: every row needs checkable evidence. The gaps are listed below.",
                 "progressLabel": "Progress",
                 "more": "More detail (optional)",
                 "why": "Why it is arranged this way",
@@ -1372,7 +1380,20 @@ window.__ModuleLoader__.load({
             const status = item?.status ?? 'pending';
             const tone = toneOfStatus(status);
             const pct = clampPct(item?.progress ?? 0);
-            return h('div', { className: `dsh-wp-subtask dsh-wp-tone-${tone}` }, h('div', { className: 'dsh-wp-subtask-head' }, h('div', { className: 'dsh-wp-subtask-title' }, `${workLabel(t, index)}：${subtask.title}`), h(Pill, { tone }, progressText(item, t))), h('div', { className: 'dsh-wp-subtask-meta' }, h('span', null, `${t('who')}：${deptName(t, subtask.department)} · ${subtask.role}`)), h('div', { className: 'dsh-wp-subtask-body' }, h('p', null, h('strong', null, `${t('what')}：`), subtask.objective), h('div', null, h('strong', null, `${t('how')}：`), h(Bullets, { items: subtask.method })), h('div', null, h('strong', null, `${t('doneWhen')}：`), h(Bullets, { items: subtask.acceptance })), subtask.outputs?.length ? h('div', null, h('strong', null, `${t('willDeliver')}：`), h(Bullets, { items: subtask.outputs })) : null, subtask.dependsOn?.length ? h('p', { className: 'dsh-wp-muted' }, `${t('waitFor')}：先等前面的工作做完，才能开始这一步。`) : null), status === 'in_progress' ? h(Progress, { value: pct, tone }) : null, status === 'in_progress' ? h('div', { className: 'dsh-wp-progress-meta' }, h('span', null, `${t('progressLabel')} ${pct}%`)) : null, status !== 'blocked' && item?.summary ? h('p', { className: 'dsh-wp-muted' }, `${t('summary')}：${plainError(item.summary)}`) : null, item?.error ? h('p', { className: 'dsh-wp-error-text' }, `${t('blockedReason')}：${plainError(item.error)}`) : null, h('details', { className: 'dsh-wp-details' }, h('summary', null, t('more')), h('div', { className: 'dsh-wp-grid', style: { marginTop: '8px' } }, h(Field, { label: t('person') }, subtask.role || '—'), h(Field, { label: t('inputs') }, h(Bullets, { items: subtask.inputs })), h(Field, { label: t('risk') }, subtask.risk || '—'), h(Field, { label: t('planId') }, subtask.id || '—'))));
+            return h('div', { className: `dsh-wp-subtask dsh-wp-tone-${tone}` }, h('div', { className: 'dsh-wp-subtask-head' }, h('div', { className: 'dsh-wp-subtask-title' }, `${workLabel(t, index)}：${subtask.title}`), h(Pill, { tone }, progressText(item, t))), h('div', { className: 'dsh-wp-subtask-meta' }, h('span', null, `${t('who')}：${deptName(t, subtask.department)} · ${subtask.role}`)), h('div', { className: 'dsh-wp-subtask-body' }, h('p', null, h('strong', null, `${t('what')}：`), subtask.objective), h('div', null, h('strong', null, `${t('how')}：`), h(Bullets, { items: subtask.method })), h('div', null, h('strong', null, `${t('doneWhen')}：`), h(Bullets, { items: subtask.acceptance })), subtask.outputs?.length ? h('div', null, h('strong', null, `${t('willDeliver')}：`), h(Bullets, { items: subtask.outputs })) : null, subtask.dependsOn?.length ? h('p', { className: 'dsh-wp-muted' }, `${t('waitFor')}：先等前面的工作做完，才能开始这一步。`) : null), status === 'in_progress' ? h(Progress, { value: pct, tone }) : null, status === 'in_progress' ? h('div', { className: 'dsh-wp-progress-meta' }, h('span', null, `${t('progressLabel')} ${pct}%`)) : null, status !== 'blocked' && item?.summary ? h('p', { className: 'dsh-wp-muted' }, `${t('summary')}：${plainError(item.summary)}`) : null, 
+            /*
+             * [1.10.0] R-02：「卡住原因」只属于没做完的行。
+             *
+             * 1.9.1 无条件渲染 `item.error`，只要历史记录里残留一句失败文本，就会在
+             * 一行 status=done 的卡片下面写「卡住原因：本轮预算用尽…」——「已完成」
+             * 与「卡住了」同屏，正是用户截图里的矛盾。数据层已经保证 done 行没有
+             * error（I12），这里再做一次呈现守卫：任何历史载荷、旧缓存都不会重现。
+             */
+            item?.error && status !== 'done'
+                ? h('p', { className: 'dsh-wp-error-text' }, `${t(status === 'blocked' ? 'blockedReason' : 'pendingReason')}：${plainError(item.error)}`)
+                : null, status === 'done' && item?.lastError
+                ? h('p', { className: 'dsh-wp-muted' }, `${t('lastErrorNote')}：${plainError(item.lastError)}`)
+                : null, h('details', { className: 'dsh-wp-details' }, h('summary', null, t('more')), h('div', { className: 'dsh-wp-grid', style: { marginTop: '8px' } }, h(Field, { label: t('person') }, subtask.role || '—'), h(Field, { label: t('inputs') }, h(Bullets, { items: subtask.inputs })), h(Field, { label: t('risk') }, subtask.risk || '—'), h(Field, { label: t('planId') }, subtask.id || '—'))));
         }
         function StageCard({ stage, statuses, index, t }) {
             const byId = useMemo(() => new Map((statuses || []).map((item) => [item.subtaskId, item])), [statuses]);
@@ -1431,6 +1452,24 @@ window.__ModuleLoader__.load({
         function planPercent(done, total) {
             return total > 0 ? Math.round((done / total) * 100) : null;
         }
+        /*
+         * [1.10.0] C-11：100% 只有一个来源。
+         *
+         * `done/total` 是「行数」，服务端的 `stats.progress` 是「加权完成度」，
+         * 二者在 12 done + 1 blocked@95 时分别是 92 与 95（T3 实测）。界面只展示
+         * 一个数：行数百分比；但只要加权口径还差一点（或全部行 done 却不可交付），
+         * 就不允许显示成 100——"100%" 在这一页上必须同时意味着「每行都做完」。
+         */
+        function cappedPercent(raw, stats) {
+            if (raw === null)
+                return null;
+            const weighted = Number(stats?.progress);
+            if (raw >= 100 && Number.isFinite(weighted) && weighted < 100)
+                return 99;
+            if (raw > 100)
+                return 100;
+            return raw;
+        }
         // 与 groupTotals 同一套口径：先夹到 [0,total]，再让「正在做/还没开始」
         // 吃掉剩余量，四段之和恒等于总数（构成条不会溢出或出现负宽度）。
         function planCounts(stats) {
@@ -1440,7 +1479,7 @@ window.__ModuleLoader__.load({
             const blocked = Math.min(planCount(source.blocked), total - done);
             const active = Math.min(planCount(source.inProgress), total - done - blocked);
             const pending = Math.max(0, total - done - blocked - active);
-            return { total, done, active, blocked, pending, percent: planPercent(done, total) };
+            return { total, done, active, blocked, pending, percent: cappedPercent(planPercent(done, total), source) };
         }
         /*
          * [1.5.2] 完成语义的第二道保险：状态文案必须服从计数事实。
@@ -1755,7 +1794,18 @@ window.__ModuleLoader__.load({
                 badge: h(Pill, { tone }, phaseLabel(phase, session, t)),
             }, session.updatedAt
                 ? h('div', { className: 'dsh-wp-meta dsh-wp-session-updated' }, `${t('updatedAt')} ${formatTime(session.updatedAt)}`)
-                : null, open === true ? h(PlanOverview, { t, stats, counts, rows: stageRows }) : null, session.degraded ? h('div', { className: 'dsh-wp-banner dsh-wp-banner--degraded' }, h('strong', null, t('degraded')), h('div', null, plainError(session.error || '')), h('div', { className: 'dsh-wp-muted' }, t('degradedHint'))) : null, h(Guide, { session, t }), departments.length ? h('div', { className: 'dsh-wp-section' }, h('div', { className: 'dsh-wp-section-title' }, t('who')), h('div', { className: 'dsh-wp-departments' }, departments.map((dept) => h(Pill, { key: dept.id, tone: dept.blocked > 0 ? 'blocked' : dept.done === dept.total ? 'done' : 'active' }, `${deptName(t, dept.id)} ${dept.done}/${dept.total} ${t('stats.done')}`)))) : null, h('div', { className: 'dsh-wp-section' }, h('div', { className: 'dsh-wp-section-title' }, t('steps')), (session.stages || []).map((stage, index) => h(StageCard, {
+                : null, open === true ? h(PlanOverview, { t, stats, counts, rows: stageRows }) : null, session.degraded ? h('div', { className: 'dsh-wp-banner dsh-wp-banner--degraded' }, h('strong', null, t('degraded')), h('div', null, plainError(session.error || '')), h('div', { className: 'dsh-wp-muted' }, t('degradedHint'))) : null, 
+            /*
+             * [1.10.0] C-09：把服务端已经下发、却从来没人读的交付门禁搬上界面。
+             *
+             * 1.9.1 的载荷里一直带着 `deliveryReady / deliveryBlockers`（present 用的
+             * 就是同一份判定），但 `client.ts` 一处都没消费。于是「13/13、100%、绿」，
+             * 而 present 被拒——「进度 100% ≠ 可交付」这条事实在界面上完全不可见。
+             */
+            session.deliveryReady === false
+                ? h('div', { className: 'dsh-wp-banner dsh-wp-banner--degraded' }, h('strong', null, t('notDeliverable')), h('div', { className: 'dsh-wp-muted' }, t('notDeliverableHint')), Array.isArray(session.deliveryBlockers) && session.deliveryBlockers.length
+                    ? h('ul', { className: 'dsh-wp-muted' }, session.deliveryBlockers.slice(0, 6).map((blocker, index) => h('li', { key: index }, plainError(String(blocker)))))
+                    : null) : null, h(Guide, { session, t }), departments.length ? h('div', { className: 'dsh-wp-section' }, h('div', { className: 'dsh-wp-section-title' }, t('who')), h('div', { className: 'dsh-wp-departments' }, departments.map((dept) => h(Pill, { key: dept.id, tone: dept.blocked > 0 ? 'blocked' : dept.done === dept.total ? 'done' : 'active' }, `${deptName(t, dept.id)} ${dept.done}/${dept.total} ${t('stats.done')}`)))) : null, h('div', { className: 'dsh-wp-section' }, h('div', { className: 'dsh-wp-section-title' }, t('steps')), (session.stages || []).map((stage, index) => h(StageCard, {
                 key: stage.id,
                 stage,
                 statuses: session.statuses || [],
@@ -2302,7 +2352,7 @@ window.__ModuleLoader__.load({
                 return {
                     label: raw.length > 14 ? `${raw.slice(0, 14)}…` : raw,
                     // [1.5.2] 与卡片/组头同一个百分比函数，杜绝第二套口径。
-                    value: planPercent(planCount(session.stats?.done), planCount(session.stats?.total)) ?? 0,
+                    value: cappedPercent(planPercent(planCount(session.stats?.done), planCount(session.stats?.total)), session.stats) ?? 0,
                 };
             }), [groups, t]);
             /*
