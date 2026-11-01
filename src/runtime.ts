@@ -36,6 +36,7 @@ import {
   flattenSubtasks,
   isRecord,
   isSocialMessage,
+  isTerminalPhase,
   isStatusQuestion,
   isVagueContinuation,
   makeUserMessage,
@@ -1617,6 +1618,12 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
     resumeCount: number
     cancelled: boolean
     /*
+     * [1.9.0] 被取代（责任已转移）。与 cancelled 互斥。本补丁只做读取、
+     * 判定与拒绝；写入路径（V1–V8 核验 + 用户确认）见规则文档 §6，属下一批。
+     */
+    superseded: boolean
+    supersededBy: any
+    /*
      * [1.8.17] The durable result message carries the round's failure lines.
      * Replay used to drop them, and the reconstructed record then had no
      * `errors` field at all: the next dispatching round spread it
@@ -1648,6 +1655,8 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
         resultSeen: false,
         resumeCount: 0,
         cancelled: false,
+        superseded: false,
+        supersededBy: undefined,
         errors: [],
       }
       snapshots.set(plan.planId, snap)
@@ -1752,7 +1761,19 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
       const cancel = parseCancelMessage(event.data)
       if (cancel && typeof cancel.planId === 'string') {
         const snap = snapshots.get(cancel.planId)
-        if (snap) snap.cancelled = true
+        if (snap) {
+          /*
+           * [1.9.0] disposition='superseded' 的信封表示「责任已转移」，不是
+           * 用户撤销。旧解析器只校验 kind，因此该字段对新旧版本都安全：旧版
+           * 按 cancelled 读（不可派发、不可交付），不会复活成 active。
+           */
+          if (cancel.disposition === 'superseded') {
+            snap.superseded = true
+            snap.supersededBy = cancel.supersededBy
+          } else {
+            snap.cancelled = true
+          }
+        }
       }
     } else if (event.type === 'tool/call') {
       /*
@@ -1841,9 +1862,11 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
   const resultSeen = chosen.resultSeen
   const resumeCount = chosen.resumeCount
   const cancelled = chosen.cancelled
+  const superseded = chosen.superseded
   let phase = planPhase(statuses, resultSeen)
   if (resultPhase === 'paused' && statuses.some((item: any) => item.status !== 'done')) phase = 'paused'
   if (cancelled) phase = 'cancelled'
+  if (superseded) phase = 'superseded'
   /*
    * [1.5.2] 回放也必须走同一套对账。
    *
@@ -1891,6 +1914,8 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
      */
     cancelled,
     cancelRecorded: cancelled,
+    superseded,
+    supersededBy: superseded ? chosen.supersededBy : undefined,
   }
 }
 
@@ -2617,20 +2642,30 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
      * is the user's stop signal; the only honest answer is a refusal that says
      * how to continue deliberately (a new plan, or the main Agent takes over).
      */
-    if (record.phase === 'cancelled' || record.cancelled === true) {
+    if (isTerminalPhase(record.phase) || record.cancelled === true) {
+      /*
+       * [1.9.0] 终态集合：cancelled（用户撤销）与 superseded（责任已转移）
+       * 都不允许派发、不允许复活。superseded 用独立拒绝码，便于调用方区分
+       * 「用户叫停」与「已被别的计划承接」。cancelled 的返回体与 1.8.19 相同。
+       */
+      const superseded = record.phase === 'superseded'
       const snapshot = derivePlanSnapshot(record.statuses)
       return {
         ok: false,
         planId: record.plan.planId,
-        phase: 'cancelled',
+        phase: superseded ? 'superseded' : 'cancelled',
         running: false,
         alreadyRunning: false,
         complete: false,
         remaining: Math.max(0, Number(snapshot.stats.total ?? 0) - Number(snapshot.stats.done ?? 0)),
         stats: snapshot.stats,
-        code: 'PLAN_CANCELLED',
-        error: '计划已取消：取消只停止执行，不会再启动任何部门 Agent',
-        hint: '不要再次派发。如需继续这项工作，请向用户确认后重新生成计划；或由主 Agent 直接接手剩余项，并在答复中说明这是直接执行而非派发。',
+        code: superseded ? 'PLAN_SUPERSEDED' : 'PLAN_CANCELLED',
+        error: superseded
+          ? '计划已被取代：不会再启动任何部门 Agent'
+          : '计划已取消：取消只停止执行，不会再启动任何部门 Agent',
+        hint: superseded
+          ? '不要再次派发。被取代不等于完成：如需交付，请按覆盖链核对承接计划的证据；承接计划未就绪时不得调用 present。'
+          : '不要再次派发。如需继续这项工作，请向用户确认后重新生成计划；或由主 Agent 直接接手剩余项，并在答复中说明这是直接执行而非派发。',
       }
     }
     /*
@@ -2846,9 +2881,18 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     return deliveryReadiness(snapshot, { phase: record.phase })
   }
 
-  function stopGateApplies(record: any) {
+  function stopGateApplies(record: any, session?: any, turn?: number) {
     if (!record?.plan) return false
     if (record.degraded) return false
+    /*
+     * [1.9.0] 终态不再触发收尾 steer —— 这正是死锁的第二个出口（T8 I7）。
+     * cancelled 只有在本回合被结构化点名时才提醒一次（present 仍会硬拦）；
+     * superseded 不 steer：它的判定对象是承接计划，present 的拒绝文案已给出出路。
+     */
+    if (isTerminalPhase(record.phase)) {
+      return record.phase === 'cancelled'
+        && Boolean(session && turn && planIdFromTurn(session, turn) === record.plan.planId)
+    }
     const readiness = recordReadiness(record)
     if (Number(readiness.total ?? 0) === 0) return false
     return !readiness.ready
@@ -3053,7 +3097,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         record = reconstructFromSession(session, planIdFromTurn(session, turn))
         if (record?.plan) state.records.set(session.id, record)
       }
-      if (!stopGateApplies(record)) return
+      if (!stopGateApplies(record, session, turn)) return
       if (record.dispatchPromise) {
         try {
           await record.dispatchPromise
@@ -3061,7 +3105,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
           /* the failure is already on record.errors; the gate only needs the outcome */
         }
         finishRound(record, session)
-        if (!stopGateApplies(record)) return
+        if (!stopGateApplies(record, session, turn)) return
       }
       const book = record.stopSteers && record.stopSteers.turn === turn
         ? record.stopSteers
@@ -3175,6 +3219,38 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     return undefined
   }
 
+  /**
+   * [1.9.0] 点名 superseded 时的覆盖链判定（T8 §4.2 第 4 条、§6.3）。
+   *
+   * superseded 只是「责任已转移」，不是完成：本回合点名它时，判的是承接计划
+   * 是否真的就绪。承接计划缺失/已终止/无法复核 ⇒ fail-closed（SUPERSEDED_STALE）；
+   * 承接计划未就绪 ⇒ 拒绝；只有承接计划 deliveryReady 才放行（产物来自承接计划）。
+   */
+  function supersededDenialReason(session: any, record: any): string | undefined {
+    const planId = record.plan?.planId ?? record.planId ?? ''
+    const by = record.supersededBy
+    const successorPlanId = typeof by?.successorPlanId === 'string' && by.successorPlanId
+      ? by.successorPlanId
+      : typeof by?.planId === 'string' ? by.planId : ''
+    if (!successorPlanId) {
+      return `计划 ${planId} 已被取代，但缺少可验证的承接计划（supersededBy.successorPlanId）：`
+        + '覆盖证据失效（SUPERSEDED_STALE），不得调用 present；请向用户说明覆盖链无法复核并重新确认交付对象。'
+    }
+    const successor = reconstructFromSession(session, successorPlanId)
+    if (!successor?.plan || definedSubtaskCount(successor.plan) === 0 || isTerminalPhase(successor.phase)) {
+      return `计划 ${planId} 已被取代，但承接计划 ${successorPlanId} 不存在、不是交付对象或已终止：`
+        + '覆盖证据失效（SUPERSEDED_STALE）。被取代不等于完成：不得调用 present，不得声称“已完成/最终版/已交付”。'
+    }
+    const readiness = deliveryReadiness(derivePlanSnapshot(successor.statuses), { phase: successor.phase })
+    if (!readiness.ready) {
+      const ids = readiness.remaining.slice(0, 10).join('、')
+      return `计划 ${planId} 已被取代，承接计划 ${successorPlanId} 只完成 ${readiness.done}/${readiness.total}`
+        + `${ids ? `，剩余 ${readiness.remaining.length} 项（${ids}）` : ''}。`
+        + '被取代不等于完成：承接计划通过交付就绪检查之前不得调用 present。'
+    }
+    return undefined
+  }
+
   function presentDenialReason(agent: any) {
     const session = agent?.session
     if (!session || !isRootSession(session)) return undefined
@@ -3222,7 +3298,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
        * or the last defined plan after a restart) is about: cancel stops
        * execution, it does not make the work deliverable.
        */
-      .filter((entry: any) => entry.record.phase !== 'cancelled' && !entry.readiness.ready)
+      .filter((entry: any) => !isTerminalPhase(entry.record.phase) && !entry.readiness.ready)
     if (unresolved.length > 1) {
       const lines = unresolved.slice(0, 6).map((entry: any) => {
         const ids = entry.readiness.remaining.slice(0, 6).join('、')
@@ -3255,10 +3331,23 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       if (!record?.plan) record = lastGateablePlanRecord(session)
       if (!record?.plan) return undefined
       if (definedSubtaskCount(record.plan) === 0) return undefined
+      /*
+       * [1.9.0] 终态解耦（T8 §4.3 P3）：终态计划不再被自动选为判定对象。
+       *
+       * 只有「本回合结构化点名」时才判定；否则不再写回 live、不再拦截其它
+       * 计划的交付。取消 ≠ 完成：记录仍是 cancelled 0/N，只是不再永久挡门。
+       */
+      const namedThisTurn = Boolean(turnPlanId && record.plan.planId === turnPlanId)
+      if (isTerminalPhase(record.phase) && !namedThisTurn) return undefined
+      if (record.phase === 'superseded') {
+        const denial = supersededDenialReason(session, record)
+        if (denial) return denial
+        return undefined
+      }
       readiness = deliveryReadiness(derivePlanSnapshot(record.statuses), { phase: record.phase })
       if (readiness.ready) return undefined
     }
-    if (record?.plan) state.records.set(session.id, record)
+    if (record?.plan && !isTerminalPhase(record.phase)) state.records.set(session.id, record)
     const snapshot = derivePlanSnapshot(record.statuses)
     const planId = record.plan?.planId ?? record.planId
     const ids = readiness.remaining.slice(0, 10).join('、')
@@ -3380,7 +3469,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     const unresolved = [...planIds]
       .map((planId) => recordForPlan(session, planId))
       .filter((record: any) => record?.plan
-        && record.phase !== 'cancelled'
+        && !isTerminalPhase(record.phase)
         && !deliveryReadiness(derivePlanSnapshot(record.statuses), { phase: record.phase }).ready)
     if (unresolved.length === 0) return undefined
     const ids = unresolved.slice(0, 4).map((record: any) => record.plan.planId)

@@ -183,7 +183,7 @@ test('A5 定义 1 子任务但状态未派生时仍拒绝（过滤依据是定�
   assert.match(reason, /未完成/)
 })
 
-test('A6 取消未完成计划后，重启回放仍拒绝 present（取消不改变未完成）', () => {
+test('A6 已取消计划的终态解耦：非点名回合不再挡门，本回合点名仍硬拦', () => {
   const plan = makePlan('wp-cancel', 3)
   const statuses: any[] = createStatuses(plan)
   const session = makeSession()
@@ -192,12 +192,18 @@ test('A6 取消未完成计划后，重启回放仍拒绝 present（取消不改
   session.append('user/message', buildCancelMessage('wp-cancel'))
 
   /*
-   * No turn/start event: this is the fresh-runtime replay after a restart.
-   * The live record and the turn attribution are both gone, which is exactly
-   * the T5 E1 shape that used to be allowed.
+   * [1.9.0] D1：终态计划不再自动进入「全局未完成集合」。
+   * 事故里的死锁正是「已取消、永不就绪、又永远挡门」；解耦后它不再阻塞交付，
+   * 但取消也不是完成——记录仍是 cancelled 0/3（下面 D2 用例钉住这点）。
    */
+  assert.equal(runtimeFor().presentDenialReason({ session }), undefined,
+    '已取消且非本回合点名的计划不得再阻塞交付')
+
+  // D2：本回合结构化点名这个已取消计划时，仍然硬拦，不放宽。
+  session.append('turn/start', { turn: 2 })
+  settle(session, plan, statuses)
   const reason = runtimeFor().presentDenialReason({ session })
-  assert.ok(reason, '取消后重启不得放行')
+  assert.ok(reason, '本回合点名的已取消计划必须拒绝')
   assert.match(reason, /wp-cancel/)
   assert.match(reason, /已取消/)
   assert.match(reason, /0\/3/)
@@ -221,7 +227,7 @@ test('A7 旧计划取消后，较新的已就绪计划仍可交付（不因历�
     '较新的已就绪计划必须能交付')
 })
 
-test('A8 取消真实计划后用空计划作挡箭牌仍拒绝（空计划不参与门禁）', () => {
+test('A8 空计划不作挡箭牌，也不参与终态判定（空计划不改变交付结论）', () => {
   const real = makePlan('wp-real', 1)
   const statuses: any[] = createStatuses(real)
   const empty = makePlan('wp-empty-shield', 0)
@@ -232,6 +238,13 @@ test('A8 取消真实计划后用空计划作挡箭牌仍拒绝（空计划不�
   session.append('user/message', buildCancelMessage('wp-real'))
   session.append('user/message', buildPlanMessage(empty))
 
+  // 空计划不在判定域；已取消的真实计划按 D1 不再挡门，因此这里应放行。
+  assert.equal(runtimeFor().presentDenialReason({ session }), undefined,
+    '空计划既不能洗白、也不应阻塞；终态解耦后这里应放行')
+
+  // 但本回合点名的若是那个已取消的真实计划，空计划挡箭牌仍然无效。
+  session.append('turn/start', { turn: 2 })
+  settle(session, real, statuses)
   const reason = runtimeFor().presentDenialReason({ session })
   assert.ok(reason, '空计划不能把已取消的真实计划洗白')
   assert.match(reason, /wp-real/)

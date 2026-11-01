@@ -22,6 +22,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  buildCancelMessage,
   buildPlanMessage,
   buildResultMessage,
   buildResultSummary,
@@ -238,7 +239,8 @@ test('完成且证据通过才放行；已取消/证据缺口会被拦住；非�
     await runtime.onTurnStopping({ agent, turn: 1 })
     assert.equal(steered.length, 0, '完成且证据通过的计划不得被拦')
   }
-  // 已取消但未完成（T5-C）：取消不等于完成，不再直接放行
+  // 已取消（1.9.0 终态解耦）：不再自动触发收尾 steer，否则又回到「取消即死锁」。
+  // 本回合点名它时 present 仍会硬拦（见下面 present 用例的 D2 分支）。
   {
     const session = makeSession()
     const record = makeRecord(makePlan('wp-cancelled'))
@@ -246,10 +248,7 @@ test('完成且证据通过才放行；已取消/证据缺口会被拦住；非�
     const runtime = makeRuntime(record, session)
     const { agent, steered } = steerableAgent(session)
     await runtime.onTurnStopping({ agent, turn: 1 })
-    assert.equal(steered.length, 1, '取消只停止执行，未完成项仍不得被当成完成')
-    assert.match(textOf(steered[0]), /计划已取消但未完成/)
-    assert.match(textOf(steered[0]), /不要调用 present/)
-    assert.doesNotMatch(textOf(steered[0]), /1\. 调用 dsh_workplan_dispatch/)
+    assert.equal(steered.length, 0, '终态计划不得再自动触发收尾 steer')
   }
   // 全部 done 但证据缺口（T5-B/D）：也要拦，不能让回合安静收尾
   {
@@ -407,7 +406,7 @@ test('计划、谱系、spawn 记录三处都没有的结算，不得激活闸�
   assert.equal(steered.length, 0, '无关后台任务的结算不能把未完成计划强行续跑')
 })
 
-test('present：未完成/全 done 无证据/已取消都拒绝，证据补齐后才放行', () => {
+test('present：未完成/全 done 无证据都拒绝，已取消按点名判定，证据补齐后才放行', () => {
   const session = makeSession()
   const record = makeRecord(makePlan('wp-present'))
   const runtime: any = makeRuntime(record, session)
@@ -427,12 +426,31 @@ test('present：未完成/全 done 无证据/已取消都拒绝，证据补齐�
   markDelivered(record)
   assert.equal(runtime.presentDenialReason({ session }), undefined, '证据补齐后才允许交付')
 
+  /*
+   * [1.9.0] D1：终态计划不再自动挡门。取消 ≠ 完成，但也不该永久阻塞交付
+   * （否则「取消未完成计划」+「禁止派发」= 双向死锁）。
+   */
   const cancelledSession = makeSession()
   const cancelled = makeRecord(makePlan('wp-present-cancelled'))
   cancelled.phase = 'cancelled'
   const cancelledRuntime: any = makeRuntime(cancelled, cancelledSession)
-  const cancelledDenial = cancelledRuntime.presentDenialReason({ session: cancelledSession })
-  assert.match(cancelledDenial, /已取消/, '取消 1/3 不得放行（T5-C）')
+  assert.equal(cancelledRuntime.presentDenialReason({ session: cancelledSession }), undefined,
+    '非本回合点名的已取消计划不再阻塞交付')
+
+  // [1.9.0] D2：本回合点名这个已取消计划时，仍按「已取消 + 0/3」硬拦。
+  const namedSession = makeSession()
+  const namedPlan = makePlan('wp-present-cancelled')
+  const namedRecord = makeRecord(namedPlan)
+  namedRecord.phase = 'cancelled'
+  namedSession.append('turn/start', { turn: 2 })
+  namedSession.append('user/message', buildPlanMessage({
+    ...namedPlan,
+    contradictions: { primary: { statement: '未完成不得交付' } },
+  }))
+  namedSession.append('user/message', buildCancelMessage('wp-present-cancelled'))
+  const namedRuntime: any = makeRuntime(namedRecord, namedSession)
+  const cancelledDenial = namedRuntime.presentDenialReason({ session: namedSession })
+  assert.match(cancelledDenial, /已取消/, '本回合点名的已取消计划仍不得放行')
   assert.match(cancelledDenial, /不得调用 present/)
 
   const childSession = { ...makeSession(), header: { origin: 'subagent' } }

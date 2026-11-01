@@ -1,3 +1,33 @@
+## 1.9.0 — 2026-11-01
+
+**修复：终态计划不再无限挡门；取消/被取代与「本回合点名」解耦；present 只硬拦本回合点名的终态计划。**
+
+> 背景：`wp-bea31753` 被取消（0/8）后，`present` 仍把它当作「最后可判定计划」
+> 硬拦；同一计划 `dispatch` 又返回 `PLAN_CANCELLED`，形成「不能交付、不能派发、
+> 收尾 steer 还说两件都不能做」的双向死锁（日志 seq 7167 → 7174 → 7175）。
+> 更早的 T5-C 语义把「已取消」等同「不可交付」，但 1.8.16 的全会话并集又把
+> 取消计划排除在未完成集合之外——两处判断互相矛盾，正是死锁来源。
+
+### 修复
+
+- `src/plan.ts` 新增 `TERMINAL_PHASES` / `isTerminalPhase`：`cancelled` 与
+  `superseded` 统一为终态，`reconcilePhase` 不再把终态改回 `active`。
+- `src/runtime.ts`：
+  - `present` 的候选集合排除终态计划；终态计划只在「本回合结构化点名」时判定
+    （D2 硬拦不放宽），不再自动写回 live、不再永久挡门（D1）。
+  - 已取消计划被点名时文案逐字保留「已取消 + 完成 N/M + 不得调用 present」。
+  - 新增只读 `superseded` 判定：`supersededBy.successorPlanId` 缺失/终止/未就绪
+    ⇒ `SUPERSEDED_STALE`；承接计划就绪才放行。**写入路径（V1–V8 核验、覆盖映射、
+    用户确认）不在本版**，`dsh_workplan_cancel` 仍只写 `cancelled`。
+  - `dispatch` 对 `superseded` 返回 `PLAN_SUPERSEDED`；`cancelled` 返回体逐字保留。
+  - `stopGateApplies`：终态计划不再自动触发收尾 steer（点名 `cancelled` 仍提醒一次）。
+- 由 T10 产出的补丁按 `git apply` 应用：3 文件 +120/−12；`tsc --noEmit` 通过；
+  更新 `tests/present-gate-evidence.test.ts` 的 A6/A8、`tests/delivery-gate.test.ts`
+  与 `tests/workplan-turn-stop-gate.test.ts` 中「取消一律拒绝」的旧断言为
+  「非点名放行 / 点名硬拦」；全量 **274/274**。
+- 已知残余（下一批）：`superseded` 写入路径、P1 `EVIDENCE_GAP` 拒绝码统一、
+  W1 digest 规范化、W5 replay 与真实取消信封联测、A6/A8 之外的全量回归。
+
 ## 1.8.19 — 2026-10-31
 
 **修复：子任务超时/整轮预算中止时，不再抹掉已落盘的产物与运行痕迹。**

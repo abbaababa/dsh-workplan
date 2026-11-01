@@ -170,7 +170,7 @@ test('update 补证会持久化，并在回放后仍然可交付', async () => {
   assert.equal(replayedReadiness.ready, true, '刷新后仍必须可交付')
 })
 
-test('present：全 done 无证据、取消未完成一律拒绝；取消文案不再暗示可交付', () => {
+test('present：全 done 无证据一律拒绝；取消文案不再暗示可交付', () => {
   const plan = makePlan('wp-present-unified')
   const session = makeSession()
   const bare: any = {
@@ -199,11 +199,14 @@ test('present：全 done 无证据、取消未完成一律拒绝；取消文案�
     errors: [],
     degraded: false,
   }
+  /*
+   * [1.9.0] D1：终态计划不再自动进入「全局未完成集合」。
+   * 取消 ≠ 完成，但也不该永久挡门（事故里的死锁正来自「已取消、永不就绪、又永远挡门」）。
+   * 本回合点名它时仍然硬拦，见 workplan-turn-stop-gate.test.ts 的 D2 用例。
+   */
   const cancelledRuntime: any = makeRuntime(cancelledRecord, cancelled)
-  const cancelledDenial = cancelledRuntime.presentDenialReason({ session: cancelled })
-  assert.match(cancelledDenial, /已取消/)
-  assert.match(cancelledDenial, /不得调用 present/)
-  assert.doesNotMatch(cancelledDenial, /先调用 dsh_workplan_cancel 取消计划/)
+  assert.equal(cancelledRuntime.presentDenialReason({ session: cancelled }), undefined,
+    '非本回合点名的已取消计划不再阻塞交付')
 
   const cancelMessage: any = buildCancelMessage('wp-cancel-copy')
   const text = String(cancelMessage?.content?.[0]?.text ?? '')

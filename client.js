@@ -75,6 +75,7 @@ window.__ModuleLoader__.load({
                     "paused": "预算用完，可续跑",
                     "degraded": "安排失败",
                     "cancelled": "已取消",
+                    "superseded": "已由他计划承接",
                     "ended": "已结束，可续跑"
                 },
                 "status": {

@@ -10,6 +10,19 @@
 import { randomUUID } from 'node:crypto'
 
 export const PLAN_VERSION = 1
+
+/**
+ * [1.9.0] 处置终态：cancelled（用户撤销）与 superseded（责任已转移）。
+ *
+ * 两者都是终态：记录与计数原样保留，永不算完成，也永不被自动选为
+ * `present` 的判定对象；只有「本回合结构化点名」时才判定（cancelled 仍硬拦）。
+ * 规则依据：_rerun_20261101/GATE_rule_design.md §3.1。
+ */
+export const TERMINAL_PHASES: ReadonlySet<string> = new Set(['cancelled', 'superseded'])
+
+export function isTerminalPhase(phase: any): boolean {
+  return typeof phase === 'string' && TERMINAL_PHASES.has(phase)
+}
 export const MAX_STAGES = 6
 export const MAX_SUBTASKS = 15
 export const MAX_CONCURRENT = 5
@@ -2154,6 +2167,11 @@ export function planPhase(statuses: any, _resultSeen = false) {
  *     它们携带状态列表里没有的信息（预算暂停、用户取消）。
  */
 export function reconcilePhase(phase: any, statuses: any) {
+  /*
+   * [1.9.0] 终态优先：superseded 的记录即使状态全部 done，也不得被对账成
+   * done（T8 §5.5 C6）。cancelled 保持 1.8.19 的既有对账语义不变。
+   */
+  if (phase === 'superseded') return phase
   const derived = planPhase(statuses)
   if (derived === 'done') return 'done'
   if (phase === 'done' || phase === 'integrating') return derived
