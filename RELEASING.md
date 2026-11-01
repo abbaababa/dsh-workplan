@@ -34,6 +34,27 @@ npm run build && git diff --exit-code -- lib client.js
 
 `npm test` 会先构建再跑全部用例；`npm run check` 是 `tsc --noEmit`。任何一步失败都不要打 tag。
 
+### 1.4 跨版本 A/B 探针（R-W5-01；**不属于 `npm test`**）
+
+用途：证明「终态计划不再死锁 present」这次解耦没有把旧版行为改坏，并且新版写出的 `superseded` 信封交给旧读端时只会安全降级、不会变成可交付。
+
+```bash
+# 旧运行时取已发布 tag 的 lib（tag 内已含构建产物，无需 npm ci）
+rm -rf /tmp/w5-old && mkdir -p /tmp/w5-old
+git archive v1.8.19 lib | tar -x -C /tmp/w5-old
+
+# 新版使用刚构建的 lib；root 日志切片是外部证据夹具，可用 W5_ROOT_LOG 覆盖
+W5_ROOT_LOG=/Users/open/Documents/Stocks/_baseline_work/root/root.jsonl \
+  node scripts/w5-cross-version-check.mjs \
+    /tmp/w5-old/lib/runtime.js "$PWD/lib/runtime.js" "$PWD/lib/plan.js"
+```
+
+前置：① 已执行 `npm run build`（`lib/` 与 `src/` 同步）；② 本地存在 tag `v1.8.19`；③ 夹具 root 日志可读（默认路径见脚本；`W5_ROOT_LOG` 可覆盖，缺夹具时本步**不得判 PASS**，按未验证记录并停下）。
+
+PASS 判据：脚本最后打印 `RESULT: PASS` 且 EXIT=0，六条断言全 PASS（旧版复现生产拒绝文案、旧版 present 拒绝且 steer 触发、新版 present 放行且 steer=0、新版对终态计划仍拒绝 dispatch、superseded 写入为单条 full 覆盖信封、旧读端降级为 cancelled 且仍拒绝交付）。耗时约 1 秒。
+
+失败处置：不得打 tag / 不得发布；保留脚本 JSON 输出；若「旧版复现生产文案」失败，先确认夹具 `root.jsonl` 的 seq 7168/7175 未被改写（`event7168Sha256` 应为 `36fc488d…`），再判断是回归还是证据过期。
+
 ## 2. 提交与打标签
 
 ```bash
