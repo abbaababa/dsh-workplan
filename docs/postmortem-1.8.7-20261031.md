@@ -463,3 +463,36 @@ assertion）。这一条尚未实施。
   「非点名放行 / 点名硬拦」。
 - 残余：`superseded` 写入路径、P1 `EVIDENCE_GAP` 拒绝码统一、W1 digest 规范化、
   W5 与真实取消信封 replay 联测、活体重启验证。
+
+## 17. 1.9.1：为「被中止但产物已交付」的子会话补发 follow-up（2026-11-01）
+
+### 17.1 事实
+
+- 事故夜三条子会话 `a0d5b134`（qa:T10）、`031225ef`（engineering:T11）、
+  `7934905a`（writing:T12）分别在 23:07:25 / 23:23:38 被整轮预算与 900s
+  子任务上限中止；三条末轮都是 `turn/end = aborted/parent`。
+- 台账侧三条早已 `done + verification=structured + acceptance 全 pass`
+  （durable seq 6197 / 6464 / 6471），父会话重启只回放台账
+  （`runtime.ts:1541`），不会改写子会话的 `turn/end`。
+- DSH Web 子智能体列表只读 `subagentTiming.lastTurnCompleted`
+  （`dsh-client-ui-subagent/lib/client.js:203-204` 文案、`:272` 状态点），
+  该字段由子会话末轮 `turn/end` 推出 ⇒ 两条数据源 3/3 冲突，界面永远灰点。
+
+### 17.2 处置
+
+- 用户 2026-11-01 明确同意「补发 follow-up，让圈注三行真正变绿」（路径 A）。
+- 新增 `dsh_workplan_followup`：调用官方
+  `subagents.sendMessage(sender, targetId, content, {signal})`。service 的语义
+  是「向发送者的直接父/直接 continuable 子投递；running 目标在下一步收，
+  idle 目标开新一轮，缺席的直接子会话冷恢复」——正是路径 A 需要的真实
+  follow-up，而不是伪造记录。
+- 守卫：根会话、catalog 直接子会话、message 非空且 ≤4000 字符、服务缺失/
+  投递异常均显式失败；工具不写计划状态、不触发 present、不改
+  `lastTurnCompleted`。
+- 新增 `tests/workplan-followup-tool.test.ts` 3 条；全量 277/277。
+
+### 17.3 边界与残余
+
+- 补发成功 ≠ 界面变绿：必须等子会话自己跑完并 `turn/end = completed`。
+- 若子会话再次被预算/上限中止，灰点保留；不得改投影缓存或手写 turn/end。
+- 本版不自动补发：必须用户明确授权后由主 Agent 调用工具。

@@ -312,6 +312,64 @@ function createCancelTool(runtime: any) {
   }
 }
 
+function createFollowupTool(runtime: any) {
+  return {
+    name: 'dsh_workplan_followup',
+    description:
+      '把一条说明投递给本会话的某个**直接子会话**，让它继续跑一个正常回合。'
+      + '用途仅限：子任务被预算/超时中止、但产物已在盘上，且用户明确同意补发 follow-up 时，'
+      + '让子会话自己收尾，从而让它自己的 turn/end 变成 completed。'
+      + '它不写计划状态、不触发交付、也不改变界面判定；投递本身不等于完成。'
+      + '不是直接子会话（父会话 catalog 未登记）一律拒绝。',
+    parameters: {
+      type: 'object',
+      properties: {
+        sessionId: {
+          type: 'string',
+          description: '直接子会话 ID（父会话 subagent/catalog 中登记的那一个）。',
+        },
+        message: {
+          type: 'string',
+          description: '发给子会话的说明：确认已有产物、只补缺口、不要整步重跑；不要要求它伪造完成。',
+        },
+      },
+      required: ['sessionId', 'message'],
+      additionalProperties: false,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          ok: { type: 'boolean' },
+          sessionId: { type: 'string' },
+          messageId: { type: 'string' },
+          code: { type: 'string' },
+          error: { type: 'string' },
+        },
+        required: ['ok'],
+        additionalProperties: true,
+      },
+      render(_args: any, value: any) {
+        const result = isRecord(value) ? value : {}
+        if (!result.ok) {
+          return textContent(
+            `follow-up 未投递：${String(result.error ?? result.code ?? '未知错误')}`,
+          )
+        }
+        return textContent(
+          `已向子会话 ${String(result.sessionId ?? '')} 投递 follow-up`
+          + (result.messageId ? `（messageId ${String(result.messageId)}）` : '')
+          + '。投递只代表消息被接收；界面状态要等该子会话自己的回合正常结束才会变化。',
+        )
+      },
+    },
+    async execute(args: any, exec: any) {
+      const parsed = asObject(args) ?? {}
+      return runtime.followupTool(exec.agent, parsed, exec.signal)
+    },
+  }
+}
+
 function createStatusTool(runtime: any) {
   return {
     name: 'dsh_workplan_status',
@@ -542,6 +600,7 @@ export function apply(ctx: any, config: WorkplanConfig = {}) {
   ctx.effect(() => ctx.tools.register(createUpdateTool(runtime)))
   ctx.effect(() => ctx.tools.register(createCancelTool(runtime)))
   ctx.effect(() => ctx.tools.register(createStatusTool(runtime)))
+  ctx.effect(() => ctx.tools.register(createFollowupTool(runtime)))
   ctx.effect(() => ctx.tools.register(createDispatchTool(runtime)))
 
   /*
@@ -622,7 +681,7 @@ export function apply(ctx: any, config: WorkplanConfig = {}) {
 
 export const meta = {
   name,
-  version: '1.9.0',
+  version: '1.9.1',
   promptOrder: PROMPT_ORDER,
   routes: ['/dsh-workplan/plans', '/dsh-workplan/vendor/chart.umd.js'],
 }

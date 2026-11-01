@@ -1,3 +1,35 @@
+## 1.9.1 — 2026-11-01
+
+**新增：`dsh_workplan_followup` —— 用户授权后，向直接子会话补发 follow-up。**
+
+> 背景：事故夜三条子会话（`a0d5b134` / `031225ef` / `7934905a`）被整轮预算与
+> 900s 上限中止，末轮 `turn/end = aborted/parent`，DSH 界面据此永远显示
+> idle（灰点）；台账侧它们早已是 done/structured。用户 2026-11-01 明确同意
+> 「补发 follow-up，让圈注三行真正变绿」——正确做法是让子会话自己再跑完一个
+> 正常回合，而不是伪造 turn/end、改投影缓存或手工刷 UI。
+
+### 新增
+
+- `dsh_workplan_followup({ sessionId, message })`：调用官方
+  `subagents.sendMessage(agent, childId, [{type:'text',text}], {signal})`，
+  把说明投递给父会话 `subagent/catalog` 里登记过的**直接**子会话。
+  - 只允许根会话；子 Agent 会话调用返回 `NOT_ROOT`。
+  - 未在 catalog 登记的目标返回 `NOT_DIRECT_CHILD`，不做猜测式投递。
+  - 空 message / 超过 4000 字符直接拒绝；子会话服务缺失返回
+    `NO_SUBAGENT_SERVICE`；投递异常返回 `DELIVERY_FAILED` 并保留原文。
+  - 工具只投递：不写计划状态、不触发 present、不改 `lastTurnCompleted`；
+    界面是否变绿由子会话自己下一轮的 `turn/end` 决定。
+- `src/runtime.ts` 新增 `followupTool`；`src/host.ts` 新增 `createFollowupTool`
+  并在插件装配处注册；`tests/workplan-followup-tool.test.ts` 3 条。
+- 全量 `npm test` **277/277**；`npm run check` 无诊断；两次构建 5 产物 sha256
+  一致。
+
+### 边界
+
+- 本工具不是「把子任务标完成」的捷径：它不会替子会话产出交付物，也不能
+  绕过 `present`/`deliveryReady` 闸门；投递后仍需核对子会话自己的回合结果。
+- 目标必须是直接子会话；孙会话、同标签的其他历史会话都不在允许范围。
+
 ## 1.9.0 — 2026-11-01
 
 **修复：终态计划不再无限挡门；取消/被取代与「本回合点名」解耦；present 只硬拦本回合点名的终态计划。**

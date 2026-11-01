@@ -2592,6 +2592,73 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     }
   }
 
+  /*
+   * [1.9.1] 用户授权的 follow-up 通道。
+   *
+   * 事故背景：三条子会话 a0d5b134 / 031225ef / 7934905a 在 2026-10-31
+   * 23:07–23:23 之间被整轮预算与 900s 子任务上限中止，各自末轮
+   * `turn/end = aborted/parent`；界面据此显示 idle（灰色），而台账侧三条
+   * 都是 done/structured。用户 2026-11-01 明确同意「补发 follow-up，让圈注
+   * 三行真正变绿」——做法是让子会话自己再跑完一个正常回合，而不是伪造
+   * turn/end 或改投影缓存。
+   *
+   * 本工具只做一件事：把一条消息投递到本会话的**直接**子会话。它不写计划
+   * 状态、不触发交付、也不改变 `lastTurnCompleted`——那个字段只会被子会话
+   * 自己真实完成的回合改写。投递成功后子会话开始新一轮；它正常结束，界面
+   * 才可能变绿。失败一律返回 ok:false，不吞错。
+   */
+  async function followupTool(agent: any, args: any, signal: any) {
+    const session = agent?.session
+    if (!session) {
+      return { ok: false, code: 'NO_SESSION', error: '只能在会话内补发 follow-up' }
+    }
+    if (!isRootSession(session)) {
+      return { ok: false, code: 'NOT_ROOT', error: '只有根会话可以补发 follow-up' }
+    }
+    const childId = typeof args?.sessionId === 'string' ? args.sessionId.trim() : ''
+    const message = typeof args?.message === 'string' ? args.message.trim() : ''
+    if (!childId) {
+      return { ok: false, code: 'INVALID_SESSION', error: 'sessionId 必填：必须是本会话的直接子会话 ID' }
+    }
+    if (!message) {
+      return { ok: false, code: 'INVALID_MESSAGE', error: 'message 必填：要发给子会话的说明' }
+    }
+    if (message.length > 4000) {
+      return { ok: false, code: 'MESSAGE_TOO_LONG', error: 'message 过长（上限 4000 字符）' }
+    }
+    if (!spawnedChildIds(session).has(childId)) {
+      return {
+        ok: false,
+        code: 'NOT_DIRECT_CHILD',
+        error: `${childId} 不是本会话的直接子会话（父会话 catalog 未登记），拒绝投递`,
+      }
+    }
+    const service: any = (ctx as any).subagents
+    if (!service || typeof service.sendMessage !== 'function') {
+      return {
+        ok: false,
+        code: 'NO_SUBAGENT_SERVICE',
+        error: '当前部署没有可用的 subagent 服务，无法投递 follow-up',
+      }
+    }
+    try {
+      const messageId = await service.sendMessage(
+        agent,
+        childId,
+        [{ type: 'text', text: message }],
+        { signal },
+      )
+      return { ok: true, sessionId: childId, messageId: String(messageId ?? '') }
+    } catch (error: any) {
+      return {
+        ok: false,
+        code: 'DELIVERY_FAILED',
+        sessionId: childId,
+        error: truncate(error instanceof Error ? error.message : String(error), 500),
+      }
+    }
+  }
+
   async function dispatchTool(agent: any, args: any, signal: any) {
     const session = agent?.session
     if (!session) throw new PlanError('只能在会话内派发计划', 'NO_SESSION')
@@ -3572,6 +3639,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     cancelPlan,
     dispatchTool,
     statusTool,
+    followupTool,
     plansPayload,
     route,
     dispose,
