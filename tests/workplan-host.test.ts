@@ -56,10 +56,31 @@ test('update 工具暴露 expectedRevision 与 force 写保护参数', () => {
   assert.equal(update.parameters.properties.force.type, 'boolean')
 })
 
-test('cancel 工具仍然存在且只接受 planId 与 reason', () => {
+test('cancel 工具的参数面仍封闭：planId/reason + 受限的 disposition/supersededBy', () => {
   const cancel = createCancelTool(fakeRuntime())
   assert.equal(cancel.name, 'dsh_workplan_cancel')
-  assert.deepEqual(Object.keys(cancel.parameters.properties).sort(), ['planId', 'reason'])
+  /*
+   * [1.9.2 / T6] 写侧收敛后多了处置参数，但集合仍是封闭的：工具只接受「映射
+   * 意图」，requiredCount/coveredCount/coverage/digest 由运行时复算，模型不得
+   * 自报。这条用例挡的是「为了让 supersede 跑通而把 schema 放成 additionalProperties:true」。
+   */
+  assert.deepEqual(
+    Object.keys(cancel.parameters.properties).sort(),
+    ['disposition', 'planId', 'reason', 'supersededBy'],
+  )
+  assert.equal(cancel.parameters.additionalProperties, false)
+  assert.deepEqual(cancel.parameters.properties.disposition.enum, ['cancelled', 'superseded'])
+  const by = cancel.parameters.properties.supersededBy
+  assert.deepEqual(by.required, ['planId', 'mapping'])
+  assert.equal(by.additionalProperties, false)
+  assert.deepEqual(Object.keys(by.properties).sort(), ['mapping', 'planId'])
+  const item = by.properties.mapping.items
+  assert.deepEqual(item.required, ['from', 'to', 'basis'])
+  assert.equal(item.additionalProperties, false)
+  const byProps = by.properties as Record<string, unknown>
+  for (const field of ['requiredCount', 'coveredCount', 'coverage', 'digest']) {
+    assert.equal(byProps[field], undefined, `运行时复算的 ${field} 不得成为工具入参`)
+  }
 })
 
 test('规划器输出 schema 要求 ok，并允许完整计划', () => {

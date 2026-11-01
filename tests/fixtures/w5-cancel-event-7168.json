@@ -1,0 +1,33 @@
+{
+  "provenance": {
+    "sessionId": "session-d1e7bc05-fd0c-4dc0-acd0-f42c391bd443",
+    "logFile": "_baseline_work/root/root.jsonl",
+    "seq": 7168,
+    "eventType": "user/message",
+    "sourceKind": "workplan-cancel",
+    "producedBy": "dsh-workplan 1.8.19 buildCancelMessage（事故时加载版本，未打 1.9.0 补丁）",
+    "incident": "turn 26 step 14：模型取消 wp-bea31753（0/8）后，同一 turn 的 present（seq 7174）被拒（seq 7175 isError）",
+    "rawLineSha256": "36fc488d907851c7ffa9c36d071fa96991534dd6ba60d04402d6ddb833f36a7f",
+    "eventDataJsonSha256": "5fe7f21ab5339a00d7621f9d6ed3221d80fa2ea2e8850a4b2b3c71001a2485f5",
+    "extractedBy": "_rerun_20261101/tmp/T9_w5/extract_fixture.mjs",
+    "note": "event.data 逐字保留；未补 disposition/supersededBy 等 1.9 字段"
+  },
+  "event": {
+    "type": "user/message",
+    "data": {
+      "id": "987c9648-2be0-4eb0-9e7a-4e90eeea44fa",
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "【任务已取消】该计划（审计 T10/T11/T12 三条 done 改判是否成立）从未派发（0/8），其目标已被后续计划 wp-4ad0038f 完整覆盖并交付 8/8：T1 定位画圈项、T2 验收判定、T3 全量复跑、T4 根因（RC-1/RC-2）…\n\n这次任务分解已取消。取消只停止后续执行，不会把未完成项标成完成；已完成项保留原记录。\n取消不等于完成：如仍有未完成项或证据缺口，不要调用 present，不要写“已完成/最终版/已交付”；\n答复开头必须写「未完成：剩余 N 项（列出 ID）与原因」。\n\n<!-- DSH-WORKPLAN-CANCEL:BEGIN -->\n{\"kind\":\"workplan-cancel\",\"version\":1,\"planId\":\"wp-bea31753-ec5f-4d97-89b6-c673308113e3\",\"reason\":\"该计划（审计 T10/T11/T12 三条 done 改判是否成立）从未派发（0/8），其目标已被后续计划 wp-4ad0038f 完整覆盖并交付 8/8：T1 定位画圈项、T2 验收判定、T3 全量复跑、T4 根因（RC-1/RC-2）、T5 交付门禁、T6 独立负控、T7 闭环报告、T8 防复发建议。重复派发会产生重复工作与新漂移，故取消；不伪造完成。\",\"cancelledAt\":1793504440684}\n<!-- DSH-WORKPLAN-CANCEL:END -->"
+        }
+      ],
+      "source": {
+        "kind": "workplan-cancel",
+        "form": "notice",
+        "summary": "【任务已取消】该计划（审计 T10/T11/T12 三条 done 改判是否成立）从未派发（0/8），其目标已被后续计划 wp-4ad0038f 完整覆盖并交付 8/8：T1 定位画圈项、T2 验收判定、T3 全量复跑、T4 根因（RC-1/RC-2）…"
+      }
+    }
+  }
+}

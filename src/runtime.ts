@@ -44,6 +44,7 @@ import {
   messageText,
   readySubtasks,
   MAX_PLAN_RESUMES,
+  PRESENT_DENY_CODES,
   canResumePlan,
   resetBlockedStatuses,
   parseCancelMessage,
@@ -55,10 +56,14 @@ import {
   validatePlan,
   applyResultStatuses,
   adjudicateResult,
+  activeDenyCode,
   MAX_CONVERSATION_CHARS,
   parseUpdateMessage,
   buildUpdateMessage,
 } from './plan.js'
+import type { PresentDenialVerdict, PresentDenyCode } from './plan.js'
+import { computeMappingDigest, verifyMappingDigest } from './supersede-digest.js'
+import { supersedePlanRecord } from './supersede.js'
 import { createProgressWatchdog, describeError } from './watchdog.js'
 
 /**
@@ -1770,6 +1775,13 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
           if (cancel.disposition === 'superseded') {
             snap.superseded = true
             snap.supersededBy = cancel.supersededBy
+            /*
+             * [1.9.2] 互斥（T6）：取代永远发生在取消之后，所以日志里两条信封
+             * 都在。只加 superseded 不清 cancelled，冷启动记录就会变成「既已
+             * 取消、又被取代」，与 live 记录（`supersedePlanRecord` 写入时
+             * 把 cancelled 置 false）分叉 —— 这正是写侧收敛要杜绝的那类分叉。
+             */
+            snap.cancelled = false
           } else {
             snap.cancelled = true
           }
@@ -1861,8 +1873,13 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
   const resultPhase = chosen.resultPhase
   const resultSeen = chosen.resultSeen
   const resumeCount = chosen.resumeCount
-  const cancelled = chosen.cancelled
   const superseded = chosen.superseded
+  /*
+   * [1.9.2] 终态互斥（T6）：superseded 与 cancelled 不会同时成立。手写/旧版
+   * 日志里可能出现「supersede 信封之后又有一条取消信封」，此时按终态优先级
+   * 只认 superseded（fail-closed：被取代依然不可派发、不可交付）。
+   */
+  const cancelled = chosen.cancelled && !superseded
   let phase = planPhase(statuses, resultSeen)
   if (resultPhase === 'paused' && statuses.some((item: any) => item.status !== 'done')) phase = 'paused'
   if (cancelled) phase = 'cancelled'
@@ -1911,10 +1928,16 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
      * whether that cancellation is durably recorded. For replay they are the
      * same; the live `cancelPlan` uses `cancelRecorded` to make a second
      * cancel a no-op instead of appending a duplicate message (N8).
+     *
+     * [1.9.2] 被取代的计划同样有一条已落盘的终态记录（V3 要求先取消才允许
+     * 取代），因此 cancelRecorded 在 superseded 时为 true —— 与 live 记录一致
+     * （`supersedePlanRecord` 保留先前的 cancelRecorded）。`supersedeRecorded`
+     * 是取代信封的写入见证，补齐后普通取消的拒绝体在冷启动/热路径上字段相同。
      */
     cancelled,
-    cancelRecorded: cancelled,
+    cancelRecorded: cancelled || superseded,
     superseded,
+    supersedeRecorded: superseded,
     supersededBy: superseded ? chosen.supersededBy : undefined,
   }
 }
@@ -2314,6 +2337,46 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     if (!record?.plan) record = reconstructFromSession(session, args?.planId)
     record = adoptRequestedPlan(session, record, args?.planId)
     if (!record?.plan) throw new PlanError('当前会话还没有已生成的计划', 'NO_PLAN')
+    /*
+     * [1.9.2] superseded 的唯一写入入口（T6）。
+     *
+     * `disposition` 只有两个合法取值：省略/'cancelled' 走既有取消语义（返回体
+     * 与 1.8.19 逐字相同）；'superseded' 交给 `supersedePlanRecord`（V1–V8
+     * 复算 + digest + durable 信封）。其他取值一律拒绝：静默忽略一个拼错的
+     * disposition 会把「想取代」写成「取消」，而两者的读侧判定完全不同。
+     */
+    const disposition = args?.disposition
+    if (disposition !== undefined && disposition !== 'cancelled' && disposition !== 'superseded') {
+      throw new PlanError(
+        `disposition 只能是 cancelled 或 superseded（收到 ${String(disposition)}）`,
+        'INVALID_DISPOSITION',
+      )
+    }
+    if (disposition === 'superseded') {
+      const result = supersedePlanRecord(session, record, args, { reconstruct: reconstructFromSession })
+      state.records.set(session.id, record)
+      return result
+    }
+    /*
+     * [1.9.2] 被取代的计划不允许被普通取消静默改回 cancelled。
+     *
+     * 旧路径会追加第二条不带 disposition 的取消信封：live 变 cancelled，
+     * replay 却因同一 planId 先读到 superseded 而仍是 superseded —— 又一种
+     * live/replay 分叉。行政撤销（E6）需要用户明确要求并写入新的处置记录，
+     * 本版本不实现，因此这里 fail-closed 并给出可执行说明。
+     */
+    if (record.phase === 'superseded' || record.superseded === true) {
+      return {
+        ok: false,
+        planId: record.plan.planId,
+        phase: 'superseded',
+        code: 'SUPERSEDED_LOCKED',
+        error: '计划已被取代：不能静默改回 cancelled（行政撤销 E6 需要用户明确要求并写入新的处置记录，本版本未实现）',
+        hint: '被取代不等于完成：不得调用 present、不得声称“已完成”。如需撤销该处置，请先向用户确认，再由主 Agent 走审计流程。',
+        cancelRecorded: record.supersedeRecorded === true,
+        stats: derivePlanSnapshot(record.statuses).stats,
+      }
+    }
     const reason = typeof args?.reason === 'string' && args.reason.trim()
       ? args.reason.trim()
       : '用户取消'
@@ -3292,33 +3355,73 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
    * superseded 只是「责任已转移」，不是完成：本回合点名它时，判的是承接计划
    * 是否真的就绪。承接计划缺失/已终止/无法复核 ⇒ fail-closed（SUPERSEDED_STALE）；
    * 承接计划未就绪 ⇒ 拒绝；只有承接计划 deliveryReady 才放行（产物来自承接计划）。
+   *
+   * [1.9.2] 返回值带上拒绝码（T8 §4.3 `judgeEffective`）：覆盖链无法复核
+   * ⇒ `SUPERSEDED_STALE`；覆盖链有效但承接计划未就绪 ⇒ `ACTIVE_NOT_READY`。
+   * 文案保持逐字不变，码值走 `src/plan.ts` 的同一组常量。
    */
-  function supersededDenialReason(session: any, record: any): string | undefined {
+  function supersededDenialVerdict(session: any, record: any): PresentDenialVerdict | undefined {
     const planId = record.plan?.planId ?? record.planId ?? ''
     const by = record.supersededBy
     const successorPlanId = typeof by?.successorPlanId === 'string' && by.successorPlanId
       ? by.successorPlanId
       : typeof by?.planId === 'string' ? by.planId : ''
     if (!successorPlanId) {
-      return `计划 ${planId} 已被取代，但缺少可验证的承接计划（supersededBy.successorPlanId）：`
-        + '覆盖证据失效（SUPERSEDED_STALE），不得调用 present；请向用户说明覆盖链无法复核并重新确认交付对象。'
+      return presentDenial(PRESENT_DENY_CODES.SUPERSEDED_STALE,
+        `计划 ${planId} 已被取代，但缺少可验证的承接计划（supersededBy.successorPlanId）：`
+        + '覆盖证据失效（SUPERSEDED_STALE），不得调用 present；请向用户说明覆盖链无法复核并重新确认交付对象。')
+    }
+    /*
+     * [W1] 覆盖摘要：present 复验从 mapping 重算摘要，不读缓存数值（T8 §6.3）。
+     *
+     * 摘要一旦对不上（含 mapping/digest 缺失），覆盖记录就无法复核 —— 无法复核
+     * ≠ 通过，一律 stale。这条检查只证明「存下来的 mapping 没被改动」，不证明
+     * 「两项工作在语义上等价」；后者仍只能由用户确认（V8）承载。
+     */
+    const mapping = by?.mapping
+    if (!Array.isArray(mapping)) {
+      return presentDenial(PRESENT_DENY_CODES.SUPERSEDED_STALE,
+        `计划 ${planId} 已被取代，但缺少可复算的逐项映射（supersededBy.mapping）：`
+        + '覆盖证据失效（SUPERSEDED_STALE），不得调用 present，不得声称“已完成/最终版/已交付”；'
+        + '请重新按用户确认的逐项映射做覆盖迁移，并由运行时写入复算后的 digest。')
+    }
+    const computedDigest = computeMappingDigest(mapping)
+    if (!verifyMappingDigest(mapping, by?.digest)) {
+      const stored = typeof by?.digest === 'string' ? by.digest.slice(0, 15) : '缺失'
+      return presentDenial(PRESENT_DENY_CODES.SUPERSEDED_STALE,
+        `计划 ${planId} 已被取代，但覆盖证据摘要与逐项映射不一致（supersededBy.digest=${stored}，`
+        + `重算=${computedDigest.slice(0, 15)}）：覆盖证据失效（SUPERSEDED_STALE），不得调用 present，`
+        + '不得声称“已完成/最终版/已交付”；请重新按用户确认的逐项映射做覆盖迁移，并由运行时复算 digest。')
     }
     const successor = reconstructFromSession(session, successorPlanId)
     if (!successor?.plan || definedSubtaskCount(successor.plan) === 0 || isTerminalPhase(successor.phase)) {
-      return `计划 ${planId} 已被取代，但承接计划 ${successorPlanId} 不存在、不是交付对象或已终止：`
-        + '覆盖证据失效（SUPERSEDED_STALE）。被取代不等于完成：不得调用 present，不得声称“已完成/最终版/已交付”。'
+      return presentDenial(PRESENT_DENY_CODES.SUPERSEDED_STALE,
+        `计划 ${planId} 已被取代，但承接计划 ${successorPlanId} 不存在、不是交付对象或已终止：`
+        + '覆盖证据失效（SUPERSEDED_STALE）。被取代不等于完成：不得调用 present，不得声称“已完成/最终版/已交付”。')
     }
     const readiness = deliveryReadiness(derivePlanSnapshot(successor.statuses), { phase: successor.phase })
     if (!readiness.ready) {
       const ids = readiness.remaining.slice(0, 10).join('、')
-      return `计划 ${planId} 已被取代，承接计划 ${successorPlanId} 只完成 ${readiness.done}/${readiness.total}`
+      return presentDenial(PRESENT_DENY_CODES.ACTIVE_NOT_READY,
+        `计划 ${planId} 已被取代，承接计划 ${successorPlanId} 只完成 ${readiness.done}/${readiness.total}`
         + `${ids ? `，剩余 ${readiness.remaining.length} 项（${ids}）` : ''}。`
-        + '被取代不等于完成：承接计划通过交付就绪检查之前不得调用 present。'
+        + '被取代不等于完成：承接计划通过交付就绪检查之前不得调用 present。')
     }
     return undefined
   }
 
-  function presentDenialReason(agent: any) {
+  /**
+   * [1.9.2] present 拒绝点的唯一出口：码值取常量，拒绝文案保持逐字不变。
+   *
+   * host 的 guard 契约是 `string`（`ctx.tools.checkGuards`），所以工具错误里
+   * 仍只有文案；码值由 `presentDenialVerdict` 一并返回，供断言、日志与后续
+   * UI 使用。所有分支都必须经由这里，不要在分支里手写码值。
+   */
+  function presentDenial(code: PresentDenyCode, message: string): PresentDenialVerdict {
+    return { code, message }
+  }
+
+  function presentDenialVerdict(agent: any): PresentDenialVerdict | undefined {
     const session = agent?.session
     if (!session || !isRootSession(session)) return undefined
     if (isPlanModeActive(ctx, session)) return undefined
@@ -3374,10 +3477,11 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         return `- 计划 ${entry.record.plan.planId}：完成 ${entry.readiness.done}/${entry.readiness.total}${suffix}`
           + `${gaps ? `；证据缺口：${gaps}` : ''}`
       })
-      return `本会话还有 ${unresolved.length} 个计划未通过交付就绪检查：\n${lines.join('\n')}\n`
+      return presentDenial(PRESENT_DENY_CODES.ACTIVE_NOT_READY,
+        `本会话还有 ${unresolved.length} 个计划未通过交付就绪检查：\n${lines.join('\n')}\n`
         + '在它们全部通过交付就绪检查之前，不得调用 present 交付任何产物：'
         + '先调用 dsh_workplan_dispatch 续跑，证据缺口用 dsh_workplan_update 补齐。'
-        + '取消只停止执行，不会让未完成的计划变成可交付，也不能用来绕过这道检查。'
+        + '取消只停止执行，不会让未完成的计划变成可交付，也不能用来绕过这道检查。')
     }
     let record: any
     let readiness: any
@@ -3407,7 +3511,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       const namedThisTurn = Boolean(turnPlanId && record.plan.planId === turnPlanId)
       if (isTerminalPhase(record.phase) && !namedThisTurn) return undefined
       if (record.phase === 'superseded') {
-        const denial = supersededDenialReason(session, record)
+        const denial = supersededDenialVerdict(session, record)
         if (denial) return denial
         return undefined
       }
@@ -3431,26 +3535,44 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         .slice(0, 10)
         .join('；')
       if (readiness.remaining.length === 0) {
-        return `计划 ${planId} 已取消，${readiness.total} 个子任务虽已 done，但证据未通过：${gaps || '缺少结构化证据'}。`
+        return presentDenial(PRESENT_DENY_CODES.CANCELLED_NAMED,
+          `计划 ${planId} 已取消，${readiness.total} 个子任务虽已 done，但证据未通过：${gaps || '缺少结构化证据'}。`
           + '取消只停止执行，不等于完成：不得调用 present，不得声称“已完成/最终版/已交付”；'
-          + '答复必须说明取消状态与证据缺口，不能写成“全部完成”。'
+          + '答复必须说明取消状态与证据缺口，不能写成“全部完成”。')
       }
-      return `计划 ${planId} 已取消，但只完成 ${readiness.done}/${readiness.total}，剩余 ${readiness.remaining.length} 项${idSuffix}`
+      return presentDenial(PRESENT_DENY_CODES.CANCELLED_NAMED,
+        `计划 ${planId} 已取消，但只完成 ${readiness.done}/${readiness.total}，剩余 ${readiness.remaining.length} 项${idSuffix}`
         + `${gaps ? `；证据缺口：${gaps}` : ''}。`
         + '取消只停止执行，不等于完成，也不会让未完成项变成可交付：不得调用 present，不得声称“已完成/最终版/已交付”；'
-        + '答复开头必须写「未完成：剩余 N 项（列出 ID）与原因」。'
+        + '答复开头必须写「未完成：剩余 N 项（列出 ID）与原因」。')
     }
+    /*
+     * [1.9.2] P1 的单一映射：`activeDenyCode` 只看就绪结果。
+     * `remaining` 为空但 `blockers` 非空 ⇒ `EVIDENCE_GAP`（T9 C05 的修法）；
+     * 还有子任务没做完 ⇒ `ACTIVE_NOT_READY`。两个分支共用同一个码值来源。
+     */
+    const activeCode = activeDenyCode(readiness)
     if (readiness.remaining.length === 0) {
-      return `计划 ${planId} 的 ${readiness.total} 个子任务虽都已 done，但证据未通过：${blockers || '缺少结构化证据'}。`
+      return presentDenial(activeCode,
+        `计划 ${planId} 的 ${readiness.total} 个子任务虽都已 done，但证据未通过：${blockers || '缺少结构化证据'}。`
         + '在 deliveryReady 变为 true 之前，产物不得作为成品交付：'
         + "用 dsh_workplan_update 为这些子任务补 verification='structured' 与 acceptance（每项 result='pass' 并附证据），"
-        + '或把对应子任务改回 blocked 并写明原因；不要调用 present。'
+        + '或把对应子任务改回 blocked 并写明原因；不要调用 present。')
     }
-    return `计划 ${planId} 未完成：完成 ${readiness.done}/${readiness.total}，剩余 ${readiness.remaining.length} 项${idSuffix}`
+    return presentDenial(activeCode,
+      `计划 ${planId} 未完成：完成 ${readiness.done}/${readiness.total}，剩余 ${readiness.remaining.length} 项${idSuffix}`
       + `${blockers ? `；另有证据缺口：${blockers}` : ''}。`
       + '在计划通过交付就绪检查之前不得调用 present 交付产物：先调用 dsh_workplan_dispatch 续跑剩余项；'
       + '证据缺口用 dsh_workplan_update 补齐；确实无法继续时，把答复写成「未完成：剩余 N 项与原因」。'
-      + '取消只停止执行，不会改变“未完成”的结论。'
+      + '取消只停止执行，不会改变“未完成”的结论。')
+  }
+
+  /**
+   * 兼容入口：host 的 guard 只接受字符串，所以工具错误仍是原来的文案。
+   * 需要码值时调用 `presentDenialVerdict`。
+   */
+  function presentDenialReason(agent: any) {
+    return presentDenialVerdict(agent)?.message
   }
 
   /*
@@ -3634,6 +3756,8 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     onPreStep,
     onTurnStopping,
     presentDenialReason,
+    presentDenialVerdict,
+    supersededDenialVerdict,
     presentedWriteDenialReason,
     updateStatus,
     cancelPlan,
@@ -3711,7 +3835,13 @@ async function maybePlan(ctx: any, state: any, payload: any, downstream: any, op
   // A plan committed but not yet dispatched must not be overwritten in the
   // same turn; a later turn may supersede it, otherwise one abandoned plan
   // would lock planning forever.
-  if (existing?.plan && !existing.dispatchedAt) {
+  //
+  // [1.9.2] 自动覆盖路径**只允许**写 cancelled，永不写 superseded（规则设计
+  // §7.1：自动路径没有逐项映射与用户确认，满足不了 V4–V8）。它也不得把已经
+  // superseded 的终态记录改回 cancelled：内存写 cancelled、日志里仍是
+  // supersede 信封，会让 live 与 replay 分叉。终态记录由 present 的终态解耦
+  // 处理（不再自动挡门），不需要在这里「取消」。
+  if (existing?.plan && !existing.dispatchedAt && !isTerminalPhase(existing.phase)) {
     if (existing.plan.createdTurn === payload.turn) return downstream
     existing.phase = 'cancelled'
     existing.cancelledAt = Date.now()
@@ -3900,6 +4030,36 @@ export function cancelToolOutputSchema() {
       cancelRecorded: { type: 'boolean' },
       alreadyCancelled: { type: 'boolean' },
       abortedRunning: { type: 'boolean' },
+      /*
+       * [1.9.2] `disposition="superseded"` answers. `supersedeRecorded` is the
+       * durable-write witness for the supersede envelope (the cancelled answer
+       * uses `cancelRecorded`); `alreadySuperseded` is the §7.4 idempotent
+       * re-submission. `code` carries the SUPERSEDE_* refusal; `gaps` /
+       * `missingFrom` / `problems` explain exactly which V-rule failed so a
+       * caller can repair the mapping instead of guessing.
+       */
+      disposition: { type: 'string' },
+      supersededAt: { type: 'number' },
+      supersedeRecorded: { type: 'boolean' },
+      alreadySuperseded: { type: 'boolean' },
+      coverage: { type: 'string' },
+      requiredCount: { type: 'number' },
+      coveredCount: { type: 'number' },
+      successorSeenAtSeq: { type: 'number' },
+      confirmedAtSeq: { type: 'number' },
+      supersededBy: {
+        type: 'object',
+        properties: {
+          planId: { type: 'string' },
+        },
+        additionalProperties: true,
+      },
+      code: { type: 'string' },
+      error: { type: 'string' },
+      hint: { type: 'string' },
+      gaps: { type: 'array', items: { type: 'string' } },
+      missingFrom: { type: 'array', items: { type: 'string' } },
+      problems: { type: 'array', items: { type: 'string' } },
     },
     required: ['ok'],
     additionalProperties: true,

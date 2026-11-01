@@ -21,14 +21,82 @@
     界面是否变绿由子会话自己下一轮的 `turn/end` 决定。
 - `src/runtime.ts` 新增 `followupTool`；`src/host.ts` 新增 `createFollowupTool`
   并在插件装配处注册；`tests/workplan-followup-tool.test.ts` 3 条。
-- 全量 `npm test` **277/277**；`npm run check` 无诊断；两次构建 5 产物 sha256
-  一致。
+- 本提交（followup 单项）`npm test` **277/277**；`npm run check` 无诊断；两次构建
+  5 产物 sha256 一致。并入下方四项后的发布态为 **306/306**、7 产物一致。
 
 ### 边界
 
 - 本工具不是「把子任务标完成」的捷径：它不会替子会话产出交付物，也不能
   绕过 `present`/`deliveryReady` 闸门；投递后仍需核对子会话自己的回合结果。
 - 目标必须是直接子会话；孙会话、同标签的其他历史会话都不在允许范围。
+
+### 一并发布：1.9.0 遗留的四项（superseded 写侧 / P1 拒绝码 / W1 digest / W5 联测）
+
+> 背景：1.9.0 的「已知残余（下一批）」把四项留到下一批。本版把四项落地后与
+> 1.9.1 合并为**同一个制品**发布：npm 上此前最新是 1.8.18，`1.9.0` 与 `1.9.1`
+> 都从未发布到 npm，本地 `v1.9.1` 标签也从未 push（`git ls-remote --tags` 无
+> `v1.9` 条目），因此 1.9.1 是用户第一个同时拿到 1.9.0、1.9.1 与四项修复的版本；
+> 发布前该标签重挂到并入四项后的发布提交，标签与 npm 制品指向同一棵树。
+
+#### superseded 写侧：唯一写入入口
+
+- `src/supersede.ts`（新增）：`supersedePlanRecord()` 是 `superseded` 的**唯一**
+  写路径。写入顺序固定为「V1–V8 全量核验 → 运行时复算 `coverage`/`digest` →
+  `buildCancelMessage(..., { disposition:'superseded' })` 写 durable 记录 →
+  append 成功后内存记录才翻成 `phase='superseded'`」；任何一步失败都返回
+  `ok:false` + 失败码，**不改内存、不写日志**（消除「UI 说被取代、重启后说未完成」
+  的 live/replay 分叉）。
+- `dsh_workplan_cancel` 新增可选参数 `disposition: 'cancelled' | 'superseded'`
+  （缺省仍是 `cancelled`，旧调用行为不变）与 `supersededBy { planId, mapping[] }`；
+  `mapping` 每条含 `from`/`to`/`basis`/`evidence`，只表达映射意图，
+  `requiredCount`/`coveredCount`/`coverage`/`digest` 一律由运行时复算，不接受自报。
+- 失败码（对外契约，按字面值断言）：`SUPERSEDE_TARGET_UNKNOWN`、
+  `SUPERSEDE_ORDER_INVALID`、`SUPERSEDE_SOURCE_NOT_CANCELLED`、
+  `SUPERSEDE_SOURCE_DONE`、`SUPERSEDE_SOURCE_EMPTY`、
+  `SUPERSEDE_MAPPING_INCOMPLETE`、`SUPERSEDE_TARGET_ITEM_UNKNOWN`、
+  `SUPERSEDE_EVIDENCE_GAP`、`SUPERSEDE_TARGET_TERMINAL`、
+  `SUPERSEDE_NOT_CONFIRMED`、`SUPERSEDE_WRITE_FAILED`。
+- 运行时侧：`superseded` 与 `cancelled` 终态互斥；自动覆盖路径**只允许**写
+  `cancelled`，永不写 `superseded`；被取代的计划不允许被普通取消静默改回
+  `cancelled`。
+- 语义边界：运行时只验承接计划那一侧的机器事实（存在、时序、状态、结构化证据、
+  验收、产物）；「两项工作在语义上等价」是人的判断，只能由用户确认承载（V8：一条
+  同时包含两个 planId 且含「确认/同意/可以/按此执行」之一的用户消息）。
+
+#### P1 拒绝码统一（`EVIDENCE_GAP`）
+
+- `src/plan.ts` 新增 `PRESENT_DENY_CODES` 与 `activeDenyCode()`：`remaining` 为空
+  且 `blockers` 非空 ⇒ `EVIDENCE_GAP`，其余 ⇒ `ACTIVE_NOT_READY`。`present` 的
+  两个未完成分支（全部 done 但证据缺口 / 仍有子任务未完成）共用同一个码值来源，
+  不再各写一份判断；拒绝文案逐字保持不变，码值对外可断言。
+- 门禁扫描：`EVIDENCE_GAP` 的散落字符串 **0 处**，拒绝点只引用常量或
+  `activeDenyCode()`。
+
+#### W1 digest：覆盖映射摘要
+
+- `src/supersede-digest.ts`（新增）：`canonicalMappingJson()` 固定规范化口径
+  （对象键按 Unicode 码位升序、分隔符 `,`/`:` 无空白、非 ASCII 不转义、数组保持
+  存储顺序）；`computeMappingDigest()` 输出 `sha256:<64 位小写十六进制>`；
+  `verifyMappingDigest()` 仅在「mapping 是数组 + digest 形如 `sha256:<64hex>` +
+  重算值逐字符相等」时返回 true，其余一律 false（fail-closed，调用方据此判定 stale）。
+- 写入方先落盘 digest 再写信封；读取方（replay / present 复验）只重算，不信任
+  缓存数值。
+
+#### W5：真实取消信封联测
+
+- `tests/workplan-w5-cancel-e2e.test.ts`（新增 5 例）：不使用桩件，直接走真实的
+  `buildCancelMessage` 信封 → durable 记录 → replay 读回，覆盖 `cancelled` 与
+  `superseded` 两种处置的写入/读回链路与终态互斥。
+
+#### 测试与门禁
+
+- 四项定向共 **29 例**：`tests/workplan-supersede.test.ts` 9、
+  `tests/present-deny-code.test.ts` 10、`tests/supersede-digest.test.ts` 5、
+  `tests/workplan-w5-cancel-e2e.test.ts` 5；`tests/workplan-host.test.ts` 的
+  工具参数集合断言随写侧收敛更新（1 例替换）。
+- 全量 `npm test` **306/306**（1.9.0 基线 277，净增 29）；`npm run check` 无诊断；
+  两次构建 7 个产物字节一致；`npm pack --dry-run` 产物含 `lib/supersede.js`、
+  `lib/supersede-digest.js` 与对应 `src/*.ts`。
 
 ## 1.9.0 — 2026-11-01
 

@@ -273,7 +273,12 @@ function createCancelTool(runtime: any) {
       '取消当前会话尚未派发/正在等待派发的任务分解计划。仅取消计划记录，不伪造任何完成；'
       + '取消后计划在面板中显示为“已取消”，不会启动任何部门 Agent。'
       + '注意：取消不等于完成。取消后如仍有未完成项或证据缺口，present 仍会被拒绝，'
-      + '答复必须按「未完成：剩余 N 项与原因」说明。',
+      + '答复必须按「未完成：剩余 N 项与原因」说明。'
+      + 'disposition="superseded" 是另一种处置：把交付责任转移给一个可验证的承接计划。'
+      + '运行时逐条复算（V1–V8）：源计划必须已取消且未全 done、承接计划必须定义更晚且非终态、'
+      + '映射必须覆盖源计划全部子任务、每个映射目标必须有 done+structured 证据与全通过的验收、'
+      + '且本会话存在同时含两个 planId 的用户确认消息。任一不满足即拒绝并返回 SUPERSEDE_* 码，'
+      + '状态不变；被取代不等于完成。',
     parameters: {
       type: 'object',
       properties: {
@@ -283,7 +288,39 @@ function createCancelTool(runtime: any) {
         },
         reason: {
           type: 'string',
-          description: '取消原因，会写入会话记录。',
+          description: '取消/取代原因，会写入会话记录。',
+        },
+        disposition: {
+          type: 'string',
+          enum: ['cancelled', 'superseded'],
+          description: '处置方式：cancelled=用户撤销（默认）；superseded=责任已转移给承接计划。',
+        },
+        supersededBy: {
+          type: 'object',
+          description: 'disposition=superseded 时必填：承接计划与逐项覆盖映射。'
+            + '只给映射意图，requiredCount/coveredCount/coverage/digest 由运行时复算，不接受自报。',
+          properties: {
+            planId: {
+              type: 'string',
+              description: '承接计划的 planId（必须定义得过且未终止）。',
+            },
+            mapping: {
+              type: 'array',
+              description: '源计划每个定义子任务一条映射；from 必须恰好覆盖全部源项（各一次）。',
+              items: {
+                type: 'object',
+                properties: {
+                  from: { type: 'string', description: '源计划子任务 ID。' },
+                  to: { type: 'string', description: '承接计划子任务 ID。' },
+                  basis: { type: 'string', description: '覆盖依据（为什么这两项是同一责任）。' },
+                },
+                required: ['from', 'to', 'basis'],
+                additionalProperties: false,
+              },
+            },
+          },
+          required: ['planId', 'mapping'],
+          additionalProperties: false,
         },
       },
       additionalProperties: false,
@@ -292,8 +329,20 @@ function createCancelTool(runtime: any) {
       schema: cancelToolOutputSchema(),
       render(_args: any, value: any) {
         const result = isRecord(value) ? value : {}
-        if (!result.ok) return textContent(`取消失败：${String(result.error ?? '未知错误')}`)
+        if (!result.ok) {
+          return textContent(`处置失败${result.code ? `（${String(result.code)}）` : ''}：`
+            + `${String(result.error ?? '未知错误')}`)
+        }
         const stats = isRecord(result.stats) ? result.stats : {}
+        if (result.phase === 'superseded') {
+          const by = isRecord(result.supersededBy) ? result.supersededBy : {}
+          return textContent(
+            `计划 ${String(result.planId ?? '')} 已被取代：承接计划 ${String(by.planId ?? '')}`
+            + `（映射 ${Number(by.coveredCount ?? 0)}/${Number(by.requiredCount ?? 0)}，digest 已复算）`
+            + `｜源计划仍是 ${Number(stats.done ?? 0)}/${Number(stats.total ?? 0)}：被取代不等于完成，`
+            + '不得 present 源计划，只能使用承接计划通过交付就绪检查的产物。',
+          )
+        }
         const cancelledIncomplete = result.phase !== 'done'
         return textContent(
           `已取消计划 ${String(result.planId ?? '')}：${String(result.reason ?? '用户取消')}`
