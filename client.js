@@ -84,6 +84,13 @@ window.__ModuleLoader__.load({
                     "done": "做好了",
                     "blocked": "卡住了"
                 },
+                "handoff": {
+                    "open": "待处置",
+                    "routed": "已指派",
+                    "answered": "已答复",
+                    "closed": "无需动作"
+                },
+                "handoffs": "跨部门需求",
                 "dept": {
                     "engineering": "工程研发",
                     "research": "研究分析",
@@ -122,6 +129,18 @@ window.__ModuleLoader__.load({
                 "notDeliverable": "还不能交付",
                 "notDeliverableHint": "「全部做完」不等于「可以交付」：交付还需要每一行都有可核对的证据。下面是没有通过的部分。",
                 "progressLabel": "进度",
+                "closureReported": "已回报",
+                "closureDone": "完成 · 待回报",
+                "closureAssigned": "已下发 · 待回应",
+                "closureAcknowledged": "已回应 · 执行中",
+                "closureInstructed": "已给指示 · 待执行",
+                "closureEscalated": "待你决定",
+                "closureRunning": "执行中",
+                "closureNoAck": "指示还没被执行",
+                "changePending": "需求变更待落实",
+                "changePendingHint": "你在执行中提出的变更已记录，本轮不会中途改写正在跑的任务；本轮结束后会按新需求重规划，已发出的变更不会丢失。",
+                "closureReplanned": "已重规划",
+                "closureReplannedTo": "已重规划 → 修订 {ids}",
                 "more": "更多细节（不看也不影响理解）",
                 "why": "为什么这样安排",
                 "whyHint": "先找出最关键的问题，再按顺序解决；每一步做完先检查，再决定下一步。",
@@ -260,6 +279,13 @@ window.__ModuleLoader__.load({
                     "done": "Done",
                     "blocked": "Stuck"
                 },
+                "handoff": {
+                    "open": "Open",
+                    "routed": "Assigned",
+                    "answered": "Answered",
+                    "closed": "No action"
+                },
+                "handoffs": "Cross-team needs",
                 "dept": {
                     "engineering": "Engineering",
                     "research": "Research",
@@ -298,6 +324,18 @@ window.__ModuleLoader__.load({
                 "notDeliverable": "Not deliverable yet",
                 "notDeliverableHint": "All rows done does not mean deliverable: every row needs checkable evidence. The gaps are listed below.",
                 "progressLabel": "Progress",
+                "closureReported": "Reported back",
+                "closureDone": "Done · not reported",
+                "closureAssigned": "Sent · no reply yet",
+                "closureAcknowledged": "Acknowledged",
+                "closureInstructed": "Instruction sent",
+                "closureEscalated": "Needs your call",
+                "closureRunning": "Running",
+                "closureNoAck": "Instruction not started yet",
+                "changePending": "Change request pending",
+                "changePendingHint": "Your mid-run change is recorded. This round will not rewrite running work; the plan is replanned from your new requirements as soon as this round ends, so nothing is lost.",
+                "closureReplanned": "Replanned",
+                "closureReplannedTo": "Replanned → revised {ids}",
                 "more": "More detail (optional)",
                 "why": "Why it is arranged this way",
                 "whyHint": "Find the most important problem first, solve in order, and check after each step before deciding the next one.",
@@ -1088,6 +1126,18 @@ window.__ModuleLoader__.load({
             const value = t(key);
             return value === key ? String(id || '') : value;
         }
+        /*
+         * [1.11.0] 跨部门需求的四档文案（用户 m00687）。
+         *
+         * 客户端只做「状态值 → 文案」映射，不推导状态：服务端写 open/routed/
+         * answered/closed，这里原样显示。未知值退回原文，避免把新状态误写成
+         * “已答复”。
+         */
+        function handoffStatusText(t, status) {
+            const key = `handoff.${String(status ?? '')}`;
+            const value = t(key);
+            return value === key ? String(status || '') : value;
+        }
         function levelText(t, value) {
             const key = `level.${value}`;
             const text = t(key);
@@ -1378,9 +1428,66 @@ window.__ModuleLoader__.load({
         }
         function SubtaskRow({ item, subtask, index, t }) {
             const status = item?.status ?? 'pending';
-            const tone = toneOfStatus(status);
+            /*
+             * [1.11.0] 闭环徽标：完成 ≠ 已回报；被重规划的行灰化并指向后继。
+             *
+             * 这里只渲染 `serialisePlan` 下发的 `closure/replacedBy`，不在客户端
+             * 推导任何状态（契约 §8.3：客户端不得维护本地状态机）。计划定义里的
+             * `supersededAt` 是同一事实的镜像，只用于「状态行缺失」的历史载荷。
+             */
+            const closure = item?.closure ?? (subtask?.supersededAt ? 'replanned' : null);
+            const replacedBy = Array.isArray(item?.replacedBy)
+                ? item.replacedBy
+                : (Array.isArray(subtask?.replacedBy) ? subtask.replacedBy : []);
+            /*
+             * [1.11.0] M9：闭环每一档都要在左侧栏可见。
+             *
+             * 只显示「已回报/已重规划」时，一条正在等主 Agent 决定的请示看起来就是
+             * 普通「受阻」，主 Agent 与用户都无法从进度栏看出「它在等你拍板」。
+             * 文案由服务端下发的 `closure` 决定，客户端不推导状态。
+             */
+            const closureText = closure === 'replanned'
+                ? (replacedBy.length > 0 ? fill(t('closureReplannedTo'), { ids: replacedBy.join('、') }) : t('closureReplanned'))
+                : closure === 'reported' ? t('closureReported')
+                    : closure === 'done' ? t('closureDone')
+                        : closure === 'assigned' ? t('closureAssigned')
+                            : closure === 'acknowledged' ? t('closureAcknowledged')
+                                : closure === 'instructed' ? t('closureInstructed')
+                                    : closure === 'escalated' ? t('closureEscalated')
+                                        /*
+                                         * [1.11.0] 瞬态兜底（T10 N7）：状态行已经 in_progress，
+                                         * 但闭环字段还是 pending（旧载荷 / 重建中的一行）。没有
+                                         * 徽标会让这一行看起来「没有闭环含义」，补一个只描述
+                                         * 事实的「执行中」，不推断它是否已回报。
+                                         */
+                                        : status === 'in_progress' ? t('closureRunning')
+                                            : '';
+            const closureLabel = closureText;
+            const closureTone = closure === 'reported' ? 'done'
+                : closure === 'escalated' ? 'blocked'
+                    : closure === 'replanned' ? 'idle'
+                        : 'idle';
+            /*
+             * [1.11.0] 「指示已发出、子会话还没动」（T10 N4）。
+             *
+             * `instructionOverdue` 由 60s 定时器写、由子会话首次进展清除；它描述的
+             * 是等待事实，不是失败，所以用 blocked 色提醒但不改 status。
+             */
+            const instructionOverdue = item?.instructionOverdue === true;
+            const tone = closure === 'replanned' ? 'idle' : toneOfStatus(status);
             const pct = clampPct(item?.progress ?? 0);
-            return h('div', { className: `dsh-wp-subtask dsh-wp-tone-${tone}` }, h('div', { className: 'dsh-wp-subtask-head' }, h('div', { className: 'dsh-wp-subtask-title' }, `${workLabel(t, index)}：${subtask.title}`), h(Pill, { tone }, progressText(item, t))), h('div', { className: 'dsh-wp-subtask-meta' }, h('span', null, `${t('who')}：${deptName(t, subtask.department)} · ${subtask.role}`)), h('div', { className: 'dsh-wp-subtask-body' }, h('p', null, h('strong', null, `${t('what')}：`), subtask.objective), h('div', null, h('strong', null, `${t('how')}：`), h(Bullets, { items: subtask.method })), h('div', null, h('strong', null, `${t('doneWhen')}：`), h(Bullets, { items: subtask.acceptance })), subtask.outputs?.length ? h('div', null, h('strong', null, `${t('willDeliver')}：`), h(Bullets, { items: subtask.outputs })) : null, subtask.dependsOn?.length ? h('p', { className: 'dsh-wp-muted' }, `${t('waitFor')}：先等前面的工作做完，才能开始这一步。`) : null), status === 'in_progress' ? h(Progress, { value: pct, tone }) : null, status === 'in_progress' ? h('div', { className: 'dsh-wp-progress-meta' }, h('span', null, `${t('progressLabel')} ${pct}%`)) : null, status !== 'blocked' && item?.summary ? h('p', { className: 'dsh-wp-muted' }, `${t('summary')}：${plainError(item.summary)}`) : null, 
+            return h('div', { className: `dsh-wp-subtask dsh-wp-tone-${tone}` }, h('div', { className: 'dsh-wp-subtask-head' }, h('div', { className: 'dsh-wp-subtask-title' }, `${workLabel(t, index)}：${subtask.title}`), closureLabel ? h(Pill, { tone: closureTone }, closureLabel) : null, instructionOverdue ? h(Pill, { tone: 'blocked' }, t('closureNoAck')) : null, h(Pill, { tone }, progressText(item, t))), h('div', { className: 'dsh-wp-subtask-meta' }, h('span', null, `${t('who')}：${deptName(t, subtask.department)} · ${subtask.role}`)), h('div', { className: 'dsh-wp-subtask-body' }, h('p', null, h('strong', null, `${t('what')}：`), subtask.objective), h('div', null, h('strong', null, `${t('how')}：`), h(Bullets, { items: subtask.method })), h('div', null, h('strong', null, `${t('doneWhen')}：`), h(Bullets, { items: subtask.acceptance })), subtask.outputs?.length ? h('div', null, h('strong', null, `${t('willDeliver')}：`), h(Bullets, { items: subtask.outputs })) : null, subtask.dependsOn?.length ? h('p', { className: 'dsh-wp-muted' }, `${t('waitFor')}：先等前面的工作做完，才能开始这一步。`) : null), status === 'in_progress' ? h(Progress, { value: pct, tone }) : null, status === 'in_progress' ? h('div', { className: 'dsh-wp-progress-meta' }, h('span', null, `${t('progressLabel')} ${pct}%`)) : null, 
+            /*
+             * [1.11.0] 跨部门需求（用户 m00687）：提出方、指派对象、答复都必须在
+             * 进度栏可见。否则用户只能从结果消息的一段文字里猜「这条需求谁在办、
+             * 办没办」，而交付门禁却已经因为它把整份计划拦住了。
+             */
+            Array.isArray(item?.handoffs) && item.handoffs.length
+                ? h('div', { className: 'dsh-wp-subtask-body' }, h('div', null, h('strong', null, `${t('handoffs')}：`)), h('ul', { className: 'dsh-wp-muted' }, item.handoffs.map((handoff) => h('li', { key: String(handoff?.id ?? '') }, `${String(handoff?.id ?? 'H?')} ${String(handoff?.request ?? '')}`
+                    + `${handoff?.department ? ` → ${deptName(t, handoff.department)}` : ''}`
+                    + `｜${handoffStatusText(t, handoff?.status)}`
+                    + `${handoff?.response ? `：${String(handoff.response)}` : ''}`))))
+                : null, status !== 'blocked' && item?.summary ? h('p', { className: 'dsh-wp-muted' }, `${t('summary')}：${plainError(item.summary)}`) : null, 
             /*
              * [1.10.0] R-02：「卡住原因」只属于没做完的行。
              *
@@ -1397,7 +1504,13 @@ window.__ModuleLoader__.load({
         }
         function StageCard({ stage, statuses, index, t }) {
             const byId = useMemo(() => new Map((statuses || []).map((item) => [item.subtaskId, item])), [statuses]);
-            const items = (stage.subtasks || []).map((subtask) => ({ subtask, item: byId.get(subtask.id) }));
+            const allItems = (stage.subtasks || []).map((subtask) => ({ subtask, item: byId.get(subtask.id) }));
+            /*
+             * [1.11.0] 被重规划替换/撤销的行仍然渲染（可追溯），但不进入阶段分母：
+             * 否则「替换一项」会让阶段永远停在 4/5，用户看到的进度与总数互相矛盾。
+             * 同一个 `supersededAt` 也决定了 `definedSubtaskCount` 的分母。
+             */
+            const items = allItems.filter(({ subtask }) => !subtask.supersededAt);
             const done = items.filter(({ item }) => item?.status === 'done').length;
             const blocked = items.filter(({ item }) => item?.status === 'blocked').length;
             const inProgress = items.some(({ item }) => item?.status === 'in_progress');
@@ -1420,7 +1533,7 @@ window.__ModuleLoader__.load({
                 title: `${stageLabel(t, index)}：${stage.name}`,
                 meta: `${done}/${items.length} ${t('stats.done')}`,
                 badge: h(Pill, { tone }, stateText),
-            }, h('div', { className: 'dsh-wp-stage-goal' }, `${t('what')}：${stage.goal}`), h('div', { className: 'dsh-wp-checkpoint' }, `${t('checkpoint')}：${stage.checkpoint}`), items.map(({ subtask, item }, subIndex) => h(SubtaskRow, { key: subtask.id, subtask, item, index: subIndex, t }))));
+            }, h('div', { className: 'dsh-wp-stage-goal' }, `${t('what')}：${stage.goal}`), h('div', { className: 'dsh-wp-checkpoint' }, `${t('checkpoint')}：${stage.checkpoint}`), allItems.map(({ subtask, item }, subIndex) => h(SubtaskRow, { key: subtask.id, subtask, item, index: subIndex, t }))));
         }
         function Analysis({ session, t }) {
             const task = session.taskUnderstanding || {};
@@ -1561,7 +1674,19 @@ window.__ModuleLoader__.load({
             const rows = [];
             const list = Array.isArray(stages) ? stages : [];
             list.forEach((stage, index) => {
-                const subtasks = Array.isArray(stage?.subtasks) ? stage.subtasks : [];
+                /*
+                 * [1.11.0] 被重规划替换的旧行不参与阶段步进条（T10 N1）。
+                 *
+                 * 卡片头部按 `definedSubtaskCount` 已排除 `supersededAt`，这里却把
+                 * 计划定义里的全部行都算进分母，于是重规划后出现「头部 100%，
+                 * 阶段条 1/2 做好了」的双口径。旧行仍是审计记录（下面按状态行渲染、
+                 * 灰化），但不再是「还要做的工作」，所以不进入 total/done/active/
+                 * blocked 四个计数；一个阶段若只剩旧行，整段也不再显示。
+                 */
+                const allSubtasks = Array.isArray(stage?.subtasks) ? stage.subtasks : [];
+                const subtasks = allSubtasks.filter((subtask) => !subtask?.supersededAt);
+                if (allSubtasks.length > 0 && subtasks.length === 0)
+                    return;
                 let done = 0;
                 let active = 0;
                 let blocked = 0;
@@ -1795,6 +1920,18 @@ window.__ModuleLoader__.load({
             }, session.updatedAt
                 ? h('div', { className: 'dsh-wp-meta dsh-wp-session-updated' }, `${t('updatedAt')} ${formatTime(session.updatedAt)}`)
                 : null, open === true ? h(PlanOverview, { t, stats, counts, rows: stageRows }) : null, session.degraded ? h('div', { className: 'dsh-wp-banner dsh-wp-banner--degraded' }, h('strong', null, t('degraded')), h('div', null, plainError(session.error || '')), h('div', { className: 'dsh-wp-muted' }, t('degradedHint'))) : null, 
+            /*
+             * [1.11.0] 执行中收到的需求变更（T10 N5）。
+             *
+             * 服务端从 1.11.0 起把 `changeRequest` 放进每份载荷，但卡片原先
+             * 一字不显示：用户提了变更、工具也回了「已记录」，进度栏却看不出
+             * 来，只能等主 Agent 自己再解释一遍。这里只显示「已记录 + 原文 +
+             * 何时生效」，不显示任何未落地的承诺。
+             */
+            session.changeRequest?.status === 'pending'
+                ? h('div', { className: 'dsh-wp-banner dsh-wp-banner--degraded' }, h('strong', null, t('changePending')), h('div', { className: 'dsh-wp-muted' }, t('changePendingHint')), typeof session.changeRequest.text === 'string' && session.changeRequest.text
+                    ? h('div', { className: 'dsh-wp-error-text' }, plainError(session.changeRequest.text))
+                    : null) : null, 
             /*
              * [1.10.0] C-09：把服务端已经下发、却从来没人读的交付门禁搬上界面。
              *

@@ -66,7 +66,7 @@ grep -RInE "child_process|execSync|eval\(|writeFileSync" src || echo "0 命中�
 ## 一键安装
 
 ```bash
-dsh plugin --profile web add dsh-workplan@1.10.6
+dsh plugin --profile web add dsh-workplan@1.11.0
 ```
 
 装完**重启一次 DSH Web**（或重新载入当前页面）让插件生效。
@@ -97,7 +97,7 @@ dsh plugin --profile web add "$(pwd)"
 
 纯打招呼、道谢、问「做到哪了」不会触发拆解，不会平白多出一堆子 Agent。
 
-## 四个模型工具（你不用直接调用）
+## 九个模型工具（你不用直接调用）
 
 | 工具 | 作用 |
 |---|---|
@@ -105,14 +105,19 @@ dsh plugin --profile web add "$(pwd)"
 | `dsh_workplan_status` | 只读：问到哪了。重启或刷新后也能从会话记录重建。 |
 | `dsh_workplan_update` | 主 Agent 核对结果、修正某个子任务状态与证据。带 `expectedRevision` 防覆盖，运行中默认拒绝（`force:true` 才覆盖）。子 Agent 不能调用。 |
 | `dsh_workplan_cancel` | 取消还没派发的计划，不会伪造任何「已完成」。 |
+| `dsh_workplan_replan` | 需求变更时就地修订：`cancel` / `replace` / `add`，旧行标为「已取代」保留可追溯，计划版本号递增。主 Agent 专用。 |
+| `dsh_workplan_escalate` | 子 Agent 执行中遇阻上报：问题、选项、建议进状态机，等主 Agent 指示；不再是「只能憋到结尾写 BLOCKED」。 |
+| `dsh_workplan_instruct` | 主 Agent 回答请示并下达指示；失败则挂起，子任务下次激活时注入。带 60s/180s 回执检查。 |
+| `dsh_workplan_handoff` | 处置跨部门需求：`list` / `assign` / `resolve` / `close`。未处置会拦住交付；对「待指示」的行 `resolve` 会直接把答复投递给子会话。 |
+| `dsh_workplan_followup` | 给预算/超时中止、但产物已落盘的直接子会话补一条收尾说明。 |
 
 在 **plan 模式**下只会给你看计划，`dispatch` 会被明确拦下并说明原因，不会偷偷开跑。
 
-## 部门怎么协作（1.7.1 的真实能力）
+## 部门怎么协作（1.11.0 的真实能力）
 
 计划里的每件工作都带一个部门标签（工程研发、研究分析、设计、产品、数据、质量验证、安全、运维、文档写作、运营、法务合规、财务）。**标签决定提示词与统计口径，不是组织架构**：
 
-- 部门之间**不能直接对话**；跨部门信息由主 Agent 转达，或落到双方都能读的工作区文件。但每个子 Agent 的提示词里会带上**兄弟部门的只读一览**（谁、做什么、产出什么、已完成摘要），需要协作就写进 `needs`，结果消息会汇总成「跨部门待转达」交给主 Agent 逐条处理。
+- 部门之间**不能直接对话**（这是刻意的权限边界）；跨部门信息由主 Agent 转达，或落到双方都能读的工作区文件。但每个子 Agent 的提示词里会带上**兄弟部门的只读一览**（谁、做什么、产出什么、已完成摘要），需要协作就写进 `needs`；每条 needs 会自动登记成带编号的跨部门需求（`open → routed → answered/closed`），结果消息与 `status` 都能看到，**未处置就拦住交付**。主 Agent 用 `dsh_workplan_handoff` 逐条处置；提出需求的行若正在等指示，`resolve` 会把答复直接投递给该子会话。
 - 下游只看到 `dependsOn` 里上游的**摘要**与完整体检结果，看不到上游的完整对话。所以上游必须把「产物绝对路径 + 怎么验收」写进摘要；声明为 `file` 的产物会被逐个核实，**缺失就不给下游解锁**。
 - 子 Agent 在输出末尾回传结构化证据块（`status` / `acceptance` / `artifacts` / `needs`）。**非空输出不再等于完成**：`partial`、任一条验收失败、坏块都判受阻，只有全 `pass` 才可直接采信，其余在结果消息里标「未验证」等主 Agent 核对。
 - 阶段（stage）只是展示分组，**不是执行门槛**；真正决定先后的是 `dependsOn`。

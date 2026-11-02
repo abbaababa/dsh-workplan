@@ -125,6 +125,8 @@ test('计划预算到点是一次暂停：未完成的保持 pending，阶段 pa
     idleTimeoutMs: 60000,
     childTimeoutMs: 60000,
     totalTimeoutMs: 400,
+    // 假子会话只回散文，没有证据块；本文件只验证预算/暂停/续跑。
+    strictEvidence: false,
   })
 
   assert.ok(result)
@@ -163,7 +165,7 @@ test('再次派发会接着跑剩余子任务，已完成的不重跑', async ()
     calls += 1
     return hangingChild()
   })
-  const options = { agent: { session, options: {} }, signal: new AbortController().signal, idleTimeoutMs: 60000, childTimeoutMs: 60000, totalTimeoutMs: 400 }
+  const options = { agent: { session, options: {} }, signal: new AbortController().signal, idleTimeoutMs: 60000, childTimeoutMs: 60000, totalTimeoutMs: 400, strictEvidence: false }
   await dispatchPlan(ctx, record, options)
   assert.equal(record.phase, 'paused')
 
@@ -227,7 +229,15 @@ test('子 Agent 提示明确说明没有派发权限、不能重启服务', () =
     cwd: '/tmp/work',
   })
   assert.match(prompt, /没有派发权限/)
-  assert.match(prompt, /不要等待或空转/)
+  /*
+   * [1.11.0] P-01 把「不要等待或空转」改成了「先上报、再等待指示」。
+   *
+   * 旧措辞同时禁止等待与请示，模型只能硬猜或静默收尾——这正是 T3 P1 判定
+   * 的「遇阻不主动上报」。新契约要求等待期间只做只读核对，断言因此改为
+   * 锁定「上报优先 + 等待指示」这一段，而不是旧的一句话。
+   */
+  assert.match(prompt, /遇阻上报（强制，先于继续动作）/)
+  assert.match(prompt, /停止推进，只做只读核对/)
 })
 
 /*
@@ -241,7 +251,7 @@ test('预算暂停后仍算可续跑，且续跑不消耗自动续跑额度', as
   const record = makeRecord(plan)
   const session = makeSession()
   const ctx = makeCtx(() => hangingChild())
-  const options = { agent: { session, options: {} }, signal: new AbortController().signal, idleTimeoutMs: 60000, childTimeoutMs: 60000, totalTimeoutMs: 400 }
+  const options = { agent: { session, options: {} }, signal: new AbortController().signal, idleTimeoutMs: 60000, childTimeoutMs: 60000, totalTimeoutMs: 400, strictEvidence: false }
   await dispatchPlan(ctx, record, options)
   assert.equal(record.phase, 'paused')
 
@@ -296,6 +306,7 @@ test('预算到点不把被杀子任务的超时写进失败清单', async () =>
     idleTimeoutMs: 60000,
     childTimeoutMs: 60000,
     totalTimeoutMs: 400,
+    strictEvidence: false,
   })
   const lines = (record.errors ?? []).join('\n')
   assert.equal(/总执行超时/.test(lines), false, 'the round budget is not a subtask failure')
@@ -362,7 +373,7 @@ test('重启后没有内存记录时，派发会从会话存档重建计划而�
     content: [{ type: 'text', text: `<!-- DSH-WORKPLAN:BEGIN -->\n${JSON.stringify({ kind: 'workplan', version: 1, planId: plan.planId, sessionId: 'session-budget', plan })}\n<!-- DSH-WORKPLAN:END -->` }],
   })
   const ctx = makeCtx(() => quickChild('重启后续跑完成'))
-  const runtime = createWorkplanRuntime(ctx, { totalTimeoutMs: 60000, maxResumes: 4 })
+  const runtime = createWorkplanRuntime(ctx, { totalTimeoutMs: 60000, maxResumes: 4, strictEvidence: false })
   const result: any = await runtime.dispatchTool({ session }, { planId: plan.planId }, new AbortController().signal)
   assert.equal(result?.ok, true)
   assert.equal(result?.stats?.done, 2, 'the rebuilt record must run the plan instead of answering NO_PLAN')
@@ -432,7 +443,7 @@ test('重启后仍能派发重启前暂停的旧计划：重建按 planId 精确
   assert.equal(rebuilt?.statuses?.find((item: any) => item.subtaskId === 'T1')?.status, 'done')
 
   const ctx = makeCtx(() => quickChild('旧计划续跑完成'))
-  const runtime = createWorkplanRuntime(ctx, { totalTimeoutMs: 60000, maxResumes: 4 })
+  const runtime = createWorkplanRuntime(ctx, { totalTimeoutMs: 60000, maxResumes: 4, strictEvidence: false })
   const result: any = await runtime.dispatchTool({ session }, { planId: 'wp-old' }, new AbortController().signal)
   assert.equal(result?.ok, true)
   assert.equal(result?.planId, 'wp-old', 'dispatching the old paused plan must target that plan, not the newest one')
@@ -470,7 +481,7 @@ test('内存里是另一份计划时，按 planId 派发旧计划照样重建并
   })
 
   const ctx = makeCtx(() => quickChild('派发完成'))
-  const runtime = createWorkplanRuntime(ctx, { totalTimeoutMs: 60000, maxResumes: 4 })
+  const runtime = createWorkplanRuntime(ctx, { totalTimeoutMs: 60000, maxResumes: 4, strictEvidence: false })
 
   const first: any = await runtime.dispatchTool({ session }, { planId: 'wp-mem-b' }, new AbortController().signal)
   assert.equal(first?.planId, 'wp-mem-b', 'the newest plan dispatches first and fills memory')

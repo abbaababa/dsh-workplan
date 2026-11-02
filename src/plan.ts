@@ -48,6 +48,8 @@ export const PRESENT_DENY_CODES = {
   EVIDENCE_GAP: 'EVIDENCE_GAP',
   CANCELLED_NAMED: 'CANCELLED_NAMED',
   SUPERSEDED_STALE: 'SUPERSEDED_STALE',
+  /* [1.11.0] 子会话不是交付主体：present 只能由根会话发起（T7 P9）。 */
+  NOT_ROOT: 'NOT_ROOT',
 } as const
 
 export type PresentDenyCode = (typeof PRESENT_DENY_CODES)[keyof typeof PRESENT_DENY_CODES]
@@ -109,6 +111,71 @@ export const EVIDENCE_STATUSES = Object.freeze(['done', 'blocked', 'partial'])
 export const ACCEPTANCE_RESULTS = Object.freeze(['pass', 'fail', 'unverified'])
 
 export const STATUSES = Object.freeze(['pending', 'in_progress', 'done', 'blocked'])
+/**
+ * [1.11.0] 正交闭环状态（T4 C-01 / T6 M1）。
+ *
+ * `status` 仍是唯一的呈现层四值枚举，左侧栏、计数、交付门禁全部只看它。
+ * `closure` 记录「这条子任务在双向闭环里走到哪一步」：是否被接收方确认、
+ * 是否在等待主 Agent 指示、是否已回报。两者同时写入同一条状态条目，但只有
+ * `applyStatus` 一个写入口，不引入第二份存储。
+ *
+ * 历史日志没有 `closure`（`undefined`）时按 `null` 解释，语义退回 1.10.6；
+ * 因此旧会话回放、旧测试夹具都不需要迁移。
+ */
+export const CLOSURES = Object.freeze([
+  'pending',
+  'assigned',
+  'acknowledged',
+  'instructed',
+  'escalated',
+  'blocked',
+  'done',
+  'reported',
+  'replanned',
+])
+/** Why a `blocked` / `escalated` row stopped. Read by the dashboard and result message. */
+export const BLOCKED_KINDS = Object.freeze(['failed', 'timeout', 'no-ack', 'escalated'])
+/**
+ * [1.11.0] 合法闭环迁移（T4 §4 的 19 条，M1）。
+ *
+ * 没有这张表时，「已重规划」的行可以被重新派发、「已完成」的行能被写成
+ * 「等待指示」，状态机只是装饰。`applyStatus` 在这里拒绝契约外迁移并抛
+ * `INVALID_TRANSITION`；`null`（历史日志 / 全新行）不设入边限制。
+ *
+ * 注意 `pending` 仍可作为「重置」的目标：续跑会把未完成行重新排队，这是
+ * 1.10.x 就有的既有语义，不是新增的合法化。
+ */
+export const CLOSURE_TRANSITIONS: Record<string, readonly string[]> = Object.freeze({
+  pending: Object.freeze(['assigned', 'blocked', 'instructed', 'escalated', 'done', 'reported', 'replanned']),
+  assigned: Object.freeze(['acknowledged', 'escalated', 'blocked', 'done', 'replanned', 'pending']),
+  acknowledged: Object.freeze(['escalated', 'blocked', 'done', 'replanned', 'pending']),
+  escalated: Object.freeze(['instructed', 'blocked', 'replanned', 'pending']),
+  instructed: Object.freeze(['acknowledged', 'done', 'blocked', 'escalated', 'replanned']),
+  // 'assigned' 是既有重试路径：同一行的第 2 次尝试会重新下发（1.10.3 行为）。
+  blocked: Object.freeze(['assigned', 'instructed', 'pending', 'escalated', 'done', 'replanned']),
+  done: Object.freeze(['reported', 'replanned', 'pending', 'blocked']),
+  reported: Object.freeze(['replanned', 'pending', 'blocked']),
+  replanned: Object.freeze([]),
+})
+export const MAX_QUESTION_CHARS = 2000
+export const MAX_ESCALATION_OPTIONS = 6
+export const MAX_INSTRUCTION_CHARS = 4000
+/*
+ * [1.11.0] 跨部门协作闭环（T2 G8 / 用户 m00687）。
+ *
+ * `needs` 原先只是一段被结果消息顺带转达的文本：主 Agent 忘了处理，计划照样
+ * 可交付；下游部门拿不到上游的交接物，也没人记录「这条需求最后怎么办了」。
+ * 这里把每条需求升级成一条有生命周期的 handoff，挂在提出需求的那一行上：
+ *  - open     ：已记录，还没指派给任何部门（交付门禁拦截）；
+ *  - routed   ：已指派给某个部门，等工作产出（交付门禁拦截）；
+ *  - answered ：已给出书面答复或已由对应子任务交付（解除拦截）；
+ *  - closed   ：经判定无需动作（解除拦截）。
+ * 不新建存储：handoff 与 status 同表、同写入口，刷新后随状态行一起回放。
+ */
+export const HANDOFF_STATUSES = Object.freeze(['open', 'routed', 'answered', 'closed'])
+/* needs 上限是 10；handoff 上限更小时，第 9/10 条会「不登记、不拦门禁」地消失。 */
+export const MAX_HANDOFFS = MAX_EVIDENCE_NEEDS
+export const MAX_HANDOFF_RESPONSE_CHARS = 4000
 export const LIKELIHOODS = Object.freeze(['low', 'medium', 'high'])
 
 export const DEPARTMENTS = Object.freeze({
@@ -800,8 +867,14 @@ export function extractJson(text: any) {
 
 export function departmentLabel(id: any, language: any = 'zh') {
   const entry = DEPARTMENTS[id as keyof typeof DEPARTMENTS]
-  if (!entry) return id
-  return language === 'en' ? entry.en : entry.zh
+  if (entry) return language === 'en' ? entry.en : entry.zh
+  /*
+   * [1.11.0] 部门名会进入子 Agent 提示词首行（「你是「X」部门的执行 Agent」）。
+   * 历史日志或 replan 里的非法值若原样回显，等于给提示词开了一个注入口；
+   * 这里只保留可打印的短标签，未知值统一显示为「未知部门」。
+   */
+  const raw = typeof id === 'string' ? id.replace(/[\r\n`"'<>]/g, '').trim().slice(0, 40) : ''
+  return raw === '' ? '未知部门' : raw
 }
 
 export function buildPlannerPrompt(taskText: any, cwd: any, conversationContext: any = '', budget: any = {}) {
@@ -1000,6 +1073,17 @@ export function buildPlanMessage(plan: any, options: any = {}) {
     summary,
     ...(warning ? ['', warning] : []),
     '',
+    /*
+     * [1.11.0] 计划消息必须给出唯一的下一步。
+     *
+     * 1.10.6 只展示计划，模型有时把「已生成计划」当成「已下发」，用户看到的
+     * 就是一条静止的分解。现在把「不派发就不启动」写成明确指令；plan 模式
+     * 例外，否则会和「等用户审阅」互相矛盾。
+     */
+    options.planMode === true
+      ? '下一步：当前处于 plan 模式，先把计划交给用户审阅；用户退出 plan 模式后，再调用 dsh_workplan_dispatch 执行。'
+      : '下一步：必须调用 dsh_workplan_dispatch 派发本计划；只展示计划而不派发，部门 Agent 不会启动。',
+    '',
     PLAN_MARKER_BEGIN,
     JSON.stringify(payload),
     PLAN_MARKER_END,
@@ -1083,7 +1167,11 @@ export function buildResultSummary(result: any) {
    */
   const statuses = Array.isArray(result.statuses) ? result.statuses : []
   if (statuses.length > 0) {
-    const readiness = deliveryReadiness(derivePlanSnapshot(statuses), { phase: result.phase })
+    const readiness = deliveryReadiness(derivePlanSnapshot(statuses), {
+      phase: result.phase,
+      changePending: result.changePending === true,
+      reportPending: result.reportPending === true,
+    })
     if (!readiness.ready) {
       const shown = readiness.blockers.slice(0, 2).join('；')
       return truncate(
@@ -1109,7 +1197,11 @@ export function buildResultMessage(result: any) {
    */
   const statuses = Array.isArray(result.statuses) ? result.statuses : []
   const readiness = statuses.length > 0
-    ? deliveryReadiness(derivePlanSnapshot(statuses), { phase: result.phase })
+    ? deliveryReadiness(derivePlanSnapshot(statuses), {
+      phase: result.phase,
+      changePending: result.changePending === true,
+      reportPending: result.reportPending === true,
+    })
     : null
   const deliveryBlockers = readiness?.blockers ?? []
   const payload = {
@@ -1150,12 +1242,44 @@ export function buildResultMessage(result: any) {
   const unverified = statuses.filter((item: any) => item?.verification === 'unverified')
   const failed = statuses.filter((item: any) => item?.verification === 'failed')
   const legacy = statuses.filter((item: any) => item?.status === 'done' && item?.verification === 'legacy')
+  /*
+   * [1.11.0] 待指示项必须在结果消息里单独成行。
+   *
+   * 它们和普通 blocked 不一样：普通 blocked 是“做失败了”，这些是“做到一半
+   * 停下来等人拍板”。如果只混在 blocked 计数里，主 Agent 会直接 dispatch
+   * 续跑，而 resetBlockedStatuses 现在会跳过它们，于是一轮什么也没发生。
+   */
+  const escalations = statuses.filter((item: any) => item?.closure === 'escalated')
   const missingArtifacts = statuses.flatMap((item: any) =>
     (Array.isArray(item?.missingArtifacts) ? item.missingArtifacts : [])
       .map((ref: any) => `${item.subtaskId}：${ref}`))
-  const needs = statuses.flatMap((item: any) =>
-    (Array.isArray(item?.needs) ? item.needs : []).map((need: any) => `${item.subtaskId}：${need}`))
+  /*
+   * [1.11.0] 结果消息里的跨部门需求必须带可操作编号（用户 m00687）。
+   *
+   * 只列一段需求原文时，主 Agent 只能「知道有这回事」，无法在下一轮用
+   * `dsh_workplan_handoff` 精确处置。优先读 handoffs（带 H 编号与状态），
+   * 没有 handoffs 的旧记录才退回 needs 原文。
+   */
+  const needs = statuses.flatMap((item: any) => {
+    const handoffs = Array.isArray(item?.handoffs) ? item.handoffs : []
+    if (handoffs.length > 0) {
+      return handoffs.map((handoff: any) =>
+        `${item.subtaskId} ${String(handoff?.id ?? 'H?')}（${String(handoff?.status ?? 'open')}）：${String(handoff?.request ?? '')}`)
+    }
+    return (Array.isArray(item?.needs) ? item.needs : []).map((need: any) => `${item.subtaskId}：${need}`)
+  })
   const review: string[] = []
+  if (escalations.length > 0) {
+    const detail = escalations.slice(0, 5).map((item: any) => {
+      const question = typeof item?.question === 'string' && item.question.trim() !== ''
+        ? `问题：${truncate(item.question, 120)}`
+        : '未附问题文本（按受阻处理）'
+      return `${item.subtaskId}（${question}）`
+    }).join('；')
+    review.push(
+      `- 待指示 ${escalations.length} 条：${detail}。这些行不会自动续跑：先用 dsh_workplan_update 给出指示（status=in_progress + instruction）或明确放弃（status=blocked），再处理其余项。`,
+    )
+  }
   if (unverified.length > 0) {
     review.push(`- 未验证 ${unverified.length} 条：${unverified.map((item: any) => item.subtaskId).join('、')}（完成但证据不足，需主 Agent 核对）`)
   }
@@ -1196,7 +1320,10 @@ export function buildResultMessage(result: any) {
    */
   const cancelled = result.phase === 'cancelled'
   const shownBlockers = deliveryBlockers.slice(0, 8).join('；')
-  const recovery = blocked > 0
+  const escalationIds = escalations.slice(0, 8).map((item: any) => item.subtaskId).join('、')
+  const recovery = escalations.length > 0
+    ? `本轮有 ${escalations.length} 条待指示项（${escalationIds}），它们不会自动续跑：请先用 dsh_workplan_update 对每条给出指示（status='in_progress' + instruction，投递成功后 closure 变为 instructed）或明确放弃（status='blocked'），处理完这些请示后再 dispatch 其余项。`
+    : blocked > 0
     ? (result.resumeAvailable === false
         ? `本计划已用尽自动续跑额度（${Number(result.resumeCount ?? 0)}/${MAX_PLAN_RESUMES}），受阻项不会再自动重跑：请主 Agent 直接接手完成剩余 ${remaining} 项，完成前同样不得交付。`
         : `受阻项可再次调用 dsh_workplan_dispatch 从受阻处续跑（已完成的不会重跑，本计划剩余续跑额度 ${MAX_PLAN_RESUMES - Number(result.resumeCount ?? 0)} 次）。`)
@@ -1227,7 +1354,7 @@ export function buildResultMessage(result: any) {
           : ['3. 给出最终答复，不要声称未验证的完成。']),
     ...(review.length > 0 ? ['', '验收核对：', ...review] : []),
     ...(needs.length > 0
-      ? ['', '跨部门待转达（子 Agent 提出的需求，请逐条处理）：', ...needs.slice(0, 10).map((line: string) => `- ${line}`)]
+      ? ['', '跨部门待转达（子 Agent 提出的需求；用 dsh_workplan_handoff 逐条 assign/resolve/close，未处置会拦住交付）：', ...needs.slice(0, 10).map((line: string) => `- ${line}`)]
       : []),
     '',
     RESULT_MARKER_BEGIN,
@@ -1258,7 +1385,13 @@ export function buildStopSteerText(input: any) {
   const remaining = Math.max(0, total - done)
   const statuses = Array.isArray(input?.statuses) ? input.statuses : []
   const snapshot = statuses.length > 0 ? derivePlanSnapshot(statuses) : null
-  const readiness = snapshot ? deliveryReadiness(snapshot, { phase: input?.phase }) : null
+  const readiness = snapshot
+    ? deliveryReadiness(snapshot, {
+      phase: input?.phase,
+      changePending: input?.changePending === true,
+      reportPending: input?.reportPending === true,
+    })
+    : null
   const blockers = readiness?.blockers ?? []
   const ids = statuses
     .filter((item: any) => item?.status !== 'done')
@@ -1482,15 +1615,57 @@ export function parseCancelMessage(message: any) {
   }
 }
 
+/**
+ * [1.11.0] 验收覆盖：计划写了什么，证据就必须逐条回应什么。
+ *
+ * 1.10.6 只检查证据自身的 result/evidence，于是子 Agent 写一条自创的
+ * 「自创验收项：pass」就能把 5 条计划验收全部绕开（T5 C4 / T10 D-01）。
+ * 这里用规范化后的包含关系做匹配：允许「必须给出命令与退出码」与
+ * 「给出命令与退出码」这类措辞差异，但不允许完全不同的一条顶替。
+ * 短文本（< 6 字）只接受等值，避免 "ok" 命中任意单词。
+ */
+export function normaliseCriterion(value: any) {
+  return String(value ?? '')
+    .toLowerCase()
+    .replace(/[\s，。；、,.;:：!！?？"'“”‘’()（）\[\]【】《》<>]/g, '')
+    .replace(/^(必须|需要|应当|应该|请|务必)/, '')
+}
+
+export function acceptanceCoverage(expected: any, actual: any) {
+  const want = (Array.isArray(expected) ? expected : []).map(normaliseCriterion).filter(Boolean)
+  const got = (Array.isArray(actual) ? actual : [])
+    .map((item: any) => normaliseCriterion(item?.criterion))
+    .filter(Boolean)
+  const missing: string[] = []
+  for (const [index, criterion] of want.entries()) {
+    const covered = got.some((row: string) => {
+      if (row === criterion) return true
+      if (Math.min(row.length, criterion.length) < 6) return false
+      return row.includes(criterion) || criterion.includes(row)
+    })
+    if (!covered) missing.push(String((Array.isArray(expected) ? expected : [])[index] ?? criterion))
+  }
+  return { total: want.length, covered: want.length - missing.length, missing }
+}
+
 function readEvidenceAcceptance(value: any) {
   if (!Array.isArray(value)) return []
   return value.slice(0, MAX_EVIDENCE_ACCEPTANCE).map((item: any) => {
     const source = isRecord(item) ? item : {}
-    const result = ACCEPTANCE_RESULTS.includes(source.result) ? source.result : 'unverified'
+    const stated = ACCEPTANCE_RESULTS.includes(source.result) ? source.result : 'unverified'
+    const evidence = truncate(String(source.evidence ?? ''), 300)
+    /*
+     * [1.11.0] C-19：`pass` 必须有证据。
+     *
+     * 「验收：pass，证据：空」是自述而不是验证。1.10.6 把它当通过，于是
+     * 子 Agent 只要写一排 pass 就能让验收表全绿。没有证据的 pass 降级为
+     * `unverified`，交付门禁据此继续拦，而不是被一行空字符串骗过。
+     */
+    const result = stated === 'pass' && evidence.trim() === '' ? 'unverified' : stated
     return {
       criterion: truncate(String(source.criterion ?? ''), 500),
       result,
-      evidence: truncate(String(source.evidence ?? ''), 300),
+      evidence,
     }
   }).filter((item: any) => item.criterion !== '')
 }
@@ -1509,6 +1684,90 @@ function readEvidenceArtifacts(value: any) {
 function readEvidenceNeeds(value: any) {
   if (!Array.isArray(value)) return []
   return value.slice(0, MAX_EVIDENCE_NEEDS)
+    .map((item: any) => truncate(typeof item === 'string' ? item : String(item ?? ''), 300))
+    .filter(Boolean)
+}
+
+/**
+ * [1.11.0] 跨部门需求的唯一规范化入口（用户 m00687）。
+ *
+ * 去重键是 `request` 文本：同一条需求可能出现在结果块、人工改判、结果消息
+ * 回放三条路径上，重复登记会让交付门禁数出 3 条未落实。状态、部门、答复
+ * 都由服务端校验，客户端与模型只能提供文本。
+ */
+export function normaliseHandoffs(value: any): any[] {
+  const list = Array.isArray(value) ? value : []
+  const seen = new Set<string>()
+  const out: any[] = []
+  for (const raw of list.slice(0, MAX_HANDOFFS)) {
+    if (!isRecord(raw)) continue
+    const request = truncate(String(raw.request ?? ''), 300).trim()
+    if (!request || seen.has(request)) continue
+    seen.add(request)
+    const status = HANDOFF_STATUSES.includes(raw.status) ? raw.status : 'open'
+    const department = typeof raw.department === 'string' && DEPARTMENTS[raw.department as keyof typeof DEPARTMENTS]
+      ? raw.department
+      : null
+    const response = truncate(String(raw.response ?? ''), MAX_HANDOFF_RESPONSE_CHARS).trim() || null
+    out.push({
+      id: truncate(String(raw.id ?? ''), 16).trim() || `H${out.length + 1}`,
+      request,
+      department,
+      status,
+      response,
+      at: numberOrNull(raw.at) ?? Date.now(),
+      updatedAt: numberOrNull(raw.updatedAt) ?? numberOrNull(raw.at) ?? Date.now(),
+      by: ['child', 'agent', 'system'].includes(raw.by) ? raw.by : 'system',
+    })
+  }
+  return out
+}
+
+/**
+ * 每一条 `needs` 都必须变成一条可追踪的 handoff。
+ *
+ * 已经登记过的需求（无论最后是 answered 还是 closed）保留原状态，不会因为
+ * 结果消息再次回放而退回 open；这是「处理过的事情不能被重放抹掉」的最基本
+ * 要求，也是交付门禁能给出稳定结论的前提。
+ */
+export function mergeHandoffsFromNeeds(current: any, needs: any): any[] {
+  const next = normaliseHandoffs(current)
+  const list = Array.isArray(needs) ? needs : []
+  for (const raw of list) {
+    const request = truncate(String(raw ?? ''), 300).trim()
+    if (!request) continue
+    if (next.some((item) => item.request === request)) continue
+    if (next.length >= MAX_HANDOFFS) break
+    next.push({
+      id: `H${next.length + 1}`,
+      request,
+      department: null,
+      status: 'open',
+      response: null,
+      at: Date.now(),
+      updatedAt: Date.now(),
+      by: 'child',
+    })
+  }
+  return next
+}
+
+/** 还挡着交付的跨部门需求（open/routed），answered/closed 视为已处理。 */
+export function openHandoffs(status: any): any[] {
+  const list = Array.isArray(status?.handoffs) ? status.handoffs : []
+  return list.filter((item: any) => item?.status === 'open' || item?.status === 'routed')
+}
+
+/**
+ * [1.11.0] Candidate decisions attached to an escalation.
+ *
+ * The main Agent is asked to decide, not to guess. Options are advisory text,
+ * never auto-applied: an option the child invented must not become an
+ * instruction just because it was listed first.
+ */
+function readEvidenceOptions(value: any) {
+  if (!Array.isArray(value)) return []
+  return value.slice(0, MAX_ESCALATION_OPTIONS)
     .map((item: any) => truncate(typeof item === 'string' ? item : String(item ?? ''), 300))
     .filter(Boolean)
 }
@@ -1549,7 +1808,7 @@ const BLOCKED_LINE = /^\s*(BLOCKED|受阻|无法完成)\s*[:：]\s*/i
  * the acceptance table cannot drift apart between the runtime and the replay.
  * It never invents evidence and never upgrades a failed self-check to done.
  */
-export function adjudicateResult({ output, strict = true }: any) {
+export function adjudicateResult({ output, strict = true, expectedAcceptance = [] }: any) {
   const text = typeof output === 'string' ? output : ''
   const parsed = parseEvidenceBlock(text)
   if (!strict) {
@@ -1586,12 +1845,40 @@ export function adjudicateResult({ output, strict = true }: any) {
         error: text.replace(BLOCKED_LINE, '').trim() || '子 Agent 报告受阻',
       }
     }
-    return { status: 'done', verification: 'legacy', acceptance: [], artifacts: [], needs: [], error: null }
+    /*
+     * [1.11.0] 沉默不是成功（C-05 / M3）。
+     *
+     * 1.10.6 在这里返回 `done/legacy`：子 Agent 只回一段散文、没有证据块、
+     * 也没写 BLOCKED，就被记成「已完成」。进度栏先显示完成，交付门禁再事后
+     * 拦一次，用户看到的是「明明做完了却交付不了」。完成必须有结构化回报，
+     * 没有回报只能算未完成，并明确写出缺什么。
+     *
+     * `strict:false` 保留旧行为，用于回放 1.11.0 之前的会话日志。
+     */
+    return {
+      status: 'blocked',
+      verification: 'unverified',
+      acceptance: [],
+      artifacts: [],
+      needs: [],
+      error: '子 Agent 未提供结构化证据块（完成必回报）：结果块缺失，无法确认验收项是否真的通过',
+    }
   }
   const payload: any = parsed.payload
   const acceptance = readEvidenceAcceptance(payload.acceptance)
   const artifacts = readEvidenceArtifacts(payload.artifacts)
   const needs = readEvidenceNeeds(payload.needs)
+  /*
+   * [1.11.0] A blocked result may carry the question it is waiting on.
+   *
+   * When the escalation tool is unavailable (a child session running an older
+   * tool table), the prompt's text fallback writes `blockedReason` +
+   * `question` + `options` into the same evidence block. Surfacing them here
+   * keeps one parser for both paths; without this the runtime could only say
+   * "blocked" and the pending decision was lost.
+   */
+  const question = truncate(String(payload.question ?? ''), MAX_QUESTION_CHARS)
+  const options = readEvidenceOptions(payload.options)
   const blockedReason = truncate(String(payload.blockedReason ?? payload.error ?? ''), 2000)
   if (payload.status === 'blocked') {
     return {
@@ -1600,6 +1887,8 @@ export function adjudicateResult({ output, strict = true }: any) {
       acceptance,
       artifacts,
       needs,
+      question,
+      options,
       error: blockedReason || '子 Agent 报告受阻',
     }
   }
@@ -1611,6 +1900,8 @@ export function adjudicateResult({ output, strict = true }: any) {
       acceptance,
       artifacts,
       needs,
+      question,
+      options,
       error: detail ? `部分完成：${detail}` : '部分完成',
     }
   }
@@ -1622,6 +1913,8 @@ export function adjudicateResult({ output, strict = true }: any) {
       acceptance,
       artifacts,
       needs,
+      question,
+      options,
       error: `自检未通过：${failed.map((item: any) => item.criterion).join('；')}`,
     }
   }
@@ -1638,6 +1931,24 @@ export function adjudicateResult({ output, strict = true }: any) {
    */
   const hasUnverified = acceptance.length === 0
     || acceptance.some((item: any) => item.result === 'unverified')
+  /*
+   * [1.11.0] 计划验收必须被逐条回应（T5 C4 / T10 D-01，阻断级）。
+   *
+   * 只有证据不完整时才算缺口：全部 pass 但少回一条，仍然是「没做完」。
+   * 旧计划/旧日志没有 expectedAcceptance 时保持原语义，避免历史回放翻红。
+   */
+  const coverage = acceptanceCoverage(expectedAcceptance, acceptance)
+  if (coverage.total > 0 && coverage.missing.length > 0) {
+    return {
+      status: 'blocked',
+      verification: 'unverified',
+      acceptance,
+      artifacts,
+      needs,
+      error: `验收项未被逐条回应（${coverage.covered}/${coverage.total}）：缺少 ${coverage.missing
+        .map((item: string) => truncate(String(item), 120)).slice(0, 5).join('；')}。请按计划验收逐条给出证据后再回报。`,
+    }
+  }
   return {
     status: 'done',
     verification: hasUnverified ? 'unverified' : 'structured',
@@ -1671,6 +1982,34 @@ export function buildUpdateMessage(update: any) {
     ...(update.acceptance === undefined ? {} : { acceptance: update.acceptance }),
     ...(update.artifacts === undefined ? {} : { artifacts: update.artifacts }),
     ...(update.missingArtifacts === undefined ? {} : { missingArtifacts: update.missingArtifacts }),
+    /*
+     * [1.11.0] 闭环字段随人工改判一起留档。
+     *
+     * `escalate` 工具在子会话里立刻写一条这样的记录，所以即使页面在回合结束
+     * 前刷新，「有一条请示在等指示」也不会退回 pending。旧版本的日志没有这些
+     * 键，回放时按 undefined 跳过，不改变 1.10.6 的语义。
+     */
+    ...(update.closure === undefined ? {} : { closure: update.closure }),
+    ...(update.blockedKind === undefined ? {} : { blockedKind: update.blockedKind }),
+    ...(update.question === undefined ? {} : { question: update.question }),
+    ...(update.options === undefined ? {} : { options: update.options }),
+    ...(update.assignedAt === undefined ? {} : { assignedAt: update.assignedAt }),
+    ...(update.ackedAt === undefined ? {} : { ackedAt: update.ackedAt }),
+    ...(update.ackEvidence === undefined ? {} : { ackEvidence: update.ackEvidence }),
+    ...(update.ackOverdue === undefined ? {} : { ackOverdue: update.ackOverdue }),
+    ...(update.escalatedAt === undefined ? {} : { escalatedAt: update.escalatedAt }),
+    ...(update.escalationSeq === undefined ? {} : { escalationSeq: update.escalationSeq }),
+    ...(update.instruction === undefined ? {} : { instruction: update.instruction }),
+    ...(update.instructionSeq === undefined ? {} : { instructionSeq: update.instructionSeq }),
+    /*
+     * [1.11.0] 指示回执提醒也要能回放（T10 N4）。
+     *
+     * 否则刷新页面后「指示已发出、子会话还没动」这条事实只剩内存里的一份，
+     * 记录重建时被静默抹掉，主 Agent 会以为指示已经被执行。
+     */
+    ...(update.instructionOverdue === undefined ? {} : { instructionOverdue: update.instructionOverdue }),
+    ...(update.handoffs === undefined ? {} : { handoffs: update.handoffs }),
+    ...(update.reportedAt === undefined ? {} : { reportedAt: update.reportedAt }),
     ...(update.revision === undefined ? {} : { revision: update.revision }),
     at: update.at ?? Date.now(),
   }
@@ -1752,6 +2091,19 @@ export function applyResultStatuses(statuses: any, result: any) {
      */
     if (Number.isInteger(entry.revision) && Number.isInteger(current.revision)
       && Number(entry.revision) <= Number(current.revision)) continue
+    /*
+     * [1.11.0] 回放一条结果消息 = 「这条完成结果已经回报过」。
+     *
+     * 1.10.6 的结果载荷没有 `closure`。若原样交给 `applyStatus`，它的 done
+     * 分支会把闭包补成 `done`（= 完成但未回报），而 `deliveryReadiness` 的
+     * reportPending 拦截就会把**每一份历史计划**判成不可交付 —— 升级后用户
+     * 手里所有旧会话都会突然“差一步回报”。结果消息本身就是回报的证据，
+     * 所以旧载荷的 done 行按 `reported` 解释；新载荷已经显式带 `reported`
+     * （finishRound 先 markReported 再构消息），不受影响。
+     */
+    const replayedClosure = entry.status === 'done' && entry.closure === undefined
+      ? 'reported'
+      : entry.closure
     try {
       next = applyStatus(next, entry.subtaskId, {
         status: entry.status,
@@ -1766,7 +2118,31 @@ export function applyResultStatuses(statuses: any, result: any) {
         artifacts: entry.artifacts,
         missingArtifacts: entry.missingArtifacts,
         needs: entry.needs,
+        handoffs: entry.handoffs,
         blockedBy: entry.blockedBy,
+        closure: replayedClosure,
+        blockedKind: entry.blockedKind,
+        question: entry.question,
+        options: entry.options,
+        assignedAt: entry.assignedAt,
+        ackedAt: entry.ackedAt,
+        ackEvidence: entry.ackEvidence,
+        ackOverdue: entry.ackOverdue,
+        escalatedAt: entry.escalatedAt,
+        escalationSeq: entry.escalationSeq,
+        instruction: entry.instruction,
+        instructionSeq: entry.instructionSeq,
+        instructionOverdue: entry.instructionOverdue,
+        reportedAt: entry.reportedAt,
+        // [1.11.0] 回报证据与重规划留档必须随结果快照回放（T7 C-06/C-11）。
+        report: entry.report,
+        replannedReason: entry.replannedReason,
+        replannedAt: entry.replannedAt,
+        replacedBy: entry.replacedBy,
+        replannedFrom: entry.replannedFrom,
+        replannedFromClosure: entry.replannedFromClosure,
+        insertedBy: entry.insertedBy,
+        replaces: entry.replaces,
         revision: entry.revision,
         updatedBy: entry.updatedBy,
       })
@@ -1785,6 +2161,7 @@ export function createStatuses(plan: any) {
     department: subtask.department,
     role: subtask.role,
     status: 'pending',
+    closure: 'pending',
     progress: 0,
     childId: null,
     startedAt: null,
@@ -1805,6 +2182,123 @@ export function applyStatus(statuses: any, subtaskId: any, patch: any) {
     }
     next.status = patch.status
   }
+  /*
+   * [1.11.0] 闭环字段与 status 同表、同写入口（T4 D1/D2）。
+   *
+   * 校验放在这里而不是各个调用点：escalate 工具、看门狗、结果回放、页面
+   * 刷新后的重建都走 applyStatus，任何一条路径都无法绕过枚举检查，也不会
+   * 出现「status 说完成、closure 说还在等指示」的双份真相。
+   */
+  if (patch.closure !== undefined) {
+    if (patch.closure === null) next.closure = null
+    else if (!CLOSURES.includes(patch.closure)) {
+      throw new PlanError(`非法 closure：${String(patch.closure)}`, 'INVALID_CLOSURE')
+    } else next.closure = patch.closure
+  }
+  if (patch.blockedKind !== undefined) {
+    if (patch.blockedKind === null) next.blockedKind = null
+    else if (!BLOCKED_KINDS.includes(patch.blockedKind)) {
+      throw new PlanError(`非法 blockedKind：${String(patch.blockedKind)}`, 'INVALID_BLOCKED_KIND')
+    } else next.blockedKind = patch.blockedKind
+  }
+  if (patch.question !== undefined) {
+    const text = truncate(String(patch.question ?? ''), MAX_QUESTION_CHARS)
+    next.question = text || null
+  }
+  if (patch.options !== undefined) next.options = readEvidenceOptions(patch.options)
+  if (patch.assignedAt !== undefined) next.assignedAt = numberOrNull(patch.assignedAt)
+  if (patch.ackedAt !== undefined) next.ackedAt = numberOrNull(patch.ackedAt)
+  if (patch.ackEvidence !== undefined) {
+    next.ackEvidence = isRecord(patch.ackEvidence)
+      ? {
+          seq: Number.isInteger(Number(patch.ackEvidence.seq)) ? Number(patch.ackEvidence.seq) : null,
+          elapsedMs: Number.isFinite(Number(patch.ackEvidence.elapsedMs))
+            ? Math.max(0, Number(patch.ackEvidence.elapsedMs))
+            : null,
+        }
+      : undefined
+  }
+  if (patch.ackOverdue !== undefined) next.ackOverdue = patch.ackOverdue === true
+  /*
+   * [1.11.0] 指示回执状态也必须能在同一条状态条目上落盘（T10 N4）。
+   *
+   * `scheduleInstructionAck` 在 60s 写 `instructionOverdue:true`，但这里原先
+   * 没有对应分支，字段被静默丢弃：界面看不到「指示已发出、子会话还没动」，
+   * 主 Agent 也无从判断该催还是该重发。它和 `ackOverdue` 是同一类事实，
+   * 只是方向相反（主 → 子）。
+   */
+  if (patch.instructionOverdue !== undefined) next.instructionOverdue = patch.instructionOverdue === true
+  if (patch.escalatedAt !== undefined) next.escalatedAt = numberOrNull(patch.escalatedAt)
+  if (patch.escalationSeq !== undefined) {
+    next.escalationSeq = Number.isInteger(Number(patch.escalationSeq)) ? Number(patch.escalationSeq) : null
+  }
+  if (patch.instruction !== undefined) {
+    if (patch.instruction === null) next.instruction = null
+    else if (isRecord(patch.instruction)) {
+      const text = truncate(String(patch.instruction.text ?? ''), MAX_INSTRUCTION_CHARS)
+      if (!text) throw new PlanError('instruction.text 不能为空', 'INVALID_INSTRUCTION')
+      const delivery = ['sent', 'failed', 'not-sent'].includes(patch.instruction.delivery)
+        ? patch.instruction.delivery
+        : 'not-sent'
+      next.instruction = {
+        text,
+        at: numberOrNull(patch.instruction.at) ?? Date.now(),
+        by: ['agent', 'system', 'child'].includes(patch.instruction.by) ? patch.instruction.by : 'agent',
+        delivery,
+        ...(typeof patch.instruction.messageId === 'string'
+          ? { messageId: truncate(patch.instruction.messageId, 200) }
+          : {}),
+      }
+    } else {
+      throw new PlanError('instruction 必须是对象或 null', 'INVALID_INSTRUCTION')
+    }
+  }
+  if (patch.instructionSeq !== undefined) {
+    next.instructionSeq = Number.isInteger(Number(patch.instructionSeq)) ? Number(patch.instructionSeq) : null
+  }
+  if (patch.reportedAt !== undefined) next.reportedAt = numberOrNull(patch.reportedAt)
+  /*
+   * [1.11.0] 完成回报与重规划的留档字段（T7 C-06/C-11）。
+   *
+   * `report` 是「这条完成结果回报给主 Agent 了吗」的唯一证据，`ref` 指向本轮
+   * `workplan-result` 消息的稳定标识；`replanned*` 让旧行在刷新后仍能显示
+   * 「被哪次修订替换、替换前是什么状态」。两者都只写同一条状态条目，
+   * 不新增存储。
+   */
+  if (patch.report !== undefined) {
+    if (patch.report === null) next.report = null
+    else if (isRecord(patch.report)) {
+      const state = ['sent', 'failed', 'pending'].includes(patch.report.state)
+        ? patch.report.state
+        : 'sent'
+      next.report = {
+        state,
+        at: numberOrNull(patch.report.at),
+        ref: typeof patch.report.ref === 'string' ? truncate(patch.report.ref, 300) : null,
+        turn: Number.isInteger(Number(patch.report.turn)) ? Number(patch.report.turn) : null,
+      }
+    } else {
+      throw new PlanError('report 必须是对象或 null', 'INVALID_REPORT')
+    }
+  }
+  if (patch.replannedReason !== undefined) {
+    next.replannedReason = truncate(String(patch.replannedReason ?? ''), 2000) || null
+  }
+  if (patch.replannedAt !== undefined) next.replannedAt = numberOrNull(patch.replannedAt)
+  if (patch.replacedBy !== undefined) {
+    next.replacedBy = (Array.isArray(patch.replacedBy) ? patch.replacedBy : [])
+      .slice(0, 8)
+      .map((id: any) => truncate(String(id ?? ''), 16))
+      .filter(Boolean)
+  }
+  if (patch.replannedFrom !== undefined) {
+    next.replannedFrom = typeof patch.replannedFrom === 'string' ? patch.replannedFrom : null
+  }
+  if (patch.replannedFromClosure !== undefined) {
+    next.replannedFromClosure = typeof patch.replannedFromClosure === 'string' ? patch.replannedFromClosure : null
+  }
+  if (patch.insertedBy !== undefined) next.insertedBy = truncate(String(patch.insertedBy), 40) || null
+  if (patch.replaces !== undefined) next.replaces = truncate(String(patch.replaces), 16) || null
   if (patch.progress !== undefined) {
     if (!Number.isInteger(patch.progress) || patch.progress < 0 || patch.progress > 100) {
       throw new PlanError('progress 必须是 0-100 的整数', 'INVALID_PROGRESS')
@@ -1847,7 +2341,18 @@ export function applyStatus(statuses: any, subtaskId: any, patch: any) {
         return true
       })
   }
-  if (patch.needs !== undefined) next.needs = readEvidenceNeeds(patch.needs)
+  if (patch.needs !== undefined) {
+    next.needs = readEvidenceNeeds(patch.needs)
+    /*
+     * [1.11.0] 需求登记是自动的，处理不是（用户 m00687）。
+     *
+     * 任何一条 needs 写进来都立刻得到一条 open handoff，模型无法通过「只在
+     * 文本里提一句」绕过交付门禁；但把它变成 answered/closed 必须走主 Agent
+     * 的显式工具调用，子 Agent 自己不能宣称「跨部门需求已解决」。
+     */
+    next.handoffs = mergeHandoffsFromNeeds(next.handoffs, next.needs)
+  }
+  if (patch.handoffs !== undefined) next.handoffs = normaliseHandoffs(patch.handoffs)
   /*
    * [1.10.6] The files a retry refused to touch.
    *
@@ -1880,6 +2385,16 @@ export function applyStatus(statuses: any, subtaskId: any, patch: any) {
   next.updatedBy = ['child', 'agent', 'system'].includes(patch.updatedBy) ? patch.updatedBy : 'system'
   if (patch.status === 'done') {
     next.progress = 100
+    if (patch.closure === undefined) next.closure = 'done'
+    /*
+     * 一条已经完成的子任务不可能同时“在等指示”。旧的 question/options 是
+     * 上一段受阻经历的证据，不能继续驱动模型把它当成未决请示；失败原因本身
+     * 仍按既有规则迁入 lastError。
+     */
+    if (patch.blockedKind === undefined) next.blockedKind = null
+    if (patch.question === undefined) next.question = null
+    if (patch.options === undefined) next.options = []
+    if (patch.ackOverdue === undefined) next.ackOverdue = false
     if (next.finishedAt === null) next.finishedAt = Date.now()
     /*
      * [1.10.0] R-01：「完成」与「失败原因」不能同时成立。
@@ -1935,6 +2450,24 @@ export function applyStatus(statuses: any, subtaskId: any, patch: any) {
     next.startedAt = null
     next.finishedAt = null
     next.childId = null
+    /*
+     * [1.11.0] A reset starts a new attempt; every closure-companion field of
+     * the previous attempt goes with it, otherwise a re-queued row would still
+     * advertise a stale ack deadline or a question nobody is waiting on.
+     */
+    if (patch.closure === undefined) next.closure = 'pending'
+    if (patch.assignedAt === undefined) next.assignedAt = null
+    if (patch.ackedAt === undefined) next.ackedAt = null
+    if (patch.ackEvidence === undefined) next.ackEvidence = undefined
+    if (patch.ackOverdue === undefined) next.ackOverdue = false
+    if (patch.escalatedAt === undefined) next.escalatedAt = null
+    if (patch.escalationSeq === undefined) next.escalationSeq = null
+    if (patch.question === undefined) next.question = null
+    if (patch.options === undefined) next.options = []
+    if (patch.blockedKind === undefined) next.blockedKind = null
+    if (patch.instruction === undefined) next.instruction = null
+    if (patch.instructionSeq === undefined) next.instructionSeq = null
+    if (patch.reportedAt === undefined) next.reportedAt = null
     if (patch.summary === undefined) next.summary = ''
     if (patch.error === undefined) next.error = null
     // The evidence of the failed attempt must not survive a reset either.
@@ -1960,8 +2493,53 @@ export function applyStatus(statuses: any, subtaskId: any, patch: any) {
      */
     if (Number(next.progress) >= 100) next.progress = 99
   }
-  if (patch.status === 'blocked' && next.finishedAt === null) {
-    next.finishedAt = Date.now()
+  if (patch.status === 'blocked') {
+    /*
+     * `escalated` is the one blocked reason that must not be flattened into a
+     * plain failure: it is waiting for a decision, not out of options. A plain
+     * blocked write (watchdog timeout, failed self-check) still gets a kind, so
+     * the model can tell "timed out" from "the child said no".
+     */
+    if (patch.closure === undefined && next.closure !== 'escalated') next.closure = 'blocked'
+    if (patch.blockedKind === undefined && next.blockedKind === undefined) next.blockedKind = 'failed'
+    if (next.finishedAt === null) next.finishedAt = Date.now()
+  }
+  /*
+   * [1.11.0] 单一不变量：escalated 只能投影成 blocked。
+   *
+   * 若允许 `status:'in_progress'` + `closure:'escalated'`，左侧栏会显示
+   * 「正在做」而实际没有任何子会话在跑；反过来 `done` + `escalated` 会让交付
+   * 门禁把一条待指示的请示当成完成。要恢复推进必须先写 closure:'instructed'。
+   */
+  /*
+   * [1.11.0] 契约外迁移一律拒绝（M1）。
+   *
+   * 这条检查放在投影不变量之前：若先投影再查表，`replanned → assigned`
+   * 会被下面两条不变量放行（它们只管 escalated/done 的组合），死状态就复活了。
+   */
+  const previousClosure = current.closure
+  if (
+    previousClosure != null
+    && next.closure != null
+    && next.closure !== previousClosure
+    && !(CLOSURE_TRANSITIONS[String(previousClosure)] ?? []).includes(String(next.closure))
+  ) {
+    throw new PlanError(
+      `非法闭环迁移：${String(previousClosure)} → ${String(next.closure)}`,
+      'INVALID_TRANSITION',
+    )
+  }
+  if (next.closure === 'escalated' && next.status !== 'blocked') {
+    throw new PlanError(
+      'closure=escalated 必须同时是 status=blocked；恢复推进请写 closure=instructed',
+      'INVALID_CLOSURE_PROJECTION',
+    )
+  }
+  if (next.status === 'done' && ['assigned', 'acknowledged', 'instructed', 'escalated'].includes(next.closure)) {
+    throw new PlanError(
+      `status=done 不能与 closure=${String(next.closure)} 同时成立`,
+      'INVALID_CLOSURE_PROJECTION',
+    )
   }
   const copy = statuses.slice()
   copy[index] = next
@@ -2085,6 +2663,14 @@ export function normaliseStatusEntry(entry: any): StatusEntry {
   const lastError = status === 'done'
     ? (typeof source.lastError === 'string' && source.lastError !== '' ? source.lastError : legacyError)
     : (typeof source.lastError === 'string' ? source.lastError : null)
+  /*
+   * [1.11.0] 未知 closure 按 null 降级，而不是猜一个最接近的阶段。
+   *
+   * 「猜」会让一条 1.10.6 的 blocked 行在升级后显示成「等待指示」，主 Agent
+   * 于是去处理一个从未存在过的请示。null 的语义就是「这条日志没有闭环信息」，
+   * 界面按 status 原样展示，与旧版完全一致。
+   */
+  const closure = CLOSURES.includes(source.closure) ? source.closure : null
   return {
     ...source,
     subtaskId: stringOr(source.subtaskId, ''),
@@ -2093,6 +2679,7 @@ export function normaliseStatusEntry(entry: any): StatusEntry {
     department: stringOr(source.department, ''),
     role: stringOr(source.role, ''),
     status,
+    closure,
     progress,
     childId: status === 'pending' ? null : (source.childId ?? null),
     startedAt: status === 'pending' ? null : numberOrNull(source.startedAt),
@@ -2142,7 +2729,15 @@ export function deriveAggregates(statuses: readonly StatusEntry[], expectedTotal
   let pending = 0
   let progressSum = 0
 
-  for (const item of statuses) {
+  /*
+   * [1.11.0] 重规划后的旧行保留在数组里用于追溯，但不计入任何统计。
+   *
+   * 判据与 runtime.liveStatuses 同为 `closure === 'replanned'`；旧行若仍被
+   * 计入分母，卡片会长期停在「差一项」而计划实际已可交付。
+   */
+  const live = statuses.filter((item: any) => item?.closure !== 'replanned')
+
+  for (const item of live) {
     if (item.status === 'done') {
       done += 1
       progressSum += 100
@@ -2181,8 +2776,8 @@ export function deriveAggregates(statuses: readonly StatusEntry[], expectedTotal
   const defined = Number.isInteger(expectedTotal) && Number(expectedTotal) > 0
     ? Number(expectedTotal)
     : 0
-  const total = Math.max(statuses.length, defined)
-  const missing = Math.max(0, total - statuses.length)
+  const total = Math.max(live.length, defined)
+  const missing = Math.max(0, total - live.length)
   pending += missing
   const allDone = total > 0 && done === total
   /*
@@ -2386,10 +2981,17 @@ export function aggregateInvariantViolations(snapshot: PlanSnapshot, phase?: any
  * 不再参与判定（旧的 integrating 窗口已由 dispatch 内的 `executing` 覆盖）。
  */
 export function planPhase(statuses: any, _resultSeen = false) {
-  if (statuses.length === 0) return 'pending'
-  if (statuses.every((item: any) => item.status === 'done')) return 'done'
-  if (statuses.some((item: any) => item.status === 'blocked')) return 'blocked'
-  if (statuses.some((item: any) => item.status === 'in_progress' || item.status === 'done')) return 'executing'
+  /*
+   * [1.11.0] 只由「仍有效」的行决定轮次阶段：closure='replanned' 的旧行是
+   * 审计记录，既不能拖住 done，也不能制造 executing。
+   */
+  const live = Array.isArray(statuses)
+    ? statuses.filter((item: any) => item?.closure !== 'replanned')
+    : []
+  if (live.length === 0) return 'pending'
+  if (live.every((item: any) => item.status === 'done')) return 'done'
+  if (live.some((item: any) => item.status === 'blocked')) return 'blocked'
+  if (live.some((item: any) => item.status === 'in_progress' || item.status === 'done')) return 'executing'
   return 'pending'
 }
 
@@ -2421,6 +3023,17 @@ export function reconcilePhase(phase: any, statuses: any) {
   if (phase === 'pending' || phase === 'planning' || phase === 'executing') {
     return derived === 'pending' ? phase : derived
   }
+  /*
+   * [1.11.0] 「受阻」可以被指令解除（T10 N3）。
+   *
+   * 主 Agent 下发指示后，该行从 blocked/escalated 变成 in_progress/instructed，
+   * 但缓存的 `phase` 仍是 blocked。规则 4 会把 blocked 原样保留，于是卡片
+   * 继续显示「卡住了」，而事实是子会话已经在执行新的指示。派生值只会在
+   * 有 in_progress/done 且没有任何 blocked 行时才是 executing，此时缓存
+   * 的 blocked 已经过期，必须让位；仍有 blocked 行时派生值是 blocked，
+   * 走不到这里。
+   */
+  if (phase === 'blocked' && derived === 'executing') return 'executing'
   return phase ?? derived
 }
 
@@ -2460,9 +3073,17 @@ function verificationGap(item: any) {
   return `自检状态非法：${verification}`
 }
 
-export function deliveryReadiness(snapshot: PlanSnapshot, options: { phase?: any } = {}): DeliveryReadiness {
+export function deliveryReadiness(
+  snapshot: PlanSnapshot,
+  options: { phase?: any; changePending?: boolean; reportPending?: boolean; expectedAcceptance?: Record<string, any[]> } = {},
+): DeliveryReadiness {
   const phase = typeof options.phase === 'string' ? options.phase : ''
-  const statuses = Array.isArray(snapshot?.statuses) ? snapshot.statuses : []
+  const allStatuses = Array.isArray(snapshot?.statuses) ? snapshot.statuses : []
+  /*
+   * [1.11.0] 被重规划的旧行不参与交付判定：它们不是「没做完的剩余项」，
+   * 而是已被新行接替的历史。旧行若仍进入 remaining，计划永远差一项。
+   */
+  const statuses = allStatuses.filter((item: any) => item?.closure !== 'replanned')
   const remaining: string[] = []
   const blockers: string[] = []
   for (const item of statuses) {
@@ -2473,6 +3094,18 @@ export function deliveryReadiness(snapshot: PlanSnapshot, options: { phase?: any
     }
     const gap = verificationGap(item)
     if (gap) blockers.push(`${id} ${gap}`)
+    /*
+     * [1.11.0] C-17：子 Agent 完成 ≠ 主 Agent 已收到回报。
+     *
+     * `closure:'done'` 是完成路径在写结果消息之前的中间态；结果消息写成功
+     * 后由 `markReported`（runtime.ts，唯一写入点）改成 `reported` 并带
+     * `report{state,at,ref,turn}`。只拦 `updatedBy:'child'` 的行：主 Agent 用
+     * `dsh_workplan_update` 亲自改判的 done 本身就是裁决行为，没有子会话回报
+     * 可言，若一并拦住会让“人工补完最后一项”永远无法交付。
+     */
+    if (item?.closure === 'done' && item?.updatedBy === 'child') {
+      blockers.push(`${id} 已完成但尚未回报（closure=done）：结果消息还没有写入会话`)
+    }
     const acceptance = Array.isArray((item as any)?.acceptance) ? (item as any).acceptance : []
     /*
      * An empty acceptance list is not "everything passed"; it is the absence
@@ -2480,9 +3113,28 @@ export function deliveryReadiness(snapshot: PlanSnapshot, options: { phase?: any
      * exactly how the T5-D snapshot still looked deliverable.
      */
     if (acceptance.length === 0) blockers.push(`${id} 未提供验收项（acceptance 为空）`)
+    /*
+     * [1.11.0] 交付门也看「计划写了什么」（T5 C4 / T10 D-01）。
+     *
+     * adjudicate 在收尾时已经拦一次，但主 Agent 的 `update` 改判与历史回放
+     * 不经过 adjudicate；只在收尾拦，交付门仍会放过「5 条验收只回 1 条」的
+     * 计划。这里按同一份 acceptanceCoverage 复核，两处结论不会分叉。
+     * 只对自称 structured 的行生效：legacy 行本来就会被上面的 gap 拦住。
+     */
+    const expected = options.expectedAcceptance?.[id]
+    if ((item as any)?.verification === 'structured' && Array.isArray(expected) && expected.length > 0) {
+      const coverage = acceptanceCoverage(expected, acceptance)
+      if (coverage.missing.length > 0) {
+        blockers.push(`${id} 验收项未被逐条回应（${coverage.covered}/${coverage.total}）：${coverage.missing
+          .map((entry: string) => truncate(entry, 80)).slice(0, 3).join('；')}`)
+      }
+    }
     for (const entry of acceptance) {
       if (entry?.result !== 'pass') {
         blockers.push(`${id} 验收未通过：${truncate(String(entry?.criterion ?? '未命名验收项'), 80)}`)
+      } else if (String(entry?.evidence ?? '').trim() === '') {
+        /* [1.11.0] C-19：自述通过但没有任何可复核证据，不算通过。 */
+        blockers.push(`${id} 验收自称通过但没有证据：${truncate(String(entry?.criterion ?? '未命名验收项'), 80)}`)
       }
     }
     const missing = Array.isArray((item as any)?.missingArtifacts) ? (item as any).missingArtifacts : []
@@ -2492,6 +3144,17 @@ export function deliveryReadiness(snapshot: PlanSnapshot, options: { phase?: any
       if (artifact?.exists === false) {
         blockers.push(`${id} 声明产物不存在：${truncate(String(artifact?.ref ?? '未命名产物'), 120)}`)
       }
+    }
+    /*
+     * [1.11.0] 跨部门需求没有闭环就不能交付（用户 m00687）。
+     *
+     * 一条 open/routed 的 handoff 表示：某个部门明确说了「我需要谁提供什么」，
+     * 而主 Agent 还没有指派或答复。此时说「全部做完、可以交付」是把未落实的
+     * 协作当成不存在。answered/closed 才解除这条阻塞。
+     */
+    for (const handoff of openHandoffs(item)) {
+      const target = handoff?.department ? ` → ${handoff.department}` : ''
+      blockers.push(`${id} 跨部门需求未落实（${String(handoff?.id ?? 'H?')}${target}）：${truncate(String(handoff?.request ?? ''), 100)}`)
     }
   }
   const done = Number(snapshot?.stats?.done ?? 0)
@@ -2507,6 +3170,21 @@ export function deliveryReadiness(snapshot: PlanSnapshot, options: { phase?: any
   const missingRows = total - statuses.length
   if (total > 0 && missingRows > 0) {
     blockers.push(`状态明细缺少 ${missingRows} 行（计划定义 ${total} 项，实际只写 ${statuses.length} 行）：缺失项按未完成计`)
+  }
+  /*
+   * [1.11.0] C-17：记录级闭环事实也必须进交付门。
+   *
+   * 这两项不在 `statuses` 里，但同样是“没闭环”：`changeRequest.pending`
+   * 表示用户在执行中提的新要求还没被 replan/dispatch/cancel 判定，
+   * `reportPending` 表示上一轮完成结果没写进会话（没有证据的完成）。
+   * 由调用方（runtime 的 readinessOf / buildRoundResult）显式传入，避免
+   * 在本函数里反查 record、把纯函数变成第二个状态源。
+   */
+  if (options.changePending === true) {
+    blockers.push('存在未落实的需求变更（changeRequest.pending）：先用 dsh_workplan_replan 判定并重规划，或 dispatch/cancel 明确判定')
+  }
+  if (options.reportPending === true) {
+    blockers.push('上一轮完成结果尚未成功写入会话（reportPending）：先补齐回报再交付')
   }
   if (phase === 'cancelled' && (remaining.length > 0 || blockers.length > 0)) {
     blockers.unshift(`计划已取消但只完成 ${done}/${total}：取消只停止执行，不等于完成`)
@@ -2549,10 +3227,50 @@ export function readySubtasks(plan: any, statuses: any[], options: any = {}) {
   return flattenSubtasks(plan)
     .map((entry: any) => entry.subtask)
     .filter((subtask: any) => {
+      // [1.11.0] 已被 replace/cancel 的旧定义不再可调度。
+      if (subtask.supersededAt) return false
       const status = byId.get(subtask.id)
       if (!status || status.status !== 'pending') return false
       return subtask.dependsOn.every((dependency: any) => dependencyOk(byId.get(dependency), dependency))
     })
+}
+
+/**
+ * [1.11.0] 重规划 cancel 掉的上游必须显式收束下游（T4 D-T4-02）。
+ *
+ * cancel 只把旧行标成 superseded，不会重写下游的 dependsOn（replace 会）。
+ * 于是下游永远等一个不再调度的 ID：不报错、不 blocked、不进入交付阻塞——
+ * 用户看到的是「一直 pending」。这里在每次派发与交付判定前把这类下游标成
+ * blocked，并写明该用 replan 重新安排，而不是让它静默死锁。
+ */
+export function blockCancelledDependents(plan: any, statuses: any) {
+  const list = Array.isArray(statuses) ? statuses : []
+  const cancelled = new Set<string>()
+  for (const { subtask } of flattenSubtasks(plan)) {
+    if (!subtask?.supersededAt) continue
+    const replacedBy = Array.isArray(subtask.replacedBy) ? subtask.replacedBy : []
+    if (replacedBy.length === 0) cancelled.add(String(subtask.id))
+  }
+  if (cancelled.size === 0) return list
+  let next = list.slice()
+  for (const { subtask } of flattenSubtasks(plan)) {
+    if (subtask?.supersededAt) continue
+    const current = next.find((item: any) => item?.subtaskId === subtask.id)
+    if (!current || current.status !== 'pending' || current.closure === 'replanned') continue
+    const hit = (Array.isArray(subtask.dependsOn) ? subtask.dependsOn : []).filter((id: any) => cancelled.has(String(id)))
+    if (hit.length === 0) continue
+    try {
+      next = applyStatus(next, subtask.id, {
+        status: 'blocked',
+        closure: 'blocked',
+        error: `依赖已被重规划取消：${hit.join('、')}。请用 dsh_workplan_replan(action=replace) 重新安排这一项，或显式取消它。`,
+        updatedBy: 'system',
+      })
+    } catch {
+      // 单行冲突不应中断整轮；下一轮派发会再次尝试收束。
+    }
+  }
+  return next
 }
 
 export function markDependentsBlocked(plan: any, statuses: any, blockedId: any, cause: any = null) {
@@ -2568,7 +3286,14 @@ export function markDependentsBlocked(plan: any, statuses: any, blockedId: any, 
     for (const { subtask } of flattenSubtasks(plan)) {
       if (blocked.has(subtask.id)) continue
       const status = next.find((item: any) => item.subtaskId === subtask.id)
-      if (!status || status.status !== 'pending') continue
+      /*
+       * [1.11.0] 已被重规划的旧行不再参与级联（T6 F6-01）。
+       *
+       * 它们的 status 仍是 pending，但 closure 是 replanned；对它写 blocked
+       * 会触发 `replanned → blocked` 的非法迁移，异常会冒泡到整轮派发。
+       * 这些行本来就不参与调度与交付，跳过即可。
+       */
+      if (!status || status.status !== 'pending' || status.closure === 'replanned') continue
       if (subtask.dependsOn.some((dependency: any) => blocked.has(dependency))) {
         const direct = subtask.dependsOn.filter((id: any) => blocked.has(id))
         /*
@@ -2622,6 +3347,14 @@ export function resetBlockedStatuses(statuses: any) {
   let next = statuses.slice()
   for (const item of statuses) {
     if (item?.status !== 'blocked' && item?.status !== 'in_progress') continue
+    /*
+     * [1.11.0] 「等指示」不是「失败」，不能靠重新 dispatch 抹平。
+     *
+     * 旧逻辑把所有 blocked 行重置为 pending 再跑一遍，于是一条正等待主 Agent
+     * 决策的请示会被静默重派、问题被丢掉。升级行必须由主 Agent 显式处理
+     * （给出指示改判 instructed，或明确放弃改判 blocked）后才离开这个状态。
+     */
+    if (item?.closure === 'escalated' || item?.closure === 'instructed') continue
     next = applyStatus(next, item.subtaskId, {
       status: 'pending',
       progress: 0,
@@ -2659,7 +3392,17 @@ export function canResumePlan(record: any, maxResumes: number = MAX_PLAN_RESUMES
    * against the resume budget (it is a time slice, not a repair).
    */
   const paused = record?.phase === 'paused'
+  /*
+   * [1.11.0] 「等指示」不是失败，不能触发续跑（T10 N2）。
+   *
+   * `closure:'escalated'` 的行 status 也是 blocked，旧过滤会把它算成待修复：
+   * 计划明明在等主 Agent 拍板，卡片却显示「可续跑」，点下去零派发（每行都在
+   * 等指示），还白白消耗一次续跑额度。它需要的是 instruct，不是 dispatch。
+   * 该行在收到指示后由 `applyStatus` 迁移成 instructed/in_progress，届时才
+   * 重新参与续跑判定。
+   */
   const failed = statuses.filter((item: any) => {
+    if (item?.closure === 'escalated') return false
     if (item?.status === 'blocked' || item?.status === 'in_progress') return true
     return paused && item?.status === 'pending'
   })
@@ -2718,7 +3461,11 @@ export function buildChildPrompt({
   const dependencies = results.length === 0
     ? '无'
     : results
-      .map((item: any) => `- ${item.id} ${item.title}：${item.status}${item.summary ? `｜${item.summary}` : ''}`)
+      .map((item: any) => {
+        const refs = Array.isArray(item?.artifacts) ? item.artifacts.filter(Boolean).slice(0, 8) : []
+        return `- ${item.id} ${item.title}：${item.status}${item.summary ? `｜${item.summary}` : ''}`
+          + (refs.length ? `｜可消费产物：${refs.join('、')}` : '')
+      })
       .join('\n')
   /*
    * [1.7.0] No second truncation here.
@@ -2765,6 +3512,44 @@ export function buildChildPrompt({
       ].join('\n')
     : ''
   /*
+   * [1.11.0] 主 Agent 已经回答过的请示必须随下一次激活送进子提示词（M6/P-04）。
+   *
+   * `dsh_workplan_instruct` 在子会话已结束时只能把指示写进状态行；若不在下一次
+   * 激活的提示词里带上它，子 Agent 会重新从零猜测，指示等于没下发。这里读的是
+   * 同一条状态行上的 `instruction.text`，与 `instructSubtask` 的写入同源。
+   */
+  const pendingInstruction = previousStatus?.closure === 'instructed'
+    && typeof previousStatus?.instruction?.text === 'string'
+    && previousStatus.instruction.text.trim() !== ''
+    ? [
+        '',
+        '主 Agent 对你上一次请示的指示（这是决定，不是建议；必须按它执行）：',
+        truncate(String(previousStatus.instruction.text), MAX_INSTRUCTION_CHARS),
+        '执行时不要再就同一问题重复请示；只有出现新的、未被这条指示覆盖的阻塞时才再次上报。',
+      ].join('\n')
+    : ''
+  /*
+   * [1.11.0] 跨部门需求的答复必须随下一次激活回到提出方（用户 m00687）。
+   *
+   * 需求被主 Agent 指派或答复后只存在状态行里；若子 Agent 再次被唤醒时看不到
+   * 这份答复，它会再提一次同样的需求，或者按错误的前提继续。这里同时列出
+   * 「已答复的」与「仍在等待的」，后者明确要求不要重复上报、先做不依赖它的部分。
+   */
+  const previousHandoffs = previousStatus && Array.isArray(previousStatus.handoffs)
+    ? previousStatus.handoffs
+    : []
+  const answeredHandoffs = previousHandoffs.filter((item: any) => item?.status === 'answered' && item?.response)
+  const waitingHandoffs = previousHandoffs.filter((item: any) => item?.status === 'open' || item?.status === 'routed')
+  const handoffBrief = answeredHandoffs.length === 0 && waitingHandoffs.length === 0
+    ? ''
+    : [
+        '跨部门需求处置结果（这是事实，不是建议）：',
+        ...answeredHandoffs.map((item: any) =>
+          `- ${item.id} 已答复（${item.department ?? '主 Agent'}）：${truncate(String(item.response), 600)}`),
+        ...waitingHandoffs.map((item: any) =>
+          `- ${item.id} 仍在等待：${truncate(String(item.request), 300)}。不要重复上报；先完成不依赖它的部分，若要继续必须等主 Agent 答复。`),
+      ].join('\n')
+  /*
    * [1.8.12] 提示词整体过一遍 session-reference 消毒。
    *
    * 背景、依赖结果、兄弟部门摘要都可能是父会话原文的摘录，任何一处出现
@@ -2795,27 +3580,37 @@ export function buildChildPrompt({
     '依赖子任务的已知结果：',
     dependencies,
     ...(team ? ['', '兄弟部门进展（同一计划内的其他子任务；不要直接联系它们，需要协作请写进 needs 由主 Agent 转达）：', team] : []),
+    ...(handoffBrief ? ['', handoffBrief] : []),
     ...(failure ? [failure] : []),
     ...(resumeHint ? [resumeHint] : []),
+    ...(pendingInstruction ? [pendingInstruction] : []),
     '',
     '执行要求：',
     '- 只完成本子任务，不擅自扩大范围；不要派生新的 Agent。',
-    '- 你没有派发权限，也不能重启或安装任何服务；遇到这类步骤，直接写清“需要主 Agent 执行什么”，不要等待或空转。',
+    '- 你没有派发权限，也不能重启或安装任何服务；遇到这类步骤，必须先上报（见下方「遇阻上报」），再停止推进等待指示，不要空转。',
     '- 不得编造事实、文件、命令结果或证据；无法确认时明确写“未验证”。',
     '- 可以读取工作目录、运行必要命令、修改与任务相关的文件。',
     '- 优先使用给定上下文和本地工具；只有任务明确需要最新外部信息时才联网搜索。',
-    '- 控制工具调用次数，证据足够就立即汇报；不要反复搜索或等待长时间任务。',
-    '- 如果确实无法完成，第一行输出 `BLOCKED: 原因`，然后简要说明。',
+    '- 先把该做的检查做完再汇报：每条验收标准至少要有一处可复核的证据（命令输出/文件/引用），不要为了省时间跳过验证。',
+    '- 如果确实无法完成，第一行输出 `BLOCKED: 原因`，并按下方「遇阻上报」给出 question。',
     '- 完成后用简洁中文汇报：做了什么、证据/文件、验收结果、遗留问题。',
+    '',
+    '遇阻上报（强制，先于继续动作）：',
+    '- 出现以下任一情况，第一动作是上报，不是猜测、绕过或静默继续：缺少权限/输入/依赖产物；需求自相矛盾；无法验证；同一命令连续两次失败；需要主 Agent 决定方向。',
+    '- 优先调用工具：`dsh_workplan_escalate({ "subtaskId": "<你的子任务 ID>", "question": "需要主 Agent 回答的单个问题", "options": ["可选项 A", "可选项 B"], "needs": ["需要谁提供什么"] })`。调用成功后停止推进，只做只读核对。',
+    '- 如果该工具不可用：在结果块里写 `"status":"blocked"`、`"blockedReason":"..."`，并加上 `"question":"..."` 与 `"options":[...]`。',
+    '- 上报必须写清：卡在哪一步、已经尝试过什么、需要谁做什么决定；不要把“未验证”当成受阻上报。',
+    '- 能独立完成的部分先做完再上报；但一旦需要外部决定，立即停止写入，等待指示，不得自行选定一个选项继续。',
     '',
     '结果回传（必填）：在汇报的最后附上一个结构化结果块，主 Agent 会按它逐项核对，不再只依赖自述。',
     EVIDENCE_MARKER_BEGIN,
-    '{"status":"done","blockedReason":"","acceptance":[{"criterion":"把上面的验收标准原文抄在这里","result":"pass","evidence":"用命令输出、文件路径或引用证明"}],"artifacts":[{"kind":"file","ref":"相对工作目录的路径"}],"needs":[]}',
+    '{"status":"done","blockedReason":"","acceptance":[{"criterion":"把上面的验收标准原文抄在这里","result":"pass","evidence":"用命令输出、文件路径或引用证明"}],"artifacts":[{"kind":"file","ref":"相对工作目录的路径"}],"needs":[],"question":"","options":[]}',
     EVIDENCE_MARKER_END,
     '- status 只能是 done / blocked / partial；partial 会被当作受阻处理。',
     '- acceptance 必须逐条覆盖上面的验收标准；result 只能是 pass / fail / unverified。无法确认就写 unverified，不要写 pass。',
     '- artifacts 写你实际产出或修改的文件（kind=file，ref 用相对路径）、链接（kind=url）或说明（kind=note）。',
-    '- 需要其他部门配合时写进 needs（每条一句话），主 Agent 会转达；不要直连其他子 Agent。',
+    '- needs 写需要其他部门配合的事项，每条写清「哪个部门 + 需要什么 + 用来做什么」；它会被登记为待处理需求，主 Agent 必须处置后计划才能交付。不要直连其他子 Agent。',
+    '- question/options 只在受阻上报时填写；done 时保持空字符串/空数组。',
     '- 整块不超过 8000 字符；不要把这段模板本身抄进结果块。',
   ].join('\n'))
 }

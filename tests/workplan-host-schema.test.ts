@@ -17,6 +17,9 @@ import assert from 'node:assert/strict'
 import {
   createCancelTool,
   createDispatchTool,
+  createEscalateTool,
+  createInstructTool,
+  createHandoffTool,
   createStatusTool,
   createUpdateTool,
 } from '../src/host.js'
@@ -121,6 +124,9 @@ test('each registered tool stays inside the host JSON-Schema subset', () => {
     createStatusTool(fakeRuntime()),
     createUpdateTool(fakeRuntime()),
     createCancelTool(fakeRuntime()),
+    createEscalateTool(fakeRuntime()),
+    createInstructTool(fakeRuntime()),
+    createHandoffTool(fakeRuntime()),
   ]
   for (const tool of tools) {
     const violations = hostViolations(tool.parameters)

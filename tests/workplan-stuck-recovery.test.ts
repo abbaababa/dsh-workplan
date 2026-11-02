@@ -330,6 +330,7 @@ test('a stalled child blocks only itself, then a re-dispatch resumes the plan', 
     childTimeoutMs: 5000,
     totalTimeoutMs: 20000,
     maxResumes: 2,
+    strictEvidence: false,
   })
   runtime.state.records.set(session.id, record)
   const agent = { session, options: {} }

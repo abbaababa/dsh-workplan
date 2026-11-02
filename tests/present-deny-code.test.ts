@@ -103,6 +103,8 @@ test('码值契约：PRESENT_DENY_CODES 与规则文档逐字一致（对外契�
     EVIDENCE_GAP: 'EVIDENCE_GAP',
     CANCELLED_NAMED: 'CANCELLED_NAMED',
     SUPERSEDED_STALE: 'SUPERSEDED_STALE',
+    // [1.11.0] 子会话不是交付主体：present 只允许根会话发起（T7 P9）。
+    NOT_ROOT: 'NOT_ROOT',
   })
 })
 

@@ -251,21 +251,32 @@ pending ──dispatch──▶ executing ──全部 done──▶ done
 子 Agent 必须用**自由文本**汇报，并满足：
 
 - 优先在输出末尾追加结构化证据块（`<!-- WORKPLAN_EVIDENCE:START -->` … JSON … `<!-- WORKPLAN_EVIDENCE:END -->`），含 `status` / `blockedReason` / `acceptance[]` / `artifacts[]` / `needs[]`。这是 1.7.0 的主信号：`partial`、任一验收 `fail`、坏块都判受阻，只有全 `pass` 直接采信。
-- 没有证据块时，失败仍可**第一行**写 `BLOCKED: 原因`（大小写不敏感，中英文冒号都认，行首允许空白）——按 `legacy` 判受阻；其余非空文本按 `legacy` 判完成但标「未验证」，结果消息会提示主 Agent 复核。
+- 没有证据块时，失败仍可**第一行**写 `BLOCKED: 原因`（大小写不敏感，中英文冒号都认，行首允许空白）——按 `legacy` 判受阻。
+- **1.11.0 起，没有证据块、也没有 `BLOCKED` 的「纯散文」不再算完成**：默认（`strictCompletion`，可用 `DSH_WORKPLAN_STRICT_COMPLETION=0` 关闭）判 `blocked` + `unverified`，错误信息写明「结果块缺失，无法确认验收项是否真的通过」。历史回放仍按 `legacy` 读取，避免旧计划整体失效。
+- 验收条目自称 `pass` 但 `evidence` 为空时，1.11.0 降级为 `unverified`，且 `deliveryReadiness` 增加「验收自称通过但没有证据」阻塞项。
 - 正文写清：做了什么、证据/文件路径、验收结果、遗留问题；
 - 不编造命令输出、文件或证据；无法确认就写「未验证」；
 - 需要别人配合时，写「需要主 Agent 执行/确认什么」，**不要等待或空转**。
 
 `summary` 会被截断到 3000 字，因此**关键结论和绝对路径要放在最前面**。
 
+### 5.2.1 验收覆盖与上游门槛（1.11.0）
+
+- **验收不可自证**：裁决与交付门共用 `acceptanceCoverage`。计划写了 N 条验收，证据块必须逐条回应；允许措辞差异（规范化后包含关系），短文本（<6 字）只接受等值。少一条即 `blocked/unverified`，交付阻塞写明「验收项未被逐条回应（N/M）」。
+- **未验收上游不得解锁下游**：调度门 `dependencyOk` 对上游 `verification` 为 `unverified` / `failed` 时返回 false；`structured` 与 `legacy`（旧日志）仍放行。下游因此停在 pending，并由 `describePendingCause` 说明原因。
+- **cancel 的悬挂下游**：`replan cancel` 不重写下游依赖；派发与交付判定前由 `blockCancelledDependents` 把这类下游标成 `blocked` 并写明处理方式，不再永久 pending。
+- **子会话不得直接交付**：`present` 守卫对非根会话返回 `NOT_ROOT`；产物写工作区，由主 Agent 统一核对后交付。
+
 ### 5.3 跨部门转达
 
-1.7.0 **仍没有**子 Agent 直连、共享黑板或会签，但多了两个通道：兄弟任务只读一览（提示词内）与 `needs` 清单（结果消息内「跨部门待转达」）。转达仍只有两条路：
+1.11.0 **仍没有**子 Agent 直连、共享黑板或会签——这是刻意的权限边界，不是遗漏。跨部门只有三条路：
 
-1. **经主 Agent**：主 Agent 读结果消息，用 `dsh_workplan_update` 的 `note` / `evidence` 写回结论，或在下一轮对话里补充背景；
-2. **经工作区文件**：上游把接口/产物落到双方都能读到的路径，并在摘要里写绝对路径。
+1. **带编号的 hand-off（1.11.0 新增，唯一处置入口）**：子 Agent 每条 `needs` 由 `applyStatus` 自动登记为 `{id: H1, request, department, status}`；主 Agent 用 `dsh_workplan_handoff` 处置：`list` / `assign`（登记责任部门）/ `resolve`（写入答复或产物引用）/ `close`（确认无需动作）。四态为 `open → routed → answered / closed`。**未处置的 hand-off 会进 `deliveryReadiness`，直接拦住交付**；对正处于「待指示」的行执行 `resolve`，会复用 `instructSubtask` 把答复直接投递给该子会话。
+   - `assign` 只登记责任，**不会自动产生工作**（插件没有常驻部门代理）；需要产出时用 `dsh_workplan_replan(action=add)` 建该部门的子任务，或由主 Agent 自己完成，再 `resolve`。
+2. **经主 Agent 对话**：`dsh_workplan_instruct` 回答请示、`dsh_workplan_replan` 就地修订计划；
+3. **经工作区文件**：上游把接口/产物落到双方都能读到的路径，并在摘要里写绝对路径；`dependsOn` 上游的 `artifacts[].ref`（`exists:true`）会作为「可消费产物」注入下游提示词。
 
-「兄弟任务只读一览」与 `needs` 清单已在 1.7.0 实现（`buildTeamBrief`、`buildResultMessage`）；子 Agent 直连仍然不开放。
+「兄弟任务只读一览」与 `needs` 清单自 1.7.0 起存在（`buildTeamBrief`、`buildResultMessage`）；子 Agent 直连仍然不开放。
 
 ---
 

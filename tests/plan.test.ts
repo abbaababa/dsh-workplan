@@ -533,6 +533,12 @@ test('dispatch runs real DAG subtasks and does not hit the loop guard', async ()
     modelSelection: { provider: 'test', model: 'test' },
     cwd: process.cwd(),
     conversationContext: '',
+    /*
+     * 这条用例验证的是 DAG 调度而不是证据判定：假子会话只回一句「完成」，
+     * 没有结构化证据块。严格完成（1.11.0 默认）会把它判成 blocked，所以这里
+     * 显式关闭严格档，保留 1.10.6 的宽松判定，让断言只聚焦调度行为。
+     */
+    strictEvidence: false,
   })
   assert.equal(result.statuses.filter((item: any) => item.status === 'done').length, 2)
   assert.equal(result.statuses.filter((item: any) => item.status === 'blocked').length, 0)

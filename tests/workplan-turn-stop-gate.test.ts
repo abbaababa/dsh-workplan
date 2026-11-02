@@ -455,7 +455,11 @@ test('present：未完成/全 done 无证据都拒绝，已取消按点名判定
 
   const childSession = { ...makeSession(), header: { origin: 'subagent' } }
   const childRuntime: any = makeRuntime(makeRecord(makePlan('wp-present-child')), childSession)
-  assert.equal(childRuntime.presentDenialReason({ session: childSession }), undefined, '子 Agent 的 present 不受父计划约束')
+  assert.match(
+    childRuntime.presentDenialReason({ session: childSession }),
+    /子 Agent 不能直接交付/,
+    '1.11.0 起子 Agent 不得绕过根交付门禁（T7 P9）',
+  )
 })
 
 test('全部 done 但证据有硬缺口时，present 仍被拒绝', () => {

@@ -1,3 +1,125 @@
+## 1.11.0 — 2026-11-02
+
+**闭环契约 v1：为「派发 → 执行 → 遇阻 → 请示 → 指示 → 回报 → 进度 → 重规划」补上回执、上行请示与重规划通道；并如实标注本版仍未落地的深度下限。**
+
+> 本版直接回应用户的 8 条质疑。判定沿用 T3：**3 条成立（③④⑥）、5 条部分成立（①②⑤⑦⑧）、0 条不成立**。
+> 1.11.0 把 ①–⑧ 中「机制缺失」的部分全部补齐：派发回执、上行请示、下行指示与回执超时、完成必回报（沉默不再算成功）、验收逐条证据下限、就地重规划、左侧栏闭环徽标。**仍按设计延后的只有 SSE 推送（D1）、独立复核（D3）与预算/并发调参（D4）**——它们改变的是时延与成本，不是闭环是否存在。
+
+### 8 条疑问逐条处置
+
+| # | 疑问 | T3 判定 | 1.11.0 处置 | 代码落点 | 尚余 |
+|---|---|---|---|---|---|
+| ① | 下发分解 | 部分成立 | **已修复（回执与下发确定性）**：计划消息点名「必须调用 `dsh_workplan_dispatch`」；派发即写 `closure:'assigned'` + `dispatchSeq`；子会话首个进度事件写 `acknowledged`；90s 未回执标 `ackOverdue`，180s 仍无事件判 `blocked/no-ack` 并中止该次尝试 | `src/plan.ts:1038-1039`；`src/runtime.ts:903`（assigned）、`996`（acknowledged）、`929`（90s）、`941-955`（180s） | 无模型参与的完全自动派发延后（D2：会绕过预算/权限判断） |
+| ② | 执行深度 | 部分成立 | **已修复（深度下限）**：删掉「证据足够就立即汇报」，改为「每条验收标准至少一处可复核证据」；`acceptance[].result==='pass'` 但没有 `evidence` 时降级为 `unverified`（C-19），交付门禁据此继续拦；`strictCompletion` 默认开启，可用 `DSH_WORKPLAN_STRICT_COMPLETION=0` 回到宽松档 | `src/plan.ts`（`readEvidenceAcceptance` 降级、`deliveryReadiness` 证据 blocker）、子提示词「执行要求」段；`src/host.ts`（`strictCompletion` 三态解析） | 独立复核延后（D3）、预算/并发调参延后（D4）；这两项是成本策略，不是深度下限 |
+| ③ | 遇阻主动上报并请示 | 成立 | **已修复**：新增子会话工具 `dsh_workplan_escalate`（question 必填、按 `childId` 反查计划、写入 `blocked + closure:'escalated'` 并向父会话追加 `workplan-update`）；子提示词强制「遇阻先上报、再停止等待」；工具不可用时结果块的 `question` 走文本兜底；父层提示第 8 条要求当轮处理待指示项 | `src/host.ts:593`；`src/runtime.ts:3761`、`3814`；`src/plan.ts:3204-3210`、`1705-1717`；`src/host.ts:115` | 300s 空闲仍按失败收束，不会自动改判 `escalated`（只有子 Agent 主动上报或结果块带 question 才升级） |
+| ④ | 收到指示后是否执行 | 成立（子层） | **已修复**：新增根会话工具 `dsh_workplan_instruct`（仅根会话、仅 `closure:'escalated'`、仅直接子会话；`sendMessage` 投递成功后写 `closure:'instructed'` + `instruction` + `instructionSeq`；投递失败返回 `DELIVERY_FAILED` 且**不改状态**）；指示写入 60s 无进展标 `instructionOverdue`、180s 仍无事件判 `blocked/no-ack`；子会话来重新激活时，`buildChildPrompt` 会把 `instruction.text` 注入提示词（不靠模型自己回想）；续跑重置不再把 `instructed` 洗成 `pending` | `src/host.ts`（`createInstructTool`）；`src/runtime.ts`（`instructSubtask`、`scheduleInstructionAck`）；`src/plan.ts`（`buildChildPrompt` 指示注入、`resetBlockedStatuses` 跳过 instructed） | 投递失败后的自动重投仍由主 Agent 重试（状态保持 `escalated`，不会假称已指示） |
+| ⑤ | 完成后主动回报 | 部分成立 | **已修复**：结构化证据块成为完成的必要条件——没有证据块、又没写 `BLOCKED:` 的结果判 `blocked/unverified`（C-05，沉默不再算成功）；结果消息写成功后才由 `markReported` 把 `done` 行标 `closure:'reported'` + `report{state,at,ref,turn}`；`closure:'done'` 且 `updatedBy:'child'` 的行进交付 blocker；记录级 `reportPending` 同样拦交付；旧日志无 `closure` 时按 1.10.6 语义回放（done 视为已回报），避免升级后所有历史计划不可交付 | `src/plan.ts`（`adjudicateResult` 严格分支、`deliveryReadiness`）；`src/runtime.ts`（`markReported`、`settleFromOutput` 的 `closure:'done'`）；`src/host.ts`（`strictCompletion`） | 无 |
+| ⑥ | 需求变更及时重规划 | 成立 | **已修复**：新增根会话工具 `dsh_workplan_replan`（`cancel`/`replace`/`add`）；执行中出现的新要求不再被丢弃，先暂存为 `changeRequest` 并由 pre-step 通知主 Agent 判定；旧行保留 `closure:'replanned'` + `supersededAt`/`replacedBy`，不计入剩余分母、不再调度、不再参与交付门禁；`planRevision` 随修订递增；未落实的变更进交付 blocker | `src/host.ts:308`（注册 `1013`）；`src/runtime.ts:2973`、`5153`、`5212`；`src/replan.ts`；`src/plan.ts:2820`、`2888` | 变更语义仍由主 Agent 判定、代码只检测与暂存（E7，按设计） |
+| ⑦ | 左侧栏进度同步 | 部分成立 | **已修复（展示半边）**：`serialisePlan` 在同一快照中下发 `closure`/`replacedBy`/`report`/`planRevision`/`blockedKind`/`question`/`instruction`；客户端按服务端字段渲染闭环全档徽标——「待你决定」「已给指示 · 待执行」「已下发 · 待回应」「已回应 · 执行中」「完成 · 待回报」「已回报」「已重规划」；仍不持本地状态机，仍是写入后 ≤4s 的同一轮询链 | `src/runtime.ts`（`serialisePlan`）；`src/client.ts`（`SubtaskRow` 的 closure 分支与文案） | SSE 实时推送延后（D1）：现状是 ≤4s 有界延迟，不是不同步 |
+| ⑧ | 底层机制/逻辑 | 部分成立 | **部分修复**：新增与四值 `status` 正交的 `closure` 九状态（`pending/assigned/acknowledged/instructed/escalated/blocked/done/reported/replanned`），`STATUSES` 仍为四值；唯一写入口仍是 `applyStatus`；非法 `closure` 抛 `INVALID_CLOSURE`；契约外迁移抛 `INVALID_TRANSITION`（`CLOSURE_TRANSITIONS` 白名单，`replanned` 为终态）；`escalated` 必须同时是 `blocked`；四个新工具的服务端权限硬校验（子会话/根会话、直接子会话、待指示状态）不依赖提示词 | `src/plan.ts:110`（STATUSES 未扩）、`123-133`（CLOSURES）、`1976-1980`、`2278-2281`；`src/host.ts:1005-1013` | D1–D4 延后；②⑤ 的上述缺口仍属机制未闭合——见 G1–G3 |
+
+### 跨部门协作闭环（本版新增，回应用户追加要求）
+
+> 追加要求原文：**「对于需要跨部门协作的时候，现有的这个插件是否有对应的完美机制，你必须同样全面、深入、全面地毯式、深入排查、诊断和修正。严禁发生不合理、不完美的跨部门协作机制。」**
+
+1.10.6 的跨部门协作只有三件事：子任务带 `department`、兄弟部门进展通过 `buildTeamBrief` 只读展示、`needs` 以一段文字出现在结果消息的「跨部门待转达」里。它没有生命周期，也不进交付门禁：主 Agent 忘掉一条需求，计划照样可以 `present`。
+
+1.11.0 把它补成一条可追踪、可处置、可验证的闭环：
+
+- **需求自动登记**：`applyStatus` 在写入 `needs` 时同步生成 `handoffs`（`H1`、`H2`…），字段为 `{id, request, department, status, response, at, updatedAt, by}`，去重键是需求原文。任何写路径（子 Agent 结算、结果消息回放、人工改判）都无法只留一段文字而不留下可追踪记录。
+- **四态生命周期**：`open`（已提出，未处置）→ `routed`（已指派部门）→ `answered`（已给出书面答复或产物引用）/ `closed`（判定无需动作）。只有 `answered` / `closed` 解除交付阻塞；`open` / `routed` 会在 `deliveryReadiness` 里生成「跨部门需求未落实」blocker，`present` 被拒绝。
+- **唯一处置入口**：新增根会话工具 `dsh_workplan_handoff`（`list` / `assign` / `resolve` / `close`），服务端 `isRootSession` 硬校验；子 Agent 只能提出需求，不能宣称需求已解决。处置结果写回同一条状态行并追加可回放的 `workplan-update`。若提出需求的行正处于「待指示」，`resolve` 会复用 `instructSubtask` 的投递与回执链路把答复直接送进子会话——只改计划表、不唤醒等待方的「闭环」不算闭环。
+- **答复回到提出方**：子任务下次被激活时，`buildChildPrompt` 把已答复的需求（含答复正文）与仍在等待的需求一起注入提示词；等待中的明确要求「不要重复上报、先做不依赖它的部分」。
+- **交接物可消费**：派发时为下游注入的依赖结果不再只有状态与摘要，还带上游 `artifacts[].exists===true` 的产物引用（`runtime.ts` 的 `dependencyResults` 映射），跨部门交接从「知道做完了」变成「知道产物在哪」。
+- **进度栏可见**：`SubtaskRow` 渲染每条需求的编号、原文、指派部门、四态文案与答复，用户不必从结果消息里猜「这条需求谁在办」。
+- **测试**：`tests/workplan-closure-n1-n5.test.ts` 覆盖「needs 自动登记 → 未处置拦交付 → 指派后仍拦 → 答复后放行」与去重、回放；`npm test` 363 / 363 通过。
+
+### 交付门禁收紧（跨部门审计 T4/T5/T8/T10 的阻断项）
+
+第二轮地毯式审计（`_t5_contract_20261102/`、`_t8_scenario_20261102/`、`_t10_defect_triage_20261102/`，79 条来源缺陷去重为 54 条）确认本版还有两处**阻断级**缺口。它们不是新功能，而是「计划说完成了、其实没完成」的放行路径，本版一并堵住：
+
+- **验收不可自证（D-01）**：`adjudicateResult` 原先只检查证据自身的 `result/evidence`，计划写的 5 条验收可以被一条「自创验收项：pass」全部绕开。现在裁决与交付门共用 `acceptanceCoverage`：证据必须逐条回应计划验收（允许措辞差异，短文本只接受等值），少一条即 `blocked/unverified`，交付阻塞写明「验收项未被逐条回应（N/M）」。
+- **未验收上游不得解锁下游（D-02）**：调度门的 `dependencyOk` 原先只看 `status==='done'` 与缺失产物；上游 `unverified/failed` 时下游照常开跑。现在 `unverified/failed` 一律不放行（`legacy` 旧日志与 `structured` 仍放行，避免历史计划整体卡死）。
+- **cancel 悬挂下游（D-13）**：`replan cancel` 不重写下游 `dependsOn`，下游会永久 `pending`。现在派发与交付判定前由 `blockCancelledDependents` 把这类下游显式标 `blocked`，并写明「请用 replan 重新安排或取消」。
+- **级联不再撞非法迁移（F6-01）**：`markDependentsBlocked` 跳过 `closure:'replanned'` 的历史行，避免 `replanned → blocked` 抛 `INVALID_TRANSITION` 污染整轮。
+- **replan 与首次规划同强度（D-T4-03/04）**：`add/replace` 校验 `dependsOn≤12`、`method/inputs/outputs≤12`、`acceptance 1–8`、字符串长度；容量只数未 `superseded` 的活跃行，满编 15 项时也能 replace；新阶段 ID 撞名时追加后缀，保证新任务始终在末尾。
+- **子会话不得直接交付（T7 P9）**：`present` 的守卫对非根会话不再放行，返回 `NOT_ROOT`「子 Agent 不能直接交付」；交付只属于根会话。
+
+以上 6 条均有 `tests/workplan-crossdept-hardening.test.ts` 回归（9 条）与 `tests/present-deny-code.test.ts` 的码值契约更新。
+
+### 走查修正（T10 端到端报告 N1–N5）
+
+端到端走查（`_t10_walkthrough_20261102/`）在已完成机制上又发现 5 处「机制对了、读出来的样子不对」，本版一并修复：
+
+- **N1 阶段分母双口径**：`planStageRows` 现在过滤 `supersededAt` 旧行；重规划后不再出现「头部 100%、阶段条 1/2」。
+- **N2 等指示被当成可续跑**：`canResumePlan` 跳过 `closure:'escalated'` 的行；「待你决定」不再显示为可续跑，也不消耗续跑额度。
+- **N3 指示后仍显示卡住**：`reconcilePhase` 允许 `blocked` 在有活跃行时对账为 `executing`，`instructSubtask` 写入后立即重算 `record.phase`。
+- **N4 指示回执字段被丢弃**：`applyStatus` 增加 `instructionOverdue` 分支并可回放；`scheduleInstructionAck` 新增 5s 轮询，子会话一有新事件就写 `acknowledged` 并撤销 60s/180s 定时器（正常工作但较慢的子会话不会再被误判 no-ack）；进度栏新增「指示还没被执行」徽标。
+- **N5 变更正文不进进度栏**：卡片新增「需求变更待落实」横幅，显示变更原文与「本轮结束后重规划、不会丢失」的说明。
+
+### 机制改动明细
+
+- **派发回执**：`runtime.ts:903` 在启动子会话后写 `closure:'assigned'`、`assignedAt`、`dispatchSeq`；同一 `dispatchSeq` 的第一个进度事件写 `acknowledged`（`runtime.ts:996`）并撤销两个定时器；90s 写 `ackOverdue`（`runtime.ts:929`），180s 写 `blocked/blockedKind:'no-ack'` 并 abort（`runtime.ts:941-955`）。重试是全新尝试，旧的 `ackedAt`/`escalatedAt`/`question` 一律清空。
+- **上行请示**：`dsh_workplan_escalate` 只接受子会话，按 `childId` 反查父计划（不信自报 `subtaskId`），`question` 必填、`options` 最多 6 条；写入 `blocked + closure:'escalated' + blockedKind:'escalated'` 并向父会话追加一条 `workplan-update`（`runtime.ts:3814-3862`）。子会话拿不到工具时，结果块里的 `question` 由 `adjudicateResult` 解析并走同一 `escalated` 投影（`plan.ts:1705-1717`、`runtime.ts:739-750`）。
+- **下行指示**：`dsh_workplan_instruct` 校验根会话、`closure==='escalated'`、直接子会话，`sendMessage` 成功后写 `status:'in_progress' + closure:'instructed'`，并 append 同一条 update 供回放（`runtime.ts:3883-3985`）；失败路径 `DELIVERY_FAILED` 明确提示「状态未改变」。
+- **完成回报**：`markReported` 是唯一写入点（`runtime.ts:3489`），只处理 `status:'done'` 的行，已 `reported` 的不重复写；`deliveryReadiness` 新增「`closure:'done'` 且 `updatedBy:'child'`」与记录级 `reportPending` 两类 blocker（`plan.ts:2842`、`2892`）。
+- **重规划**：`src/replan.ts`（569 行）承载 `cancel/replace/add` 的纯函数；`runtime.ts:2973` 的 `replanPlan` 负责权限、修订号与持久化，执行中调用返回 `REPLAN_PLAN_RUNNING` 并保留 `changeText`；`plan.ts:2820` 把 `replanned` 行从剩余分母剔除，`runtime.ts:95-108` 让其不进入调度。
+- **完成判定收紧**：`adjudicateResult` 的 `!parsed.found` 分支从 `done/legacy` 改为 `blocked/unverified`；`readEvidenceAcceptance` 把「宣称 pass 但没有 evidence」降级为 `unverified`；`deliveryReadiness` 对无证据的 pass 另记一条 blocker。严格档默认开启，`strictCompletion:false` / `DSH_WORKPLAN_STRICT_COMPLETION=0` 可回放旧行为。
+- **状态机闸门**：`CLOSURE_TRANSITIONS` 逐状态列出合法出边，`applyStatus` 在投影校验之前拒绝契约外迁移；重试的 `blocked→assigned`、结果回放的 `pending→reported` 是两条显式例外。
+- **指示闭环**：`instructSubtask` 投递成功后启动 60s/180s 两级回执定时器；`buildChildPrompt` 在 `closure:'instructed'` 时把 `instruction.text` 注入子提示词；`resetBlockedStatuses` 不再重置 `instructed` 行，避免续跑把指示静默抹掉。
+- **进度读取**：字段全部来自 `serialisePlan` 的同一次快照；HTTP 仍只有一个 `/dsh-workplan/plans` GET；客户端 4s 轮询、按服务端 `closure` 渲染徽标，不做状态推导（`client.ts` 的 `SubtaskRow`）。
+
+### 行为变化（非破坏性）
+
+- 子任务派发后若 180s 内没有任何事件，状态会显示 `blocked`（原因 `no-ack`）而不是一直 `in_progress`，并中止该次子会话；重试策略不变（仍最多一次）。
+- 子 Agent 主动上报遇阻后，该行保持 `blocked + escalated`；父会话必须用 `instruct` 回答或显式改判 `blocked`，交付门禁不会把它当成已完成。
+- `done` 行只有在结果消息确实写入会话后才变为 `reported`；写失败时整轮记 `reportPending`，下一次交付被拦。
+- 执行中收到的新要求会生成 `changeRequest` 并在 pre-step 提示，主 Agent 必须 `replan`/`dispatch`/`cancel` 三选一，不能再静默略过。
+
+### 破坏性变更
+
+**无。**
+
+- `PLAN_VERSION` 保持 `1`（`src/plan.ts:14`），消息格式未变；
+- 未删除或改名任何既有字段/工具，新增字段均为可选；
+- `STATUSES` 仍是 `pending/in_progress/done/blocked` 四值（`src/plan.ts:110`），四值语义、计数与门禁不变；
+- 旧日志没有 `closure` 时按 `null` 回放，`done` 行按 1.10.6 语义视为已回报（`src/plan.ts:1890`）；
+- 新增的 `escalate`/`instruct`/`replan` 是纯增量工具，旧工具的参数面未变。
+
+### 迁移与安装
+
+**不需要迁移数据或改历史计划。** 升级后旧会话重新打开时按原语义回放；`closure` 为空的旧行不会被误判成「未回报」。
+
+```bash
+dsh plugin --profile web add dsh-workplan@1.11.0
+```
+
+装完重启一次 DSH Web（或重新载入页面）。
+
+### 测试
+
+`npm test`：**363 / 363 通过**（`src` + `tests` 全量，含 `tests/version-sync.test.ts` 对版本位点、CHANGELOG 标题与 README 安装命令的一致性断言）。新增用例：`tests/workplan-crossdept-hardening.test.ts`（验收覆盖、未验收上游、cancel 悬挂、replan 容量与字段强度 9 条）、`tests/workplan-closure-ack-escalation.test.ts`（9 条）、`tests/workplan-replan-progress.test.ts`、`tests/workplan-closure-n1-n5.test.ts`（走查修正 + 跨部门闭环 5 条）、`tests/workplan-evidence-contract.test.ts` 增补 3 条（严格判定、`strict=false` 兼容档、C-19 证据降级）；`tests/workplan-host-schema.test.ts` 纳入四个新工具的 schema（escalate / instruct / replan / handoff）。
+
+### 未包含（列入 1.12 的入口）
+
+- **D1** SSE 推送：左侧栏继续 4s 轮询（写入后 ≤4s 可见，不是「不同步」）。
+- **D2** 完全自动派发：会绕过预算/权限判断，保持「计划消息点名 + 收尾闸门」。
+- **D3** 独立复核/深度下限：需要第二套模型预算与复核判定标准。
+- **D4** 预算/并发/maxDepth 调参：900s/1200s/5 并发是现有安全边界，需基准后再动。
+
+### 本版固化的闭环语义（发布前自查）
+
+- **状态机有闸门**：`applyStatus` 拒绝契约外迁移（`INVALID_TRANSITION`），`replanned` 是终态；重试路径（`blocked → assigned`）与结果回放（`pending → reported`）是显式允许的两条例外。
+- **完成必须有证据**：无证据块 → `blocked/unverified`；`pass` 无 `evidence` → 降级 `unverified`；完成但未回报 → 交付 blocker。
+- **指示必须能到、能被确认**：`instructed` 行在下次激活时把指示注入子提示词；60s/180s 两级回执超时；续跑重置跳过 `instructed`/`escalated`。
+- **进度栏与服务端同源**：客户端只渲染 `serialisePlan` 下发的 `closure`，不推导状态。
+
+### 仍按设计延后（不是缺口）
+
+- **D1** SSE 推送：「写入后 ≤4s 可见」是有界延迟；改为推送属于性能优化，1.12 入口。
+- **D3** 独立复核：需要第二套模型预算与复核判定标准。
+- **D4** 预算/并发/maxDepth 调参：900s/1200s/5 并发是安全边界，需基准后再动。
+
 ## 1.10.6 — 2026-11-01
 
 **修复：单个子任务超时后的「自动重试一次」在真实链路里是死代码；自动续跑开关默认关闭，等于从来没有打开过。**

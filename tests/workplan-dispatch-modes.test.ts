@@ -90,6 +90,8 @@ function makeRuntime(child: Promise<any>, session = makeSession()) {
     totalTimeoutMs: 60_000,
     idleTimeoutMs: 30_000,
     maxResumes: 4,
+    // 假子会话只回散文，没有证据块；本文件验证派发模式而不是证据判定。
+    strictEvidence: false,
   })
   return { session, runtime, ctx }
 }
@@ -169,7 +171,7 @@ test('没有计划时 status 工具如实返回 NO_PLAN，不编造进度', asyn
     subagents: { startActivation: async () => ({ childId: 'x', result: Promise.resolve(completed()), dispose: async () => {} }) },
     sessions: { get: () => undefined, list: () => [], eventAt: () => undefined },
   }
-  const runtime = createWorkplanRuntime(ctx, { totalTimeoutMs: 60_000 })
+  const runtime = createWorkplanRuntime(ctx, { totalTimeoutMs: 60_000, strictEvidence: false })
   const out: any = await runtime.statusTool({ session }, {})
   assert.equal(out.ok, false)
   assert.equal(out.code, 'NO_PLAN')
@@ -185,13 +187,13 @@ test('重启后 status 工具可以从会话记录重建计划并读到完成项
     },
     sessions: { get: () => undefined, list: () => [], eventAt: () => undefined },
   }
-  const first = createWorkplanRuntime(ctx, { totalTimeoutMs: 60_000 })
+  const first = createWorkplanRuntime(ctx, { totalTimeoutMs: 60_000, strictEvidence: false })
   session.append('user/message', buildPlanMessage(makePlan()))
   const out: any = await first.dispatchTool({ session, options: {} }, {}, new AbortController().signal)
   assert.equal(out.stats.done, 1)
 
   // A fresh runtime has no in-memory record: the session log must be enough.
-  const second = createWorkplanRuntime(ctx, { totalTimeoutMs: 60_000 })
+  const second = createWorkplanRuntime(ctx, { totalTimeoutMs: 60_000, strictEvidence: false })
   const rebuilt: any = await second.statusTool({ session }, {})
   assert.equal(rebuilt.ok, true)
   assert.equal(rebuilt.planId, 'wp-modes')

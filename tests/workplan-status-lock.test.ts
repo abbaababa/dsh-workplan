@@ -87,7 +87,8 @@ function makeRuntime(child: Promise<any>) {
     },
     sessions: { get: () => undefined, list: () => [], eventAt: () => undefined },
   }
-  const runtime = createWorkplanRuntime(ctx, { totalTimeoutMs: 60_000, idleTimeoutMs: 30_000, maxResumes: 4 })
+  // 假子会话只回散文，没有证据块；本文件验证 revision 锁而不是证据判定。
+  const runtime = createWorkplanRuntime(ctx, { totalTimeoutMs: 60_000, idleTimeoutMs: 30_000, maxResumes: 4, strictEvidence: false })
   return { session, runtime, ctx }
 }
 

@@ -27,7 +27,7 @@ function donePayload(overrides: any = {}) {
   return {
     status: 'done',
     summary: '实现完成',
-    acceptance: [{ criterion: '接口可用', result: 'pass' }],
+    acceptance: [{ criterion: '接口可用', result: 'pass', evidence: 'curl /health 返回 200' }],
     artifacts: [{ kind: 'file', ref: 'src/host.ts' }],
     needs: [],
     ...overrides,
@@ -97,10 +97,27 @@ test('无结构化块但首行 BLOCKED → 旧格式受阻', () => {
   assert.match(String(verdict.error), /等不到依赖/)
 })
 
-test('无结构化块的普通汇报 → done/legacy（保持旧行为，主 Agent 自行核对）', () => {
+test('[1.11.0] 无结构化块的普通汇报 → blocked/unverified（沉默不是成功）', () => {
   const verdict = adjudicateResult({ output: '我改好了，文件在 src/host.ts' })
+  assert.equal(verdict.status, 'blocked')
+  assert.equal(verdict.verification, 'unverified')
+  assert.match(String(verdict.error), /证据块/)
+})
+
+test('[1.11.0] 兼容档 strict=false 仍按 1.10.6 解释无证据块', () => {
+  const verdict = adjudicateResult({ output: '我改好了，文件在 src/host.ts', strict: false })
   assert.equal(verdict.status, 'done')
   assert.equal(verdict.verification, 'legacy')
+})
+
+test('[1.11.0] C-19：验收自称 pass 但没有证据 → 降级 unverified', () => {
+  const verdict = adjudicateResult({
+    output: block({ status: 'done', acceptance: [{ criterion: '测试通过', result: 'pass' }] }),
+  })
+  assert.equal(verdict.status, 'done')
+  assert.equal(verdict.verification, 'unverified')
+  assert.equal(verdict.acceptance[0].result, 'unverified')
+  assert.equal(verdict.acceptance[0].evidence, '')
 })
 
 test('strict=false 完全回到 1.6.0 判定，便于旧计划回放', () => {

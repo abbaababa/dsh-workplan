@@ -141,6 +141,8 @@ test('硬超时且预算充足时自动重试一次，第二次带着 CHILD_TIME
       childTimeoutMs: 1_000,
       // 远大于 120s 的重试下限：证明「有预算」分支被走到。
       totalTimeoutMs: 400_000,
+      // 假子会话只回散文，没有证据块；本条只验证重试策略。
+      strictEvidence: false,
     })
 
     assert.ok(result)
@@ -206,6 +208,7 @@ test('重试前核对发现产物在超时后被改动：不覆盖、不重试�
       idleTimeoutMs: 60_000,
       childTimeoutMs: 1_000,
       totalTimeoutMs: 400_000,
+      strictEvidence: false,
     })
 
     assert.ok(result)
