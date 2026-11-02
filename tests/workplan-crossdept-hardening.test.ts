@@ -19,7 +19,7 @@ import {
   derivePlanSnapshot,
   markDependentsBlocked,
 } from '../src/plan.js'
-import { planReplan } from '../src/replan.js'
+import { applyReplanStatuses, planReplan } from '../src/replan.js'
 
 function planFixture(overrides: any = {}) {
   return {
@@ -167,4 +167,37 @@ test('replan 容量：superseded 旧行不占 15 项上限', () => {
 test('acceptanceCoverage 短文本只等值匹配，避免 "ok" 命中任意单词', () => {
   assert.equal(acceptanceCoverage(['ok'], [{ criterion: 'broken thing', result: 'pass' }]).missing.length, 1)
   assert.equal(acceptanceCoverage(['ok'], [{ criterion: 'ok', result: 'pass' }]).missing.length, 0)
+})
+
+test('重规划 cancel：applyReplanStatuses 自身级联阻断传递下游（D-13）', () => {
+  const plan: any = {
+    planId: 'p-cancel-cascade',
+    sessionId: 's',
+    createdTurn: 1,
+    createdAt: 1,
+    stages: [{
+      id: 'S1',
+      name: '交付',
+      subtasks: [
+        { id: 'A', title: '上游', department: 'engineering', role: 'dev', objective: 'a', method: ['x'], inputs: [], outputs: ['a'], dependsOn: [], acceptance: ['a ok'], risk: 'none' },
+        { id: 'B', title: '下游一', department: 'qa', role: 'qa', objective: 'b', method: ['x'], inputs: [], outputs: ['b'], dependsOn: ['A'], acceptance: ['b ok'], risk: 'none' },
+        { id: 'C', title: '下游二', department: 'writing', role: 'w', objective: 'c', method: ['x'], inputs: [], outputs: ['c'], dependsOn: ['B'], acceptance: ['c ok'], risk: 'none' },
+      ],
+    }],
+  }
+  const statuses = createStatuses(plan)
+  const result: any = planReplan(plan, [{ action: 'cancel', subtaskId: 'A', reason: '需求撤销' }], {
+    planId: plan.planId, reason: '上游需求撤销', revision: 1, at: 1_700_000_000_000,
+  })
+  assert.equal(result.ok, true)
+  const next = applyReplanStatuses(statuses, result.payload)
+  const byId = new Map(next.map((row: any) => [row.subtaskId, row]))
+  assert.equal((byId.get('A') as any).closure, 'replanned')
+  for (const [id, upstream] of [['B', 'A'], ['C', 'B']] as const) {
+    const row: any = byId.get(id)
+    assert.equal(row.status, 'blocked', `${id} 不得停在 pending`)
+    assert.deepEqual((row.blockedBy ?? []).map((item: any) => item.id), [upstream])
+    assert.match(String(row.error), /需求撤销/)
+    assert.match(String(row.error), /A/)
+  }
 })

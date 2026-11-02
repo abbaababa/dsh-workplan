@@ -516,6 +516,72 @@ export function applyReplanStatuses(statuses: any, payload: ReplanPayload): any[
       },
     ]
   }
+  /*
+   * [1.11.1] D-13：cancel 不能把下游留在 pending。
+   *
+   * 旧实现只把被取消的行标成 replanned；下游既没 blocked 也没错误码，
+   * 调度器判定「依赖未完成」后永远不再派发——用户看到的是「卡住但没有任何原因」。
+   * 这里按依赖图做传递闭包：直接下游的 blockedBy 指向被取消的上游（或已阻塞的
+   * 中间行），间接下游的 error 必须回溯到根源取消项与取消原因，而不是只说
+   * 「上游 B 阻塞」。实时路径与回放路径共用本函数，因此刷新后结论一致。
+   */
+  const cancelled = new Map<string, string>()
+  for (const mark of payload.marks ?? []) {
+    if (mark.action !== 'cancel') continue
+    cancelled.set(String(mark.subtaskId), String(mark.reason ?? payload.reason ?? ''))
+  }
+  if (cancelled.size > 0 && payload.plan) {
+    const deps = new Map<string, string[]>()
+    const order: string[] = []
+    for (const { subtask } of flattenSubtasks(payload.plan)) {
+      const id = String(subtask?.id ?? '')
+      if (!id) continue
+      deps.set(id, Array.isArray(subtask.dependsOn) ? subtask.dependsOn.map(String) : [])
+      order.push(id)
+    }
+    const cascaded = new Map<string, { direct: string; roots: Set<string> }>()
+    for (const id of order) {
+      if (cancelled.has(id)) continue
+      const direct = (deps.get(id) ?? []).filter((dep) => cancelled.has(dep))
+      if (direct.length > 0) cascaded.set(id, { direct: direct[0], roots: new Set(direct) })
+    }
+    let grew = true
+    while (grew) {
+      grew = false
+      for (const id of order) {
+        if (cancelled.has(id) || cascaded.has(id)) continue
+        const direct = (deps.get(id) ?? []).filter((dep) => cascaded.has(dep))
+        if (direct.length === 0) continue
+        const roots = new Set<string>()
+        for (const dep of direct) {
+          for (const root of cascaded.get(dep)?.roots ?? []) roots.add(root)
+        }
+        cascaded.set(id, { direct: direct[0], roots })
+        grew = true
+      }
+    }
+    for (const [id, info] of cascaded) {
+      const current = next.find((item: any) => item?.subtaskId === id)
+      if (!current || current.closure === 'replanned') continue
+      if (current.status !== 'pending') continue
+      const rootText = [...info.roots].join('、')
+      const cause = [...info.roots]
+        .map((root) => cancelled.get(root))
+        .filter((value) => value && value.length > 0)[0] ?? String(payload.reason ?? '')
+      try {
+        next = applyStatus(next, id, {
+          status: 'blocked',
+          closure: 'blocked',
+          blockedBy: [{ id: info.direct, reason: `上游 ${info.direct} 因重规划取消而无法完成` }],
+          error: `依赖链上游 ${rootText} 已被重规划取消（取消原因：${cause || '未填写'}），本项无法继续；请用 dsh_workplan_replan(action=replace) 重新安排，或显式 cancel 它。`,
+          updatedBy: 'system',
+          revision,
+        })
+      } catch {
+        // 单行冲突不中断回放；下一轮 readiness 仍会把悬挂项拦在交付门外。
+      }
+    }
+  }
   return next
 }
 
