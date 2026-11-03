@@ -20,6 +20,7 @@ import {
   autoResumeAttemptCap,
   autoResumeEnabledFrom,
   decideAutoResume,
+  liveResumeCounts,
 } from '../src/auto-resume.js'
 
 /** A paused round that finished 12 of 13 subtasks and left 1 pending. */
@@ -89,6 +90,26 @@ test('a blocked row is a real failure, not a budget artifact', () => {
   assert.equal(decision.code, 'HAS_BLOCKED')
 })
 
+test('[1.12.0] paused + blocked + 0 pending 报 HAS_BLOCKED，不是「证据缺口」', () => {
+  /*
+   * 旧分支顺序先判 pending<=0，`done=N, blocked=1, pending=0` 会被答成
+   * NOTHING_PENDING（证据缺口，需复核 done 行），而真正要处置的是那条 blocked。
+   * 1.12 起预算到点会保留等指示行并把阶段写成 blocked；历史回放仍可能给出
+   * paused + blocked，所以决策表本身也要按「可执行优先」回答。
+   */
+  const decision = decideAutoResume(pausedWithPending({ done: 12, pending: 0, blocked: 1, attempt: 1 }))
+  assert.equal(decision.action, 'stop')
+  assert.equal(decision.code, 'HAS_BLOCKED')
+  assert.match(decision.reason, /blocked/)
+})
+
+test('[1.12.0] 显式关闭的文案不再自称「默认关闭」', () => {
+  const decision = decideAutoResume(pausedWithPending({ enabled: false }))
+  assert.equal(decision.code, 'AUTO_RESUME_DISABLED')
+  assert.doesNotMatch(decision.reason, /默认关闭/)
+  assert.match(decision.reason, /显式关闭/)
+})
+
 test('all done but delivery not ready stops: evidence gaps are human work', () => {
   const decision = decideAutoResume(pausedWithPending({ done: 13, pending: 0, attempt: 1 }))
   assert.equal(decision.action, 'stop')
@@ -154,4 +175,24 @@ test('the enable resolver: default on, explicit off wins in both sources', () =>
   assert.equal(autoResumeEnabledFrom(undefined, ' TRUE '), true)
   assert.equal(autoResumeEnabledFrom('false', undefined), true, 'a non-boolean config value is not a switch')
   assert.equal(autoResumeEnabledFrom(undefined, 'maybe'), true, 'an unknown spelling falls back to the default')
+})
+
+test('[1.12.0] 自动续跑的计数排除已重规划旧行（否则会空排一轮）', () => {
+  /*
+   * 旧实现按 status 数 pending：replanned 旧行也是 pending，于是一个 live
+   * 全部 done 的计划仍会被判成「还有 pending」，排出一轮什么都不派发的续跑，
+   * 并写下 PHASE_NOT_PAUSED 噪音。计数必须与 planPhase/readySubtasks 同源。
+   */
+  const counts = liveResumeCounts([
+    { subtaskId: 'T1', status: 'done', closure: 'reported' },
+    { subtaskId: 'T2', status: 'done', closure: 'reported' },
+    { subtaskId: 'T0', status: 'pending', closure: 'replanned' },
+  ])
+  assert.deepEqual(counts, { done: 2, pending: 0, blocked: 0 })
+  const withLive = liveResumeCounts([
+    { subtaskId: 'T1', status: 'done', closure: 'reported' },
+    { subtaskId: 'T2', status: 'pending', closure: 'pending' },
+    { subtaskId: 'T0', status: 'pending', closure: 'replanned' },
+  ])
+  assert.deepEqual(withLive, { done: 1, pending: 1, blocked: 0 })
 })

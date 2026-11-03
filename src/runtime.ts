@@ -71,10 +71,11 @@ import {
   MAX_HANDOFF_RESPONSE_CHARS,
 } from './plan.js'
 import type { PresentDenialVerdict, PresentDenyCode } from './plan.js'
+import { compactUnderstandingAudit, validatePlanContext } from './understanding.js'
 import { computeMappingDigest, verifyMappingDigest } from './supersede-digest.js'
 import { supersedePlanRecord } from './supersede.js'
 import { createProgressWatchdog, describeError } from './watchdog.js'
-import { AUTO_RESUME_DEFAULTS, autoResumeAttemptCap, decideAutoResume } from './auto-resume.js'
+import { AUTO_RESUME_DEFAULTS, autoResumeAttemptCap, decideAutoResume, liveResumeCounts } from './auto-resume.js'
 import {
   applyReplanStatuses,
   buildChangeRequestMessage,
@@ -335,8 +336,21 @@ async function collectStream(stream: any) {
   return text
 }
 
+/**
+ * [1.12.0] Rollback switch for the context guard.
+ *
+ * `DSH_WORKPLAN_CONTEXT_GUARD=off` keeps the 1.11.1 behaviour (audit still runs
+ * and is attached for inspection, but no deviation can block a plan). This is a
+ * runtime switch rather than a code revert so a bad release can be defused
+ * without rebuilding, while the reason stays visible in the plan message.
+ */
+function contextGuardStrict() {
+  const flag = String(process.env.DSH_WORKPLAN_CONTEXT_GUARD ?? '').trim().toLowerCase()
+  return flag !== 'off' && flag !== '0' && flag !== 'false'
+}
+
 async function runPlanner(ctx: any, options: any) {
-  const { taskText, cwd, sessionId, modelSelection, signal, conversationContext = '', budget = {} } = options
+  const { taskText, cwd, sessionId, modelSelection, signal, conversationContext = '', budget = {}, sourceMessageIds = [] } = options
   let lastErrors: string[] = []
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     if (signal.aborted) throw abortError()
@@ -366,7 +380,28 @@ async function runPlanner(ctx: any, options: any) {
       const text = await collectStream(stream)
       const raw = extractJson(text)
       const validated = validatePlan(raw)
-      if (validated.ok) return validated.plan
+      if (validated.ok) {
+        /*
+         * [1.12.0] Structure alone is not understanding. Run the three-stage
+         * audit against the user's own words before the plan can be returned;
+         * a deviation becomes a retry error so the planner gets one chance to
+         * fix it, and a second failure degrades instead of dispatching.
+         */
+        const guard = validatePlanContext(validated.plan, {
+          taskText,
+          conversationContext,
+          sourceMessageIds,
+          strict: contextGuardStrict(),
+        })
+        if (guard.ok) {
+          const plan: any = validated.plan
+          plan.taskAnchor = guard.audit.anchor
+          plan.understandingAudit = compactUnderstandingAudit(guard.audit)
+          return plan
+        }
+        lastErrors = guard.errors.length > 0 ? guard.errors : guard.warnings
+        continue
+      }
       lastErrors = validated.errors ?? []
     } catch (error) {
       if (signal.aborted || (controller.signal.aborted && (controller.signal.reason as any)?.code === 'ABORTED')) {
@@ -379,9 +414,10 @@ async function runPlanner(ctx: any, options: any) {
       signal.removeEventListener('abort', onAbort)
     }
   }
+  const deviation = lastErrors.some((error: any) => /^(?:DEVIATION|CLARIFY|CONTEXT):/.test(String(error)))
   throw new PlanError(
     `规划器两次输出均未通过校验：${lastErrors.slice(0, 5).join('；')}`,
-    'PLANNER_FAILED',
+    deviation ? 'DEVIATION' : 'PLANNER_FAILED',
     lastErrors,
   )
 }
@@ -732,6 +768,25 @@ export function budgetResetError(item: any, subtask: any, cwd: any, artifactExis
   if (item?.childId) parts.push(`上一轮子会话 ${String(item.childId).slice(0, 8)}`)
   if (Number.isFinite(item?.startedAt) && Number.isFinite(item?.finishedAt)) {
     parts.push(`运行 ${Math.max(0, Math.round((Number(item.finishedAt) - Number(item.startedAt)) / 1000))}s`)
+  }
+  /*
+   * [1.12.0][D-31] 预算重置不能把上一次的真实失败原因抹掉。
+   *
+   * 旧实现用「预算用尽」整段覆盖 `error`，原失败只留在 record.errors 的
+   * 尾部切片里；模型读状态行时看不到「为什么上一轮没做完」，只会以为
+   * 是时间不够。原值以只读摘要保留在前，重置原因仍然明确。
+   */
+  /*
+   * 只保留「真实失败」原因：`本轮预算用尽` 与中止哨兵 `总执行超时` 都不是
+   * 子任务的失败（后者会让 paused 计划看起来像集体超时，见 budget-pause
+   * 用例的硬断言）。优先读 applyStatus 留档的 lastError，其次读当前值。
+   */
+  const isSentinel = (text: string) => /本轮预算用尽|总执行超时/.test(text)
+  const previousFailure = [item?.lastError, item?.error]
+    .map((value: any) => (typeof value === 'string' ? value.trim() : ''))
+    .find((value: string) => value !== '' && !isSentinel(value)) ?? ''
+  if (previousFailure) {
+    parts.push(`上一次尝试的失败原因：${truncate(previousFailure, 300)}`)
   }
   if (landed.length > 0) parts.push(`声明产物已在盘上：${landed.slice(0, 6).join('、')}`)
   return parts.join('；')
@@ -1783,6 +1838,21 @@ export async function dispatchPlan(ctx: any, record: any, options: any) {
       let reset = record.statuses
       for (const item of record.statuses) {
         if (item.status === 'done') continue
+        /*
+         * [1.12.0] 预算到点不是这三类行的「尝试被打断」（T11）：
+         *
+         *  - `escalated`：正在等用户/主 Agent 拍板。pending 分支会清空
+         *    question/options/blockedKind，于是请示被静默吞掉、计划变回 paused，
+         *    自动续跑再把它当普通 pending 重派一次。
+         *  - `instructed`：指示已投递给子会话，该子会话可能仍在写。重置成
+         *    pending 根本不在 `CLOSURE_TRANSITIONS.instructed` 里，会抛
+         *    INVALID_TRANSITION —— 而这里位于 catch 内部，异常会让 phase、
+         *    结果消息与自动续跑排期全部不落。
+         *  - `replanned`：终态旧行，只为追溯保留（没有出边），同样会抛。
+         *
+         * 三者保留原状由后续人工/子会话推进；真正被预算打断的行照常回到 pending。
+         */
+        if (item.closure === 'escalated' || item.closure === 'instructed' || item.closure === 'replanned') continue
         // [1.8.19] Carry the aborted attempt's provenance and landed files into
         // the pause reason instead of silently erasing them.
         const definition = findSubtaskById(record.plan, item.subtaskId)
@@ -1792,8 +1862,16 @@ export async function dispatchPlan(ctx: any, record: any, options: any) {
         })
       }
       record.statuses = reset
-      const total = record.statuses.length
-      const done = record.statuses.filter((item: any) => item.status === 'done').length
+      /*
+       * 按 live 行（排除 replanned）统计：一条只为追溯保留的旧行既不算完成，
+       * 也不算「保留为未完成」，否则文案会说「12/13，其余 1 项未完成」——
+       * 而那 1 项永远不会再跑。
+       */
+      const live = liveStatuses(record.statuses)
+      const total = live.length
+      const done = live.filter((item: any) => item.status === 'done').length
+      const pendingNow = live.filter((item: any) => item.status === 'pending').length
+      const blockedNow = live.filter((item: any) => item.status === 'blocked').length
       /*
        * [1.5.2] 预算到点 ≠ 一定是「暂停」。
        *
@@ -1803,11 +1881,18 @@ export async function dispatchPlan(ctx: any, record: any, options: any) {
        * 全部完成时直接进终态，并且不再写「其余 0 项保留为未完成」这种自相矛盾的说明。
        */
       const allDoneNow = total > 0 && done === total
-      record.phase = allDoneNow ? 'done' : 'paused'
+      /*
+       * [1.12.0] 与普通轮末同一判据（T11）：只要有仍 live 的 blocked 行，
+       * 阶段就是 blocked —— 其中可能包含一条保留下来的「待指示」。写成 paused
+       * 会让卡片显示「预算用完、可续跑」，而真正该做的是 instruct。
+       */
+      record.phase = allDoneNow ? 'done' : (blockedNow > 0 ? 'blocked' : 'paused')
       const minutes = Math.max(1, Math.round((options.totalTimeoutMs ?? TOTAL_TIMEOUT_MS) / 60000))
       record.error = allDoneNow
         ? null
-        : `本轮执行预算（${minutes} 分钟）已到：已完成 ${done}/${total}，其余 ${total - done} 项保留为未完成，再次派发本计划即可续跑（已完成的不重跑）`
+        : blockedNow > 0
+          ? `本轮执行预算（${minutes} 分钟）已到：已完成 ${done}/${total}；${blockedNow} 项在等待指示或已受阻（续跑不会重派，请先 instruct 或改判），${pendingNow} 项保留为未完成，再次派发本计划即可继续`
+          : `本轮执行预算（${minutes} 分钟）已到：已完成 ${done}/${total}，其余 ${total - done} 项保留为未完成，再次派发本计划即可续跑（已完成的不重跑）`
       /*
        * Drop the failure lines the aborted children wrote on their way out.
        * They used to survive into the result payload as
@@ -2653,11 +2738,12 @@ export type WorkplanRuntimeOptions = {
   /** How many times a blocked plan may be resumed. */
   maxResumes?: number
   /**
-   * [1.10.4] 整轮预算到点后自动开始下一轮。**默认关闭**：默认值来自
-   * `AUTO_RESUME_DEFAULTS.enabled=false`，必须由宿主显式打开。
+   * [1.10.4][1.12.0] 整轮预算到点后自动开始下一轮。**默认开启**：默认值来自
+   * `AUTO_RESUME_DEFAULTS.enabled=true`；`autoResume:false` 或
+   * `DSH_WORKPLAN_AUTO_RESUME=0` 显式关闭。
    *
-   * 它只续跑 `paused`（预算到点）的计划，不动 `blocked`（真实失败），
-   * 也不重跑任何 `done` 项；自动续跑本身不做任何证据判定。
+   * 它只续跑 `paused`（预算到点）的计划，不动 `blocked`（真实失败）与
+   * `escalated`（待指示），也不重跑任何 `done` 项；自动续跑本身不做任何证据判定。
    */
   autoResume?: boolean
   /** 自动续跑轮次上限（0–4，默认 2）。 */
@@ -2670,6 +2756,14 @@ export type WorkplanRuntimeOptions = {
    * 或 `DSH_WORKPLAN_STRICT_COMPLETION` 解析后传入。
    */
   strictEvidence?: boolean
+  /**
+   * [1.12.0] 计划生成后自动派发（T6 Q2 / 用户三项机制体检）。
+   *
+   * `undefined`/`true` = 计划一生成就以 async 方式开跑，不依赖主模型再调一次
+   * `dsh_workplan_dispatch`；`false` = 保留 plan-first（计划消息要求模型显式
+   * 派发）。plan 模式、已有计划执行中、预算/取消/幂等/交付门禁不受影响。
+   */
+  autoDispatch?: boolean
   /**
    * [1.8.13] Package version, supplied by the host from its `meta.version`.
    *
@@ -2756,6 +2850,57 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       maxAttempts: autoResumeAttemptCap(options.autoResumeMaxAttempts),
     },
   }
+
+  /**
+   * [1.12.0] 自动派发：计划生成后立即以 async 方式开跑。
+   *
+   * 与 `dsh_workplan_dispatch(mode:"async")` 走同一条 `dispatchPlan` 路径，
+   * 区别只在「启动」是计划落地后的确定性动作，而不是模型的一次额外调用：
+   *  - 独立 AbortController：回合结束不会杀掉后台执行；
+   *  - 结果消息由 `finishRound` 写入，刷新后仍可见；
+   *  - 失败只记录错误，不把「派发失败」伪装成「计划生成失败」。
+   */
+  function startAutoDispatch(record: any, session: any, agent: any) {
+    const controller = new AbortController()
+    record.abortDispatch = (reason: string) => {
+      if (!controller.signal.aborted) {
+        controller.abort(new PlanError(`计划已取消：${reason}`, 'CANCELLED'))
+      }
+    }
+    const roundOptions = {
+      agent,
+      modelSelection: record.modelSelection,
+      cwd: session.header?.cwd ?? options.cwd,
+      conversationContext: record.conversationContext ?? '',
+    }
+    record.dispatchStartedAt = Date.now()
+    record.dispatchPromise = dispatchPlan(ctx, record, {
+      ...roundOptions,
+      signal: controller.signal,
+      childTimeoutMs: limits.childTimeoutMs,
+      idleTimeoutMs: limits.idleTimeoutMs,
+      totalTimeoutMs: limits.totalTimeoutMs,
+      maxResumes: limits.maxResumes,
+      strictEvidence: options.strictEvidence,
+    }).finally(() => {
+      record.dispatchPromise = null
+      record.dispatchStartedAt = null
+      record.abortDispatch = null
+    })
+    record.dispatchPromise
+      .then(() => {
+        finishRound(record, session)
+        state.records.set(session.id, record)
+        armAutoResume(record, session, roundOptions)
+      })
+      .catch((error: any) => {
+        pushRecordError(record, error)
+        finishRound(record, session)
+        state.records.set(session.id, record)
+        armAutoResume(record, session, roundOptions)
+      })
+  }
+  state.startAutoDispatch = startAutoDispatch
 
   async function onPreStep(payload: any, next: any) {
     let downstream
@@ -3437,8 +3582,14 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     if (done > doneBefore) book.noProgressRounds = 0
     else if (Number(book.attempt ?? 0) > 0) book.noProgressRounds = Number(book.noProgressRounds ?? 0) + 1
     book.doneBefore = done
-    const pending = statuses.filter((item: any) => item?.status === 'pending').length
-    const blocked = statuses.filter((item: any) => item?.status === 'blocked').length
+    /*
+     * [1.12.0] 只数仍参与调度的行（T11）：replanned 旧行保持 status='pending'
+     * 只为追溯，把它们算进 pending 会让「live 全 done」的计划也排一次续跑，
+     * 那一轮什么都不会派发，还会往 errors 里写一条误导性的停止行。
+     */
+    const liveCounts = liveResumeCounts(statuses)
+    const pending = liveCounts.pending
+    const blocked = liveCounts.blocked
     /*
      * [1.10.4 / D6] 正常完成的计划不许留「停止」噪音。
      *
@@ -3482,7 +3633,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     }].slice(-10)
     if (decision.action !== 'schedule') {
       /*
-       * 关闭开关时不写错误行：默认关闭不是一次「失败」，不该污染计划台账。
+       * 显式关闭开关时不写错误行：关闭不是一次「失败」，不该污染计划台账。
        * 其余停止原因都要留痕，否则「为什么没有自动续跑」又变成考古。
        */
       if (decision.code !== 'AUTO_RESUME_DISABLED') {
@@ -5598,6 +5749,7 @@ async function maybePlan(ctx: any, state: any, payload: any, downstream: any, op
       modelSelection,
       signal: payload.signal,
       conversationContext,
+      sourceMessageIds: human.map((message: any) => message.id).filter((id: any) => typeof id === 'string'),
       /*
        * Hand the real limits to the planner. Without them it had no idea the
        * round budget was 20 minutes and happily planned 15 heavy subtasks,
@@ -5664,15 +5816,32 @@ async function maybePlan(ctx: any, state: any, payload: any, downstream: any, op
   }
   state.records.set(session.id, record)
   /*
+   * [1.12.0] Q2：默认自动派发。计划消息仍然先把计划完整展示出来，紧接着以
+   * async 方式开跑——不是等所有子任务结束再显示（那才是旧的「没动静」）。
+   * plan 模式不自动派发；显式 `autoDispatch:false` 保留 plan-first。
+   */
+  const autoDispatched = !planMode && options?.autoDispatch !== false
+  if (autoDispatched) {
+    record.dispatchedAt = Date.now()
+    state.startAutoDispatch?.(record, session, payload.agent)
+  }
+  /*
    * Plan-first: commit the plan with this step and let the main Agent call
    * dsh_workplan_dispatch. Dispatching here would hide the plan until every
-   * child finished, which is exactly the "没动静/没完成" failure. The dispatch
-   * tool appends the durable result after the children finish, and tools.guard
-   * stops the main Agent from doing other work before dispatching.
+   * child finished, which is exactly the "没动静/没完成" failure.
+   *
+   * [1.12.0] There is no tool guard that forces dispatch before other work —
+   * `toolGuardReason` only denies dispatch in plan mode and `present` when the
+   * plan is not ready. What actually enforces the ordering is the system
+   * prompt, plus the turn-stopping gate steering at most twice per turn
+   * (`STOP_STEER_LIMIT`); if the model still never dispatches, the next turn
+   * cancels the stale plan ("计划已取消：上一轮未派发") and plans again.
    */
   const planMessage = buildPlanMessage(fullPlan, {
     totalBudgetMinutes: Math.max(1, Math.round(Number(options?.limits?.totalTimeoutMs ?? TOTAL_TIMEOUT_MS) / 60000)),
     maxResumes: Number(options?.limits?.maxResumes ?? MAX_PLAN_RESUMES),
+    planMode,
+    autoDispatched,
   })
   if (!planMode) return enterDecision(downstream, [planMessage])
   /*

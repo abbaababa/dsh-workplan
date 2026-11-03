@@ -22,7 +22,7 @@ import {
   statusToolOutputSchema,
   updateToolOutputSchema,
 } from './runtime.js'
-import { isRecord } from './plan.js'
+import { DEPARTMENT_IDS, isRecord } from './plan.js'
 import { autoResumeEnabledFrom } from './auto-resume.js'
 
 /*
@@ -166,11 +166,12 @@ export type WorkplanConfig = {
   totalTimeoutMs?: number
   maxResumes?: number
   /**
-   * [1.10.4] 整轮预算到点后自动开始下一轮。默认 **false**。
+   * [1.10.4][1.12.0] 整轮预算到点后自动开始下一轮。默认 **true**（自 1.10.6）。
    *
-   * 打开方式（部署时二选一）：profile 配置 `autoResume: true`，或环境变量
-   * `DSH_WORKPLAN_AUTO_RESUME=1`。默认关闭是刻意的：自动续跑会自己消耗
-   * 模型额度，必须先在小流量 profile 上验证过状态机与证据门禁再开。
+   * 关闭方式（部署时二选一）：profile 配置 `autoResume: false`，或环境变量
+   * `DSH_WORKPLAN_AUTO_RESUME=0`。默认开启是用户 2026-11-01 的明确要求：
+   * 一个没人被告知要打开的恢复开关等于没有。取消、blocked、等指示、无进展、
+   * 轮次上限等安全分支仍然生效。
    */
   autoResume?: boolean
   /** 自动续跑轮次上限（0–4，默认 2）；环境变量 `DSH_WORKPLAN_AUTO_RESUME_MAX`。 */
@@ -184,6 +185,15 @@ export type WorkplanConfig = {
    * 或部署方明确只想看松散结果。环境变量 `DSH_WORKPLAN_STRICT_COMPLETION=0`。
    */
   strictCompletion?: boolean
+  /**
+   * [1.12.0] 计划生成后是否自动派发（T6 Q2 / 用户三项机制体检）。
+   *
+   * 默认 **true**：计划一生成就自动开跑，不再依赖主模型额外调用
+   * `dsh_workplan_dispatch`。以下边界仍然生效：plan 模式不自动派发（等用户
+   * 审阅）；已有计划执行中不重复派发；预算、取消、幂等与交付门禁全部保留。
+   * 关闭方式：`autoDispatch: false` 或环境变量 `DSH_WORKPLAN_AUTO_DISPATCH=0`。
+   */
+  autoDispatch?: boolean
 }
 
 function createUpdateTool(runtime: any) {
@@ -271,6 +281,17 @@ function createUpdateTool(runtime: any) {
         note: {
           type: 'string',
           description: '补充说明；会显示在任务卡片中。',
+        },
+        /*
+         * [1.12.0][D-28] 结果消息指引的 `update + instruction` 必须真的能通过
+         * schema 校验。runtime 的 updateStatus 一直读 args.instruction，但这里
+         * 因 additionalProperties:false 从未声明该字段：严格宿主会直接拒绝，
+         * 模型只能看到「该动作不存在」。与 dsh_workplan_instruct 等价，二选一。
+         */
+        instruction: {
+          type: 'string',
+          description: '待指示项（closure=escalated）的答复文本：与 status="in_progress" 一起使用，'
+            + '会投递给子会话并把该行恢复为执行中。等价于 dsh_workplan_instruct。',
         },
       },
       required: ['subtaskId', 'status'],
@@ -362,7 +383,12 @@ function createReplanTool(runtime: any) {
                 properties: {
                   id: { type: 'string', description: '接替行 ID（默认在旧 ID 后加 b）；最长 16 字符，不能与现有 ID 重复。' },
                   title: { type: 'string' },
-                  department: { type: 'string' },
+                  department: {
+                    type: 'string',
+                    /* [1.12.0][D-07] 与规划入口同源：模型先选合法 key，而不是先写自由文本再被运行期拒绝。 */
+                    enum: [...DEPARTMENT_IDS],
+                    description: '受影响的部门 key（必须是规划器枚举之一）。',
+                  },
                   role: { type: 'string' },
                   objective: { type: 'string' },
                   method: { type: 'array', items: { type: 'string' } },
@@ -380,7 +406,12 @@ function createReplanTool(runtime: any) {
                   id: { type: 'string', description: '新行 ID；省略时自动生成 R<修订号>-<序号>。' },
                   title: { type: 'string' },
                   objective: { type: 'string' },
-                  department: { type: 'string' },
+                  department: {
+                    type: 'string',
+                    /* [1.12.0][D-07] 同 replacement.department：枚举与规划入口同源。 */
+                    enum: [...DEPARTMENT_IDS],
+                    description: '新行所属部门 key（必须是规划器枚举之一）。',
+                  },
                   role: { type: 'string' },
                   method: { type: 'array', items: { type: 'string' } },
                   inputs: { type: 'array', items: { type: 'string' } },
@@ -1103,6 +1134,11 @@ export function apply(ctx: any, config: WorkplanConfig = {}) {
      * 与 autoResume 用同一种写法：未配置时走默认值，而不是悄悄等于 false。
      */
     strictEvidence: strictCompletionEnabledFrom(config.strictCompletion, settingEnv('DSH_WORKPLAN_STRICT_COMPLETION')),
+    /*
+     * [1.12.0] 自动派发三态：显式配置 > 显式环境变量 > 默认 true。
+     * 与 autoResume / strictCompletion 同一写法，避免「没配置就等于关闭」。
+     */
+    autoDispatch: strictCompletionEnabledFrom(config.autoDispatch, settingEnv('DSH_WORKPLAN_AUTO_DISPATCH')),
   })
 
   ctx.effect(() =>
@@ -1219,7 +1255,7 @@ export function apply(ctx: any, config: WorkplanConfig = {}) {
 
 export const meta = {
   name,
-  version: '1.11.1',
+  version: '1.12.0',
   promptOrder: PROMPT_ORDER,
   routes: ['/dsh-workplan/plans', '/dsh-workplan/vendor/chart.umd.js'],
 }

@@ -3,6 +3,7 @@
 > **Two selling points, one line: a full ISO/IEC 15408:2026 evidence pack you can verify with 5 commands, and a one-command install with zero runtime dependencies.**
 
 [![verify](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml/badge.svg)](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml)
+[![version](https://img.shields.io/badge/version-1.12.0-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v1.12.0)
 
 Adds "plan first → dispatch real department subagents → watch progress in the sidebar" to **DeepSeek Harness (DSH)**. No app, no DSH source patch, no page replacement.
 
@@ -27,7 +28,7 @@ We do the half that can be done by us: **build the materials the 2026 edition (n
 | Class-by-class mapping, EAL1 readiness, what is missing | Self-assessment | [docs/cc/CC-2026-ASSESSMENT.md](docs/cc/CC-2026-ASSESSMENT.md) |
 | Third-party components, licences, hashes | Life cycle (ALC) | [docs/SBOM.md](docs/SBOM.md) |
 | How to report a vulnerability, response times | Security policy | [SECURITY.md](SECURITY.md) |
-| 188 automated tests, one command to re-run | Testing (ATE) | `npm run verify` |
+| 459 automated tests, one command to re-run | Testing (ATE) | `npm run verify` |
 
 Status: of the 14 EAL1 components — CC's lowest level — **10 are ready, 3 partially ready, 1 can only come from an external lab**. What is missing is lab money and scheduling, not code, so we sell evidence and do not pretend to hold a certificate.
 
@@ -35,7 +36,7 @@ Check it yourself — 3 lines, copy-paste:
 
 ```bash
 git clone https://github.com/abbaababa/dsh-workplan.git && cd dsh-workplan
-npm ci && npm run verify                                  # expect: tests 188 / pass 188 / fail 0
+npm ci && npm run verify                                  # expect: tests 459 / pass 459 / fail 0
 grep -RInE "child_process|execSync|eval\(|writeFileSync" src || echo "0 hits (expected)"
 ```
 
@@ -77,7 +78,7 @@ The full contract — roles, data shapes, state machine, recovery, and the three
 ## Install
 
 ```bash
-dsh plugin --profile web add dsh-workplan@1.11.1
+dsh plugin --profile web add dsh-workplan@1.12.0
 ```
 
 Restart the DSH Web process (or reload the page) so the bundle is picked up.

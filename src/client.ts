@@ -15,6 +15,7 @@ window.__ModuleLoader__.load({
     const NS = 'dsh-workplan'
     const { useState, useEffect, useCallback, useMemo } = React
 
+    // [D-11] 面板统一称「执行角色」：role 仍是自由文本字段，只消除「负责人」与「角色」的口径冲突。
     const LOCALE = {
       "zh": {
         "panel": "任务进度",
@@ -64,7 +65,7 @@ window.__ModuleLoader__.load({
         "refresh": "刷新",
         "updatedAt": "更新于",
         "empty": "还没有任务进度",
-        "emptyHint": "先发一句话说明你要做什么，系统会自动安排步骤和负责人。",
+        "emptyHint": "先发一句话说明你要做什么，系统会自动安排步骤和执行角色。",
         "error": "读取失败",
         "retry": "重试",
         "phase": {
@@ -105,7 +106,8 @@ window.__ModuleLoader__.load({
           "writing": "文档写作",
           "operations": "运营",
           "legal": "法务合规",
-          "finance": "财务"
+          "finance": "财务",
+          "unknown": "未知部门"
         },
         "stats": {
           "done": "做好了",
@@ -119,7 +121,7 @@ window.__ModuleLoader__.load({
         "stepSuffix": "步",
         "workPrefix": "具体工作",
         "who": "负责团队",
-        "person": "负责人",
+        "person": "执行角色",
         "what": "要做出什么",
         "how": "怎么做",
         "doneWhen": "怎样算做好",
@@ -165,7 +167,7 @@ window.__ModuleLoader__.load({
         "transformation": "什么情况下会变化",
         "checkpoint": "这一步做完先检查",
         "subtasks": "具体工作",
-        "role": "负责人",
+        "role": "执行角色",
         "objective": "要做出什么",
         "method": "怎么做",
         "inputs": "开始前需要",
@@ -300,7 +302,8 @@ window.__ModuleLoader__.load({
           "writing": "Writing",
           "operations": "Operations",
           "legal": "Legal",
-          "finance": "Finance"
+          "finance": "Finance",
+          "unknown": "Unknown department"
         },
         "stats": {
           "done": "Done",
@@ -314,7 +317,7 @@ window.__ModuleLoader__.load({
         "stepSuffix": "",
         "workPrefix": "Work item",
         "who": "Team",
-        "person": "Owner",
+        "person": "Execution role",
         "what": "What to make",
         "how": "How",
         "doneWhen": "How we know it is good",
@@ -360,7 +363,7 @@ window.__ModuleLoader__.load({
         "transformation": "What could change it",
         "checkpoint": "Check before moving on",
         "subtasks": "Work items",
-        "role": "Owner role",
+        "role": "Execution role",
         "objective": "What to make",
         "method": "How",
         "inputs": "Needed first",
@@ -809,9 +812,45 @@ window.__ModuleLoader__.load({
 .dsh-wp-planoverview-title { font-size: 12px; font-weight: 650; letter-spacing: .2px; }
 .dsh-wp-planoverview-stats { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 12px; color: var(--dsw-alias-label-secondary, #475569); font-variant-numeric: tabular-nums; }
 .dsh-wp-planrows { display: grid; }
-.dsh-wp-planrow { display: grid; grid-template-columns: 7px minmax(0, 1fr) 48px auto auto; align-items: center; gap: 8px; min-height: 28px; padding: 4px 0; border-top: 1px solid var(--dsw-alias-border-l1); }
+/*
+ * [1.12.0] 「分步进度」每一行都是一个可点击的 disclosure（默认收起）。
+ *
+ * 收起态必须与改造前逐项一致：状态点、第 N 步：名称、进度条、done/total、
+ * 状态词；只多一个折叠指示箭头。展开按钮本身是原生 <button>，44px 触控高度，
+ * aria-expanded/aria-controls 由组件绑定，不复用 Collapse 的外层卡片留白。
+ */
+.dsh-wp-planrow { display: block; min-width: 0; border-top: 1px solid var(--dsw-alias-border-l1); }
 .dsh-wp-planrow:first-child { border-top: 0; }
 .dsh-wp-planrow[data-current="true"] { background: rgba(249,115,22,.06); border-radius: 8px; }
+.dsh-wp-planrow-toggle {
+  display: grid;
+  grid-template-columns: 9px 7px minmax(0, 1fr) 48px auto auto;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 44px;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.dsh-wp-planrow-toggle:hover { background: rgba(148,163,184,.10); }
+.dsh-wp-planrow-toggle:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 2px; }
+.dsh-wp-planrow-chevron {
+  justify-self: center;
+  width: 8px;
+  height: 8px;
+  border-right: 2px solid var(--dsw-alias-label-secondary, #475569);
+  border-bottom: 2px solid var(--dsw-alias-label-secondary, #475569);
+  transform: rotate(-45deg);
+  transition: transform 160ms ease;
+}
+.dsh-wp-planrow[data-open="true"] .dsh-wp-planrow-chevron { transform: rotate(45deg); }
 .dsh-wp-planrow-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dsw-alias-state-idle-primary); }
 .dsh-wp-planrow[data-tone="done"] .dsh-wp-planrow-dot { background: var(--dsh-wp-done); }
 .dsh-wp-planrow[data-tone="active"] .dsh-wp-planrow-dot { background: var(--dsh-wp-active); }
@@ -823,6 +862,21 @@ window.__ModuleLoader__.load({
 .dsh-wp-planrow[data-tone="blocked"] .dsh-wp-planrow-fill { background: var(--dsw-alias-state-error-primary); }
 .dsh-wp-planrow-count { font-size: 12px; color: var(--dsw-alias-label-secondary, #475569); font-variant-numeric: tabular-nums; }
 .dsh-wp-planrow-state { font-size: 11px; color: var(--dsw-alias-label-secondary, #475569); white-space: nowrap; }
+.dsh-wp-planrow-panel { padding: 0 6px 10px 30px; min-width: 0; }
+.dsh-wp-planrow-panel[hidden] { display: none; }
+.dsh-wp-planrow-detail { display: grid; gap: 4px; font-size: 12px; color: var(--dsw-alias-label-secondary, #475569); overflow-wrap: anywhere; }
+.dsh-wp-planrow-goal, .dsh-wp-planrow-checkpoint { line-height: 1.5; }
+.dsh-wp-planrow-goal strong, .dsh-wp-planrow-checkpoint strong { color: var(--dsw-alias-label-primary, #0f172a); font-weight: 600; }
+.dsh-wp-planrow-tasks { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 3px; }
+.dsh-wp-planrow-task { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; min-width: 0; }
+.dsh-wp-planrow-task-dot { flex: 0 0 auto; width: 6px; height: 6px; border-radius: 50%; background: var(--dsw-alias-state-idle-primary); }
+.dsh-wp-planrow-task[data-status="done"] .dsh-wp-planrow-task-dot { background: var(--dsh-wp-done); }
+.dsh-wp-planrow-task[data-status="in_progress"] .dsh-wp-planrow-task-dot { background: var(--dsh-wp-active); }
+.dsh-wp-planrow-task[data-status="blocked"] .dsh-wp-planrow-task-dot { background: var(--dsw-alias-state-error-primary); }
+.dsh-wp-planrow-task-title { min-width: 0; color: var(--dsw-alias-label-primary, #0f172a); }
+.dsh-wp-planrow-task-dept { color: var(--dsw-alias-label-secondary, #475569); }
+.dsh-wp-planrow-task-state { margin-left: auto; white-space: nowrap; }
+@media (prefers-reduced-motion: reduce) { .dsh-wp-planrow-chevron { transition: none; } }
 .dsh-wp-sessions { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr)); gap: 16px; align-items: start; }
 .dsh-wp-session {
   min-width: 0;
@@ -1124,7 +1178,14 @@ window.__ModuleLoader__.load({
     function deptName(t: any, id: any) {
       const key = `dept.${id}`
       const value = t(key)
-      return value === key ? String(id || '') : value
+      /*
+       * [1.12.0][D-09] 未知部门不再回显原文。
+       *
+       * 计划/回放里的非法值（拼错、旧版本、注入文本）不能成为面板分组标题
+       * 或任务行文案。语言表缺键时统一显示「未知部门 / Unknown」，原文只
+       * 留在服务端记录里供审计。
+       */
+      return value === key ? t('dept.unknown') : value
     }
 
     /*
@@ -2067,11 +2128,171 @@ window.__ModuleLoader__.load({
       )
     }
 
-    // 展开后的「分步进度」：逐阶段行 + 总体进度（与环/组头同一个计数口径）。
-    function PlanOverview({ t, stats, counts, rows }: { t: (key: string) => string; stats: any; counts: PlanCounts; rows: PlanStageRow[] }) {
-      const stateOf = (tone: PlanTone): string => (tone === 'done'
+    /*
+     * [1.12.0] 「分步进度」每一步的展开状态。
+     *
+     * 默认不展开；只有用户亲手点开/收起的步骤才写进 localStorage
+     * （存的是「已展开的步骤 id」集合，而不是布尔值数组，新增步骤天然收起）。
+     * 读不到 localStorage（隐私模式、旧 WebView、测试环境）时退回纯内存状态，
+     * 不让存储失败影响交互。轮询刷新、重渲染、状态回放都不会改动这份状态。
+     */
+    const PLANROW_STORAGE_PREFIX = 'dsh-workplan:planrow-open:v1'
+
+    function planRowStorageKey(sessionId: any): string {
+      return `${PLANROW_STORAGE_PREFIX}:${String(sessionId ?? '')}`
+    }
+
+    function readPlanRowOpen(sessionId: any): string[] {
+      try {
+        const storage = typeof window !== 'undefined' ? window.localStorage : undefined
+        if (!storage || typeof storage.getItem !== 'function') return []
+        const raw = storage.getItem(planRowStorageKey(sessionId))
+        if (!raw) return []
+        const parsed = JSON.parse(raw)
+        if (!Array.isArray(parsed)) return []
+        return Array.from(new Set(parsed.filter((id: any) => typeof id === 'string' && id !== '')))
+      } catch {
+        return []
+      }
+    }
+
+    function writePlanRowOpen(sessionId: any, ids: string[]): void {
+      try {
+        const storage = typeof window !== 'undefined' ? window.localStorage : undefined
+        if (!storage || typeof storage.setItem !== 'function') return
+        storage.setItem(planRowStorageKey(sessionId), JSON.stringify(ids))
+      } catch {
+        // 配额已满或存储被禁用：保留内存状态，不影响本次交互。
+      }
+    }
+
+    function planRowDomId(sessionId: any, rowId: any): string {
+      const safe = `${String(sessionId ?? '')}-${String(rowId ?? '')}`.replace(/[^A-Za-z0-9_-]+/g, '-')
+      return `dsh-wp-planrow-${safe}`
+    }
+
+    function planStepStateText(t: (key: string) => string, tone: PlanTone): string {
+      return tone === 'done'
         ? t('stats.done')
-        : tone === 'active' ? t('stats.inProgress') : tone === 'blocked' ? t('stats.blocked') : t('stats.pending'))
+        : tone === 'active' ? t('stats.inProgress') : tone === 'blocked' ? t('stats.blocked') : t('stats.pending')
+    }
+
+    function planTaskStatus(value: any): string {
+      return value === 'done' || value === 'in_progress' || value === 'blocked' ? value : 'pending'
+    }
+
+    /*
+     * 收起态与截图逐项一致：状态点、第 N 步：名称、进度条、done/total、状态词，
+     * 只多一个折叠箭头。展开态放「该步摘要」（目标、检查点、子任务状态）；
+     * 完整明细仍由下方的阶段卡承担，避免 D-6 未拍板时出现两份完全相同的详情。
+     */
+    function PlanStepRow({
+      t, row, stage, statuses, open, onToggle, panelId,
+    }: {
+      t: (key: string) => string
+      row: PlanStageRow
+      stage: any
+      statuses: any
+      open: boolean
+      onToggle: (next: boolean) => void
+      panelId: string
+    }) {
+      const width = row.total > 0 ? (row.done / row.total) * 100 : 0
+      const stop = (event: any) => {
+        if (event && typeof event.stopPropagation === 'function') event.stopPropagation()
+      }
+      const handleClick = (event: any) => {
+        stop(event)
+        onToggle(!open)
+      }
+      const handleKeyDown = (event: any) => {
+        const key = event?.key
+        // 原生 button 已经把 Enter/Space 变成 click；这里只阻止按键冒泡到外层卡片。
+        if (key === 'Enter' || key === ' ' || key === 'Spacebar') stop(event)
+      }
+      const byId = new Map<string, any>()
+      for (const item of Array.isArray(statuses) ? statuses : []) {
+        if (item && item.subtaskId != null) byId.set(String(item.subtaskId), item)
+      }
+      const subtasks = (Array.isArray(stage?.subtasks) ? stage.subtasks : [])
+        .filter((subtask: any) => !subtask?.supersededAt)
+      return h('section', {
+        className: 'dsh-wp-planrow',
+        'data-tone': row.tone,
+        'data-current': row.current ? 'true' : 'false',
+        'data-open': open ? 'true' : 'false',
+      },
+        h('button', {
+          type: 'button',
+          className: 'dsh-wp-planrow-toggle',
+          'aria-expanded': open,
+          'aria-controls': panelId,
+          onClick: handleClick,
+          onKeyDown: handleKeyDown,
+        },
+          h('span', { className: 'dsh-wp-planrow-chevron', 'aria-hidden': 'true' }),
+          h('span', { className: 'dsh-wp-planrow-dot', 'aria-hidden': 'true' }),
+          h('span', { className: 'dsh-wp-planrow-name' }, `${stageLabel(t, row.index)}：${row.name}`),
+          h('span', { className: 'dsh-wp-planrow-bar' },
+            h('span', {
+              className: 'dsh-wp-planrow-fill',
+              'data-width': String(Math.round(width)),
+              style: { width: `${width}%` },
+            }),
+          ),
+          h('span', { className: 'dsh-wp-planrow-count' }, `${row.done}/${row.total}`),
+          h('span', { className: 'dsh-wp-planrow-state' }, planStepStateText(t, row.tone)),
+        ),
+        h('div', { id: panelId, className: 'dsh-wp-planrow-panel', hidden: !open },
+          h('div', { className: 'dsh-wp-planrow-detail' },
+            stage?.goal
+              ? h('div', { className: 'dsh-wp-planrow-goal' },
+                h('strong', null, `${t('what')}：`), String(stage.goal))
+              : null,
+            stage?.checkpoint
+              ? h('div', { className: 'dsh-wp-planrow-checkpoint' },
+                h('strong', null, `${t('checkpoint')}：`), String(stage.checkpoint))
+              : null,
+            subtasks.length
+              ? h('ul', { className: 'dsh-wp-planrow-tasks' },
+                subtasks.map((subtask: any, index: number) => {
+                  const status = planTaskStatus(byId.get(String(subtask?.id))?.status)
+                  return h('li', {
+                    key: String(subtask?.id ?? index),
+                    className: 'dsh-wp-planrow-task',
+                    'data-status': status,
+                  },
+                    h('span', { className: 'dsh-wp-planrow-task-dot', 'aria-hidden': 'true' }),
+                    h('span', { className: 'dsh-wp-planrow-task-title' }, `${t('workPrefix')} ${index + 1}：${String(subtask?.title ?? '')}`),
+                    h('span', { className: 'dsh-wp-planrow-task-dept' }, deptName(t, subtask?.department)),
+                    h('span', { className: 'dsh-wp-planrow-task-state' }, t(`status.${status}`)),
+                  )
+                }),
+              )
+              : null,
+          ),
+        ),
+      )
+    }
+
+    // 展开后的「分步进度」：逐阶段行 + 总体进度（与环/组头同一个计数口径）。
+    function PlanOverview({
+      t, stats, counts, rows, stages, statuses, sessionId, openRows, onToggleRow,
+    }: {
+      t: (key: string) => string
+      stats: any
+      counts: PlanCounts
+      rows: PlanStageRow[]
+      stages: any
+      statuses: any
+      sessionId: any
+      openRows: string[]
+      onToggleRow: (rowId: string, next: boolean) => void
+    }) {
+      const stagesById = new Map<string, any>()
+      for (const stage of Array.isArray(stages) ? stages : []) {
+        if (stage?.id != null) stagesById.set(String(stage.id), stage)
+      }
       return h('div', {
         className: 'dsh-wp-planoverview',
         'data-plan-total': String(counts.total),
@@ -2097,25 +2318,17 @@ window.__ModuleLoader__.load({
         rows.length
           ? h('div', { className: 'dsh-wp-planrows' },
             rows.map((row) => {
-              const width = row.total > 0 ? (row.done / row.total) * 100 : 0
-              return h('div', {
+              const panelId = `${planRowDomId(sessionId, row.id)}-panel`
+              return h(PlanStepRow, {
                 key: row.id,
-                className: 'dsh-wp-planrow',
-                'data-tone': row.tone,
-                'data-current': row.current ? 'true' : 'false',
-              },
-                h('span', { className: 'dsh-wp-planrow-dot', 'aria-hidden': 'true' }),
-                h('span', { className: 'dsh-wp-planrow-name' }, `${stageLabel(t, row.index)}：${row.name}`),
-                h('span', { className: 'dsh-wp-planrow-bar' },
-                  h('span', {
-                    className: 'dsh-wp-planrow-fill',
-                    'data-width': String(Math.round(width)),
-                    style: { width: `${width}%` },
-                  }),
-                ),
-                h('span', { className: 'dsh-wp-planrow-count' }, `${row.done}/${row.total}`),
-                h('span', { className: 'dsh-wp-planrow-state' }, stateOf(row.tone)),
-              )
+                t,
+                row,
+                stage: stagesById.get(String(row.id)),
+                statuses,
+                open: openRows.includes(row.id),
+                onToggle: (next: boolean) => onToggleRow(row.id, next),
+                panelId,
+              })
             }),
           )
           : null,
@@ -2124,6 +2337,19 @@ window.__ModuleLoader__.load({
 
     function SessionCard({ session, t, open, onToggle }: any) {
       const domId = `dsh-wp-session-${session.sessionId}`
+      /*
+       * [1.12.0] 受控状态：展开哪几步只由这里决定，初始值只来自 localStorage
+       * （默认空集）。不按「当前步骤」或进度自动展开，也不在数据更新时重置；
+       * 卡片收起再展开时，PlanOverview 重新挂载也拿得到同一份选择。
+       */
+      const [openPlanRows, setOpenPlanRows] = useState(() => readPlanRowOpen(session.sessionId))
+      const togglePlanRow = (rowId: string, next: boolean) => {
+        const nextOpen = next
+          ? [...openPlanRows.filter((id: string) => id !== rowId), rowId]
+          : openPlanRows.filter((id: string) => id !== rowId)
+        setOpenPlanRows(nextOpen)
+        writePlanRowOpen(session.sessionId, nextOpen)
+      }
       const stats = session.stats || {}
       // 1.5.0：折叠卡摘要＝图表（环 + 百分比 + 四段构成条 + 图例 + 阶段步进条）；
       // 数字仍只来自 session.stats，与旧头部的口径完全一致，不引入第二套统计。
@@ -2153,7 +2379,17 @@ window.__ModuleLoader__.load({
           session.updatedAt
             ? h('div', { className: 'dsh-wp-meta dsh-wp-session-updated' }, `${t('updatedAt')} ${formatTime(session.updatedAt)}`)
             : null,
-          open === true ? h(PlanOverview, { t, stats, counts, rows: stageRows }) : null,
+          open === true ? h(PlanOverview, {
+            t,
+            stats,
+            counts,
+            rows: stageRows,
+            stages: session.stages,
+            statuses,
+            sessionId: session.sessionId,
+            openRows: openPlanRows,
+            onToggleRow: togglePlanRow,
+          }) : null,
           session.degraded ? h('div', { className: 'dsh-wp-banner dsh-wp-banner--degraded' },
             h('strong', null, t('degraded')),
             h('div', null, plainError(session.error || '')),

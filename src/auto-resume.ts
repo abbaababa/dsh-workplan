@@ -32,7 +32,8 @@
  *    re-running a done subtask cannot fix a missing acceptance item, it only
  *    produces duplicate work and a chance to overwrite the evidence.
  *
- * Default: **off**. See `AUTO_RESUME_DEFAULTS.enabled`.
+ * Default: **on**. `AUTO_RESUME_DEFAULTS.enabled = true`; turn it off with
+ * profile `autoResume: false` or `DSH_WORKPLAN_AUTO_RESUME=0`.
  */
 
 /** Tunables that are policy, not deployment config. */
@@ -98,6 +99,26 @@ export function autoResumeEnabledFrom(configValue: any, envValue: any) {
     if (/^(0|false|no|off)$/i.test(raw)) return false
   }
   return AUTO_RESUME_DEFAULTS.enabled === true
+}
+
+/**
+ * [1.12.0] Count the rows that still participate in scheduling.
+ *
+ * A `closure:'replanned'` row keeps `status:'pending'` for audit. Counting it as
+ * pending made `armAutoResume` schedule a continuation round that could dispatch
+ * nothing (every live row was done) and then append a misleading
+ * `PHASE_NOT_PAUSED` stop line to `record.errors`.
+ *
+ * `armAutoResume` now passes these counts to `decideAutoResume`; `total` there
+ * still comes from `derivePlanSnapshot` (same live-row rule).
+ *
+ * @param statuses - the plan's status list.
+ * @returns live `done` / `pending` / `blocked` counts.
+ */
+export function liveResumeCounts(statuses: any) {
+  const live = (Array.isArray(statuses) ? statuses : []).filter((item: any) => item?.closure !== 'replanned')
+  const count = (status: string) => live.filter((item: any) => item?.status === status).length
+  return { done: count('done'), pending: count('pending'), blocked: count('blocked') }
 }
 
 /** `schedule` = arm the next round; `stop` = leave the plan to a human. */
@@ -176,8 +197,8 @@ export interface AutoResumeDecision {
  *  2. user stop (`cancelled`, `superseded`) — never resurrect a decision
  *  3. already running / plan mode
  *  4. only a `paused` phase is auto-continuable
- *  5. nothing pending (includes "all done, evidence gap" — human work)
- *  6. any `blocked` row — a real failure, not a budget artifact
+ *  5. any `blocked` row — a real failure, not a budget artifact
+ *  6. nothing pending (includes "all done, evidence gap" — human work)
  *  7. attempt / progress budgets
  *
  * @param input - the frozen facts of the round that just ended.
@@ -195,7 +216,7 @@ export function decideAutoResume(input: AutoResumeInput): AutoResumeDecision {
   })
 
   if (input.enabled !== true) {
-    return stop('AUTO_RESUME_DISABLED', '自动续跑开关未开启（默认关闭）')
+    return stop('AUTO_RESUME_DISABLED', '自动续跑开关未开启（已被显式关闭：profile autoResume:false 或 DSH_WORKPLAN_AUTO_RESUME=0）')
   }
   if (input.degraded === true || Number(input.total) <= 0) {
     return stop('NO_PLAN', '没有可续跑的计划（自动分解降级或子任务数为 0）')
@@ -215,6 +236,17 @@ export function decideAutoResume(input: AutoResumeInput): AutoResumeDecision {
   if (input.phase !== 'paused') {
     return stop('PHASE_NOT_PAUSED', `计划阶段是 ${String(input.phase ?? 'unknown')}，只有 paused（预算到点）才自动续跑`)
   }
+  /*
+   * [1.12.0] 「有 blocked」先于「没有 pending」（T11）。
+   *
+   * 旧顺序把 `done=N, blocked=1, pending=0` 判成 NOTHING_PENDING（证据缺口），
+   * 而真正要处理的是那条 blocked 行。1.12 起预算到点会保留等指示行并把阶段写成
+   * blocked（PHASE_NOT_PAUSED 先命中），但历史会话回放仍可能出现 paused + blocked，
+   * 所以这里按可执行的优先序回答。
+   */
+  if (Number(input.blocked) > 0) {
+    return stop('HAS_BLOCKED', `存在 ${input.blocked} 个 blocked 子任务：那是真实失败，需人工改判或显式续跑，不自动修复`)
+  }
   if (Number(input.pending) <= 0) {
     /*
      * Also the evidence-gap case: all rows done but deliveryReady=false.
@@ -222,9 +254,6 @@ export function decideAutoResume(input: AutoResumeInput): AutoResumeDecision {
      * only be closed by a human re-adjudication, so stop and say so.
      */
     return stop('NOTHING_PENDING', '没有 pending 项：若仍未就绪，那是证据缺口，需主 Agent 复核，不能靠重跑 done 项解决')
-  }
-  if (Number(input.blocked) > 0) {
-    return stop('HAS_BLOCKED', `存在 ${input.blocked} 个 blocked 子任务：那是真实失败，需人工改判或显式续跑，不自动修复`)
   }
   if (attempt >= maxAttempts) {
     return stop('BUDGET_EXHAUSTED', `自动续跑已用满 ${maxAttempts} 轮，交给主 Agent 决定`)

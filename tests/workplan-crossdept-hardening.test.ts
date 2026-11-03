@@ -12,6 +12,7 @@ import assert from 'node:assert/strict'
 import {
   acceptanceCoverage,
   adjudicateResult,
+  buildPlanMessage,
   applyStatus,
   blockCancelledDependents,
   createStatuses,
@@ -167,6 +168,45 @@ test('replan 容量：superseded 旧行不占 15 项上限', () => {
 test('acceptanceCoverage 短文本只等值匹配，避免 "ok" 命中任意单词', () => {
   assert.equal(acceptanceCoverage(['ok'], [{ criterion: 'broken thing', result: 'pass' }]).missing.length, 1)
   assert.equal(acceptanceCoverage(['ok'], [{ criterion: 'ok', result: 'pass' }]).missing.length, 0)
+})
+
+test('acceptanceCoverage 不再接受「只写长验收标准的一部分」（Q6 / U-16）', () => {
+  const planned = ['通过登录测试与越权测试']
+  const partial = acceptanceCoverage(planned, [{ criterion: '通过登录测试', result: 'pass' }])
+  assert.equal(partial.covered, 0, '短子串不能顶替完整验收项')
+  assert.equal(partial.missing.length, 1)
+  const full = acceptanceCoverage(planned, [{ criterion: '通过登录测试与越权测试', result: 'pass' }])
+  assert.equal(full.missing.length, 0)
+})
+
+test('acceptanceCoverage 接受按 A1/A2 稳定编号对号入座', () => {
+  const planned = ['通过登录测试', '通过越权测试', '给出命令输出']
+  const rows = [
+    { criterion: 'A1 通过登录测试', result: 'pass' },
+    { criterion: 'A2 通过越权测试', result: 'pass' },
+    { criterion: 'A3 给出命令输出', result: 'pass' },
+  ]
+  const result = acceptanceCoverage(planned, rows)
+  assert.equal(result.covered, 3)
+  assert.equal(result.missing.length, 0)
+  assert.equal(acceptanceCoverage(planned, [{ criterion: 'A2 通过越权测试', result: 'pass' }]).missing.length, 2)
+})
+
+test('buildPlanMessage 在自动派发时不再要求模型重复调用 dispatch', () => {
+  const messagePlan: any = planFixture()
+  messagePlan.title = '测试计划'
+  messagePlan.contradictions = {
+    primary: { statement: '要求与现状的落差', evidence: ['e'], whyPrimary: 'w' },
+    secondary: [],
+    transformationConditions: [],
+  }
+  const message = buildPlanMessage(messagePlan, { autoDispatched: true })
+  const text = (message.content ?? []).map((part: any) => String(part?.text ?? '')).join('\n')
+  assert.match(text, /计划已自动派发/)
+  assert.match(text, /不要重复调用 dsh_workplan_dispatch/)
+  const manual = buildPlanMessage(messagePlan, {})
+  const manualText = (manual.content ?? []).map((part: any) => String(part?.text ?? '')).join('\n')
+  assert.match(manualText, /必须调用 dsh_workplan_dispatch/)
 })
 
 test('重规划 cancel：applyReplanStatuses 自身级联阻断传递下游（D-13）', () => {

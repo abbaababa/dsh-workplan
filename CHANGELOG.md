@@ -1,3 +1,134 @@
+## 1.12.0 — 2026-11-02
+
+**把三类异质改动收敛为一次发布：T11 低风险缺陷补丁 rebase（15 个缺陷 / 44 个 hunk）、任务理解与部门分配机制修正、分步进度折叠 UI；并逐条给出 U-15…U-21 的结论或明确决策请求。**
+
+> **事实边界（发布说明不得外推）**
+> 1. 本版证明的是「代码级护栏 + 固定样例 + 全量回归」。真实模型在 20 条任务上的理解质量与部门命中率**尚未验证**（T5 D-1）。
+> 2. 计划生成后**默认自动派发**（`autoDispatch` 默认 true，plan 模式除外；`autoDispatch:false` 或 `DSH_WORKPLAN_AUTO_DISPATCH=0` 可关闭并回到 plan-first）。
+> 3. D-01 的验收改为**稳定编号 A1…An + 单向包含**：只写验收标准的一部分不再算覆盖，自创验收项也不能顶替计划验收（Q6 / U-16）。
+> 4. 真实浏览器点击未在本机执行（缺浏览器自动化与 3080 鉴权）；组件级交互验收 17/17 通过，发布前仍需主 Agent 在 GUI 手工点验一次。
+
+### 零、1.12.0 收口：自动派发与验收编号（T6 Q2 / Q6）
+
+- **自动派发**：计划落地后立即以 async 方式调用 `dispatchPlan`，结果仍由 `finishRound` 写回；
+  计划消息改为「已自动派发，不要重复调用 dispatch」。plan 模式不自动派发；预算、取消、
+  幂等、交付门禁与自动续跑全部保留。三态解析：配置 > `DSH_WORKPLAN_AUTO_DISPATCH` > 默认 true。
+- **验收稳定编号**：子提示词把计划验收编号为 A1…An，证据块 `criterion` 以 A1/A2… 对号入座；
+  `acceptanceCoverage` 同时去掉反向包含（`criterion.includes(row)`），部分文字不再被判覆盖。
+- 新增回归：子串绕过被拦、A1/A2 编号通过、缺少编号时只覆盖对应项、计划消息自动派发文案；
+  全量 **459 / 459 pass，0 fail**，`npm run check` exit 0。
+
+### 一、rebase：15 个低风险缺陷补丁
+
+补丁：[`_t8_rebase_20261102/out/T11-1.12.0.patch`](../_t8_rebase_20261102/out/T11-1.12.0.patch)（7 文件 / 44 hunk / SHA256 `6331f169…aadb00f`），基于 `HEAD f5160ff`（1.11.1）重生成，`git apply --check` 与 `patch --fuzz=0` 均为 0 退出码，无 `.rej`。
+
+45 个源 hunk 的去向（T7 台账 → T8 对账）：
+
+| 去向 | 数量 | 说明 |
+|---|---:|---|
+| 可直用 | 31 | 上下文未受 1.11.0/1.11.1 影响 |
+| 需改写 | 11 | 按 HEAD 上下文重写（含 D-45 的 1.12.0 版本口径、D-30 的回放透传拆分） |
+| 建议废弃 | 3 | D-15 两段、D-17 一段；对应缺陷已被 1.11.0 以不同实现修复，强打会回退已修逻辑 |
+| 对齐新增 | 1 | B1（文档口径） |
+| **最终 patch hunk** | **44** | 42 保留（#37 拆分 1→2，已含测试文件 hunk）+ 1 对齐 |
+
+覆盖的 15 个缺陷 ID：`D-04 / D-07 / D-08 / D-09 / D-10 / D-11 / D-15 / D-17 / D-19 / D-21 / D-28 / D-30 / D-31 / D-35 / D-45`。逐 hunk 落点见 `_t8_rebase_20261102/out/T11-1.12.0.map.json` 与 `source_decisions.csv`；D-15/D-17 的断言保留在 `tests/t11-lowrisk-patches.test.ts`，用于防止 1.11.0 的修复被回退，但不计作本次新增修复。
+
+回归覆盖（详见 `_t9_regression_20261102/T9_回归用例补齐与实跑记录_20261102.md`）：
+
+- 44/44 个 patch hunk 至少对应 1 条可执行用例，缺口 0；
+- 新增 52 条：补丁自带 `tests/t11-lowrisk-patches.test.ts` 13 条 + `tests/t9-hunk-contract.test.ts` 34 条 + `tests/t13-gap-cases.test.ts` 5 条；
+- 未打补丁基线同批对照：43/44 个 hunk 为 fail-before；唯一例外 hunk 33（D-19，基线本就拒绝环）已标注为「补独立基线」，不冒充判别力；
+- T13 的 5 条补位用例已适配 1.12.0 版本口径（原断言写死 1.11.0，直接复用会假失败）。
+
+### 二、任务理解与部门分配（T10）
+
+改造前：`validatePlan(raw)` 拿不到用户原文，12 个部门只有中英文名，子 Agent 提示词首行才出现部门；「分配是否合理」在机制上不可判定。
+
+改造后（纯函数，无模型、无网络、无时钟、无文件系统）：
+
+- **任务锚点** `taskAnchor`：保存用户原文 + `sha256` + 长度 + 来源消息；哈希不一致即降级为 `null`，不会带着被改写的「原要求」通过校验；
+- **要素抽取** `extractTaskElements()`：版本号、日期、编号、路径、数量、数值边界、显式否定、指代、矛盾；裸「它」等无上下文指代判 `needs-context`，不猜；
+- **部门能力目录** `src/departments.ts`：12 个部门各有 `responsibilities / outputs / keywords`；`departmentFit()` 输出 `fit / weak / mismatch`、命中关键词、`bestAlternative` 与受保护部门的 `intrusion`；
+- **偏离自检** `auditTaskUnderstanding()`：硬要素缺失、交付动作缺失、复述覆盖、部门矛盾；严格模式下以 `DEVIATION:` / `CLARIFY:` / `CONTEXT:` 前缀阻断并走既有重试/降级，不派发；
+- **提示词**：规划提示词要求每个子任务写 `departmentRationale`；子 Agent 提示词注入部门职责、典型产物与只读锚点（含哈希前 12 位）；
+- **回退开关**：`DSH_WORKPLAN_CONTEXT_GUARD=off` 时审计仍运行并写盘，但只告警不阻断。
+
+真实历史计划回放（41 个子任务）：`fit 41/41`、`mismatch 0`；S3 的 7 个硬要素 0 丢失。该结果证明「旧计划不会被新护栏误伤」，**不证明真实模型对新任务的理解质量**。
+
+### 三、自动化闭环口径修正（T11）
+
+本版修正 4 组会让自动化闭环「看起来在跑、实际丢状态」的缺陷，均有 fail-before / pass-after：
+
+1. 预算到点不再把 `escalated` / `instructed` / `replanned` 三类闭态行重置为 `pending`（原先会清空请示、触发 `INVALID_TRANSITION`、或让一条历史旧行毁掉整轮派发）；
+2. 新增 `liveResumeCounts`：`replanned` 旧行不再被当作 pending，避免 live 行全 done 仍空排一轮并写误导性停止行；
+3. `HAS_BLOCKED` 不再被 `NOTHING_PENDING` 抢先，`paused + blocked + 0 pending` 如实答「有受阻」，不再答成「证据缺口」；
+4. 修正 3 处「自动续跑默认关闭」的错误文案（实现默认开启）与 1 处不存在的 `tools.guard` 强制派发注释。
+
+本版已实现默认自动派发（见 §零）；plan 模式与 `DSH_WORKPLAN_AUTO_DISPATCH=0` 保留 plan-first。
+
+### 四、分步进度折叠 UI（T12）
+
+`PlanOverview` 的「分步进度」每行改为可点击展开/收起，**默认收起**：
+
+- 收起态只显示状态点、第 N 步名称、进度条、done/total、状态词与折叠箭头；
+- 点击行或键盘 Enter/Space 展开该步摘要（目标、检查点、子任务状态）；再次触发收起；
+- `aria-expanded` / `aria-controls` 与 `hidden` 面板同步；点击不冒泡到外层卡片；
+- 展开状态按会话存 `dsh-workplan:planrow-open:v1:<sessionId>`，刷新后恢复；localStorage 抛错时降级为纯内存，不影响点击；
+- 统计数字与既有阶段卡不变，未删除下方「分几步做」列表（D-6 未拍板）。
+
+局限：`stage id` 在重规划后可能复用，旧展开态可能被新阶段继承（T13 观察 O-2，不丢数据、不影响点击，未阻塞）。
+
+### 五、U-15…U-21 结论
+
+| ID | 结论 | 证据 / 待决 |
+|---|---|---|
+| U-15 | **本版已关闭** | 1.12.0 集成树 `npm test` 459/459、`fail 0`、退出码 0；原始日志见 T14 发布包 `logs/t14final2_npm_test.log` |
+| U-16 | **已修（1.12.0）** | 验收改为稳定编号 A1…An + 单向包含；证据只写「通过登录测试」不再覆盖「通过登录测试与越权测试」。复跑探针 `BYPASS=BLOCKED`（`logs/t14final2_u16_probe.log`）；回归见 `tests/workplan-crossdept-hardening.test.ts` |
+| U-17 | **未关闭，不得写「已修 N/42」** | 42 条 present 中，T11 用例覆盖 12 条、D-01/D-13 已复验，仍有 28 条无复验；T9 的 44 hunk 覆盖不等于 42 缺陷全覆盖 |
+| U-18 | **已关闭** | `v1.11.0` 干净树重跑 `npm test`：363/363、`fail 0`、退出码 0（T14 日志 `logs/v110_npm_test.log`） |
+| U-19 | **内容已闭合，时刻保留说明** | 1.12.0 map 由 `gen_map.py` 从最终补丁反解生成，45/45 源 hunk 一致；旧 map 的 `createdAt` 与 mtime 矛盾仍如实记录，不再作为 1.12.0 权威映射 |
+| U-20 | **已关闭** | `_t12_high_risk_patches_20261102/ROLLBACK.md` 已存在；该 P0 补丁（D-01/D-13）不进入 1.12.0 |
+| U-21 | **需主 Agent/用户确认口径** | 以 `T14_诊断与修正总报告_20261102.md` + 证据索引为准，`dsh-workplan-1.11.0-final-report.md` 降为参考 |
+
+### 六、测试
+
+| 检查 | 结果 |
+|---|---|
+| `npm run check`（tsc --noEmit） | exit 0 |
+| `npm test` | **459 tests / 459 pass / 0 fail / exit 0**（约 4.4s） |
+| `version-sync` | 2/2 通过；`verify_version.mjs` 10 个声明点（含 README 版本徽章）全部 1.12.0 |
+| 基线对照（未打补丁） | 43/44 hunk fail-before；基线原套件 364/364 通过，排除环境故障 |
+| `v1.11.0` 复跑 | 363/363，exit 0（U-18） |
+
+459 = 1.11.1 之后已并入的机制/UI 用例 404 + 本次 rebase 52 + 1.12.0 收口新增 3（U-16 / 自动派发文案）。
+
+### 七、破坏性变更
+
+**无。** 可复核理由：
+
+1. `PLAN_VERSION` 仍为 `1`（`src/plan.ts:16`），计划消息契约未变；
+2. 未删除或改名任何字段/工具；新增 `taskAnchor`、`understandingAudit`、`departmentRationale` 均为可选字段；
+3. `STATUSES` 仍为四值，计数与交付门禁语义不变；
+4. 旧日志/旧计划缺新字段时按 1.11.1 语义降级（`degraded`、不阻断），刷新回放不翻红。
+
+### 八、升级
+
+```bash
+dsh plugin --profile web add dsh-workplan@1.12.0
+```
+
+装完重启 DSH Web（或重新载入页面）。无需配置迁移；若新护栏误拒正常计划，可临时设 `DSH_WORKPLAN_CONTEXT_GUARD=off` 只告警不阻断，并把样例反馈回来。
+
+### 九、已知缺口（如实列出，不折算为已修）
+
+- U-16 验收子串绕过：**已修**（A1…An 稳定编号 + 单向包含），复跑 `BYPASS=BLOCKED`；
+- U-17 28 条 present 缺陷未逐条复验；
+- 自动派发：**已实现并默认开启**（plan 模式除外，`DSH_WORKPLAN_AUTO_DISPATCH=0` 可关闭）；真实宿主端到端自动派发未单独跑，证据为代码级 + 单测；
+- 真实模型 20 条任务的理解质量/部门命中率：未验证；
+- 真实浏览器点击：未执行（组件级 17/17 已过）；
+- 索引源：本仓库只能提上游条目 PR，catalog npm 由上游 CI 重建；PR 合并前不得写「已上索引」。
+
 ## 1.11.1 — 2026-11-02
 
 修复 1.11.0 中一个「已声称、但数据层未生效」的问题：

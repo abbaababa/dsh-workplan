@@ -3,6 +3,7 @@
 > **两个卖点，一句话：ISO/IEC 15408:2026 全套安全证据，5 条命令自己验；安装一条命令、零第三方运行时依赖。**
 
 [![verify](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml/badge.svg)](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml)
+[![version](https://img.shields.io/badge/version-1.12.0-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v1.12.0)
 
 给 **DeepSeek Harness（DSH）** 加一段「先拆计划 → 真派部门子 Agent 去做 → 左侧栏实时看进度」的能力。不装 App、不改 DSH 源码、不换页面。
 
@@ -27,7 +28,7 @@
 | 逐类对照 + EAL1 就绪度 + 还缺什么 | 自评估 | [docs/cc/CC-2026-ASSESSMENT.md](docs/cc/CC-2026-ASSESSMENT.md) |
 | 第三方组件、许可证、哈希 | 生命周期（ALC） | [docs/SBOM.md](docs/SBOM.md) |
 | 漏洞怎么报、多久回、部署怎么配 | 安全策略 | [SECURITY.md](SECURITY.md) |
-| 188 项自动化测试，一条命令复跑 | 测试（ATE） | `npm run verify` |
+| 459 项自动化测试，一条命令复跑 | 测试（ATE） | `npm run verify` |
 
 现状：CC 最低等级 **EAL1** 的 14 项组件里，**10 项就绪、3 项部分具备、1 项只能靠外部实验室**。差的不是代码，是认证要花的实验室费用与排期——所以我们只卖证据，不冒充分证。
 
@@ -35,7 +36,7 @@
 
 ```bash
 git clone https://github.com/abbaababa/dsh-workplan.git && cd dsh-workplan
-npm ci && npm run verify                                  # 期望：tests 188 / pass 188 / fail 0
+npm ci && npm run verify                                  # 期望：tests 459 / pass 459 / fail 0
 grep -RInE "child_process|execSync|eval\(|writeFileSync" src || echo "0 命中（预期）"
 ```
 
@@ -66,7 +67,7 @@ grep -RInE "child_process|execSync|eval\(|writeFileSync" src || echo "0 命中�
 ## 一键安装
 
 ```bash
-dsh plugin --profile web add dsh-workplan@1.11.1
+dsh plugin --profile web add dsh-workplan@1.12.0
 ```
 
 装完**重启一次 DSH Web**（或重新载入当前页面）让插件生效。

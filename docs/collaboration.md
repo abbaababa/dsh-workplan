@@ -2,8 +2,10 @@
 
 > 这份文档回答四个问题：**谁把什么写给谁、什么时候算完成、失败后谁接手、改代码时哪些地方必须一起改。**
 >
-> 适用版本：**1.7.0（当前已发布，2026-10-30）**。文中每一项能力都已落到代码与测试；标注「未处理」的是明确不做、留待后续版本的范围，不要当现状。
+> 适用版本：**1.12.0**。文中每一项能力都已落到代码与测试；标注「未处理」的是明确不做、留待后续版本的范围，不要当现状。
 >
+<!-- [D-45] 本文版本与实现口径已对齐 1.12.0；核对项：权限 7 处、present 仅根会话、下游可读 artifacts。 -->
+
 > 约定：本文只用「文件 + 符号名」定位代码（例如 `src/plan.ts#buildChildPrompt`），**不写行号**，避免代码改动后文档漂移。核对命令见 §11。
 
 ---
@@ -21,13 +23,13 @@
 
 要点：
 
-- **部门是职责标签，不是组织架构。** 1.6.0 的 `src/plan.ts#DEPARTMENTS`（12 个）只用于生成提示词与界面分组；**没有部门负责人、部门队列、部门内串行**。是否并行只由 `dependsOn` 与全局并发 5 决定。
+- **部门是职责标签，不是组织架构。** 1.12.0 的 `src/plan.ts#DEPARTMENTS`（12 个）只用于生成提示词与界面分组（未知值归入「未知部门」桶，不回显原文）；**没有部门负责人、部门队列、部门内串行**。是否并行只由 `dependsOn` 与全局并发 5 决定。
 - **主 Agent 是唯一中枢。** 子 Agent 之间没有消息通道；跨部门信息只能经主 Agent 转达（见 §5、§7）。
-- **子 Agent 的权限是「代码硬约束 + 提示词软约束」两层。** 硬约束只有三条 `NOT_ROOT` 拒绝（dispatch / update / cancel）；「不要重启服务、不要安装」只在 `buildChildPrompt` 文本里，**没有工具层护栏**。
+- **子 Agent 的权限是「代码硬约束 + 提示词软约束」两层。** 代码层有 **7 处 `NOT_ROOT` 拒绝**：dispatch / update / replan / cancel / instruct / handoff / followup；`present` 另有独立守卫，对非根会话直接返回 `NOT_ROOT`（1.11.0 起，见 §5.2.1）。但「已交付文件写保护」只对**根会话**生效（`presentedWriteDenialReason` 对子会话直接返回 `undefined`），子会话仍可改写已交付文件（§7.2 L13）；「不要重启服务、不要安装/升级依赖」仍只在 `buildChildPrompt` 文本里，**没有工具层护栏**（见 §7.2 L11）。
 
 ---
 
-## 2. 端到端流程（1.6.0 实际行为）
+## 2. 端到端流程（1.12.0 实际行为）
 
 ```
 用户消息
@@ -242,7 +244,7 @@ pending ──dispatch──▶ executing ──全部 done──▶ done
 3. 工作目录；
 4. 最近对话背景（**截断到 7000 字**；1.7.0 在每次派发前重新采样，之后不再二次截断）；
 5. 本子任务的 `role/objective/method/inputs/outputs/acceptance/risk`；
-6. **仅 `dependsOn` 里的上游结果**：`{id, title, status, summary}`，summary 已是 3000 字以内的截断文本。
+6. **仅 `dependsOn` 里的上游结果**：`{id, title, status, summary}`，外加 `artifacts[]` 中 `exists:true` 的可消费产物 `ref`（1.8+ 起）；summary 已是 3000 字以内的截断文本。
 
 **下游看不到上游的原始对话**，但 1.7.0 会附上**兄弟任务的只读一览**（`buildTeamBrief`：id、部门、目标、产出、状态；已完成的带摘要），并用 `needs` 汇总需要主 Agent 转达的协作请求。产物本身仍要靠工作区文件与摘要传递，因此上游必须把「产物在哪、怎么用、什么算合格」写进摘要或落成文件。
 
@@ -250,7 +252,7 @@ pending ──dispatch──▶ executing ──全部 done──▶ done
 
 子 Agent 必须用**自由文本**汇报，并满足：
 
-- 优先在输出末尾追加结构化证据块（`<!-- WORKPLAN_EVIDENCE:START -->` … JSON … `<!-- WORKPLAN_EVIDENCE:END -->`），含 `status` / `blockedReason` / `acceptance[]` / `artifacts[]` / `needs[]`。这是 1.7.0 的主信号：`partial`、任一验收 `fail`、坏块都判受阻，只有全 `pass` 直接采信。
+- 优先在输出末尾追加结构化证据块（`<!-- WORKPLAN_EVIDENCE:START -->` … JSON … `<!-- WORKPLAN_EVIDENCE:END -->`），含 `status` / `blockedReason` / `acceptance[]` / `artifacts[]` / `needs[]`。这是 1.11.0 起的完成判据：`partial`、任一验收 `fail`、坏块都判受阻，只有全 `pass` 直接采信。
 - 没有证据块时，失败仍可**第一行**写 `BLOCKED: 原因`（大小写不敏感，中英文冒号都认，行首允许空白）——按 `legacy` 判受阻。
 - **1.11.0 起，没有证据块、也没有 `BLOCKED` 的「纯散文」不再算完成**：默认（`strictCompletion`，可用 `DSH_WORKPLAN_STRICT_COMPLETION=0` 关闭）判 `blocked` + `unverified`，错误信息写明「结果块缺失，无法确认验收项是否真的通过」。历史回放仍按 `legacy` 读取，避免旧计划整体失效。
 - 验收条目自称 `pass` 但 `evidence` 为空时，1.11.0 降级为 `unverified`，且 `deliveryReadiness` 增加「验收自称通过但没有证据」阻塞项。
@@ -258,7 +260,7 @@ pending ──dispatch──▶ executing ──全部 done──▶ done
 - 不编造命令输出、文件或证据；无法确认就写「未验证」；
 - 需要别人配合时，写「需要主 Agent 执行/确认什么」，**不要等待或空转**。
 
-`summary` 会被截断到 3000 字，因此**关键结论和绝对路径要放在最前面**。
+`summary` 会被截断到 3000 字，因此**关键结论和产物路径要放在最前面**。
 
 ### 5.2.1 验收覆盖与上游门槛（1.11.0）
 
@@ -269,12 +271,12 @@ pending ──dispatch──▶ executing ──全部 done──▶ done
 
 ### 5.3 跨部门转达
 
-1.11.0 **仍没有**子 Agent 直连、共享黑板或会签——这是刻意的权限边界，不是遗漏。跨部门只有三条路：
+1.12.0 **仍没有**子 Agent 直连、共享黑板或会签——这是刻意的权限边界，不是遗漏。跨部门只有三条路：
 
 1. **带编号的 hand-off（1.11.0 新增，唯一处置入口）**：子 Agent 每条 `needs` 由 `applyStatus` 自动登记为 `{id: H1, request, department, status}`；主 Agent 用 `dsh_workplan_handoff` 处置：`list` / `assign`（登记责任部门）/ `resolve`（写入答复或产物引用）/ `close`（确认无需动作）。四态为 `open → routed → answered / closed`。**未处置的 hand-off 会进 `deliveryReadiness`，直接拦住交付**；对正处于「待指示」的行执行 `resolve`，会复用 `instructSubtask` 把答复直接投递给该子会话。
    - `assign` 只登记责任，**不会自动产生工作**（插件没有常驻部门代理）；需要产出时用 `dsh_workplan_replan(action=add)` 建该部门的子任务，或由主 Agent 自己完成，再 `resolve`。
 2. **经主 Agent 对话**：`dsh_workplan_instruct` 回答请示、`dsh_workplan_replan` 就地修订计划；
-3. **经工作区文件**：上游把接口/产物落到双方都能读到的路径，并在摘要里写绝对路径；`dependsOn` 上游的 `artifacts[].ref`（`exists:true`）会作为「可消费产物」注入下游提示词。
+3. **经工作区文件**：上游把接口/产物落到双方都能读到的路径，并在摘要里写**工作目录相对路径或绝对路径（同一产物只用一种）**；`dependsOn` 上游的 `artifacts[].ref`（`exists:true`）会作为「可消费产物」注入下游提示词。
 
 「兄弟任务只读一览」与 `needs` 清单自 1.7.0 起存在（`buildTeamBrief`、`buildResultMessage`）；子 Agent 直连仍然不开放。
 
@@ -282,14 +284,14 @@ pending ──dispatch──▶ executing ──全部 done──▶ done
 
 ## 6. 失败与恢复
 
-| 现象 | 1.6.0 的实际行为 | 正确恢复动作 |
+| 现象 | 1.12.0 的实际行为 | 正确恢复动作 |
 |---|---|---|
 | 子 Agent 5 分钟无新事件 | 判 `CHILD_STALLED`，同一 prompt 重试 1 次 | 若仍失败转 `blocked`；主 Agent 核对并决定续跑或接手 |
 | 单项超过 15 分钟 | 强制结束，记 `blocked` | 拆小任务或提高 `childTimeoutMs` 后重派 |
 | 整轮 20 分钟预算用尽 | 阶段 `paused`，剩余项保持 `pending`，**不消耗续跑额度** | 再次 `dispatch` 即续跑，已完成不重跑 |
 | 子任务 `blocked` | 下游依赖被级联标记 `blocked`；错误只写「上游子任务受阻：T1、T2」 | 先修上游；再 `dispatch` 续跑（额度内） |
 | 续跑额度用尽 | `resumeAvailable:false`，结果消息要求主 Agent 直接接手 | 主 Agent 自己完成或向用户说明，不要重复派发 |
-| 运行中 `update` 改判 | **允许**，但会被子任务结束时的结果覆盖（无锁） | 等本轮结束再改判；这是 1.7.0 要修的缺陷 |
+| 运行中 `update` 改判 | **拒绝**（`TASK_RUNNING`）；`force:true` 才允许，并记录为人工改判 | 等本轮结束再改判；确需覆盖再显式 `force` |
 | 刷新页面 | 由结果消息回放；显式 cancel 会回放 | 若改判消失，属已知缺陷（§8） |
 | 新一轮取代未派发旧计划 | 旧计划只改内存为 `cancelled`，不落盘（plan 模式下未派发的计划例外：会保留） | 刷新前不要依赖「已取消」结论 |
 | 规划失败 | `degraded` 消息，不自动重规划 | 向用户说明并询问是否重试 |
@@ -303,15 +305,15 @@ pending ──dispatch──▶ executing ──全部 done──▶ done
 
 ### 7.1 硬约束（代码层，改动需同步测试）
 
-1. 只有 root 会话能 `dispatch` / `update` / `cancel`；子 Agent 调用会被 `NOT_ROOT` 拒绝。
+1. 只有 root 会话能 `dispatch` / `update` / `replan` / `cancel` / `instruct` / `handoff` / `followup`（共 7 处 `NOT_ROOT`）；子 Agent 调用会被拒绝。`present` 另有独立守卫：非根会话返回 `NOT_ROOT`（1.11.0 起，§5.2.1），不在这 7 处之内；已交付文件写保护仍只覆盖根会话（§7.2 L13）。
 2. 子 Agent 派生深度上限 1（`maxDepth: 1`）。
 3. plan 模式下 `dispatch` 被 `tools.guard` 拒绝，并给出原因。
 4. 状态枚举只有 4 个值；计划版本 `PLAN_VERSION = 1`。
 5. `stats` 不缓存，统一由 `derivePlanSnapshot` 在出口派生；实时与回放必须同源。
 
-### 7.2 限制清单（1.7.0 现状：哪些已处理、哪些明确不做）
+### 7.2 限制清单（1.12.0 现状：哪些已处理、哪些明确不做）
 
-| # | 限制 | 影响 | 1.7.0 状态 |
+| # | 限制 | 影响 | 1.12.0 状态 |
 |---|---|---|---|
 | L1 | 派发期间主 Agent 无法观测进度 | 用户问「做到哪了」时主 Agent 无上下文 | 已处理（async 派发 + `status` 工具） |
 | L2 | 回传是自由文本，非空即 `done` | 「假完成」；验收标准没有被逐条核对 | 已处理（结构化证据 + 确定性裁决） |
@@ -323,7 +325,8 @@ pending ──dispatch──▶ executing ──全部 done──▶ done
 | L8 | 部门之间无直接通信 | 跨部门接口对不上只能等失败 | 部分处理（兄弟只读一览 + needs 转达，仍不直连） |
 | L9 | 一个会话只有一个计划槽位；计划之间无依赖/汇总 | 超长任务只能靠多轮对话承载 | 不做（后续版本评估） |
 | L10 | 对话背景在计划时刻冻结，且 prompt 内再截断到 5000 字 | 续跑时子 Agent 拿到旧背景 | 已处理（派发时重新采样、7000 字、不二次截断） |
-| L11 | 子 Agent 的「不要重启/安装」只是提示词 | 越权动作无法被插件拦截 | 不做（属宿主工具护栏） |
+| L11 | 子 Agent 的「不要重启/安装」只是提示词 | 重启/停服/安装/升级等**进程与依赖动作**无法被插件拦截 | 部分处理（进程/依赖动作在插件层不可拦截；`present` 已由根会话守卫拒绝，已交付文件写保护仅覆盖根会话，见 L13） |
+| L13 | 已交付文件的写保护只覆盖根会话 | 子会话可改写已交付文件，绕过「交付后不再改动」的约束 | 未处理（D-37 剩余部分：`present` 已由 1.11.0 拒绝子会话，写保护仍需宿主按会话过滤） |
 | L12 | 无证据块，无产物检查，无预算提示 | 计划过大时必然多轮 | 已处理（三者均已实现） |
 
 **关于阶段（L7）的正式口径：阶段是展示分组，不是执行门槛。** `readySubtasks` 只读 `dependsOn`，不读 stage。这样设计是为了避免「一个慢任务拖红整个阶段」。如果产品上需要阶段验收，必须单独立项并改调度语义，不能在文档里暗示它已经生效。
@@ -332,7 +335,7 @@ pending ──dispatch──▶ executing ──全部 done──▶ done
 
 ## 8. 写者所有权（当前与目标）
 
-### 8.1 1.7.0 实际
+### 8.1 1.12.0 实际
 
 | 事实 | 写入者 | 写入位置 | 回放 |
 |---|---|---|---|
@@ -343,7 +346,7 @@ pending ──dispatch──▶ executing ──全部 done──▶ done
 | 续跑计数 | `dispatchPlan` | 内存 `resumeCount` | 结果消息的 `resumeCount` |
 | 面板数字 | 无（全派生） | — | `derivePlanSnapshot` |
 
-### 8.2 写保护规则（1.7.0 已实现）
+### 8.2 写保护规则（1.11.0 已实现，仅覆盖根会话）
 
 - 调度器与主 Agent 的改判都走同一条 `applyStatus`，每次写入递增 `revision`；
 - 运行中的子任务拒绝 `update`（`TASK_RUNNING`），除非 `force:true`；
@@ -363,7 +366,7 @@ pending ──dispatch──▶ executing ──全部 done──▶ done
 
 ---
 
-## 9. 1.7.0 契约与实现状态
+## 9. 1.12.0 契约与实现状态
 
 | 能力 | 设计要点 | 状态 |
 |---|---|---|
