@@ -5,3 +5,8 @@ dist-tests/
 *.log
 .DS_Store
 npm-debug.log*
+
+dist-tests-t3/
+lib.bak.*/
+*.tgz
+docs/cc/T6-RECHECK-REPORT.md.bak

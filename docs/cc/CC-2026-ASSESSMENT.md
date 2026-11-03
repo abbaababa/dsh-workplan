@@ -4,7 +4,7 @@
 
 | 项目 | 内容 |
 |---|---|
-| 评估对象（TOE） | dsh-workplan 插件 v1.8.1 |
+| 评估对象（TOE） | dsh-workplan 插件 v1.8.1（**本文为 1.8.1 时点的评估记录，保留原文不改历史；v1.12.0 文档链刷新见文末 §11**） |
 | 评估性质 | **公开自评估（self-assessment），不是 CC 认证** |
 | 依据标准 | ISO/IEC 15408-1/-2/-3/-4/-5:2026；ISO/IEC 18045:2026（CEM） |
 | 报告日期 | 2026-10-30 |
@@ -264,3 +264,35 @@ grep -n "x-content-type-options" src/runtime.ts
 ---
 
 *报告结束。任何一项结论都可在第 10 节用 5 条命令复核。*
+
+---
+
+## 11. v1.12.0 文档链刷新记录（2026-11-03，T5 补齐；对应 T3 差距 G-01/02/06/08/09/11/12/13/14/17/20/21/24/26~32）
+
+本报告正文（§0–§10）是 **v1.8.1 时点的历史评估记录，保留不改**。v1.12.0 的刷新以增量方式进行：
+
+### 11.1 数字更正（以实测为准）
+| 项 | 历史值（1.8.x） | v1.12.0 实测（git HEAD `5fe47a1`，2026-11-03） |
+|---|---|---|
+| 测试 | 31 文件 / 188 项 | **65 文件 / 462 项**（`npm test` 实跑 462/462 pass / 0 fail；CHANGELOG 曾写 459 亦过期） |
+| 自有代码 | 5 模块 / 8044 行 | **12 文件（11 模块 + 类型声明）/ 17,430 行**（`wc -l src/*.ts`） |
+| 模型工具 | 4 个 | **9 个**（见 `docs/cc/ADV-FSP-FUNCTIONAL-SPEC.md` 完整枚举） |
+| SECURITY.md 支持表 | 1.8.x | 1.12.x（已刷新） |
+
+### 11.2 新增独立成文文档（补 R3 根因缺口）
+| 文档 | 对齐类别 | 补齐差距 |
+|---|---|---|
+| `docs/cc/ADV-FSP-FUNCTIONAL-SPEC.md` | ADV_FSP.1 | G-08 |
+| `docs/cc/ADV-TDS-TOE-DESIGN.md`（含安全域隔离成文） | ADV_TDS.1 / ADV_ARC | G-07/G-09/G-10 |
+| `docs/cc/CM-PLAN.md` | ALC_CMC/CMS/DVS/LCD/TAT | G-13/G-16/G-18/G-19 |
+| `docs/cc/TEST-COVERAGE-MATRIX.md`（SFR↔测试映射+分层） | ATE_COV/DPT/FUN | G-20/G-21/G-22 |
+| `docs/cc/AGD-OPS-SECURE-OPERATION.md`（安装前校验+安全操作） | AGD_OPS.1/AGD_PRE.1 | G-11/G-12/G-31 |
+
+### 11.3 就地刷新的既有文档
+- `docs/cc/SECURITY-TARGET.md` → rev 2（TOE 1.12.0、9 工具、新增 §10 SFR 成文化与 ACO N/A 判定）。
+- `docs/cc/AVA-VULNERABILITY-ANALYSIS.md` → 新增 §8（5 个新工具入口纳入攻击面）。
+- `docs/SBOM.md` → v1.12.0（代码/测试数字重算）。
+- `SECURITY.md` → 支持版本表更新至 1.12.x。
+
+### 11.4 口径（不变）
+本插件仍是**公开自评估**，不宣称 CC 认证；固有残留不变：ATE_IND.1（实验室独立测试）、AVA_VAN.2+（更高攻击潜力评定）需外部实验室，如实披露。版本口径沿用：结构参照 **ISO/IEC 15408:2026**，认证体系现行受理 **CC:2022**；CC 最新版本号的在线二次确认截至 2026-11-03 仍未完成（web_search 持续 503），如实登记为「未验证」，交主 Agent 复核（G-00）。

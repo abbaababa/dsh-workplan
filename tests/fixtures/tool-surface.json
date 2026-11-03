@@ -1,0 +1,23 @@
+{
+  "$comment": "T4 (CC G-08/G-24): golden inventory of the plugin's external interface surface (model tools, HTTP routes, lifecycle events). The regression test tests/tool-surface-inventory.test.ts extracts the same facts from src/host.ts and must match this file. Any intentional interface change requires updating this file AND refreshing docs/cc (ADV_FSP functional spec + AVA attack surface) in the same change.",
+  "version": "1.12.0",
+  "tools": [
+    "dsh_workplan_update",
+    "dsh_workplan_replan",
+    "dsh_workplan_cancel",
+    "dsh_workplan_followup",
+    "dsh_workplan_escalate",
+    "dsh_workplan_instruct",
+    "dsh_workplan_handoff",
+    "dsh_workplan_status",
+    "dsh_workplan_dispatch"
+  ],
+  "routes": [
+    "/dsh-workplan/plans",
+    "/dsh-workplan/vendor/chart.umd.js"
+  ],
+  "events": [
+    "agent/pre-step",
+    "agent/turn-stopping"
+  ]
+}

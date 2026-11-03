@@ -28,15 +28,17 @@ We do the half that can be done by us: **build the materials the 2026 edition (n
 | Class-by-class mapping, EAL1 readiness, what is missing | Self-assessment | [docs/cc/CC-2026-ASSESSMENT.md](docs/cc/CC-2026-ASSESSMENT.md) |
 | Third-party components, licences, hashes | Life cycle (ALC) | [docs/SBOM.md](docs/SBOM.md) |
 | How to report a vulnerability, response times | Security policy | [SECURITY.md](SECURITY.md) |
-| 459 automated tests, one command to re-run | Testing (ATE) | `npm run verify` |
+| 470 automated tests (independent recheck on 2026-11-03: 470/470 green), one command to re-run | Testing (ATE) | `npm run verify` |
 
-Status: of the 14 EAL1 components — CC's lowest level — **10 are ready, 3 partially ready, 1 can only come from an external lab**. What is missing is lab money and scheduling, not code, so we sell evidence and do not pretend to hold a certificate.
+Status (from the independent recheck of 2026-11-03, all 33 gap items reviewed one by one): **26 items closed (pass); 4 items confirmed as "not applicable or inherent residual" with the judgement itself standing; 1 item (the release-package sha256 value) is a release-time execution step — the script is ready and the value ships with the release**. No new code-level gaps were found. **Inherent residuals that must stay disclosed**: `ATE_IND.1` (test execution witnessed by an accredited lab) and `AVA_VAN.2+` (independent penetration evaluation) — under CC rules only an accredited lab can perform these, so this project labels itself honestly as a **published self-assessment**, and no marketing copy may omit this line.
+
+Version framing (both ends backed by official sources): the evidence pack follows the structure of **ISO/IEC 15408:2026** (listed in the official ISO catalogue); national certification schemes currently accept **CC:2022** (e.g. Germany's BSI). So we say: "**aligned with the 2026 structure, certification schemes currently accept CC:2022; full self-assessment evidence published, plus a complete install-and-use guide**" — and we never say "CC certified".
 
 Check it yourself — 3 lines, copy-paste:
 
 ```bash
 git clone https://github.com/abbaababa/dsh-workplan.git && cd dsh-workplan
-npm ci && npm run verify                                  # expect: tests 459 / pass 459 / fail 0
+npm ci && npm run verify                                  # expect: tests 470 / pass 470 / fail 0
 grep -RInE "child_process|execSync|eval\(|writeFileSync" src || echo "0 hits (expected)"
 ```
 

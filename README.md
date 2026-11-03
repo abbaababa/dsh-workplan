@@ -28,15 +28,17 @@
 | 逐类对照 + EAL1 就绪度 + 还缺什么 | 自评估 | [docs/cc/CC-2026-ASSESSMENT.md](docs/cc/CC-2026-ASSESSMENT.md) |
 | 第三方组件、许可证、哈希 | 生命周期（ALC） | [docs/SBOM.md](docs/SBOM.md) |
 | 漏洞怎么报、多久回、部署怎么配 | 安全策略 | [SECURITY.md](SECURITY.md) |
-| 459 项自动化测试，一条命令复跑 | 测试（ATE） | `npm run verify` |
+| 470 项自动化测试（2026-11-03 独立复检实测 470/470 全绿），一条命令复跑 | 测试（ATE） | `npm run verify` |
 
-现状：CC 最低等级 **EAL1** 的 14 项组件里，**10 项就绪、3 项部分具备、1 项只能靠外部实验室**。差的不是代码，是认证要花的实验室费用与排期——所以我们只卖证据，不冒充分证。
+现状（2026-11-03 独立复检报告结论，33 条差距逐条复核）：**26 条已关闭（通过）；4 条经判定为「不适用或固有残留」且判定本身成立；1 条（发布包 sha256 数值）属发布期执行件，脚本已就绪、随发布公布**。无新发现的代码类缺口。**必须如实披露的固有残留**：`ATE_IND.1`（测试执行需认可实验室见证）与 `AVA_VAN.2+`（独立渗透评测）——按 CC 规则只能由认可实验室完成，本项目以「公开自评估」口径如实标注，任何宣传材料都不省略这条。
+
+版本口径（两个头都有官方来源佐证）：证据包按 **ISO/IEC 15408:2026**（已列入 ISO 官方目录）的结构编写；现行国家认证体系（如德国 BSI）受理的版本仍为 **CC:2022**。所以我们说「**对齐 2026 结构、认证体系现行受理 CC:2022，公开全套自评证据 + 完整安装使用方法**」，不说「已通过 CC 认证」。
 
 自己验，3 行，复制即用：
 
 ```bash
 git clone https://github.com/abbaababa/dsh-workplan.git && cd dsh-workplan
-npm ci && npm run verify                                  # 期望：tests 459 / pass 459 / fail 0
+npm ci && npm run verify                                  # 期望：tests 470 / pass 470 / fail 0
 grep -RInE "child_process|execSync|eval\(|writeFileSync" src || echo "0 命中（预期）"
 ```
 

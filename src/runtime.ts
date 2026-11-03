@@ -2443,7 +2443,12 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
         if (snap) {
           try {
             snap.statuses = applyStatus(snap.statuses, update.subtaskId, {
-              status: update.status,
+              /*
+               * handoff 的 durable 记录携带的是状态快照，不是一次状态迁移。
+               * 重放时若再走 done 分支，会把已经 reported 的行打回 done 并抛
+               * INVALID_TRANSITION（wp-79c31abf 的 H1 就是这样被丢掉的）。
+               */
+              status: update.handoffs === undefined ? update.status : undefined,
               progress: typeof update.progress === 'number' ? update.progress : undefined,
               summary: typeof update.note === 'string' ? update.note : undefined,
               // [1.8.13] Evidence written through the update tool must survive replay.
@@ -2451,6 +2456,7 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
               acceptance: update.acceptance,
               artifacts: update.artifacts,
               missingArtifacts: update.missingArtifacts,
+              handoffs: update.handoffs,
               revision: Number.isInteger(update.revision) ? update.revision : undefined,
               updatedBy: 'agent',
             })

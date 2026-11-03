@@ -1,4 +1,6 @@
-# 安全目标（Security Target）— dsh-workplan v1.8.0
+# 安全目标（Security Target）— dsh-workplan v1.12.0
+
+> **v1.12.0 刷新记录（2026-11-03，T5，对应差距 G-01/02/05/06/25/26~32）**：本 ST 从 v1.8.0 基线刷新——TOE 版本、模块构成、工具清单（4 → 9 个）与测试基线（188 → 462）均已更新；§10 为 1.9–1.12 新增功能的安全陈述（SFR 成文化）与 ACO 判定。原文符合性主张（NONE）不变。
 
 **文件性质：按 ISO/IEC 15408-3:2026 ASE 类结构编写的 ST 草案 / ST draft structured per ISO/IEC 15408-3:2026 class ASE.**
 
@@ -15,11 +17,11 @@
 
 | 字段 | 值 |
 |---|---|
-| ST 标识 | `dsh-workplan-ST-1.8.0`（草案 rev 1） |
-| TOE 标识 | `dsh-workplan` 插件 1.8.0，npm 包 `dsh-workplan@1.8.0` |
+| ST 标识 | `dsh-workplan-ST-1.12.0`（草案 rev 2；rev 1 = 1.8.0） |
+| TOE 标识 | `dsh-workplan` 插件 1.12.0，npm 包 `dsh-workplan@1.12.0`（git HEAD `5fe47a1`） |
 | 依据 | ISO/IEC 15408-1/-2/-3:2026 |
 | 目标保证等级 | 无（若将来评估，拟选 **EAL1**） |
-| 日期 | 2026-10-30 |
+| 日期 | rev1 2026-10-30 ｜ rev2（本次刷新）2026-11-03 |
 
 ---
 
@@ -29,7 +31,7 @@
 见上表。本 ST 随插件版本发布，版本号与 `package.json` 由测试强制同步。
 
 ### 1.2 TOE 引用
-`dsh-workplan@1.8.0`。分发渠道：npm 公共注册表；源码：<https://github.com/abbaababa/dsh-workplan>。
+`dsh-workplan@1.12.0`。分发渠道：npm 公共注册表；源码：<https://github.com/abbaababa/dsh-workplan>。
 
 ### 1.3 TOE 概述
 `dsh-workplan` 是 DeepSeek Harness（DSH）的一个插件。它让 AI 在**动手之前**先把任务拆成阶段和子任务，把计划显示给用户，再按计划派发子代理，并把每个子任务的结果、验证状态与证据写回会话。
@@ -42,12 +44,19 @@
 
 | 部件 | 文件 | 职责 |
 |---|---|---|
-| 宿主运行时 | `src/runtime.ts`（2384 行） | 计划生成与派发、子代理看门狗、HTTP 路由与鉴权、状态写入 |
-| 插件入口 | `src/host.ts` | 注册 2 条 HTTP 路由、4 个模型工具、配置 schema、版本元数据 |
-| 浏览器面板 | `src/client.ts`（2881 行）→ `client.js` | 同源拉取计划数据并渲染面板（含图表） |
-| 计划模型 | `src/plan.ts`（2158 行） | 计划结构、校验、统计派生 |
+| 宿主运行时 | `src/runtime.ts`（6071 行） | 计划派发、子代理生命周期、状态回写、HTTP 路由与加固响应头 |
+| 计划模型 | `src/plan.ts`（3820 行） | 计划结构、校验、统计派生 |
+| 浏览器面板 | `src/client.ts`（3367 行）→ `client.js` | 同源拉取计划数据并渲染面板（含图表） |
+| 插件入口 | `src/host.ts`（1278 行） | 注册 HTTP 路由、**9 个模型工具**、配置 schema、提示词规则、版本元数据 |
+| 结果理解 | `src/understanding.ts`（901 行） | 结果理解与核对辅助 |
+| 重规划 | `src/replan.ts`（708 行） | 需求变更判定（cancel/replace/add） |
+| 计划取代 | `src/supersede.ts`（429 行）+ `src/supersede-digest.ts`（116 行） | 跨计划取代 V1–V8 复算与摘要 |
+| 自动续跑 | `src/auto-resume.ts`（275 行） | 中断后续跑策略 |
+| 部门枚举 | `src/departments.ts`（244 行） | 部门 key 定义 |
 | 看门狗 | `src/watchdog.ts`（207 行） | 子代理超时与预算控制 |
 | 随包第三方 | `vendor/chart.umd.js` | Chart.js 4.6.1（MIT），本地分发 |
+
+（行数为 v1.12.0 于 git HEAD `5fe47a1` 的 `wc -l src/*.ts` 实测，2026-11-03；完整清单见 `docs/SBOM.md` §5，模块级设计见 `docs/cc/ADV-TDS-TOE-DESIGN.md`。）
 
 **外部接口（TSF 接口，完全枚举）**：
 
@@ -58,7 +67,14 @@
 | `dsh_workplan_dispatch` | 模型工具 | 双向 | 派发计划；plan 模式下被 guard 拒绝 |
 | `dsh_workplan_status` | 模型工具 | 双向 | 只读查询进度 |
 | `dsh_workplan_update` | 模型工具 | 双向 | 更新子任务状态，需 `expectedRevision` |
-| `dsh_workplan_cancel` | 模型工具 | 双向 | 取消未派发/等待中的计划 |
+| `dsh_workplan_cancel` | 模型工具 | 双向 | 取消计划（或按 disposition=superseded 转移责任给承接计划） |
+| `dsh_workplan_replan` | 模型工具 | 双向 | 需求变更重规划（cancel/replace/add），旧行保留可追溯 |
+| `dsh_workplan_followup` | 模型工具 | 双向 | 仅向直接子会话补发说明；非直接子会话拒绝 |
+| `dsh_workplan_escalate` | 模型工具 | 双向 | 子 Agent 遇阻上报，子任务置「待指示」 |
+| `dsh_workplan_instruct` | 模型工具 | 双向 | 仅对「待指示」行下发主 Agent 决定并恢复执行 |
+| `dsh_workplan_handoff` | 模型工具 | 双向 | 跨部门需求处置；仅根会话可用 |
+
+（1.9–1.12 新增 5 个工具与取代/重规划能力；接口参数与失败行为完整枚举见 `docs/cc/ADV-FSP-FUNCTIONAL-SPEC.md`。）
 
 **不在 TOE 内**：DSH 本体（身份认证、会话存储、模型推理）、Node.js 运行时、操作系统、浏览器。
 
@@ -206,7 +222,7 @@ TOE 应提供可重复执行的自测试，覆盖：计划模型校验、派发�
 | FMT_MOF.1 / FMT_SMF.1 | `src/host.ts` 工具注册 | 4 个工具；`update` 强制 `expectedRevision`，不匹配返回 `STALE_WRITE`；plan 模式下 `dispatch` 被 guard 拒绝 | `grep -n "expectedRevision" src/*.ts` |
 | FMT_SMR.1 | 同上 + 路由 | 浏览器角色只能 GET/HEAD；写操作只能经模型工具 | 同 FMT_MOF.1 |
 | FAU_GEN.1 | 会话事件 + 工具返回值 | 每次派发/完成/取消/拒绝均落会话事件，含证据字段 | 阅读 `dsh_workplan_status` 返回结构 |
-| FPT_TST.1 | `tests/` + `npm run verify` | 31 文件 188 项；CI 每次提交执行 | `npm run verify` |
+| FPT_TST.1 | `tests/` + `npm run verify` | 65 个测试文件 462 项（v1.12.0 基线；2026-11-03 实跑 462/462 pass）；CI 每次提交执行 | `npm run verify` |
 | O-05 资源有界 | `src/runtime.ts`、`src/watchdog.ts` | 响应 > 2.5 MB 截断；子代理与总预算双超时且被夹紧 | `grep -n "2_500_000" src/runtime.ts` |
 | O-02/O-03 硬化头 | `src/runtime.ts` `HARDENING_HEADERS` | `x-content-type-options: nosniff`、`referrer-policy: no-referrer` | `grep -n HARDENING_HEADERS src/runtime.ts` |
 | P-02 零运行时依赖 | `package.json` | `dependencies` 为空对象 | `npm ls --omit=dev` |
@@ -242,3 +258,36 @@ grep -n "requestRejection\|HARDENING_HEADERS\|2_500_000\|expectedRevision" src/r
 4. 发现本文件与实现不一致时，**以实现与测试为准**，并按 `SECURITY.md` 渠道报告——这本身也是 T-07（虚假完成）在本项目上的应用。
 5. **已声明的残余风险 R-07**：`/dsh-workplan/vendor/chart.umd.js` 不调用 `connection.requestRejection`，任何人只要能连到 DSH 端口就能读到这个固定文件（Chart.js 4.6.1，MIT，210078 字节，sha256 见 `docs/SBOM.md`）。它不含任何会话数据，读走它不泄露任何用户信息；它的存在本身也不构成秘密。若你的部署要求"任何响应都必须先鉴权"，请在前置反向代理上统一拦截 `/dsh-workplan/*`。
 6. **已声明的测试缺口**：`route()` 的鉴权拒绝分支、405 分支、响应截断分支没有逐分支自动化用例（见 §6.5）。这些行为目前由代码阅读与源码级断言支撑，不是由测试支撑；补测需要构造 DSH `connection` 桩件。
+
+---
+
+## 10. v1.12.0 补充：新增功能的安全陈述与判定（T5 刷新，2026-11-03）
+
+### 10.1 新增/成文化的 SFR 陈述（对应差距 G-26/27/28/29/30/31/32）
+
+| SFR（精化） | 陈述 | 实现与回归测试 |
+|---|---|---|
+| FAU_GEN.1（审计留痕，成文化） | 每次派发/状态回写/取消/取代/拒绝均生成含证据字段的会话留痕，持久化于会话记录，可经 `dsh_workplan_status` 与面板只读复核 | runtime 状态机 + 证据契约；`tests/workplan-evidence-contract.test.ts`、`tests/plan-anchor.test.ts` |
+| FDP_ACF.1（访问控制，成文化） | TOE 自身不新增任何越权写路径：所有写操作经宿主文件沙箱（DSH file policy）执行；子 Agent 权限启动时固化 | `tests/workplan-presented-write-guard.test.ts`、`tests/session-reference-safety.test.ts` |
+| FIA（鉴别）：环境假设 | TOE 不做鉴别，依赖宿主已鉴别（A-01）；不自建账户体系 | 见 §6.2（FIA_UID.1 精化）与 `docs/cc/AGD-OPS-SECURE-OPERATION.md` §4 |
+| FMT_MOF.1（安全管理角色表，成文化） | 角色：用户（读面板/取消）、主 Agent（全部 9 工具，交付门禁持有人）、子 Agent（仅 escalate/update 自身行）；仅根会话可用 `handoff`，仅「待指示」行可被 `instruct` 恢复 | `tests/workplan-status-lock.test.ts`、`tests/workplan-team-brief.test.ts` |
+| FPT_SEP.1（域隔离，成文化） | 子 Agent 运行于独立会话/独立工作目录；跨会话引用被校验拒绝 | `tests/session-reference-safety.test.ts`、`docs/cc/ADV-TDS-TOE-DESIGN.md` §2 |
+| FTA_SSL.4（超时，成文化） | 子任务单步硬上限 15 分钟、整轮预算 20 分钟（默认值，`DSH_WORKPLAN_CHILD_TIMEOUT_MS` 等可覆盖）；host 工具超时 > 计划预算，杜绝竞态 | `src/host.ts`（超时条款与 L1019–1023）；`tests/timeout-artifact-evidence.test.ts` |
+| FRU_FLT.2（容错，成文化） | 预算耗尽/中断→产物落盘+自动续跑；卡死→看门狗判 blocked 并留档；需求变更→replan 旧行保留可追溯 | `tests/auto-resume-policy.test.ts`、`tests/workplan-stuck-recovery.test.ts`、`tests/workplan-auto-retry.test.ts` |
+
+### 10.2 ACO 判定（对应差距 G-25）
+
+TOE **不是**对任何已评估组件（certified product）的级联开发：npm 依赖为零运行时依赖，随包第三方仅 Chart.js 4.6.1（未声称任何评估状态，见 SBOM §3）。故 ACO_DEV/ACO_REL/ACO_COR 判定为 **N/A**，无级联声明义务。
+
+### 10.3 ADV 文档链（对应差距 G-07/08/09/10）
+
+自 v1.12.0 起，本 ST 由以下配套文档支撑（均为公开自评估）：
+- 功能规范（ADV_FSP.1 对齐）：`docs/cc/ADV-FSP-FUNCTIONAL-SPEC.md`
+- TOE 设计（ADV_TDS.1 对齐，含安全域隔离 G-07）：`docs/cc/ADV-TDS-TOE-DESIGN.md`
+- 配置管理计划（ALC_CMC/CMS/DVS/LCD）：`docs/cc/CM-PLAN.md`
+- 测试覆盖矩阵（ATE_COV/DPT/FUN）：`docs/cc/TEST-COVERAGE-MATRIX.md`
+- 安全操作与安装校验（AGD_OPS/PRE.1）：`docs/cc/AGD-OPS-SECURE-OPERATION.md`
+
+### 10.4 版本口径声明（对应差距 G-00，沿用两头都真实的口径）
+
+本 ST 结构依据 **ISO/IEC 15408-1/-2/-3:2026**；认证体系现行受理版本为 CC:2022。该版本号主张最终以官方目录页在线确认为准（截至 2026-11-03 未能在线二次复核，如实登记为「未验证」）。
