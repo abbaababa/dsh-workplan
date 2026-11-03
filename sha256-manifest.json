@@ -1,0 +1,10 @@
+{
+  "algorithm": "sha256",
+  "files": [
+    {
+      "file": "dsh-workplan-1.12.0.tgz",
+      "bytes": 1002570,
+      "sha256": "38ec24cac205e55b6212e66463dcd7b4ad40bf20811169888a37ee956c131ec4"
+    }
+  ]
+}
