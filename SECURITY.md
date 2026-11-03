@@ -121,3 +121,23 @@ grep -RInE "child_process|execSync|eval\(|new Function|writeFileSync|appendFileS
 5. ✅ 本插件**提供**按 ISO/IEC 15408:2026 结构组织的公开自评估、ST 草案、攻击面分析与可复现测试。
 
 > 一句话：**我们把"能做到的"做到了并公开证据；把"做不到的"写清楚，而不是把它包装成卖点。**
+
+---
+
+## 8. 数据窃取专项审计结论（2026-11-03，逐行源码审计）
+
+> **安全说明**
+>
+> 我们对插件全部源码逐行做了安全审计。结论：**未发现任何窃取文件或数据的行为。**
+> 它不读取您的文档、照片、通讯录、剪贴板等个人文件；不向任何外部服务器发送数据，仅在您本机内显示任务面板，且相关请求需登录授权。
+> 说明：以上为源码审计结论。发布包一致性、运行时实际行为两项仍在进一步验证中，结果会在此更新。
+
+<details>
+<summary>技术证据索引（点击展开）</summary>
+
+- 文件访问仅 4 处、全部只读、路径为常量：`src/host.ts:2,49,1238`、`src/runtime.ts:16`；`writeFile/mkdir/rm/unlink/child_process` 全源码 0 命中。
+- 敏感数据（clipboard/contact/keychain/token/camera 等）全源码 0 命中；环境变量仅读自身 `DSH_WORKPLAN_*` 开关；浏览器侧仅 localStorage 存面板展开状态（`src/client.ts:2134-2161`）。
+- 全源码仅 1 处网络请求：`src/client.ts:1494` 同源相对路径 `/dsh-workplan/plans`，且经宿主鉴权（`src/runtime.ts:5495-5505`，未授权返回 401）；无外部域名、无 WebSocket/第三方 HTTP 库、无混淆与动态加载、零运行时依赖。
+- 完整审计报告：`_t1_plugin_security_locate_20261103/T1…T3`（本地工作区留存）。
+
+</details>

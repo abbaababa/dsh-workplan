@@ -237,3 +237,9 @@ MIT，见 [LICENSE](LICENSE)。Chart.js 亦为 MIT。
 ---
 
 **English (US) — plain-language guide:** [README.en.md](README.en.md)
+
+## 🔒 安全性
+
+我们对插件全部源码逐行做了安全审计。结论：**未发现任何窃取文件或数据的行为。**
+它不读取您的文档、照片、通讯录、剪贴板等个人文件；不向任何外部服务器发送数据，仅在您本机内显示任务面板，且相关请求需登录授权。
+以上为源码审计结论；发布包一致性、运行时实际行为两项仍在进一步验证中，详见 [SECURITY.md](SECURITY.md) 第 8 节。
