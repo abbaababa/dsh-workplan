@@ -10,3 +10,9 @@ dist-tests-t3/
 lib.bak.*/
 *.tgz
 docs/cc/T6-RECHECK-REPORT.md.bak
+
+# 一次性验证/取证目录（2026-11-04）
+_t1_guard_fix_20261104/
+_t2_ms2_evidence_20261104/
+_t3_release_20261104/
+_t7_release_20261104/
