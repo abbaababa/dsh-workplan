@@ -21,6 +21,7 @@ import {
   buildTaskAnchor,
   extractTaskElements,
   normalizeForMatch,
+  resolvePronounAntecedent,
   validatePlanContext,
 } from '../src/understanding.js'
 import { buildChildPrompt, buildPlannerPrompt, validatePlan } from '../src/plan.js'
@@ -318,3 +319,69 @@ test('normalizeForMatch only removes formatting, never content', () => {
   assert.equal(normalizeForMatch('15 个'), '15个')
   assert.notEqual(normalizeForMatch('15 个'), normalizeForMatch('15 条'))
 })
+
+/*
+ * [P0-2] Antecedent resolution — the gap this closes.
+ *
+ * Before: any non-empty conversation marked every pronoun resolved, so a plan
+ * built on "把它改成默认收起" passed with a context that never mentioned the
+ * thing. The tests below pin both directions: no noun phrase in the
+ * conversation means still ambiguous; a real noun phrase is quoted as the
+ * antecedent and the plan may proceed.
+ */
+test('non-empty context alone no longer resolves a pronoun: antecedent is required', () => {
+  const task = '把它改成默认收起。'
+  const plan = planOf(subtask('T1', 'design', '把分步进度默认收起'))
+  const audit = auditTaskUnderstanding(plan, {
+    taskText: task,
+    conversationContext: '用户问：现在进展到哪一步了？',
+  })
+  const reference = audit.stage1.references[0]
+  assert.equal(reference.token, '它')
+  assert.equal(reference.resolved, false)
+  assert.equal(reference.resolvedBy, 'none')
+  const guarded = validatePlanContext(plan, { taskText: task, conversationContext: '用户问：现在进展到哪一步了？' })
+  assert.equal(guarded.ok, false)
+  assert.ok(guarded.errors.some((error) => error.startsWith('CONTEXT:')))
+})
+
+test('a real antecedent is extracted and quoted, so the plan may proceed', () => {
+  const task = '把它改成默认收起。'
+  const plan = planOf(subtask('T1', 'design', '把分步进度默认收起'))
+  const context = '用户上一轮说：把截图红圈处的三行分步进度改成可点击。'
+  const found = resolvePronounAntecedent('它', context)
+  assert.ok(found, 'expected an antecedent')
+  assert.equal(found!.antecedent, '截图红圈处的三行分步进度')
+  const audit = auditTaskUnderstanding(plan, { taskText: task, conversationContext: context })
+  assert.equal(audit.stage1.references[0].resolved, true)
+  assert.equal(audit.stage1.references[0].resolvedBy, 'context')
+  assert.equal(audit.stage1.references[0].antecedent, '截图红圈处的三行分步进度')
+})
+
+test('an empty or fragment-only context is refused instead of being accepted as an antecedent', () => {
+  assert.equal(resolvePronounAntecedent('它', ''), null)
+  assert.equal(resolvePronounAntecedent('它', '嗯，好的。'), null)
+  // The context only hands back the pronoun itself — there is no noun to point at.
+  assert.equal(resolvePronounAntecedent('它', '把它改一下。'), null)
+})
+
+test('option letter resolves only when the conversation lists that option', () => {
+  const listed = '用户给出 A 方案（全量重跑）与 B 方案（只跑增量）供选择。'
+  assert.ok(resolvePronounAntecedent('B', listed))
+  /*
+   * B is not listed, so the generic extractor can only offer A's phrase. The
+   * guard in auditTaskUnderstanding refuses it, which is what makes the plan
+   * block instead of resolving B to the wrong option.
+   */
+  const unlisted = '用户给出 A 方案（全量重跑）供选择。'
+  assert.equal(resolvePronounAntecedent('B', unlisted)?.antecedent, 'A 方案')
+
+  const task = '按 B 方案执行。'
+  const plan = planOf(subtask('T1', 'engineering', '按 B 方案（只跑增量）执行'))
+  const ok = validatePlanContext(plan, { taskText: task, conversationContext: listed })
+  assert.equal(ok.ok, true, ok.errors.join('\n'))
+  const blocked = validatePlanContext(plan, { taskText: task, conversationContext: unlisted })
+  assert.equal(blocked.ok, false)
+  assert.ok(blocked.errors.some((error) => error.startsWith('CONTEXT:')))
+})
+
