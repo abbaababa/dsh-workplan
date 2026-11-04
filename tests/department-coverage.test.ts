@@ -135,7 +135,11 @@ test('recall: no ordered-pair keyword remains in the legal catalog', () => {
   const capability = DEPARTMENT_CAPABILITIES.find((entry) => entry.id === 'legal')!
   const pairs = capability.keywords.filter((keyword) => keyword.includes('…'))
   assert.deepEqual(pairs, [], 'legal must not carry an ordered pair: ' + JSON.stringify(pairs))
-  assert.equal(capability.keywords.length, 16)
+  // 16 -> 22 on 2026-11-04: 窃取/信息泄露/个人信息/数据安全/隐私风险/移动终端 were added
+  // so the T05-12 privacy question reaches the >=2 gate without naming 法务. Each is
+  // legal-specific; 「泄露」 was deliberately widened to 「信息泄露」 so a memory leak
+  // (内存泄露) cannot pull legal into an engineering task.
+  assert.equal(capability.keywords.length, 22)
 })
 
 test('recall: legal keywords do not fire on a single 「法」 character', () => {

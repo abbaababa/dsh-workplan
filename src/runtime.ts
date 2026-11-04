@@ -25,6 +25,7 @@ import {
   blockCancelledDependents,
   buildChildPrompt,
   buildCancelMessage,
+  buildClarifyMessage,
   buildDegradedMessage,
   buildPlanMessage,
   buildPlannerPrompt,
@@ -71,7 +72,7 @@ import {
   MAX_HANDOFF_RESPONSE_CHARS,
 } from './plan.js'
 import type { PresentDenialVerdict, PresentDenyCode } from './plan.js'
-import { compactUnderstandingAudit, validatePlanContext } from './understanding.js'
+import { auditClarifyNeed, compactUnderstandingAudit, validatePlanContext } from './understanding.js'
 import { computeMappingDigest, verifyMappingDigest } from './supersede-digest.js'
 import { supersedePlanRecord } from './supersede.js'
 import { createProgressWatchdog, describeError } from './watchdog.js'
@@ -2771,6 +2772,27 @@ export type WorkplanRuntimeOptions = {
    */
   autoDispatch?: boolean
   /**
+   * [1.12.3] headless「未完成不得成功收尾」硬闸门（fail-closed）。
+   *
+   * 事故（session-99984ebd…）暴露的最后一个缺口：`agent/turn-stopping` 的
+   * steer 每个回合最多 2 次，用尽后闸门只能沉默放行；而官方 headless runner
+   * 的完成判据是 `turn/end reason.kind === 'completed'`，它并不认识计划，
+   * 于是「计划未完成但回合正常收尾」= 打印正文 + exit 0，自动化仍把它当成成功。
+   *
+   * 语义：
+   *  - `'auto'`（默认）：只在 headless 运行中启用——判据是运行上下文提供了
+   *    官方 headless 专属服务 `headlessStartup`（packages/bundle/headless/
+   *    src/startup.ts 提供，web/tui profile 不提供）。交互式会话行为不变。
+   *  - `true` / `false`：显式打开 / 关闭。
+   *
+   * 启用后：steer 次数用尽而计划仍未通过交付就绪检查时，闸门抛
+   * `PlanError('WORKPLAN_INCOMPLETE')`。官方 `agent/turn-stopping` 是 serial
+   * 事件（cordis `serial()` 逐个 await，监听器抛错会向上传播），因此该回合以
+   * `error` 结束；headless runner 的 `failure` 非空 ⇒ 不打印「已完成」正文、
+   * 以非零退出码结束（packages/bundle/headless/src/index.ts 的 fail()）。
+   */
+  failClosedOnIncomplete?: boolean | 'auto'
+  /**
    * [1.8.13] Package version, supplied by the host from its `meta.version`.
    *
    * `dsh_workplan_status` used to say nothing about which build answered, so a
@@ -2810,6 +2832,19 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
    * resume, cancel, the host's tool timeout) agrees on the same numbers.
    */
   const pluginVersion = typeof options.version === 'string' && options.version ? options.version : 'unknown'
+  /*
+   * [1.12.3] fail-closed 解析：显式值优先；'auto' 只在 headless 运行中生效。
+   * `ctx.get` 在普通对象（测试）上不存在，可选链保证降级为「非 headless」。
+   */
+  const failClosedMode: boolean | 'auto' = options.failClosedOnIncomplete ?? 'auto'
+  const headlessRun = (() => {
+    try {
+      return ctx?.get?.('headlessStartup') !== undefined
+    } catch {
+      return false
+    }
+  })()
+  const failClosedActive = failClosedMode === true || (failClosedMode === 'auto' && headlessRun)
   /*
    * [1.8.14] Build identity, captured once.
    *
@@ -5033,7 +5068,34 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       const book = record.stopSteers && record.stopSteers.turn === turn
         ? record.stopSteers
         : { turn, count: 0 }
-      if (book.count >= STOP_STEER_LIMIT) return
+      if (book.count >= STOP_STEER_LIMIT) {
+        /*
+         * [1.12.3] steer 用尽后不再沉默放行。
+         *
+         * 旧行为（1.8.7–1.12.2）：达到上限就 `return`，回合正常收尾。对交互式
+         * 会话这是「避免死循环」；对 headless 却是事故复现路径——官方 runner 只
+         * 看 `turn/end reason.kind==='completed'`，它会把「计划未完成但回合正常
+         * 结束」打印成结果并 exit 0（session-99984ebd… 的最终现场）。
+         *
+         * 现在：headless（或显式开启）时抛 WORKPLAN_INCOMPLETE。turn-stopping
+         * 是 serial 事件，抛错 ⇒ 该回合以 error 收尾 ⇒ runner 走 fail()：
+         * 不打印正文、非零退出。交互式会话维持原样（只 steer，不抛错）。
+         */
+        if (failClosedActive) {
+          const stuck = derivePlanSnapshot(record.statuses)
+          const remaining = (stuck.statuses ?? [])
+            .filter((item: any) => item.status !== 'done')
+            .map((item: any) => String(item.subtaskId))
+          throw new PlanError(
+            `未完成：剩余 ${remaining.length} 项（${remaining.join(', ')}）与原因——计划 ${record.plan.planId} `
+            + `仅完成 ${stuck.stats.done}/${stuck.stats.total}，本回合已连续 ${book.count} 次被要求续跑/补证，`
+            + '仍未通过交付就绪检查。headless 以非零退出码结束，不输出「已完成」结果。',
+            'WORKPLAN_INCOMPLETE',
+            { planId: record.plan.planId, stats: stuck.stats, remaining },
+          )
+        }
+        return
+      }
       book.count += 1
       record.stopSteers = book
       const snapshot = derivePlanSnapshot(record.statuses)
@@ -5058,6 +5120,11 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         + `已在回合收尾前要求继续/如实收尾（第 ${book.count} 次）`,
       )
     } catch (error) {
+      /*
+       * [1.12.3] fail-closed 的硬失败必须穿过这层日志包装：
+       * 这里原本把任何异常降级成一条 warn，等于把上面的抛错又吃掉。
+       */
+      if (error instanceof PlanError && error.code === 'WORKPLAN_INCOMPLETE') throw error
       ctx.logger?.warn?.(`dsh-workplan: 回合收尾检查失败：${error instanceof Error ? error.message : String(error)}`)
     }
   }
@@ -5649,6 +5716,15 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
   }
 }
 
+/**
+ * [1.12.3] 澄清闸门的退出口。默认开启；只有显式设成 0/false/off 才回到旧行为
+ * （信息不足也照做计划、照派发）。
+ */
+function clarifyGateDisabled() {
+  const raw = String(process.env.DSH_WORKPLAN_CLARIFY_GATE ?? '').trim().toLowerCase()
+  return raw === '0' || raw === 'false' || raw === 'off'
+}
+
 function resolveModelSelection(ctx: any, payload: any) {
   const direct = payload.modelSelection
   if (direct?.provider && direct?.model) {
@@ -5785,6 +5861,39 @@ async function maybePlan(ctx: any, state: any, payload: any, downstream: any, op
       }, { activeSubtasks: active })])
     }
     return downstream
+  }
+  /*
+   * [1.12.3] 信息不足就不做计划、不派发——只问一句。
+   *
+   * 用户在 2026-11-04 拍板：自动派发改成「只在信息不足这一类上拦截」，其余照旧。
+   * 因此拦截点放在规划之前，而不是关掉自动派发：缺信息时连计划都不生成，
+   * 免得部门 Agent 对着一个猜出来的目标开工。
+   * 关闭方式：DSH_WORKPLAN_CLARIFY_GATE=0（保留给需要旧行为的自动化）。
+   */
+  if (!clarifyGateDisabled()) {
+    const clarify = auditClarifyNeed(taskText, conversationContext)
+    if (clarify.needed) {
+      const createdAt = Date.now()
+      state.records.set(session.id, {
+        planId: null,
+        plan: null,
+        title: '任务信息不足（先澄清）',
+        degraded: false,
+        clarify: true,
+        error: clarify.reason,
+        statuses: [],
+        phase: 'clarify',
+        errors: [truncate(clarify.reason, 1000)],
+        createdAt,
+        updatedAt: createdAt,
+        createdTurn: payload.turn,
+      })
+      return enterDecision(downstream, [buildClarifyMessage({
+        rule: clarify.rule,
+        reason: clarify.reason,
+        question: clarify.question,
+      })])
+    }
   }
   const modelSelection = resolveModelSelection(ctx, payload)
   if (!modelSelection?.provider || !modelSelection?.model) {

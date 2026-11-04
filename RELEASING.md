@@ -34,9 +34,23 @@ npm run build && git diff --exit-code -- lib client.js
 
 `npm test` 会先构建再跑全部用例；`npm run check` 是 `tsc --noEmit`。任何一步失败都不要打 tag。
 
-### 1.4 跨版本 A/B 探针（R-W5-01；**不属于 `npm test`**）
+**第 4 步（必做；不在 `npm test` 内）：headless W5 跨版本 A/B 探针（R-W5-01）。** 按 §1.4 执行，
+必须打印 `RESULT: PASS` 且 EXIT=0。该步需要已发布 tag `v1.8.19` 的 `lib/` 与外部事故日志夹具，
+属于发布前验证而不是常规回归测试，因此**不并入 `npm test`**。
 
-用途：证明「终态计划不再死锁 present」这次解耦没有把旧版行为改坏，并且新版写出的 `superseded` 信封交给旧读端时只会安全降级、不会变成可交付。
+### 1.4 headless W5 跨版本 A/B 探针（R-W5-01；**不属于 `npm test`**）
+
+| 登记项 | 内容 |
+|---|---|
+| 条目编号 | **R-W5-01**（回归自动化；裁决来源 `_rerun_20261101/W5_RUN.md` §八，2026-11-01 用户「同意移入」） |
+| 触发时机 | 每次发版、**打 tag 之前**必做；不随 `npm test` 运行 |
+| 位置 | 本清单 §1「发布前检查」第 4 步 |
+| 执行脚本（已入仓） | `scripts/w5-cross-version-check.mjs`（`git ls-files` 可见） |
+| 通过判据 | `RESULT: PASS` 且 EXIT=0（六条断言全 PASS） |
+| 失败处置 | 不得打 tag / 不得发布；保留脚本 JSON 输出 |
+| 当前状态 | 已登记；**执行判据待复核**（2026-11-04 实测 `RESULT: FAIL (1)`，见本节「已知偏差」） |
+
+用途：证明「终态计划不再死锁 present」这次解耦没有把旧版行为改坏，并且新版写出的 `superseded` 信封交给旧读端时只会安全降级、不会变成可交付。脚本用 `node` 直接驱动两份 `lib/`（无 DSH 服务、无网络），即所谓 headless 运行。
 
 ```bash
 # 旧运行时取已发布 tag 的 lib（tag 内已含构建产物，无需 npm ci）
@@ -54,6 +68,26 @@ W5_ROOT_LOG=/Users/open/Documents/Stocks/_baseline_work/root/root.jsonl \
 PASS 判据：脚本最后打印 `RESULT: PASS` 且 EXIT=0，六条断言全 PASS（旧版复现生产拒绝文案、旧版 present 拒绝且 steer 触发、新版 present 放行且 steer=0、新版对终态计划仍拒绝 dispatch、superseded 写入为单条 full 覆盖信封、旧读端降级为 cancelled 且仍拒绝交付）。耗时约 1 秒。
 
 失败处置：不得打 tag / 不得发布；保留脚本 JSON 输出；若「旧版复现生产文案」失败，先确认夹具 `root.jsonl` 的 seq 7168/7175 未被改写（`event7168Sha256` 应为 `36fc488d…`），再判断是回归还是证据过期。
+
+**已知偏差（2026-11-04 实测，待确认处理方式）**
+
+在 1.12.2 工作树按本节命令执行（`lib/` 与 `dist/` 同源、sha256 一致；旧版 `lib/` 由
+`git archive v1.8.19` 取出；夹具 `root.jsonl` 的 `event7168Sha256 = 36fc488d…` 未被改写），
+结果 `RESULT: FAIL (1)`：六条断言中五条 PASS，失败的是第 3 条
+`current does not trap: present allowed, no steer`。
+
+- 实测：`current.presentBeforeCancel` 与 `current.presentAfterCancel` 都返回 `EVIDENCE_GAP`，
+  指向同一日志切片里的**兄弟计划** `wp-4ad0038f-ef9c-4e9b-8907-9a3f414fe246`（8/8 done，
+  但带 H1–H5 条未处置的跨部门需求），而不是本节假设的「取消后 present 放行」。
+  `current.steers = 0`、`current.dispatch.code = PLAN_CANCELLED` 均符合预期。
+- 版本差异（命令实测 + `git log -S` 佐证）：1.8.19 的 `lib/runtime.js` 没有 `EVIDENCE_GAP`
+  字符串（`grep -c` 为 0）；该错误码由 1.9.1（`c6c3a0a`）引入，跨部门需求闸门由 1.11.0
+  （`71f0b65`，`openHandoffs`）引入。历史夹具在现行「会话内全部计划一起判」的闸门下，
+  会先命中兄弟计划的证据缺口。
+- **待确认**：这属于「探针断言/夹具随版本演进而过期」还是「产品回归」，需工程与质量确认后
+  再决定处理方式（更新断言与夹具，或改用不含未处置需求的日志切片）。确认前本步骤只能记为
+  **未通过**，不得记 PASS、不得据此打 tag。复现输出见
+  `_t3_rw5_20261104/w5_probe_output_20261104.txt`（工作区根目录）。
 
 ## 2. 提交与打标签
 

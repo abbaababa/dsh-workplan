@@ -3,7 +3,7 @@
 > **Two selling points, one line: a full ISO/IEC 15408:2026 evidence pack you can verify with 5 commands, and a one-command install with zero runtime dependencies.**
 
 [![verify](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml/badge.svg)](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml)
-[![version](https://img.shields.io/badge/version-1.12.2-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v1.12.2)
+[![version](https://img.shields.io/badge/version-1.12.3-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v1.12.3)
 
 Adds "plan first → dispatch real department subagents → watch progress in the sidebar" to **DeepSeek Harness (DSH)**. No app, no DSH source patch, no page replacement.
 
@@ -80,7 +80,7 @@ The full contract — roles, data shapes, state machine, recovery, and the three
 ## Install
 
 ```bash
-dsh plugin --profile web add dsh-workplan@1.12.2
+dsh plugin --profile web add dsh-workplan@1.12.3
 ```
 
 Restart the DSH Web process (or reload the page) so the bundle is picked up.

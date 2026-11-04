@@ -173,6 +173,13 @@ export const DEPARTMENT_CAPABILITIES: readonly DepartmentCapability[] = Object.f
     keywords: [
       '法务', '合同', '版权', '许可', '合规', '条款', '法律', '隐私', '授权', '侵权', '国际标准',
       'ISO/IEC 15408', '15408', 'ISO/IEC', 'ISO 标准', 'CC 标准',
+      // [P0-4 recall] T05-12 「会不会窃取用户电脑和移动终端里的文件和数据」 is a
+      // privacy/authorisation claim and matched nothing: the list had 隐私/授权 but
+      // not the verbs a user actually writes. These are plain words, so the
+      // intrusion guard keeps legal out of unrelated plans.
+      // 「泄露」 alone would also fire on 「内存泄露」 (a memory leak is engineering,
+      // not legal); 「信息泄露」 keeps the privacy sense and the keyword count at 22.
+      '窃取', '信息泄露', '个人信息', '数据安全', '隐私风险', '移动终端',
     ],
   },
   {

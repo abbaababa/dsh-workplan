@@ -1224,6 +1224,32 @@ export function buildDegradedMessage(options: any) {
   return makeUserMessage(text, { kind: 'workplan', form: 'notice', summary })
 }
 
+/**
+ * [1.12.3] 信息不足时先问，不做计划也不派发。
+ *
+ * 2026-11-04 MS2 的真实数据：T05-04/09/13/20 这四条本来需要澄清，插件却照样拆出
+ * 计划并（自动）派发，部门 Agent 于是对着一个并不存在的目标开工。用户在同一天拍板：
+ * 自动派发只在「信息不足」这一类上拦截，其余一律照旧。所以这里不是关掉自动派发，
+ * 而是在规划**之前**把缺的东西变成一句能给用户看的话。
+ *
+ * 这条消息不带计划信封：没有计划就没有 planId，也不该出现在计划列表里。
+ */
+export function buildClarifyMessage(options: any) {
+  const rule = String(options.rule ?? '')
+  const reason = truncate(options.reason ?? '', 600)
+  const question = String(options.question ?? '').trim()
+  const summary = truncate(`【先澄清，未生成计划】${reason}`, 300)
+  const text = [
+    `【先澄清，未生成计划】任务信息不足：${reason}（规则 ${rule}）`,
+    '',
+    `请把这句话原样问用户：${question || '请补充这个任务缺的关键信息。'}`,
+    '',
+    '本条没有生成任务分解，也没有派发任何部门 Agent——缺信息时拆出来的计划只能靠猜。',
+    '等用户回答后，用户的下一条消息会重新触发计划生成；在那之前不要调用 dsh_workplan_dispatch，也不要开始执行。',
+  ].join('\n')
+  return makeUserMessage(text, { kind: 'workplan', form: 'notice', summary })
+}
+
 export function buildResultSummary(result: any) {
   const stats = result.stats ?? { done: 0, total: 0, blocked: 0 }
   const done = Number(stats.done ?? 0)

@@ -194,6 +194,16 @@ export type WorkplanConfig = {
    * 关闭方式：`autoDispatch: false` 或环境变量 `DSH_WORKPLAN_AUTO_DISPATCH=0`。
    */
   autoDispatch?: boolean
+  /**
+   * [1.12.3] headless「未完成不得成功收尾」硬闸门。
+   *
+   * `'auto'`（不配置时的默认）：只在 headless 运行中启用，交互式 web/tui 会话
+   * 行为完全不变。`true` 强制开启（任何运行方式都硬失败），`false` 关闭并回到
+   * 1.12.2 的「steer 用尽即放行」。
+   *
+   * 环境变量：`DSH_WORKPLAN_FAIL_CLOSED_ON_INCOMPLETE=1|0`。
+   */
+  failClosedOnIncomplete?: boolean
 }
 
 function createUpdateTool(runtime: any) {
@@ -1060,6 +1070,23 @@ function strictCompletionEnabledFrom(configValue: any, envValue: any) {
   return true
 }
 
+/**
+ * [1.12.3] `failClosedOnIncomplete` 的三态解析：显式配置 > 显式环境变量 > 'auto'。
+ *
+ * 与 `strictCompletionEnabledFrom` 的区别只在默认值：这里未配置时返回 `'auto'`，
+ * 语义是「headless 才硬失败」，不能退化成 `false`（那等于默认关闭，事故会复发），
+ * 也不能退化成 `true`（那会让交互式会话在收尾时抛错）。
+ */
+function failClosedOnIncompleteFrom(configValue: any, envValue: any): boolean | 'auto' {
+  if (typeof configValue === 'boolean') return configValue
+  const raw = envValue === undefined || envValue === null ? '' : String(envValue).trim()
+  if (raw !== '') {
+    if (/^(1|true|yes|on)$/i.test(raw)) return true
+    if (/^(0|false|no|off)$/i.test(raw)) return false
+  }
+  return 'auto'
+}
+
 function booleanSetting(configValue: any, envName: string) {
   if (typeof configValue === 'boolean') return configValue
   const raw = typeof process !== 'undefined' ? process.env?.[envName] : undefined
@@ -1139,6 +1166,14 @@ export function apply(ctx: any, config: WorkplanConfig = {}) {
      * 与 autoResume / strictCompletion 同一写法，避免「没配置就等于关闭」。
      */
     autoDispatch: strictCompletionEnabledFrom(config.autoDispatch, settingEnv('DSH_WORKPLAN_AUTO_DISPATCH')),
+    /*
+     * [1.12.3] headless「未完成不得成功收尾」。默认 'auto'：只有 headless
+     * 运行上下文（提供 `headlessStartup` 服务）才硬失败，交互式会话不受影响。
+     */
+    failClosedOnIncomplete: failClosedOnIncompleteFrom(
+      config.failClosedOnIncomplete,
+      settingEnv('DSH_WORKPLAN_FAIL_CLOSED_ON_INCOMPLETE'),
+    ),
   })
 
   ctx.effect(() =>
@@ -1255,7 +1290,7 @@ export function apply(ctx: any, config: WorkplanConfig = {}) {
 
 export const meta = {
   name,
-  version: '1.12.2',
+  version: '1.12.3',
   promptOrder: PROMPT_ORDER,
   routes: ['/dsh-workplan/plans', '/dsh-workplan/vendor/chart.umd.js'],
 }
