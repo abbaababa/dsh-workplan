@@ -1,0 +1,318 @@
+[
+  {
+    "case": "T05-01",
+    "text": "（1）把 T11 的 15 个低风险补丁 rebase 到 HEAD、补齐对应回归，发 1.12.0；用户同意。\n\n（2）以上T14_诊断与修正总报告_20261102.md报告内6.1 本次无法验证、必须由主 Agent 决定或执行的（新增 U-15…U-21）必须全面、深入思考、分析会，全面、深入思考并修正。\n\n（3）此外，\n现有dsh-workplan插件的体制、底层机制和逻辑是否有以下问题：\n1. 此插件底层机制是否真正智能化，是否可以根据不同用户任务，面对不同用户任务，都能够全面、深入思考、研究、分析用户任务\n2. 然后在智能判断后，将用户任务智能化、合情、合理分配给相关部门人员，同时，确保分配过程，不偏离用户任务和用户要求本身。\n3. 底层机制真正做到全自动化、智能化分配。\n\n以上所有疑问和问题解决要求如下：\n1. 现有的此插件源代码网址是https://github.com/abbaababa/dsh-workplan\n2. 必须通过全面、地毯式排查、深入思考、分析、诊断以上问题和疑问，\n3. 如果诊断下来都是否或不确定，的确不满足用户要求，必须全面、深入思考和修正，\n4. 你在整个执行全程中，如遇到不确定的事情，请你立刻通俗易懂地向用户问清楚，再继续。\n5. 最后同步升级版本并对外发布，上索引源。\n6. 确保严禁偏离以上所有用户要求和需求。\n\n（4）上传的截图红色画圈部分改进为每一步可以手工点击一次展开和不展开，默认为不展开。同时确保改进必须完美。\n\n以上所有内容，严禁偏离。所有用户要求和需求必须全部满足。\n\n以上所有内容必须全面、地毯式排查、深入思考、分析、诊断和修正，最终成果，严禁留下任何遗留问题。",
+    "clarify": {
+      "needed": false,
+      "rule": "",
+      "reason": "",
+      "question": ""
+    },
+    "required": [
+      "engineering",
+      "research",
+      "design",
+      "devops"
+    ],
+    "missing": [
+      "design",
+      "devops"
+    ],
+    "antecedent": null
+  },
+  {
+    "case": "T05-02",
+    "text": "这个是现有dsh-workplan插件的截图，\n把左侧栏“任务进度”里，画红圈的“每个任务进度”板块放在“进行中”板块的上面。\n优化全程严禁你低效率执行。\n优化全过程严禁偏离以上全部要求。",
+    "clarify": {
+      "needed": false,
+      "rule": "",
+      "reason": "",
+      "question": ""
+    },
+    "required": [
+      "design"
+    ],
+    "missing": [
+      "design"
+    ],
+    "antecedent": null
+  },
+  {
+    "case": "T05-03",
+    "text": "修复截图所示，在iPhone Safari访问DeepSeek Harness，深色模式下，dsh-mobile-access插件在左侧栏里，显示白色块问题。必须全面、深入研究、排查、诊断、修复。并同步更新、升级此插件版本。",
+    "clarify": {
+      "needed": false,
+      "rule": "",
+      "reason": "",
+      "question": ""
+    },
+    "required": [
+      "research"
+    ],
+    "missing": [],
+    "antecedent": null
+  },
+  {
+    "case": "T05-04",
+    "text": "W5 的跨版本 A/B 探针不进 npm test（R-W5-01，建议移入发版清单）。同意移入",
+    "clarify": {
+      "needed": true,
+      "rule": "C1",
+      "reason": "任务只是对上文问题的表态，且引用了任务里没有定义的编号，缺上文",
+      "question": "你这句话是在回答哪个问题？请把上文的问题、或你要「同意/移入」的具体对象说清楚。"
+    },
+    "required": [
+      "devops"
+    ],
+    "missing": [
+      "devops"
+    ],
+    "antecedent": null
+  },
+  {
+    "case": "T05-05",
+    "text": "全面、深入、全方位审查现有dsh-workplan插件是否完全满足ISO/IEC 15408（CC）最新版国际标准   如果不完全满足  准确诊断并修复   最后对外发布到我的官方GitHub上和索引袁上   GitHub上将满足此国际标准和此插件安装使用方法作为卖点 重点强调和宣传   使用中英文  通俗易懂、简要地介绍明白  让技术小白也完全看得懂 操作的来。",
+    "clarify": {
+      "needed": false,
+      "rule": "",
+      "reason": "",
+      "question": ""
+    },
+    "required": [
+      "security",
+      "legal"
+    ],
+    "missing": [
+      "security",
+      "legal"
+    ],
+    "antecedent": null
+  },
+  {
+    "case": "T05-06",
+    "text": "取补丁版 1.5.1  \n\n提交并打 v1.5.1 标签",
+    "clarify": {
+      "needed": false,
+      "rule": "",
+      "reason": "",
+      "question": ""
+    },
+    "required": [
+      "engineering",
+      "devops"
+    ],
+    "missing": [
+      "devops"
+    ],
+    "antecedent": null
+  },
+  {
+    "case": "T05-07",
+    "text": "为什么会话session-99984ebd-7d13-47d5-87a0-e9ba7271b883明明没有完全好  却已经输出结果了   \n\n全面、深入、地毯式排查官方DeepSeek Harness和现有dsh-workplan插件  包括所有源代码，源代码网址是https://github.com/abbaababa/dsh-workplan和https://github.com/deepseek-ai/deepseek-harness\n\n必须全面、准确诊断并修复所有这个会话session-99984ebd-7d13-47d5-87a0-e9ba7271b883发生的所有问题，杜绝再次发生类似事件，类似问题。",
+    "clarify": {
+      "needed": false,
+      "rule": "",
+      "reason": "",
+      "question": ""
+    },
+    "required": [
+      "engineering",
+      "research"
+    ],
+    "missing": [],
+    "antecedent": null
+  },
+  {
+    "case": "T05-08",
+    "text": "总任务：\n必须全部重新准确预判，159667工业母机ETF国泰，下月全月详细、具体的走势，合计涨跌幅分别是多少？准确预判后详细并通俗易懂地告诉我，它每天具体走势到底如何？本总任务非常复杂。\n\n部分总要求如下：\nA. 禁止参考未收盘的行情。\n\nB. 分析研判全程必须依据人性自私，最在乎自身利益不受损的原理来全方位、全面、深入、准确地研究、分析、研判、预判走势。\n\nC. 任务执行全过程，必须准确、灵活运用马克思主义哲学原理和第一性原理。\n\nD. 同时必须地毯式全盘考虑各事件、各因素和上述所有因素对股价的综合影响及相互作用。\n\nE. 本总任务非常复杂，全程必须精准、合理的安排和分配总任务。\n\nF. 全程绝对禁止参考项目目录和文件夹内既有的所有内容，\n\nG. 总任务执行全程，各进度状态（比如用了具体用了哪个大模型、哪个thinking，做了什么事）必须在最终报告中准确告诉我。\n\nH. 最终报告必须让金融完全没学过金融的小白也完全都看得懂。\n\nI. 最终报告排版必须一目了然、精美绝伦、印象深刻，同时必须便于用户阅读。\n\nJ. 总任务全程，全面完美使用现有的dsh-workplan、vectorize-io/hindsight-coding-agents插件完成。",
+    "clarify": {
+      "needed": false,
+      "rule": "",
+      "reason": "",
+      "question": ""
+    },
+    "required": [
+      "research",
+      "writing"
+    ],
+    "missing": [
+      "writing"
+    ],
+    "antecedent": {
+      "antecedent": "159667工业母机ETF国泰",
+      "source": "必须全部重新准确预判，159667工业母机ETF国泰，下月全月详细、具体的走势，合计涨跌幅分别是多少"
+    }
+  },
+  {
+    "case": "T05-09",
+    "text": "36 条范围缺口（18 开放 + 12 表外）  必须完美补上\n\n\n还有  按 T4 草稿开始续做",
+    "clarify": {
+      "needed": true,
+      "rule": "C2",
+      "reason": "任务引用了「T4 草稿」这一内部编号/草稿，但任务原文没有定义它，也找不到上文",
+      "question": "「T4 草稿」指的是什么？请给出文件路径、链接或把内容贴进来。"
+    },
+    "required": [],
+    "missing": [],
+    "antecedent": null
+  },
+  {
+    "case": "T05-10",
+    "text": "Github上 你没有醒目直接一句话标识用户说的两个卖点  而且太啰嗦 必须改进",
+    "clarify": {
+      "needed": false,
+      "rule": "",
+      "reason": "",
+      "question": ""
+    },
+    "required": [],
+    "missing": [],
+    "antecedent": null
+  },
+  {
+    "case": "T05-11",
+    "text": "对于现有插件dsh-workplan，把截图画圈部分，“先看这三句”板块和“分步进度”板块，布局位置对换一下，并同步更新、升级此插件为小版本升级。",
+    "clarify": {
+      "needed": false,
+      "rule": "",
+      "reason": "",
+      "question": ""
+    },
+    "required": [
+      "design"
+    ],
+    "missing": [
+      "design"
+    ],
+    "antecedent": null
+  },
+  {
+    "case": "T05-12",
+    "text": "请问，这个刚研发好的插件安全吗？会窃取用户电脑和移动终端里的文件和数据吗？最后把诊断结果用简短通俗易懂的表达方式补充进我的官方GitHub中",
+    "clarify": {
+      "needed": false,
+      "rule": "",
+      "reason": "",
+      "question": ""
+    },
+    "required": [
+      "legal"
+    ],
+    "missing": [
+      "legal"
+    ],
+    "antecedent": null
+  },
+  {
+    "case": "T05-13",
+    "text": "显示内容希望可折叠，可点击展开",
+    "clarify": {
+      "needed": true,
+      "rule": "C4",
+      "reason": "要求改动界面显示，但没有说明改哪个界面/哪个板块，缺指代对象",
+      "question": "要改的是哪个界面/哪个板块？（例如左侧栏、任务进度面板、某个按钮；有截图更好）"
+    },
+    "required": [
+      "design"
+    ],
+    "missing": [
+      "design"
+    ],
+    "antecedent": null
+  },
+  {
+    "case": "T05-14",
+    "text": "全面深入排查dsh-workplan插件所有逻辑和显示内容缺陷，并准确诊断和修复",
+    "clarify": {
+      "needed": false,
+      "rule": "",
+      "reason": "",
+      "question": ""
+    },
+    "required": [
+      "research"
+    ],
+    "missing": [],
+    "antecedent": null
+  },
+  {
+    "case": "T05-15",
+    "text": "补充：对于需要跨部门协作的时候，现有的这个插件是否有对应的完美机制，你必须同样全面、深入、全面地毯式、深入排查、诊断和修正。严禁发生不合理、不完美的跨部门协作机制。",
+    "clarify": {
+      "needed": false,
+      "rule": "",
+      "reason": "",
+      "question": ""
+    },
+    "required": [
+      "research"
+    ],
+    "missing": [],
+    "antecedent": null
+  },
+  {
+    "case": "T05-16",
+    "text": "全部用typescript语言研发了吗？有任何疑问 先暂停  问用户  由用户确认再继续",
+    "clarify": {
+      "needed": false,
+      "rule": "",
+      "reason": "",
+      "question": ""
+    },
+    "required": [],
+    "missing": [],
+    "antecedent": null
+  },
+  {
+    "case": "T05-17",
+    "text": "左侧栏“任务进度”里的内容，右下角增加一键回到顶部的按钮。\n优化全程严禁你低效率执行。\n优化全过程严禁偏离以上全部要求。",
+    "clarify": {
+      "needed": false,
+      "rule": "",
+      "reason": "",
+      "question": ""
+    },
+    "required": [],
+    "missing": [],
+    "antecedent": null
+  },
+  {
+    "case": "T05-18",
+    "text": "这个你现有的，刚研发的dsh-workplan插件存在以下问题：\n在官方DeepSeek Harness中，左侧栏“任务进度”里显示的内容，用户一眼看出去，无法区分哪些是“正在进行的任务”，哪些是“已经完成的任务”。\n\n用户诉求如下：\n希望在左侧栏“任务进度”中，可以一目了然看到，哪些任务时正在做的任务，哪些任务是已经完成了的任务，其它暂时保持不变。\n\n此插件改进要求如下：\n1. 左侧栏“任务进度”显示，必须以各种精美图表等更直观、生动的形式，显示所有用户想知道的内容。\n2. 左侧栏任务进度里显示的所有内容必须一目了然、突出重点、逻辑严密清晰。\n3. 左侧栏“任务进度”里显示的所有内容，必须精美绝伦、赏心悦目！\n4. 此插件版本必须同步更新和升级。\n5. 整个研发和改进全过程，如果遇到你觉得不确定的地方，必须先暂停，问清用户准确需求之后，再做。\n6. 整个研发和改进全过程，严禁胡编乱造、胡说八道！\n7. 整个研发与改进全过程，必须控制在1小时以内。\n8. 整个研发和改进全过程，严禁偏离用户提出的所有要求和诉求。",
+    "clarify": {
+      "needed": false,
+      "rule": "",
+      "reason": "",
+      "question": ""
+    },
+    "required": [],
+    "missing": [],
+    "antecedent": null
+  },
+  {
+    "case": "T05-19",
+    "text": "类似画圈的地方还是需要点击两次才能切换对应会话，希望点击一次就能切换会话，同时，希望切换好会话后，左侧栏能自动缩",
+    "clarify": {
+      "needed": false,
+      "rule": "",
+      "reason": "",
+      "question": ""
+    },
+    "required": [],
+    "missing": [],
+    "antecedent": null
+  },
+  {
+    "case": "T05-20",
+    "text": "准确预测11月全月详细、具体走势",
+    "clarify": {
+      "needed": true,
+      "rule": "C3",
+      "reason": "要求预测走势，但任务里没有可识别标的（股票代码/名称），也没有年份，缺关键输入",
+      "question": "要预测哪只标的（股票代码或名称）？看哪个时间段？"
+    },
+    "required": [],
+    "missing": [],
+    "antecedent": null
+  }
+]
