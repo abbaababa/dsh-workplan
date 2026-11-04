@@ -76,6 +76,24 @@ export const MAX_AUDITED_SUBTASKS = 15
  */
 export const MISMATCH_BLOCKING_SCORE = 3
 
+/**
+ * [P0-1] Domain coverage threshold.
+ *
+ * The MS2 run (2026-11-03) measured 11/29 required departments present: plans
+ * silently dropped whole domains (design/legal/security/devops) the user's own
+ * request names. A single incidental keyword is not evidence of a domain, so a
+ * department counts as *implied by the request* only when at least two of its
+ * catalogue keywords occur in the user text. Named so tests pin it.
+ */
+export const REQUIRED_DEPARTMENT_MIN_HITS = 2
+
+/**
+ * Wording that turns a missing department into a deliberate exclusion. The plan
+ * must say 「不安排<部门>：理由」 in taskUnderstanding.assumptions; silence is
+ * what the gate rejects.
+ */
+export const DEPARTMENT_EXCLUSION_CUES = /(?:不安排|不需要|未涉及|不涉及|排除|不含|无需|不启用)/
+
 /** Hard anchors are the only elements that can fail a plan by themselves. */
 export type TaskElementKind =
   | 'version'
@@ -138,6 +156,13 @@ export interface DepartmentAssignment {
   declaredRationale: string
 }
 
+/** One department the user's request implies, with the evidence words. */
+export interface DepartmentCoverageEntry {
+  department: string
+  departmentLabel: string
+  hits: string[]
+}
+
 export interface TaskAnchor {
   text: string
   sha256: string
@@ -160,6 +185,12 @@ export interface UnderstandingAudit {
     assignments: DepartmentAssignment[]
     departmentsUsed: string[]
     mismatches: string[]
+    /** Departments the user's own request implies (>= REQUIRED_DEPARTMENT_MIN_HITS keywords). */
+    requiredDepartments: DepartmentCoverageEntry[]
+    /** Implied departments with no subtask and no stated exclusion — the U3 gap. */
+    missingDepartments: DepartmentCoverageEntry[]
+    /** Implied departments that the plan deliberately excluded, with the stated reason. */
+    excludedDepartments: Array<DepartmentCoverageEntry & { reason: string }>
   }
   stage3: {
     verdict: 'aligned' | 'deviation' | 'needs-clarification' | 'needs-context' | 'degraded'
@@ -431,18 +462,24 @@ function extractReferences(text: string): TaskReference[] {
       })
     }
   }
-  // Option letters are only references when the text also talks about options.
-  if (/(?:选|选项|方案|可选|建议)/.test(text)) {
-    const option = /(?:^|[^A-Za-z])([A-D])(?![A-Za-z])/.exec(text)
-    if (option && !seen.has(option[1])) {
-      seen.add(option[1])
-      references.push({
-        token: option[1],
-        resolvedBy: 'none',
-        resolved: false,
-        evidence: clauseOf(text, option.index, option[0].length),
-      })
-    }
+  /*
+   * [P0-2] Option letters are references only when a choice cue selects one.
+   *
+   * The old rule fired on any A-D letter as soon as the text said 建议/方案
+   * anywhere: MS2 case T05-04 ("A/B 探针…建议移入") was blocked as an unresolved
+   * pronoun it never contained, and Markdown list markers "A." would do the
+   * same. A letter now counts only when it directly follows a selection verb,
+   * which is the only structure that can actually mean "choose this option".
+   */
+  const option = /(?:选|选项|方案|可选|建议|采用|按)\s*(?:用\s*)?([A-D])(?![A-Za-z\/])/.exec(text)
+  if (option && !seen.has(option[1])) {
+    seen.add(option[1])
+    references.push({
+      token: option[1],
+      resolvedBy: 'none',
+      resolved: false,
+      evidence: clauseOf(text, option.index, option[0].length),
+    })
   }
   return references
 }
@@ -549,6 +586,57 @@ function flattenPlanSubtasks(plan: any): any[] {
     }
   }
   return subtasks
+}
+
+/**
+ * [P0-1] Which department domains the user's request itself implies, and which
+ * of them the plan never addresses.
+ *
+ * Root cause this closes: before 1.12.1 the audit only asked "does the chosen
+ * department fit?" — a plan could omit an entire domain the request names and
+ * still pass, because nothing asked "is a domain missing?". MS2 measured the
+ * consequence: 11/29 required departments covered.
+ *
+ * A missing department is forgiven only when the plan states the exclusion in
+ * `taskUnderstanding.assumptions` / `unknowns` with one of
+ * DEPARTMENT_EXCLUSION_CUES, so omission must be a written decision instead of
+ * silence. Pure and deterministic: no model, no I/O.
+ */
+export function auditDepartmentCoverage(taskText: string, plan: any): {
+  required: DepartmentCoverageEntry[]
+  missing: DepartmentCoverageEntry[]
+  excluded: Array<DepartmentCoverageEntry & { reason: string }>
+} {
+  const text = typeof taskText === 'string' ? taskText.trim() : ''
+  if (text === '') return { required: [], missing: [], excluded: [] }
+  const used = new Set<string>(
+    flattenPlanSubtasks(plan)
+      .map((subtask) => (typeof subtask?.department === 'string' ? subtask.department : ''))
+      .filter((department) => department !== ''),
+  )
+  const statements: string[] = []
+  for (const key of ['assumptions', 'unknowns']) {
+    const list = plan?.taskUnderstanding?.[key]
+    if (!Array.isArray(list)) continue
+    for (const item of list) if (typeof item === 'string' && item.trim() !== '') statements.push(item.trim())
+  }
+  const required: DepartmentCoverageEntry[] = []
+  const missing: DepartmentCoverageEntry[] = []
+  const excluded: Array<DepartmentCoverageEntry & { reason: string }> = []
+  for (const capability of DEPARTMENT_CAPABILITIES) {
+    const hits = matchDepartmentKeywords(text, capability.id)
+    if (hits.length < REQUIRED_DEPARTMENT_MIN_HITS) continue
+    const entry: DepartmentCoverageEntry = { department: capability.id, departmentLabel: capability.zh, hits }
+    required.push(entry)
+    if (used.has(capability.id)) continue
+    const reason = statements.find((statement) => (
+      (statement.includes(capability.zh) || statement.includes(capability.id))
+      && DEPARTMENT_EXCLUSION_CUES.test(statement)
+    ))
+    if (reason) excluded.push({ ...entry, reason: reason.slice(0, 300) })
+    else missing.push(entry)
+  }
+  return { required, missing, excluded }
 }
 
 /**
@@ -682,7 +770,7 @@ function emptyAudit(anchor: TaskAnchor | null, reason: string): UnderstandingAud
     version: UNDERSTANDING_AUDIT_VERSION,
     anchor,
     stage1: { elements: [], hardCount: 0, references: [], conflicts: [], deliverableClauses: [] },
-    stage2: { assignments: [], departmentsUsed: [], mismatches: [] },
+    stage2: { assignments: [], departmentsUsed: [], mismatches: [], requiredDepartments: [], missingDepartments: [], excludedDepartments: [] },
     stage3: {
       verdict: 'degraded',
       rewritten: false,
@@ -713,6 +801,7 @@ export function auditTaskUnderstanding(plan: any, context: PlanAuditContext = {}
   const planText = collectPlanText(plan)
   const assignments = flattenPlanSubtasks(plan).map((subtask) => departmentFit(subtask, taskText))
   const departmentsUsed = [...new Set(assignments.map((entry) => entry.department))]
+  const coverage = auditDepartmentCoverage(taskText, plan)
   const mismatches = assignments
     .filter((entry) => entry.verdict === 'mismatch')
     .map((entry) => `${entry.subtaskId || '（无 ID）'} → ${entry.departmentLabel}：${entry.reason}`)
@@ -757,6 +846,10 @@ export function auditTaskUnderstanding(plan: any, context: PlanAuditContext = {}
     verdict = 'deviation'
     reasons.push(`用户原要求中的 ${missingHardAnchors.length} 个硬要素在计划中完全缺失：${missingHardAnchors.slice(0, 6).join('、')}`)
   }
+  if (coverage.missing.length > 0) {
+    verdict = 'deviation'
+    reasons.push(`用户原要求涉及 ${coverage.missing.length} 个部门领域，计划既未安排也未写明排除理由：${coverage.missing.map((entry) => entry.departmentLabel).join('、')}`)
+  }
   if (mismatches.length > 0) {
     if (verdict === 'aligned') verdict = 'deviation'
     reasons.push(`${mismatches.length} 个子任务的部门与用户原要求矛盾：${mismatches.slice(0, 4).join('；')}`)
@@ -783,7 +876,14 @@ export function auditTaskUnderstanding(plan: any, context: PlanAuditContext = {}
       conflicts: extracted.conflicts,
       deliverableClauses: extracted.deliverableClauses,
     },
-    stage2: { assignments, departmentsUsed, mismatches },
+    stage2: {
+      assignments,
+      departmentsUsed,
+      mismatches,
+      requiredDepartments: coverage.required,
+      missingDepartments: coverage.missing,
+      excludedDepartments: coverage.excluded,
+    },
     stage3: {
       verdict,
       rewritten: !verbatim,
@@ -836,6 +936,14 @@ export function validatePlanContext(plan: any, context: PlanAuditContext = {}): 
     for (const missing of audit.stage3.missingHardAnchors.slice(0, 6)) {
       errors.push(`DEVIATION: 用户原要求中的硬要素「${missing}」在计划中完全缺失，请补回或说明为什么可以省略`)
     }
+    /*
+     * [P0-1] Missing domain coverage is blocking, not a warning: MS2 showed a
+     * plan can look internally consistent while silently dropping design/legal/
+     * security/devops, which is exactly what "必须高" cannot tolerate.
+     */
+    for (const entry of audit.stage2.missingDepartments.slice(0, 6)) {
+      errors.push(`COVERAGE: 用户原要求涉及「${entry.departmentLabel}」领域（命中 ${entry.hits.slice(0, 4).join('、')}），计划既没有该部门的子任务，也没有在 taskUnderstanding.assumptions 写明「不安排${entry.departmentLabel}：理由」`)
+    }
     for (const assignment of audit.stage2.assignments) {
       if (assignment.verdict !== 'mismatch') continue
       errors.push(`DEVIATION: 子任务 ${assignment.subtaskId || '（无 ID）'} 分配给「${assignment.departmentLabel}」缺乏依据：${assignment.reason}`)
@@ -879,6 +987,22 @@ export function compactUnderstandingAudit(audit: UnderstandingAudit): any {
       })),
       departmentsUsed: audit.stage2.departmentsUsed,
       mismatches: audit.stage2.mismatches,
+      requiredDepartments: audit.stage2.requiredDepartments.map((entry) => ({
+        department: entry.department,
+        departmentLabel: entry.departmentLabel,
+        hits: entry.hits.slice(0, 4),
+      })),
+      missingDepartments: audit.stage2.missingDepartments.map((entry) => ({
+        department: entry.department,
+        departmentLabel: entry.departmentLabel,
+        hits: entry.hits.slice(0, 4),
+      })),
+      excludedDepartments: audit.stage2.excludedDepartments.map((entry) => ({
+        department: entry.department,
+        departmentLabel: entry.departmentLabel,
+        hits: entry.hits.slice(0, 4),
+        reason: entry.reason,
+      })),
     },
     stage3: {
       verdict: audit.stage3.verdict,
