@@ -1255,7 +1255,7 @@ export function apply(ctx: any, config: WorkplanConfig = {}) {
 
 export const meta = {
   name,
-  version: '1.12.0',
+  version: '1.12.1',
   promptOrder: PROMPT_ORDER,
   routes: ['/dsh-workplan/plans', '/dsh-workplan/vendor/chart.umd.js'],
 }
