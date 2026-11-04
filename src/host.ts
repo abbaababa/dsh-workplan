@@ -1255,7 +1255,7 @@ export function apply(ctx: any, config: WorkplanConfig = {}) {
 
 export const meta = {
   name,
-  version: '1.12.1',
+  version: '1.12.2',
   promptOrder: PROMPT_ORDER,
   routes: ['/dsh-workplan/plans', '/dsh-workplan/vendor/chart.umd.js'],
 }
@@ -1271,8 +1271,50 @@ export { PROMPT_SECTION, createCancelTool, createDispatchTool, createEscalateToo
  */
 export function fileWriteGuardReason(
   exec: any,
-  runtime: { presentedWriteDenialReason(agent: any, args: any): string | undefined },
+  runtime: {
+    presentedWriteDenialReason(agent: any, args: any): string | undefined
+    writeTargets(agent: any, args: any): string[]
+  },
 ) {
-  if (exec?.name !== 'write' && exec?.name !== 'edit' && exec?.name !== 'str_replace_editor') return undefined
-  return runtime.presentedWriteDenialReason(exec?.agent, exec?.arguments)
+  if (!isWriteShapedCall(exec)) return undefined
+  // The three historical write tools pass their arguments through untouched, so
+  // their behaviour stays exactly as before (argument-shape matching is only an
+  // EXTENSION: a tool that used to be denied is still denied the same way).
+  const direct = exec?.name === 'write' || exec?.name === 'edit' || exec?.name === 'str_replace_editor'
+  const reason = direct ? runtime.presentedWriteDenialReason(exec?.agent, exec?.arguments) : undefined
+  if (typeof reason === 'string') return reason
+  // [1.12.2] G2: a single call can touch several files (apply_patch hunks).
+  // Deny the call as a whole if any of its targets is a protected deliverable.
+  for (const target of runtime.writeTargets(exec?.agent, exec?.arguments) ?? []) {
+    const extra = runtime.presentedWriteDenialReason(exec?.agent, { file_path: target })
+    if (typeof extra === 'string') return extra
+  }
+  return undefined
+}
+
+/**
+ * [1.12.2] G2: recognise write calls by their argument shape, not by a tool-name
+ * allow-list. The 1.8.18 version named write/edit/str_replace_editor only, so a
+ * fourth write tool such as apply_patch never reached the guard at all.
+ *
+ * Shape rule: a path/first positional argument PLUS a content-bearing argument
+ * (content, file_text, new_str, old_string, patch, input). read/read_image/
+ * present/glob/grep carry no such pair, so they stay untouched.
+ */
+const READ_ONLY_TOOLS = new Set([
+  'read', 'read_image', 'glob', 'grep', 'ls', 'list', 'list_dir',
+  'present', 'todo_write', 'ask_user_question',
+])
+
+function isWriteShapedCall(exec: any) {
+  const name = exec?.name
+  if (typeof name !== 'string' || !name) return false
+  const args = exec?.arguments
+  if (!args || typeof args !== 'object') return false
+  // Read-only tools also carry file_path/path; the guard must never touch them.
+  if (READ_ONLY_TOOLS.has(name)) return false
+  // A patch tool names its target(s) inside the patch text, not in an argument.
+  if (typeof args.input === 'string' && /\*\*\* (Update|Add|Delete|Move) File/.test(args.input)) return true
+  // Every other write form names a single target: file_path or path.
+  return typeof args.file_path === 'string' || typeof args.path === 'string'
 }

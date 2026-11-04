@@ -187,7 +187,13 @@ test('非根会话、plan 模式、其它路径、空参数：放行', () => {
   presentedPlan(childSession, plan)
   presentedFile(childSession, REPORT)
   const runtime = makeRuntime(makeRecord(plan), childSession)
-  assert.equal(runtime.presentedWriteDenialReason(agentFor(childSession), { file_path: REPORT }), undefined)
+  /*
+   * [1.12.2] G1 行为变更（用户点名要求）：这条曾经断言「非根会话放行」，
+   * 而那正是「门卫只认户主、保姆拿钥匙能进」的缺口本身。已交付文件在
+   * 计划未就绪期间不得被原地改写，与谁在写无关，所以断言改为「被拦」。
+   * 本条其余部分（plan 模式 / 其它路径 / 空参数）保持不变。
+   */
+  assert.equal(typeof runtime.presentedWriteDenialReason(agentFor(childSession), { file_path: REPORT }), 'string')
 
   const session = makeSession({ createdAt: 1000, cwd: WORKSPACE })
   presentedPlan(session, plan)

@@ -107,16 +107,45 @@ function guarded(header: any) {
   return { session, runtime: makeRuntime(makeRecord(plan), session) }
 }
 
-test('M1 G1 现状：子会话改写已交付文件不被拦（修复属 M3，需同步改既有用例第 184 行）', () => {
+test('M1 G1 现状已翻转（1.12.2）：子会话改写已交付文件同样被拦', () => {
   const { session, runtime } = guarded({ parentSession: 'parent-session' })
-  assert.equal(runtime.presentedWriteDenialReason(agentFor(session), { file_path: REPORT }), undefined)
+  assert.equal(typeof runtime.presentedWriteDenialReason(agentFor(session), { file_path: REPORT }), 'string')
 
-  // 对照：同一份数据，根会话就被拦。证明差别只来自 isRootSession 分支。
+  // 对照：同一份数据，根会话同样被拦。1.12.2 起两者一致。
   const root = guarded({})
   assert.equal(typeof root.runtime.presentedWriteDenialReason(agentFor(root.session), { file_path: REPORT }), 'string')
 })
 
-test('M1 G2 现状：闸门只认三个写工具名，第四个写类工具名不进闸门', () => {
+// ---------------------------------------------------------------------------
+// [1.12.2] G1 已修复：写保护不再区分「谁在写」。
+// 子 Agent 会改掉用户手上那份文件，后果与根会话完全相同，所以必须同样被拦。
+// 反向保护：子会话 plan 模式、未交付路径仍放行——修复不扩大成「子 Agent 不能写」。
+// ---------------------------------------------------------------------------
+test('G1 已修复：子 Agent 改写已交付文件同样被拦，且不误伤其它路径', () => {
+  const child = guarded({ parentSession: 'parent-session', delegationDepth: 1 })
+  const childReason = child.runtime.presentedWriteDenialReason(agentFor(child.session), { file_path: REPORT })
+  assert.equal(typeof childReason, 'string', 'G1：子 Agent 写已交付文件必须被拦')
+  assert.match(childReason, /wp-p03-m1-gating/)
+
+  // 三种子会话识别方式都要覆盖：parentSession / origin=subagent / delegationDepth>0。
+  for (const header of [{ origin: 'subagent' }, { delegationDepth: 2 }]) {
+    const scoped = guarded(header)
+    assert.equal(
+      typeof scoped.runtime.presentedWriteDenialReason(agentFor(scoped.session), { file_path: REPORT }),
+      'string',
+      JSON.stringify(header),
+    )
+  }
+
+  // 反向保护：未交付的其它路径对子 Agent 仍然放行。
+  assert.equal(
+    child.runtime.presentedWriteDenialReason(agentFor(child.session), { file_path: WORKSPACE + '/other.md' }),
+    undefined,
+    'G1：未交付路径不得被误拦',
+  )
+})
+
+test('M1 G2 现状已翻转（1.12.2）：第四个写类工具名同样进闸门', () => {
   const { session, runtime } = guarded({})
   const agent = agentFor(session)
   const call = (name: string, args: any = { file_path: REPORT }) =>
@@ -127,11 +156,43 @@ test('M1 G2 现状：闸门只认三个写工具名，第四个写类工具名�
   assert.equal(typeof call('edit'), 'string', 'edit')
   assert.equal(typeof call('str_replace_editor', { path: REPORT }), 'string', 'str_replace_editor')
 
-  // 未覆盖的写类工具名：不进闸门，哪怕参数就是已交付路径。
-  assert.equal(call('apply_patch'), undefined, 'G2 缺口现状：apply_patch 不进闸门')
+  // 未覆盖的写类工具名：1.12.2 起按参数形状进闸门，同样被拦。
+  const patch = '*** Begin Patch\n*** Update File: ' + REPORT + '\n@@\n-a\n+b\n*** End Patch'
+  assert.equal(typeof call('apply_patch', { input: patch }), 'string', 'G2 已修复：apply_patch 进闸门')
 
   // 对照：非写工具本来就不该拦，证明上面的 undefined 不是闸门整体失灵。
   assert.equal(call('read'), undefined, 'read')
   assert.equal(fileWriteGuardReason({ name: 'present', agent }, runtime), undefined, 'present')
   assert.equal(fileWriteGuardReason({ name: 'dsh_workplan_dispatch', agent }, runtime), undefined, 'dispatch')
+})
+
+// ---------------------------------------------------------------------------
+// [1.12.2] G2 已修复：按「参数形状」识别写操作，不再依赖工具名白名单。
+// ---------------------------------------------------------------------------
+test('G2 已修复：第四个写类工具名按参数形状进闸门，读类调用不受影响', () => {
+  const { session, runtime } = guarded({})
+  const agent = agentFor(session)
+
+  // 以前进不了闸门的写法，现在都被拦。
+  const blocked: Array<[string, any]> = [
+    ['apply_patch', { input: '*** Begin Patch\n*** Update File: ' + REPORT + '\n@@\n-a\n+b\n*** End Patch' }],
+    ['write_file', { path: REPORT, content: '# 覆盖\n' }],
+    ['create', { file_path: REPORT, file_text: '# 覆盖\n' }],
+    ['some_future_editor', { file_path: REPORT, new_str: 'x' }],
+  ]
+  for (const [name, args] of blocked) {
+    assert.equal(typeof fileWriteGuardReason({ name, agent, arguments: args }, runtime), 'string', name)
+  }
+
+  // apply_patch 多文件：只要有一个 hunk 命中已交付文件就整单拒绝。
+  const mixed = '*** Begin Patch\n*** Update File: ' + WORKSPACE + '/other.md\n@@\n-a\n+b\n'
+    + '*** Update File: ' + REPORT + '\n@@\n-a\n+b\n*** End Patch'
+  assert.equal(typeof fileWriteGuardReason({ name: 'apply_patch', agent, arguments: { input: mixed } }, runtime), 'string')
+
+  // 反向保护：只写未交付文件的 patch、以及纯读类工具一律放行。
+  const harmless = '*** Begin Patch\n*** Update File: ' + WORKSPACE + '/other.md\n@@\n-a\n+b\n*** End Patch'
+  assert.equal(fileWriteGuardReason({ name: 'apply_patch', agent, arguments: { input: harmless } }, runtime), undefined)
+  for (const name of ['read', 'read_image', 'glob', 'grep', 'todo_write']) {
+    assert.equal(fileWriteGuardReason({ name, agent, arguments: { file_path: REPORT, path: REPORT } }, runtime), undefined, name)
+  }
 })

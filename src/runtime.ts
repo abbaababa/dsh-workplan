@@ -13,8 +13,8 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { existsSync, statSync } from 'node:fs'
-import { isAbsolute, resolve } from 'node:path'
+import { existsSync, realpathSync, statSync } from 'node:fs'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 
 import {
   MAX_CONCURRENT,
@@ -5397,11 +5397,47 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     entries: Array<{ raw: string; canonical?: string; planIds: string[] }>
   }>()
 
+  /*
+   * [1.12.2] G3 修复：符号链接必须归一到同一个文件。
+   * 1.8.18 的 canonicalPath 只做 path.resolve，同一个文件因此有无限种写法——
+   * 交付的是 /a/report.md，改 /link/report.md（link 指向 a）就被放过。
+   * 这里再用 realpath.native 把路径解析成真实身份，两侧都解析才能比对。
+   * 文件尚不存在时解析最近的存在祖先后拼回剩余段落；完全解析不了时
+   * 返回 undefined，调用方回落到旧的 path.resolve 结果（不改变旧行为）。
+   */
+  function realPathIdentity(value: string) {
+    try {
+      return realpathSync.native(value)
+    } catch {
+      // 文件可能尚未创建，继续找最近的存在祖先。
+    }
+    let cursor = value
+    const tail: string[] = []
+    for (let depth = 0; depth < 64; depth += 1) {
+      const parent = dirname(cursor)
+      if (!parent || parent === cursor) return undefined
+      tail.unshift(basename(cursor))
+      cursor = parent
+      try {
+        return join(realpathSync.native(cursor), ...tail)
+      } catch {
+        // 继续向上。
+      }
+    }
+    return undefined
+  }
+
   function canonicalPath(session: any, value: any) {
     if (typeof value !== 'string' || value.trim() === '') return undefined
     if (isAbsolute(value)) return resolve(value)
     const cwd = session?.header?.cwd ?? options.cwd
     return typeof cwd === 'string' && cwd ? resolve(cwd, value) : undefined
+  }
+
+  function identityPath(session: any, value: any) {
+    const canonical = canonicalPath(session, value)
+    if (canonical === undefined) return undefined
+    return realPathIdentity(canonical) ?? canonical
   }
 
   function presentedEntries(session: any) {
@@ -5428,7 +5464,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       const planIds = [...seen]
       for (const file of event.data?.files ?? []) {
         if (typeof file?.path !== 'string' || file.path.trim() === '') continue
-        entries.push({ raw: file.path, canonical: canonicalPath(session, file.path), planIds })
+        entries.push({ raw: file.path, canonical: identityPath(session, file.path), planIds })
       }
     }
     presentedPaths.set(session.id, {
@@ -5447,15 +5483,22 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
 
   function presentedWriteDenialReason(agent: any, args: any) {
     const session = agent?.session
-    if (!session || !isRootSession(session)) return undefined
+    if (!session) return undefined
     if (isPlanModeActive(ctx, session)) return undefined
     const entries = presentedEntries(session)
     if (entries.length === 0) return undefined
     const requested = args?.file_path ?? args?.path
     if (typeof requested !== 'string' || requested.trim() === '') return undefined
-    const canonical = canonicalPath(session, requested)
+    // [1.12.2] G3: compare by real file identity (symlinks resolved).
+    const canonical = identityPath(session, requested)
+    /*
+     * [1.12.2] G3: compare like-for-like. The entry now holds the real identity
+     * of the presented path, so a link delivered earlier and a write through
+     * the real path (or vice versa) resolve to the same string.
+     */
     const matched = entries.filter((entry: any) =>
       entry.raw === requested
+      || (entry.raw !== undefined && identityPath(session, entry.raw) === canonical)
       || (canonical !== undefined && entry.canonical !== undefined && entry.canonical === canonical))
     if (matched.length === 0) return undefined
     const planIds = new Set<string>()
@@ -5473,6 +5516,28 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       + '计划未就绪期间不得原地改写已交付文件：先调用 dsh_workplan_dispatch 续跑剩余项，'
       + '完成后重新 present 新版本；确实不做的计划用 dsh_workplan_cancel 显式取消。'
       + '（present 之后新建的计划不受此限制。）'
+  }
+
+  /**
+   * [1.12.2] G2: every path a single write call can touch.
+   * apply_patch carries many files in one string; parsing the directives here
+   * lets the guard deny the whole call instead of letting an unrelated path
+   * in the arguments form a blind spot.
+   */
+  function writeTargets(_agent: any, args: any): string[] {
+    const targets: string[] = []
+    const single = args?.file_path ?? args?.path
+    if (typeof single === 'string' && single.trim() !== '') targets.push(single)
+    const patch = typeof args?.input === 'string' ? args.input : (typeof args?.patch === 'string' ? args.patch : '')
+    if (patch) {
+      const directive = /^\*\*\* (?:Update File|Add File|Delete File|Move to): (.+)$/gm
+      let match
+      while ((match = directive.exec(patch)) !== null) {
+        const path = match[1].trim()
+        if (path !== '') targets.push(path)
+      }
+    }
+    return targets
   }
 
   function plansPayload(sessionId: any) {
@@ -5567,6 +5632,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     presentDenialVerdict,
     supersededDenialVerdict,
     presentedWriteDenialReason,
+    writeTargets,
     updateStatus,
     cancelPlan,
     dispatchTool,

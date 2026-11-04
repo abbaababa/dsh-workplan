@@ -127,6 +127,7 @@ function makeFixture() {
   const linkPath = join(linkDir, 'report.md')
   return {
     root,
+    linkDir,
     realDir,
     reportPath,
     linkPath,
@@ -191,16 +192,49 @@ test('M1 其它三种写法（绝对 / ./相对 / sub/../）都被拦', () => {
 // 现在不一致（缺口仍在）⇒ 断言「一致」必然红，而红之后紧跟的断言把
 // 现状也钉住，这样「缺口被悄悄修好」和「缺口被悄悄扩大」都会被发现。
 // ---------------------------------------------------------------------------
-test('M1 G3：符号链接路径与基准路径行为一致（当前缺口：放行）', () => {
+test('M1 G3：符号链接路径与基准路径行为一致（1.12.2 已修复：两者都被拦）', () => {
   const fx = makeFixture()
   try {
     const { session, runtime } = guardedRuntime(fx.root, fx.reportPath)
     const viaReal = runtime.presentedWriteDenialReason(agentFor(session), { file_path: fx.reportPath })
     const viaLink = runtime.presentedWriteDenialReason(agentFor(session), { file_path: fx.linkPath })
 
-    // 钉现状：基准被拦，符号链接放行。
+    // 1.12.2 修复后：基准被拦，经符号链接同样被拦，且报的是同一个计划。
     assert.equal(typeof viaReal, 'string', '基准（无符号链接）必须被拦')
-    assert.equal(viaLink, undefined, 'G3 缺口现状：经符号链接的路径被放行，修复后本行应改为与被拦一致')
+    assert.equal(typeof viaLink, 'string', 'G3 已修复：经符号链接的路径必须同样被拦')
+    assert.match(viaLink as string, /wp-p03-m1/)
+  } finally {
+    fx.cleanup()
+  }
+})
+
+// ---------------------------------------------------------------------------
+// G3 反向保护：交付的是链接路径、改写的是真实路径，同样要被认出来；
+// 以及不同文件不能被误判成同一个（否则就是过度拦截）。
+// ---------------------------------------------------------------------------
+test('G3 反向：交付链接路径、改写真实路径同样被拦；不同文件不被误伤', () => {
+  const fx = makeFixture()
+  try {
+    // 反向：present 的是链接路径，改写走真实路径。
+    // 注意 cwd 必须取「未解析符号链接」的根：按现行约定，cwd 本身若已是
+    // realpath，present 的链接路径会被 canonicalPath 的字符串前缀规则判成
+    // 相对路径（/work/link/report.md 不以 /real 开头），那是另一处已知的
+    // 相对路径残缺，不属于 G3（G3 只处理「绝对路径 + 符号链接」）。
+    const reverse = guardedRuntime(fx.linkDir, fx.linkPath)
+    const reverseReason = reverse.runtime.presentedWriteDenialReason(
+      agentFor(reverse.session),
+      { file_path: fx.reportPath },
+    )
+    assert.equal(typeof reverseReason, 'string', 'G3：present 链接路径、写真实路径，必须被拦')
+
+    // 误伤保护：同目录下另一个文件不是交付物，必须放行。
+    writeFileSync(join(fx.realDir, 'other.md'), '# 未交付\n')
+    const other = guardedRuntime(fx.root, fx.reportPath)
+    assert.equal(
+      other.runtime.presentedWriteDenialReason(agentFor(other.session), { file_path: join(fx.realDir, 'other.md') }),
+      undefined,
+      'G3：不同文件不得被误判为同一个',
+    )
   } finally {
     fx.cleanup()
   }
