@@ -13,7 +13,7 @@ G-08（ADV-FSP.1 独立接口规范缺失）。核对方法：工具名逐一来
 
 TOE 对外暴露 **2 类接口**：9 个 Agent 工具（宿主注入给模型调用）+ 1 个本地 HTTP 路由（面板数据源）。
 
-### 1.1 Agent 工具（9 个）／ Agent tools
+### 1.1 Agent 工具（10 个）／ Agent tools
 
 | # | 工具 | 调用者 | 用途（一句话） | 关键参数 | 失败/拒绝行为 |
 |---|---|---|---|---|---|
@@ -26,6 +26,7 @@ TOE 对外暴露 **2 类接口**：9 个 Agent 工具（宿主注入给模型调
 | 7 | `dsh_workplan_instruct` | 主 Agent | 向「待指示」子任务下发决定 | `subtaskId`, `instruction` | 仅接受 `closure=escalated` 的行 |
 | 8 | `dsh_workplan_escalate` | 子 Agent | 子任务遇阻上报请示 | `question`, `options?`, `needs?` | 调用后子任务置「待指示」 |
 | 9 | `dsh_workplan_handoff` | 主 Agent（仅根会话） | 处置跨部门需求 | `action: list/assign/resolve/close` | 非根会话拒绝 |
+| 10 | `dsh_workplan_verify` | 子 Agent（阶段三） | 核验三阶段证据与验收覆盖 | `phases`（planning/execution/verification） | 阶段一/二返回 `PHASE_GATE`；证据缺口返回 `VERIFICATION_INCOMPLETE`；核验通过不等于完成 |
 
 ### 1.2 HTTP 路由（1 个）／ HTTP route
 

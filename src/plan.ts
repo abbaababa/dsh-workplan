@@ -12,6 +12,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { DEPARTMENT_CAPABILITIES, departmentCapability } from './departments.js'
 import { MAX_TASK_ANCHOR_CHARS } from './understanding.js'
 import { isMappingDigest, verifyMappingDigest } from './supersede-digest.js'
+import { phaseSummaryLine, threePhasePromptLines, validatePhaseEvidence } from './three-phase.js'
 
 export const PLAN_VERSION = 1
 
@@ -104,7 +105,7 @@ export const UPDATE_MARKER_END = '<!-- DSH-WORKPLAN-UPDATE:END -->'
 /** Upper bound for the run-time conversation window (single truncation point). */
 export const MAX_CONVERSATION_CHARS = 7000
 /** Upper bound for one child evidence block; longer blocks are truncated. */
-export const MAX_EVIDENCE_BLOCK_CHARS = 8000
+export const MAX_EVIDENCE_BLOCK_CHARS = 12000
 export const MAX_EVIDENCE_ACCEPTANCE = 20
 export const MAX_EVIDENCE_ARTIFACTS = 20
 export const MAX_EVIDENCE_NEEDS = 10
@@ -1955,7 +1956,7 @@ const BLOCKED_LINE = /^\s*(BLOCKED|受阻|无法完成)\s*[:：]\s*/i
  * the acceptance table cannot drift apart between the runtime and the replay.
  * It never invents evidence and never upgrades a failed self-check to done.
  */
-export function adjudicateResult({ output, strict = true, expectedAcceptance = [] }: any) {
+export function adjudicateResult({ output, strict = true, expectedAcceptance = [], requirePhases = true }: any) {
   const text = typeof output === 'string' ? output : ''
   const parsed = parseEvidenceBlock(text)
   if (!strict) {
@@ -2096,6 +2097,30 @@ export function adjudicateResult({ output, strict = true, expectedAcceptance = [
         .map((item: string) => truncate(String(item), 120)).slice(0, 5).join('；')}。请按计划验收逐条给出证据后再回报。`,
     }
   }
+  /*
+   * [1.13.0] 完成前必须交出三阶段证据（用户 2026-11-05 的强制要求）。
+   *
+   * 这是「先规划后执行」从口号变成契约的唯一落点：子 Agent 只在提示词里
+   * 被要求时，仍可以先动手、最后补一句「已规划」；只有把规划内容做成
+   * 收尾证据的一部分并在这里校验，缺规划/缺验证的结果才不可能被记成 done。
+   *
+   * 兼容边界：`requirePhases:false` 保留给历史回放与明确关闭该门禁的部署；
+   * `strict:false` 的旧语义不受影响（前面已经返回）。
+   */
+  const phaseCheck = requirePhases === false
+    ? null
+    : validatePhaseEvidence(payload.phases, expectedAcceptance)
+  if (phaseCheck && !phaseCheck.ok) {
+    return {
+      status: 'blocked',
+      verification: 'unverified',
+      acceptance,
+      artifacts,
+      needs,
+      error: `三阶段证据不完整（未按「规划→执行→验证」回报）：${phaseCheck.errors.slice(0, 6).join('；')}`,
+      phases: null,
+    }
+  }
   return {
     status: 'done',
     verification: hasUnverified ? 'unverified' : 'structured',
@@ -2103,6 +2128,8 @@ export function adjudicateResult({ output, strict = true, expectedAcceptance = [
     artifacts,
     needs,
     error: null,
+    phases: phaseCheck?.phases ?? null,
+    phaseSummary: phaseCheck?.phases ? phaseSummaryLine(phaseCheck.phases) : null,
   }
 }
 
@@ -3816,6 +3843,8 @@ export function buildChildPrompt({
     ...(resumeHint ? [resumeHint] : []),
     ...(pendingInstruction ? [pendingInstruction] : []),
     '',
+    ...threePhasePromptLines(),
+    '',
     '执行要求：',
     '- 只完成本子任务，不擅自扩大范围；不要派生新的 Agent。',
     '- 你没有派发权限，也不能重启或安装任何服务；遇到这类步骤，必须先上报（见下方「遇阻上报」），再停止推进等待指示，不要空转。',
@@ -3835,13 +3864,13 @@ export function buildChildPrompt({
     '',
     '结果回传（必填）：在汇报的最后附上一个结构化结果块，主 Agent 会按它逐项核对，不再只依赖自述。',
     EVIDENCE_MARKER_BEGIN,
-    '{"status":"done","blockedReason":"","acceptance":[{"criterion":"A1 把上面的验收标准原文抄在这里","result":"pass","evidence":"用命令输出、文件路径或引用证明"}],"artifacts":[{"kind":"file","ref":"相对工作目录的路径"}],"needs":[],"question":"","options":[]}',
+    '{"status":"done","blockedReason":"","phases":{"planning":{"problemAnalysis":["要解决的问题 1（含现状/约束/未知/主要矛盾）"],"constraints":["..."],"unknowns":["..."],"approach":["第 1 步：做什么 → 产出什么 → 如何证明"]},"execution":{"steps":["实际执行的步骤"],"deviations":[]},"verification":{"allPassed":true,"checks":[{"criterion":"A1","method":"怎么验证","evidence":"命令输出/文件/引用"}],"requirementCheck":"逐条核对用户原要求的结果"}},"acceptance":[{"criterion":"A1 把上面的验收标准原文抄在这里","result":"pass","evidence":"用命令输出、文件路径或引用证明"}],"artifacts":[{"kind":"file","ref":"相对工作目录的路径"}],"needs":[],"question":"","options":[]}',
     EVIDENCE_MARKER_END,
     '- status 只能是 done / blocked / partial；partial 会被当作受阻处理。',
     '- acceptance 必须逐条覆盖上面的验收标准：criterion 以 A1、A2… 开头对号入座（编号不可省略）；result 只能是 pass / fail / unverified。无法确认就写 unverified，不要写 pass。',
     '- artifacts 写你实际产出或修改的文件（kind=file，ref 用相对路径）、链接（kind=url）或说明（kind=note）。',
     '- needs 写需要其他部门配合的事项，每条写清「哪个部门 + 需要什么 + 用来做什么」；它会被登记为待处理需求，主 Agent 必须处置后计划才能交付。不要直连其他子 Agent。',
     '- question/options 只在受阻上报时填写；done 时保持空字符串/空数组。',
-    '- 整块不超过 8000 字符；不要把这段模板本身抄进结果块。',
+    '- 整块不超过 12000 字符；不要把这段模板本身抄进结果块。',
   ].join('\n'))
 }

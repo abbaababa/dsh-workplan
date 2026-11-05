@@ -22,6 +22,7 @@ import {
   createHandoffTool,
   createStatusTool,
   createUpdateTool,
+  createVerifyTool,
 } from '../src/host.js'
 import {
   dispatchToolOutputSchema,
@@ -127,6 +128,7 @@ test('each registered tool stays inside the host JSON-Schema subset', () => {
     createEscalateTool(fakeRuntime()),
     createInstructTool(fakeRuntime()),
     createHandoffTool(fakeRuntime()),
+    createVerifyTool(fakeRuntime()),
   ]
   for (const tool of tools) {
     const violations = hostViolations(tool.parameters)

@@ -2,9 +2,9 @@
 
 > 这份文档回答四个问题：**谁把什么写给谁、什么时候算完成、失败后谁接手、改代码时哪些地方必须一起改。**
 >
-> 适用版本：**1.12.0**。文中每一项能力都已落到代码与测试；标注「未处理」的是明确不做、留待后续版本的范围，不要当现状。
+> 适用版本：**1.13.0**。文中每一项能力都已落到代码与测试；标注「未处理」的是明确不做、留待后续版本的范围，不要当现状。
 >
-<!-- [D-45] 本文版本与实现口径已对齐 1.12.0；核对项：权限 7 处、present 仅根会话、下游可读 artifacts。 -->
+<!-- [D-45] 本文版本与实现口径已对齐 1.13.0；核对项：权限 7 处、present 仅根会话、下游可读 artifacts、三阶段证据门禁。 -->
 
 > 约定：本文只用「文件 + 符号名」定位代码（例如 `src/plan.ts#buildChildPrompt`），**不写行号**，避免代码改动后文档漂移。核对命令见 §11。
 
@@ -253,6 +253,7 @@ pending ──dispatch──▶ executing ──全部 done──▶ done
 子 Agent 必须用**自由文本**汇报，并满足：
 
 - 优先在输出末尾追加结构化证据块（`<!-- WORKPLAN_EVIDENCE:START -->` … JSON … `<!-- WORKPLAN_EVIDENCE:END -->`），含 `status` / `blockedReason` / `acceptance[]` / `artifacts[]` / `needs[]`。这是 1.11.0 起的完成判据：`partial`、任一验收 `fail`、坏块都判受阻，只有全 `pass` 直接采信。
+- **1.13.0 起，证据块还必须含 `phases`**（`planning` / `execution` / `verification`）：缺任一阶段、规划内容过薄、`allPassed!==true`、验证条数少于验收数或未逐条对号，即使 `status:"done"` 也判 `blocked/unverified`。阶段一、二禁用插件；阶段三可用 `dsh_workplan_verify` 预核验，但核验通过不等于完成。
 - 没有证据块时，失败仍可**第一行**写 `BLOCKED: 原因`（大小写不敏感，中英文冒号都认，行首允许空白）——按 `legacy` 判受阻。
 - **1.11.0 起，没有证据块、也没有 `BLOCKED` 的「纯散文」不再算完成**：默认（`strictCompletion`，可用 `DSH_WORKPLAN_STRICT_COMPLETION=0` 关闭）判 `blocked` + `unverified`，错误信息写明「结果块缺失，无法确认验收项是否真的通过」。历史回放仍按 `legacy` 读取，避免旧计划整体失效。
 - 验收条目自称 `pass` 但 `evidence` 为空时，1.11.0 降级为 `unverified`，且 `deliveryReadiness` 增加「验收自称通过但没有证据」阻塞项。
@@ -435,6 +436,8 @@ npm run verify
 | 子 Agent 不能 dispatch/update/cancel | `src/runtime.ts#dispatchTool`、`#updateStatus`、`#cancelPlan` 的 `isRootSession` |
 | 阶段只是分组 | `src/plan.ts#readySubtasks` 上方注释与实现 |
 | 证据块决定完成/受阻，非空文本不再直接算完成 | `src/plan.ts#adjudicateResult`、`#parseEvidenceBlock` |
+| 完成必须带规划→执行→验证三段证据，缺段降级 | `src/plan.ts#adjudicateResult`、`src/three-phase.ts#validatePhaseEvidence` |
+| 阶段三才可核验，阶段一/二返回 PHASE_GATE | `src/runtime.ts#verifySubtask`、`src/host.ts#createVerifyTool` |
 | 依赖同时看状态与产物 | `src/plan.ts#readySubtasks` 的 `dependencyOk`、`src/runtime.ts#checkArtifacts` |
 | 派发支持 wait/async 且可汇合 | `src/runtime.ts#dispatchTool` 的 `mode` 与 `dispatchPromise` 分支 |
 | 运行中 update 默认被拒 | `src/runtime.ts#updateStatus` 的 `TASK_RUNNING` 分支 |
@@ -452,3 +455,23 @@ npm run verify
 - [1.6.0 会话终止收敛](../CHANGELOG.md)
 - [安装与使用说明](../README.md) / [English](../README.en.md)
 - T5 优化方案与验收标准：`deliverables/workplan/T5_优化方案与验收标准_20261030.md`
+
+---
+
+## 13. 三阶段工作法（1.13.0，用户强制要求）
+
+部门 Agent 收到子任务后，必须按顺序完成三个阶段；阶段不可颠倒、不可跳过。
+
+| 阶段 | 必须做什么 | 结果块证据（`phases`） | 插件是否可用 |
+|---|---|---|---|
+| 一 规划 | 先全面梳理问题：现状与事实、约束、未知、主要矛盾、边界；再形成完整可执行思路：步骤、产物、依赖、风险、验证方式 | `planning.problemAnalysis` / `planning.constraints` / `planning.unknowns` / `planning.approach` | **禁用** |
+| 二 执行 | 严格按阶段一的思路执行；任何偏离都必须记录原因与证据 | `execution.steps` / `execution.deviations` | **禁用** |
+| 三 验证 | 逐条验证验收标准与用户原要求，全部通过才可报 done | `verification.allPassed` / `verification.checks` / `verification.requirementCheck` | 可用 `dsh_workplan_verify` |
+
+完成判定：`src/plan.ts#adjudicateResult` 对 `status:'done'` 强制校验 `phases`；缺任一阶段、规划内容过薄、`allPassed!==true`、验证记录少于验收标准数或未逐条对号、字段为空，一律判 `blocked/unverified`，计划不能交付。
+
+唯一保留的插件通道：遇阻上报 `dsh_workplan_escalate`。它不是计划/执行/验证能力，而是安全阀；否则子 Agent 在阶段一/二受阻时只能空转或编造。
+
+核验工具：`dsh_workplan_verify` 只接受阶段三调用；缺 planning/execution 时返回 `PHASE_GATE`（插件在阶段一、二禁用）。核验通过不等于完成——结果块仍须写同一份 `phases`，由完成判定再判一次。
+
+代码位置：提示词 `src/plan.ts#buildChildPrompt` 调用 `src/three-phase.ts#threePhasePromptLines`；校验 `src/three-phase.ts#validatePhaseEvidence` 与 `src/plan.ts#adjudicateResult`；核验工具 `src/host.ts#createVerifyTool` / `src/runtime.ts#verifySubtask`；回归 `tests/three-phase.test.ts`。

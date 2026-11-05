@@ -23,10 +23,36 @@ function block(payload: any, prefix = '做完了。') {
   return `${prefix}\n${EVIDENCE_MARKER_BEGIN}\n${JSON.stringify(payload)}\n${EVIDENCE_MARKER_END}`
 }
 
+/*
+ * [1.13.0] 三阶段证据的合法样例。
+ *
+ * 完成契约现在要求 planning / execution / verification 三段都有实质内容；
+ * 原有「完成」用例统一复用这份样例，这样它们继续只验证各自要锁的规则
+ * （验收覆盖、unverified、失败降级），而不是被三阶段门禁误伤。
+ */
+function phasesFixture(overrides: any = {}) {
+  return {
+    planning: {
+      problemAnalysis: ['现状：需要确认接口可用；约束：不能改线上配置；未知：对端限流阈值；主要矛盾：覆盖面与时间。'],
+      constraints: ['不得修改生产配置'],
+      unknowns: ['对端限流阈值未确认'],
+      approach: ['先读现有实现确认入口 → 写最小复现脚本 → 跑一次并保存输出 → 对照验收标准逐条记录证据。'],
+    },
+    execution: { steps: ['读源码确认入口', '运行最小复现脚本', '记录输出证据'], deviations: [] },
+    verification: {
+      allPassed: true,
+      checks: [{ criterion: '接口可用', method: 'curl /health', evidence: 'HTTP 200' }],
+      requirementCheck: '用户原要求已逐条核对，无遗漏。',
+    },
+    ...overrides,
+  }
+}
+
 function donePayload(overrides: any = {}) {
   return {
     status: 'done',
     summary: '实现完成',
+    phases: phasesFixture(),
     acceptance: [{ criterion: '接口可用', result: 'pass', evidence: 'curl /health 返回 200' }],
     artifacts: [{ kind: 'file', ref: 'src/host.ts' }],
     needs: [],
@@ -112,7 +138,7 @@ test('[1.11.0] 兼容档 strict=false 仍按 1.10.6 解释无证据块', () => {
 
 test('[1.11.0] C-19：验收自称 pass 但没有证据 → 降级 unverified', () => {
   const verdict = adjudicateResult({
-    output: block({ status: 'done', acceptance: [{ criterion: '测试通过', result: 'pass' }] }),
+    output: block({ status: 'done', phases: phasesFixture(), acceptance: [{ criterion: '测试通过', result: 'pass' }] }),
   })
   assert.equal(verdict.status, 'done')
   assert.equal(verdict.verification, 'unverified')

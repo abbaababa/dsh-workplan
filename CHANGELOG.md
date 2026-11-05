@@ -1,3 +1,29 @@
+## 1.13.0 — 2026-11-05
+
+**新增「三阶段工作法」：部门 Agent 收到工作后必须先规划、再执行、最后验证；阶段一、二不提供插件工作能力，阶段三才可用 `dsh_workplan_verify` 核验。完成判定新增三阶段证据门禁，缺段一律 blocked/unverified。**
+
+### 一、改了什么
+
+| 用户要求 | 本版实现 |
+|---|---|
+| 先全面梳理问题，再形成可执行思路，最后才动手 | `src/three-phase.ts#threePhasePromptLines` 写进每个子 Agent 提示词：阶段一先列事实/约束/未知/主要矛盾，再给步骤、产物、依赖、风险与验证方式，并明说「思路未形成前禁止动手」 |
+| 全过程按规划→执行→验证三阶段 | 结果块新增必填 `phases`：planning（problemAnalysis/constraints/unknowns/approach）→ execution（steps/deviations）→ verification（allPassed/checks/requirementCheck）；`src/three-phase.ts#validatePhaseEvidence` 校验顺序与完整性 |
+| 阶段一、二禁用插件 | 子 Agent 本就没有 update/replan/cancel/dispatch/status/instruct/handoff/followup 权限；新增的 verify 工具在只交 planning/execution 时返回 `PHASE_GATE`；提示词同时写明阶段一、二不得调用插件。唯一保留的是遇阻上报 `dsh_workplan_escalate`（安全阀，不属于计划/执行/验证能力），否则子 Agent 受阻只能空转或编造 |
+| 阶段三可用插件验证是否成功、是否满足全部要求 | 新增 `dsh_workplan_verify`（`src/host.ts#createVerifyTool`、`src/runtime.ts#verifySubtask`）：提交三阶段证据，按计划验收表逐条核对结构与覆盖；核验通过也不等于完成，结果块仍须写同一份 phases，由 `adjudicateResult` 再判 |
+| 完成判定必须挡住缺段 | `src/plan.ts#adjudicateResult` 对 done 默认 `requirePhases=true`：缺任一阶段、规划内容过薄（<40 字符）、`allPassed!==true`、验证条数少于验收数或未逐条对号、字段为空，一律 `blocked/unverified`，计划不可交付 |
+
+### 二、验证
+
+- `npm test`：**536 条全过、0 失败**（基线 523 + 新增 13 条 `tests/three-phase.test.ts`）；`npm run check`（tsc --noEmit）退出码 0。
+- 新增用例覆盖：提示词含三阶段与禁用、合法 phases 仍 structured、缺 planning/思路过薄/allPassed=false/漏验均被降级、`requirePhases:false` 历史回放兼容、verify 工具的 `PHASE_GATE` 与 `VERIFICATION_INCOMPLETE`。
+- 工具面 fixture（`tests/fixtures/tool-surface.json`）与 docs/cc 同步到 10 个工具、1.13.0。
+
+### 三、事实边界（如实登记）
+
+- 插件无法观测模型内部「想了多久、按什么顺序想」，只能把顺序变成**可审计的完成证据**：没有 planning/execution 证据就不算完成；阶段三核验只在模型主动调用时发生。
+- 阶段一、二禁止的是插件的工作能力（计划/执行/验证）；`dsh_workplan_escalate` 是遇阻上报的安全通道，本版保留并在提示词中明确其例外身份。
+- verify 只检查证据的结构与验收覆盖，不判断证据内容是否真实；真实性仍由主 Agent 核对产物与结果消息。
+
 ## 1.12.3 — 2026-11-04
 
 **修好 MS2 20 条真实实跑暴露的四处缺陷：指代误拦（T05-08）、该问不问（T05-04/09/13/20）、未确认自行派发、法务召回缺失（T05-12）。默认行为变化：信息不足时不再生成计划、不再派发，改为向用户提问。**

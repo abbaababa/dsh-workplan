@@ -51,6 +51,31 @@ function evidenceBlock(payload: any) {
   return `已完成。\n<!-- WORKPLAN_EVIDENCE:START -->\n${JSON.stringify(payload)}\n<!-- WORKPLAN_EVIDENCE:END -->`
 }
 
+/*
+ * [1.13.0] 三阶段证据（规划 → 执行 → 验证）是完成契约的一部分。
+ * 这里按计划的两条验收生成两条验证记录，避免三阶段门禁掩盖本文件要锁的
+ * 「验收覆盖」规则。
+ */
+function phasesFixture() {
+  return {
+    planning: {
+      problemAnalysis: ['现状：需要交付可复核数据；约束：只能用离线样本；未知：样本是否完整；主要矛盾：覆盖与时间。'],
+      constraints: ['只能使用离线样本'],
+      unknowns: ['样本完整性待确认'],
+      approach: ['先确认数据源与字段 → 写取数脚本 → 运行并记录行数与校验值 → 对照两条验收逐条留证。'],
+    },
+    execution: { steps: ['确认数据源', '运行取数脚本', '记录校验值'], deviations: [] },
+    verification: {
+      allPassed: true,
+      checks: [
+        { criterion: 'A1', method: '复跑取数命令', evidence: 'node fetch.js --date 2026-11-02 输出一致' },
+        { criterion: 'A2', method: '核对行数与 sha256', evidence: 'rows=1200 sha256=abc' },
+      ],
+      requirementCheck: '两条验收标准均已覆盖。',
+    },
+  }
+}
+
 test('验收覆盖：自创一条验收不能顶替计划要求的 N 条', () => {
   const plan = planFixture()
   const output = evidenceBlock({
@@ -67,6 +92,7 @@ test('验收覆盖：逐条回应（允许措辞差异）才判 structured', () 
   const plan = planFixture()
   const output = evidenceBlock({
     status: 'done',
+    phases: phasesFixture(),
     acceptance: [
       { criterion: '给出可复现的取数命令', result: 'pass', evidence: 'node fetch.js --date 2026-11-02' },
       { criterion: '给出数据行数与校验值', result: 'pass', evidence: 'rows=1200 sha256=abc' },

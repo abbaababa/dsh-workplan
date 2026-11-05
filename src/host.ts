@@ -712,6 +712,122 @@ function createEscalateTool(runtime: any) {
 }
 
 /**
+ * [1.13.0] 阶段三（验证阶段）的插件核验工具（用户 2026-11-05）。
+ *
+ * 用户规则：部门 Agent 收到工作后必须先梳理问题、再形成可执行思路、最后
+ * 执行与验证；第一、二阶段禁用 dsh-workplan 插件，第三阶段才可以用插件
+ * 验证是否成功、是否完全满足要求。
+ *
+ * 因此这个工具只做一件事：接收三阶段证据并给出核验结论。阶段一/二的调用
+ * 会被 `runtime.verifySubtask` 以 `PHASE_GATE` 拒绝（缺 planning/execution
+ * 证据），不会替子 Agent 跳过梳理与规划。
+ */
+export function createVerifyTool(runtime: any) {
+  return {
+    name: 'dsh_workplan_verify',
+    description:
+      '部门子 Agent 在第三阶段（验证阶段）使用的插件核验：提交 planning / execution / verification 三阶段证据，'
+      + '插件逐项核验并返回 passed 或仍需补齐的 gaps。阶段一、二禁用本插件，调用会返回 PHASE_GATE；'
+      + '只有「问题梳理 + 可执行思路 + 实际执行步骤」齐全后，才会进入阶段三核验。'
+      + '核验通过不代表完成：最终仍要在结果块里写同一份 phases，由主计划按三阶段契约判定。',
+    parameters: {
+      type: 'object',
+      properties: {
+        subtaskId: {
+          type: 'string',
+          description: '你的子任务 ID（仅用于回显核对；服务端按父子会话关系反查，自报值不作为定位依据）。',
+        },
+        phases: {
+          type: 'object',
+          description: '三阶段证据：planning（问题梳理 + 可执行思路）、execution（执行步骤）、verification（逐项验证）。',
+          properties: {
+            planning: {
+              type: 'object',
+              properties: {
+                problemAnalysis: { type: 'array', items: { type: 'string' }, description: '要解决的问题逐条梳理（现状/事实/约束/未知/主要矛盾/边界）' },
+                constraints: { type: 'array', items: { type: 'string' }, description: '约束条件' },
+                unknowns: { type: 'array', items: { type: 'string' }, description: '未知或待确认项' },
+                approach: { type: 'array', items: { type: 'string' }, description: '完整可执行的思路：每一步做什么、产出什么、如何证明' },
+              },
+              required: ['problemAnalysis', 'approach'],
+            },
+            execution: {
+              type: 'object',
+              properties: {
+                steps: { type: 'array', items: { type: 'string' }, description: '实际执行的步骤' },
+                deviations: { type: 'array', items: { type: 'string' }, description: '偏离原思路的地方与原因' },
+              },
+              required: ['steps'],
+            },
+            verification: {
+              type: 'object',
+              properties: {
+                allPassed: { type: 'boolean', description: '是否全部验证通过；未全部通过必须为 false' },
+                checks: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      criterion: { type: 'string', description: '对应的验收标准（A1/A2…）' },
+                      method: { type: 'string', description: '用什么方式验证' },
+                      evidence: { type: 'string', description: '命令输出/文件/引用' },
+                    },
+                    required: ['criterion', 'method', 'evidence'],
+                  },
+                },
+                requirementCheck: { type: 'string', description: '逐条核对用户原要求的结果' },
+              },
+              required: ['allPassed', 'checks'],
+            },
+          },
+          required: ['planning', 'execution', 'verification'],
+        },
+      },
+      required: ['phases'],
+      additionalProperties: false,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          ok: { type: 'boolean' },
+          passed: { type: 'boolean' },
+          phase: { type: 'string' },
+          planId: { type: 'string' },
+          subtaskId: { type: 'string' },
+          summary: { type: 'string' },
+          gaps: { type: 'array', items: { type: 'string' } },
+          code: { type: 'string' },
+          error: { type: 'string' },
+          message: { type: 'string' },
+        },
+        required: ['ok'],
+        additionalProperties: true,
+      },
+      render(_args: any, value: any) {
+        const result = isRecord(value) ? value : {}
+        if (!result.ok) {
+          const gaps = Array.isArray(result.gaps) ? result.gaps.slice(0, 5).join('；') : ''
+          return textContent(
+            `插件核验未通过（${String(result.code ?? 'FAILED')}）：${String(result.error ?? '未知原因')}`
+            + (gaps ? `｜需补齐：${gaps}` : '')
+            + '｜先修复再回报，不要用 done 收尾。',
+          )
+        }
+        return textContent(
+          `${String(result.subtaskId ?? '')} 阶段三核验通过：${String(result.summary ?? '')}`
+          + '｜把同一份 phases 写进结果块后提交。',
+        )
+      },
+    },
+    async execute(args: any, exec: any) {
+      const parsed = asObject(args) ?? {}
+      return runtime.verifyTool(exec.agent, parsed)
+    },
+  }
+}
+
+/**
  * [1.11.0] 主 → 子的指示通道（T4 C-10 / T6 M6）。
  *
  * 服务端硬校验：根会话、该行 `closure:'escalated'`、`childId` 是本会话直接
@@ -1197,6 +1313,8 @@ export function apply(ctx: any, config: WorkplanConfig = {}) {
    * 侧不做过滤；权限判断一律落在 execute 内部。
    */
   ctx.effect(() => ctx.tools.register(createEscalateTool(runtime)))
+  /* [1.13.0] 阶段三核验：子会话唯一可用的插件工作能力，阶段一/二会被 PHASE_GATE 拒绝。 */
+  ctx.effect(() => ctx.tools.register(createVerifyTool(runtime)))
   ctx.effect(() => ctx.tools.register(createInstructTool(runtime)))
   /*
    * [1.11.0] 需求变更的重规划入口（T4 C-11 / T7）。
@@ -1290,7 +1408,7 @@ export function apply(ctx: any, config: WorkplanConfig = {}) {
 
 export const meta = {
   name,
-  version: '1.12.3',
+  version: '1.13.0',
   promptOrder: PROMPT_ORDER,
   routes: ['/dsh-workplan/plans', '/dsh-workplan/vendor/chart.umd.js'],
 }

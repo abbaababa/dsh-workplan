@@ -90,10 +90,10 @@ function planWith(subtasks: any[]) {
 
 /* ==================== H01–H12：docs/collaboration.md ==================== */
 
-test('H01 collaboration.md 首部声明适用版本 1.12.0（hunk 1）', async () => {
+test('H01 collaboration.md 首部声明适用版本 1.13.0（hunk 1）', async () => {
   const doc = await read('docs/collaboration.md')
-  assert.match(doc, /适用版本：\*\*1\.12\.0\*\*/, '首部必须声明 1.12.0')
-  assert.match(doc, /\[D-45\] 本文版本与实现口径已对齐 1\.12\.0/, 'D-45 核对注释必须存在')
+  assert.match(doc, /适用版本：\*\*1\.13\.0\*\*/, '首部必须声明 1.13.0')
+  assert.match(doc, /\[D-45\] 本文版本与实现口径已对齐 1\.13\.0/, 'D-45 核对注释必须存在')
 })
 
 test('H02 部门口径改成 1.12.0 且权限写为 7 处 NOT_ROOT（hunk 2）', async () => {
