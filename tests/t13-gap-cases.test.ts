@@ -74,9 +74,9 @@ function planWith(subtasks: any[]) {
 
 /* ---------- D-45：文档版本口径必须与实现一致 ---------- */
 
-test('D-45 协作文档声明适用版本 2.0.1，且写明 7 处 NOT_ROOT 与 present 仅根会话', async () => {
+test('D-45 协作文档声明适用版本 2.0.2，且写明 7 处 NOT_ROOT 与 present 仅根会话', async () => {
   const doc = await read('docs/collaboration.md')
-  assert.match(doc, /适用版本：\*\*2\.0\.1\*\*/, '文档首部必须声明适用版本 2.0.1')
+  assert.match(doc, /适用版本：\*\*2\.0\.2\*\*/, '文档首部必须声明适用版本 2.0.2')
   assert.match(doc, /7 处/, '权限硬约束必须写为 7 处 NOT_ROOT（旧文写 3 处）')
   assert.match(doc, /present/, '必须写明 present 只允许根会话')
   /* 旧口径「3 处 NOT_ROOT」不得再作为现行约束出现 */

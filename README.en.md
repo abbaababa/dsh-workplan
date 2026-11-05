@@ -80,7 +80,7 @@ The full contract — roles, data shapes, state machine, recovery, and the three
 ## Install
 
 ```bash
-dsh plugin --profile web add dsh-workplan@2.0.1
+dsh plugin --profile web add dsh-workplan@2.0.2
 ```
 
 Restart the DSH Web process (or reload the page) so the bundle is picked up.
@@ -125,9 +125,9 @@ Every number is derived from the same task state — the panel can no longer cla
 
 In **plan mode** the plan is shown for review and `dispatch` is explicitly refused with a reason.
 
-## Three phases and self-learning (2.0.1)
+## Three phases and self-learning (2.0.2)
 
-Every department agent must work in order — **planning → execution → verification** — and completion requires structured evidence for all three phases. Phases 1 and 2 must not use the dsh-workplan plugin: children have no plan/dispatch/adjudication powers, and the phase-3 verify tool rejects calls that lack planning/execution evidence with `PHASE_GATE`. The only exception is the blocker escalation channel, which is a safety valve rather than a planning/execution/verification capability.
+Every department agent must work in order — **planning → execution → verification** — and completion requires structured evidence for all three phases. The phase-3 verify tool rejects calls that lack planning/execution evidence with `PHASE_GATE` and lists the gaps; this is an evidence gate, not a plugin-wide disable. Correction (2.0.2): the "phases 1–2 must not use the plugin" wording described a one-off constraint of the 2026-11-05 optimization session, not a permanent rule for later sessions. The main agent can use the planning, dispatch, status and replan tools at any phase; the blocker escalation channel stays available.
 
 Phase 3 also requires a **retrospective** (`retrospective` inside `phases.verification`):
 

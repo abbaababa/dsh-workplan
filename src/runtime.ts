@@ -4103,11 +4103,11 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
   /**
    * [1.13.0] 阶段三（验证阶段）的插件核验入口（用户 2026-11-05）。
    *
-   * 用户规则：第一、二阶段禁用 dsh-workplan 插件，第三阶段才可以用插件验证
-   * 是否成功、是否完全满足要求。这里的实现方式是「按提交内容判阶段」：
+   * 「按提交内容判阶段」：
    *   - 只有 planning + execution 证据齐全，才会进入阶段三核验；
-   *   - 缺 planning/execution 的调用直接以 PHASE_GATE 拒绝，并说明插件在
-   *     阶段一、二禁用 —— 子 Agent 无法用插件跳过梳理与规划；
+   *   - 缺 planning/execution 的调用以 PHASE_GATE 拒绝并列出待补项 —— 这是一道
+   *     证据门禁，不是对插件的全局禁用（「阶段一、二禁用插件」只是 2026-11-05
+   *     当次优化会话的过程约束，2.0.2 起不再作为所有会话的产品规则）；
    *   - 阶段三核验会逐条检查：问题梳理/可执行思路是否有实质内容、执行步骤
    *     是否记录、验证是否全部通过、验证记录是否覆盖全部验收标准。
    *
@@ -4166,7 +4166,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         subtaskId: row.subtaskId,
         gaps: check.errors,
         error: gate === 'phase-1-2'
-          ? `插件在阶段一、二禁用：先完成「梳理问题 → 形成可执行思路」并实际执行，阶段三才能用插件核验。${check.errors.slice(0, 5).join('；')}`
+          ? `阶段三核验缺少前两阶段证据：先完成「梳理问题 → 形成可执行思路」并实际执行，再提交阶段三核验。${check.errors.slice(0, 5).join('；')}`
           : `阶段三核验未通过：${check.errors.slice(0, 5).join('；')}`,
       }
     }

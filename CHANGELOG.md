@@ -1,3 +1,33 @@
+## 2.0.2 — 2026-11-05
+
+**更正「第一、二阶段禁用 dsh-workplan 插件」的适用范围：这条只适用于 2026-11-05 本次优化会话，不是对所有后续会话的永久产品规则。2.0.2 起，提示词、工具描述、README 与协作文档不再声明全局禁用；三阶段工作法与「验证工具缺前两阶段证据返回 PHASE_GATE」的证据门禁保持不变。**
+
+### 一、为什么要改
+
+- 用户在 2.0.1 发布后澄清：原要求 4「第一、二阶段禁用 dsh-workplan 插件」是**本次会话内**对优化过程的约束，不是要求插件对所有未来会话禁用。
+- 1.13.0 起把这条写成了产品级规则（子 Agent 提示词、`dsh_workplan_verify` 描述、运行时报错、README、协作文档），属于对需求范围的误读；2.0.2 全面更正。
+
+### 二、改了什么（只改措辞与说明，不改三阶段契约）
+
+| 位置 | 2.0.1 及以前 | 2.0.2 |
+|---|---|---|
+| `src/three-phase.ts#threePhasePromptLines` | 「阶段一、二：dsh-workplan 插件禁用。不得调用任何 dsh_workplan_* 工具」 | 「阶段一、二先把问题、思路与执行记录写全；调用 verify 会因缺少前两阶段证据返回 PHASE_GATE（证据门禁，不是禁用插件）」 |
+| `src/host.ts#createVerifyTool` 描述 | 「阶段一、二禁用本插件」 | 「缺少 planning / execution 证据时返回 PHASE_GATE 与待补项」 |
+| `src/runtime.ts#verifySubtask` 报错 | 「插件在阶段一、二禁用」 | 「阶段三核验缺少前两阶段证据」 |
+| `README.md` / `README.en.md` | 声明永久禁用 | 声明仅 2026-11-05 本次会话约束；主 Agent 任何阶段都可用计划/派发/查询/改判 |
+| `docs/collaboration.md`、`docs/cc/AVA` | 表格写「禁用」 | 写「证据门禁」并加 2.0.2 更正说明 |
+
+### 三、没有变的部分
+
+- 三阶段（规划 → 执行 → 验证）仍是产品功能，完成判定仍要求 `phases` 齐全。
+- `dsh_workplan_verify` 仍只接受三阶段齐全的证据；缺 planning/execution 仍返回 `PHASE_GATE`——这是证据门禁，不是插件禁用。
+- 阶段三复盘（自我学习）与永久教训记忆完全不变。
+
+### 四、验证
+
+- `npm run check`（tsc --noEmit）退出码 0；`npm test` 全过（见 `docs/release-notes-2.0.2.md` 与 GitHub Release 页）。
+- 新增/更新断言：`tests/three-phase.test.ts` 明确断言提示词不再包含「插件禁用」，同时仍断言阶段三门禁与 `PHASE_GATE`。
+
 ## 2.0.1 — 2026-11-05
 
 **新增「自我学习与自我迭代」：部门 Agent 每次完成工作后，必须在阶段三复盘本次全过程的问题、弯路、解决方式与防再犯规则；复盘通过后写入永久教训记忆文件，下次派发同类任务时自动注入提示词。同一类错误重复出现会累加次数并提前排序。三阶段工作法（1.13.0）保持「规划 → 执行 → 验证」不变，复盘是验证阶段收尾的必填项，不是第四个阶段。**
@@ -14,6 +44,8 @@
 | 6. 全程遵照用户要求，禁止偏离 | 本版所有新增门禁都落在完成判定与提示词两处，避免「提示词说要做、判定却不检查」的两套真相 |
 | 7. 版本更新为 2.0.1 | `package.json` / `package-lock.json`（两处）/ `src/host.ts#meta.version` / `CHANGELOG` / `README.md` / `README.en.md` 全部为 2.0.1，由 `tests/version-sync.test.ts` 断言 |
 | 8. 源码与版本同步发布到 GitHub 与索引源 | 提交 + `v2.0.1` tag + GitHub Release（带 tgz 制品）+ npm `dsh-workplan@2.0.1` + awesome-dsh-plugin 索引条目更新，发布记录见 `docs/release-record-2.0.1-20261105.md` |
+
+> **勘误（2026-11-05，2.0.2）**：上表第 4 条「第一、二阶段禁用 dsh-workplan 插件」只适用于本次优化会话，不是对所有后续会话的永久插件限制。2.0.2 起提示词、工具描述、README 与文档已更正；三阶段工作法与证据门禁不变。
 
 ### 二、自我学习的具体机制（可复核）
 

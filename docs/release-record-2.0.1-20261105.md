@@ -106,3 +106,8 @@ node -e "const p=require('dsh-workplan/package.json');console.log(p.version)"
 
 - 本文件在 npm 2.0.1 发布完成之后补写并提交到仓库；npm 上的 2.0.1 tarball 是 13:23 构建的固化产物，不包含本文件。仓库与 GitHub Release 是权威来源，功能代码与测试不受影响。
 - 证据契约在 2.0.1 变为「结果块必须带三阶段（含复盘）」；旧结果回放需显式传 `requirePhases: false`，已在 CHANGELOG「兼容边界」说明。
+
+## 9. 勘误（2.0.2，2026-11-05）
+
+- 本记录把用户要求 4「第一、二阶段禁用 dsh-workplan 插件」当成了产品级永久规则；用户随后澄清：该条只适用于 2026-11-05 本次优化会话，不是对所有后续会话的要求。
+- 2.0.2 已更正提示词、`dsh_workplan_verify` 描述、运行时报错、README 与协作文档中的相关措辞；三阶段工作法与证据门禁保持不变。2.0.2 的完整证据见 `docs/release-record-2.0.2-20261105.md`。

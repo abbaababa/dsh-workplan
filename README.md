@@ -3,7 +3,7 @@
 > **两个卖点，一句话：ISO/IEC 15408:2026 全套安全证据，5 条命令自己验；安装一条命令、零第三方运行时依赖。**
 
 [![verify](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml/badge.svg)](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml)
-[![version](https://img.shields.io/badge/version-2.0.1-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v2.0.1)
+[![version](https://img.shields.io/badge/version-2.0.2-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v2.0.2)
 
 给 **DeepSeek Harness（DSH）** 加一段「先拆计划 → 真派部门子 Agent 去做 → 左侧栏实时看进度」的能力。不装 App、不改 DSH 源码、不换页面。
 
@@ -69,7 +69,7 @@ grep -RInE "child_process|execSync|eval\(|writeFileSync" src || echo "0 命中�
 ## 一键安装
 
 ```bash
-dsh plugin --profile web add dsh-workplan@2.0.1
+dsh plugin --profile web add dsh-workplan@2.0.2
 ```
 
 装完**重启一次 DSH Web**（或重新载入当前页面）让插件生效。
@@ -118,7 +118,7 @@ dsh plugin --profile web add "$(pwd)"
 
 在 **plan 模式**下只会给你看计划，`dispatch` 会被明确拦下并说明原因，不会偷偷开跑。
 
-## 三阶段工作法与自我学习（2.0.1 的核心）
+## 三阶段工作法与自我学习（2.0.2 的核心）
 
 ### 三阶段：规划 → 执行 → 验证
 
@@ -130,7 +130,7 @@ dsh plugin --profile web add "$(pwd)"
 | 二 执行 | 严格按阶段一的思路执行；需要改道必须记录原因 | `phases.execution.steps/deviations` |
 | 三 验证 | 逐条验证验收标准与用户原要求，并做**自我学习复盘** | `phases.verification` + `retrospective` |
 
-**第一、二阶段禁用 dsh-workplan 插件**：子 Agent 本就没有计划/派发/改判权限；阶段三的核验工具在缺规划或执行证据时会直接返回 `PHASE_GATE`。唯一保留的是遇阻上报 `dsh_workplan_escalate`（安全阀，不属于计划/执行/验证能力）。
+**关于「第一、二阶段禁用插件」的更正（2.0.2）**：这条只适用于 2026-11-05 本次优化会话，不是对所有后续会话的永久规则（2.0.1 曾把它写成产品级规则，2.0.2 已更正）。三阶段约束的是部门子 Agent 的交付证据顺序；主 Agent 在任何阶段都可以正常使用计划、派发、查询与改判工具。验证工具在缺规划或执行证据时返回 `PHASE_GATE` 并列出待补项——这是防止跳过前两阶段直接「验证通过」的门禁，不是禁用插件。遇阻上报 `dsh_workplan_escalate` 始终可用。
 
 ### 自我学习与自我迭代：把弯路变成永久记忆
 

@@ -3,7 +3,7 @@
  *
  * 锁四件事：
  *  1. 每个部门子任务的提示词都明确要求「先梳理问题 → 再形成可执行思路 →
- *     执行 → 验证」，并把「阶段一、二禁用插件，阶段三才可核验」写进去；
+ *     执行 → 验证」，并把「阶段三才可核验、缺前两阶段证据返回 PHASE_GATE」写进去；
  *  2. 完成（done）必须带 planning / execution / verification 三阶段证据，
  *     缺一段就判未完成，不能靠一句「已完成」收尾；
  *  3. 阶段三核验工具（dsh_workplan_verify）在阶段一/二返回 PHASE_GATE，
@@ -112,7 +112,7 @@ test('子 Agent 提示词包含三阶段顺序、禁止跳步与阶段三插件�
   assert.match(prompt, /完整、可执行思路/)
   assert.match(prompt, /阶段二 · 执行阶段/)
   assert.match(prompt, /阶段三 · 验证阶段/)
-  assert.match(prompt, /阶段一、二：dsh-workplan 插件禁用/)
+  assert.doesNotMatch(prompt, /插件禁用/, '2.0.2 起不得把「阶段一、二禁用插件」写成永久规则')
   assert.match(prompt, /dsh_workplan_verify/)
   assert.match(prompt, /"phases"/, '结果块模板必须包含 phases 字段')
   // 顺序要求：规划段必须出现在执行要求之前。
@@ -224,9 +224,10 @@ test('兼容边界：requirePhases=false 保留旧完成语义（历史回放/�
   assert.equal(verdict.verification, 'structured')
 })
 
-test('提示词段落本身声明了阶段一/二禁用、阶段三核验', () => {
+test('提示词段落：阶段三核验 + 缺证据 PHASE_GATE，且不再声明全局禁用', () => {
   const text = threePhasePromptLines().join('\n')
-  assert.match(text, /阶段一、二：dsh-workplan 插件禁用/)
+  assert.doesNotMatch(text, /插件禁用/, '2.0.2 起不得把「阶段一、二禁用插件」写成永久规则')
+  assert.match(text, /会因缺少前两阶段证据返回 PHASE_GATE/)
   assert.match(text, /阶段三：可以调用 dsh_workplan_verify/)
   assert.match(text, /禁止动手执行/)
 })
@@ -272,7 +273,7 @@ function runtimeFixture() {
   return { runtime, child }
 }
 
-test('阶段三核验工具：阶段一/二提交被 PHASE_GATE 拒绝（插件禁用）', async () => {
+test('阶段三核验工具：缺前两阶段证据被 PHASE_GATE 拒绝（证据门禁，不是插件禁用）', async () => {
   const { runtime, child } = runtimeFixture()
   const out = await runtime.verifyTool({ session: child }, {
     phases: {
@@ -283,7 +284,7 @@ test('阶段三核验工具：阶段一/二提交被 PHASE_GATE 拒绝（插件�
   assert.equal(out.passed, false)
   assert.equal(out.code, 'PHASE_GATE')
   assert.equal(out.phase, 'phase-1-2')
-  assert.match(String(out.error), /阶段一、二禁用/)
+  assert.match(String(out.error), /缺少前两阶段证据/)
 })
 
 test('阶段三核验工具：三阶段齐全且验证通过 → passed', async () => {
