@@ -3,7 +3,7 @@
 > **Two selling points, one line: a full ISO/IEC 15408:2026 evidence pack you can verify with 5 commands, and a one-command install with zero runtime dependencies.**
 
 [![verify](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml/badge.svg)](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml)
-[![version](https://img.shields.io/badge/version-1.13.0-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v1.13.0)
+[![version](https://img.shields.io/badge/version-2.0.4-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v2.0.4)
 
 Adds "plan first → dispatch real department subagents → watch progress in the sidebar" to **DeepSeek Harness (DSH)**. No app, no DSH source patch, no page replacement.
 
