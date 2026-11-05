@@ -80,7 +80,7 @@ The full contract — roles, data shapes, state machine, recovery, and the three
 ## Install
 
 ```bash
-dsh plugin --profile web add dsh-workplan@1.13.0
+dsh plugin --profile web add dsh-workplan@2.0.1
 ```
 
 Restart the DSH Web process (or reload the page) so the bundle is picked up.
@@ -120,8 +120,23 @@ Every number is derived from the same task state — the panel can no longer cla
 | `dsh_workplan_instruct` | The main agent answers an escalation and issues direction; if delivery fails the instruction is queued for the next activation. Ack checks at 60s/180s. |
 | `dsh_workplan_handoff` | Resolve cross-department needs: `list` / `assign` / `resolve` / `close`. Unresolved needs block delivery; when the asking row is waiting for direction, `resolve` delivers the answer straight into the child session. |
 | `dsh_workplan_followup` | Send a closing note to a direct child that was stopped by budget/timeout but already wrote its artifacts. |
+| `dsh_workplan_verify` | Child agents submit their three-phase evidence for phase-3 (verification) checking; calls from phases 1–2 return `PHASE_GATE`. Passing verification is not completion — the completion gate re-checks the same evidence. |
+| `dsh_workplan_lessons` | Read-only view of the permanent lesson memory: `list` / `search` / `stats`. Never changes plan state; used to audit what was remembered and which mistakes keep repeating. |
 
 In **plan mode** the plan is shown for review and `dispatch` is explicitly refused with a reason.
+
+## Three phases and self-learning (2.0.1)
+
+Every department agent must work in order — **planning → execution → verification** — and completion requires structured evidence for all three phases. Phases 1 and 2 must not use the dsh-workplan plugin: children have no plan/dispatch/adjudication powers, and the phase-3 verify tool rejects calls that lack planning/execution evidence with `PHASE_GATE`. The only exception is the blocker escalation channel, which is a safety valve rather than a planning/execution/verification capability.
+
+Phase 3 also requires a **retrospective** (`retrospective` inside `phases.verification`):
+
+1. `problems` — every problem met in the process (symptom + root cause);
+2. `detours` — wrong turns, rework, dead ends (empty array when genuinely none; do not invent);
+3. `resolutions` — how those problems were finally solved;
+4. `prevention` — executable "when X, first do Y" rules that stop the same mistake from happening again.
+
+A passing retrospective is appended to the **permanent lesson memory** at `~/.dsh/workplan/lessons.jsonl` (override with `DSH_WORKPLAN_LESSONS_FILE`). Before each dispatch, the most relevant lessons are ranked by department, project, keyword overlap, recurrence count and recency, then injected into the child prompt (max 8), labelled explicitly as historical data rather than new instructions. A repeated mistake increments `occurrences` and moves up the ranking instead of creating a duplicate — that is the self-iteration loop. A corrupt line is skipped instead of poisoning the whole file; the store keeps the most recent 500 records and writes atomically.
 
 ## Budgets, timeouts, resumes
 

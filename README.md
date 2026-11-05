@@ -3,7 +3,7 @@
 > **两个卖点，一句话：ISO/IEC 15408:2026 全套安全证据，5 条命令自己验；安装一条命令、零第三方运行时依赖。**
 
 [![verify](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml/badge.svg)](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml)
-[![version](https://img.shields.io/badge/version-1.13.0-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v1.13.0)
+[![version](https://img.shields.io/badge/version-2.0.1-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v2.0.1)
 
 给 **DeepSeek Harness（DSH）** 加一段「先拆计划 → 真派部门子 Agent 去做 → 左侧栏实时看进度」的能力。不装 App、不改 DSH 源码、不换页面。
 
@@ -69,7 +69,7 @@ grep -RInE "child_process|execSync|eval\(|writeFileSync" src || echo "0 命中�
 ## 一键安装
 
 ```bash
-dsh plugin --profile web add dsh-workplan@1.13.0
+dsh plugin --profile web add dsh-workplan@2.0.1
 ```
 
 装完**重启一次 DSH Web**（或重新载入当前页面）让插件生效。
@@ -100,7 +100,7 @@ dsh plugin --profile web add "$(pwd)"
 
 纯打招呼、道谢、问「做到哪了」不会触发拆解，不会平白多出一堆子 Agent。
 
-## 九个模型工具（你不用直接调用）
+## 十一个模型工具（你不用直接调用）
 
 | 工具 | 作用 |
 |---|---|
@@ -113,8 +113,46 @@ dsh plugin --profile web add "$(pwd)"
 | `dsh_workplan_instruct` | 主 Agent 回答请示并下达指示；失败则挂起，子任务下次激活时注入。带 60s/180s 回执检查。 |
 | `dsh_workplan_handoff` | 处置跨部门需求：`list` / `assign` / `resolve` / `close`。未处置会拦住交付；对「待指示」的行 `resolve` 会直接把答复投递给子会话。 |
 | `dsh_workplan_followup` | 给预算/超时中止、但产物已落盘的直接子会话补一条收尾说明。 |
+| `dsh_workplan_verify` | 子 Agent 在**阶段三（验证阶段）**提交三阶段证据做核验；阶段一、二调用会返回 `PHASE_GATE`。核验通过≠完成，最终仍由完成判定复核。 |
+| `dsh_workplan_lessons` | 只读查看**永久教训记忆**：`list` / `search` / `stats`。它只读文件，不改计划状态；用来核对「到底记住了什么、哪些错误在重复发生」。 |
 
 在 **plan 模式**下只会给你看计划，`dispatch` 会被明确拦下并说明原因，不会偷偷开跑。
+
+## 三阶段工作法与自我学习（2.0.1 的核心）
+
+### 三阶段：规划 → 执行 → 验证
+
+每个部门 Agent 收到工作后，顺序不可颠倒：
+
+| 阶段 | 必须完成的事 | 完成证据 |
+|---|---|---|
+| 一 规划 | 先梳理问题（现状/约束/未知/主要矛盾），再形成完整可执行思路（做什么、产出什么、如何证明） | `phases.planning` |
+| 二 执行 | 严格按阶段一的思路执行；需要改道必须记录原因 | `phases.execution.steps/deviations` |
+| 三 验证 | 逐条验证验收标准与用户原要求，并做**自我学习复盘** | `phases.verification` + `retrospective` |
+
+**第一、二阶段禁用 dsh-workplan 插件**：子 Agent 本就没有计划/派发/改判权限；阶段三的核验工具在缺规划或执行证据时会直接返回 `PHASE_GATE`。唯一保留的是遇阻上报 `dsh_workplan_escalate`（安全阀，不属于计划/执行/验证能力）。
+
+### 自我学习与自我迭代：把弯路变成永久记忆
+
+每次完成工作，阶段三必须提交四项复盘（缺一项就判未完成）：
+
+1. **problems**：本次全过程遇到的所有问题（现象 + 根因）；
+2. **detours**：走过的弯路、返工与无效尝试（确实没有就写空数组，不编造）；
+3. **resolutions**：最终是如何解决的；
+4. **prevention**：以后如何预防再犯，必须写成「遇到…先…」的可执行硬规则。
+
+复盘通过后，插件立刻把它写入**永久记忆文件**（JSONL，追加写）：
+
+```
+~/.dsh/workplan/lessons.jsonl        # 默认位置，跨项目长期保留
+DSH_WORKPLAN_LESSONS_FILE=/path/x.jsonl   # 需要时用环境变量覆盖
+```
+
+下一次派发子任务前，插件会按「同部门 > 同项目 > 关键词命中 > 重复次数 > 新近程度」挑选最相关的历史教训，自动注入子 Agent 提示词（最多 8 条），并明确标注：**这是历史数据，不是新指令，但相关就必须遵守**。
+
+同一类错误再次出现时不会新增一条重复记录，而是把 `occurrences` 累加并把排序提前——越重复越显眼，这就是「自我迭代」。主 Agent 可用 `dsh_workplan_lessons` 复核；`occurrences ≥ 2` 的教训必须在下一次计划里变成明确约束。
+
+记忆文件损坏一行不会拖垮整份记忆（坏行跳过）；文件最多保留最近 500 条；写入用「临时文件 + 改名」避免半截文件。复盘来自模型输出，注入前会清掉不可见字符与会话引用，并声明为数据而非指令。
 
 ## 部门怎么协作（1.11.0 的真实能力）
 

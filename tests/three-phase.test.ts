@@ -46,6 +46,12 @@ function phases(overrides: any = {}) {
       allPassed: true,
       checks: [{ criterion: 'A1', method: '同一请求连发两次', evidence: '数据库只有 1 条记录' }],
       requirementCheck: '用户原要求逐条核对：幂等、兼容旧调用方，均覆盖。',
+      retrospective: {
+        problems: ['第一次只在应用层去重，仍被并发写穿；根因是没加数据库唯一约束。'],
+        detours: ['先改了两版内存锁，都无效。'],
+        resolutions: ['改为在入口做幂等键校验 + 唯一索引兜底，连发两次验证只写一条。'],
+        prevention: ['遇到幂等需求，先确认存储层唯一约束，再谈应用层校验。'],
+      },
     },
     ...overrides,
   }

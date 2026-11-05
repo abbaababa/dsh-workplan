@@ -2,9 +2,9 @@
 
 > 这份文档回答四个问题：**谁把什么写给谁、什么时候算完成、失败后谁接手、改代码时哪些地方必须一起改。**
 >
-> 适用版本：**1.13.0**。文中每一项能力都已落到代码与测试；标注「未处理」的是明确不做、留待后续版本的范围，不要当现状。
+> 适用版本：**2.0.1**。文中每一项能力都已落到代码与测试；标注「未处理」的是明确不做、留待后续版本的范围，不要当现状。
 >
-<!-- [D-45] 本文版本与实现口径已对齐 1.13.0；核对项：权限 7 处、present 仅根会话、下游可读 artifacts、三阶段证据门禁。 -->
+<!-- [D-45] 本文版本与实现口径已对齐 2.0.1；核对项：权限 7 处、present 仅根会话、下游可读 artifacts、三阶段证据门禁、复盘永久记忆。 -->
 
 > 约定：本文只用「文件 + 符号名」定位代码（例如 `src/plan.ts#buildChildPrompt`），**不写行号**，避免代码改动后文档漂移。核对命令见 §11。
 
@@ -458,7 +458,7 @@ npm run verify
 
 ---
 
-## 13. 三阶段工作法（1.13.0，用户强制要求）
+## 13. 三阶段工作法（1.13.0 起，2.0.1 增补复盘，用户强制要求）
 
 部门 Agent 收到子任务后，必须按顺序完成三个阶段；阶段不可颠倒、不可跳过。
 
@@ -473,5 +473,7 @@ npm run verify
 唯一保留的插件通道：遇阻上报 `dsh_workplan_escalate`。它不是计划/执行/验证能力，而是安全阀；否则子 Agent 在阶段一/二受阻时只能空转或编造。
 
 核验工具：`dsh_workplan_verify` 只接受阶段三调用；缺 planning/execution 时返回 `PHASE_GATE`（插件在阶段一、二禁用）。核验通过不等于完成——结果块仍须写同一份 `phases`，由完成判定再判一次。
+
+**2.0.1 起，`phases.verification.retrospective` 也是必填**（`problems` / `detours` / `resolutions` / `prevention`，见 `src/lessons.ts#validateRetrospective`）：缺项或太薄判 `blocked/unverified`；通过后写入永久记忆 `~/.dsh/workplan/lessons.jsonl`，下次派发同类任务时自动注入最相关的历史教训。主 Agent 可用只读工具 `dsh_workplan_lessons` 复核。
 
 代码位置：提示词 `src/plan.ts#buildChildPrompt` 调用 `src/three-phase.ts#threePhasePromptLines`；校验 `src/three-phase.ts#validatePhaseEvidence` 与 `src/plan.ts#adjudicateResult`；核验工具 `src/host.ts#createVerifyTool` / `src/runtime.ts#verifySubtask`；回归 `tests/three-phase.test.ts`。

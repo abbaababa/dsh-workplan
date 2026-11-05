@@ -75,6 +75,14 @@ import {
 import type { PresentDenialVerdict, PresentDenyCode } from './plan.js'
 import { auditClarifyNeed, compactUnderstandingAudit, validatePlanContext } from './understanding.js'
 import { phaseGateFromErrors, phaseSummaryLine, validatePhaseEvidence } from './three-phase.js'
+import {
+  lessonStats,
+  rankLessons,
+  readLessons,
+  recordLesson,
+  renderLessonsBrief,
+  resolveLessonsFile,
+} from './lessons.js'
 import { computeMappingDigest, verifyMappingDigest } from './supersede-digest.js'
 import { supersedePlanRecord } from './supersede.js'
 import { createProgressWatchdog, describeError } from './watchdog.js'
@@ -828,11 +836,39 @@ function settleFromOutput(record: any, subtask: any, output: any, guard: Subtask
   const checked = checkArtifacts(verdict.artifacts, options.cwd, options.artifactExists)
   const escalated = verdict.status === 'blocked'
     && typeof verdict.question === 'string' && verdict.question.trim() !== ''
+  /*
+   * [2.0.0] 自我学习闭环的出口：完成且带复盘证据时，立刻写入永久记忆。
+   *
+   * 写入失败不改变本次判定（教训没记住是记忆层的问题，不能把已经做完的工作
+   * 判成未完成），但会把失败原因写进本条状态，避免「以为记住了其实没写」。
+   */
+  let lessonNote = ''
+  if (verdict.status === 'done' && verdict.phases?.verification?.retrospective) {
+    try {
+      const saved = recordLesson({
+        file: resolveLessonsFile(),
+        planId: String(record.plan?.planId ?? ''),
+        subtaskId: subtask.id,
+        department: String(subtask.department ?? ''),
+        title: `${subtask.id} ${subtask.title}`,
+        cwd: typeof options.cwd === 'string' ? options.cwd : '',
+        retrospective: verdict.phases.verification.retrospective,
+        now: Date.now(),
+      })
+      if (saved) {
+        lessonNote = saved.mode === 'repeated'
+          ? `已记住同类教训（第 ${saved.record.occurrences} 次，永久记忆）`
+          : '复盘已写入永久教训记忆'
+      }
+    } catch (error) {
+      lessonNote = `复盘记忆写入失败：${truncate(error instanceof Error ? error.message : String(error), 120)}`
+    }
+  }
   writeSubtaskStatus(record, subtask.id, {
     status: verdict.status,
     progress: 100,
     finishedAt: Date.now(),
-    summary: truncate(output, 3000),
+    summary: truncate(lessonNote ? `${output}\n[自我学习] ${lessonNote}` : output, 3000),
     error: verdict.error,
     verification: verdict.verification,
     acceptance: verdict.acceptance,
@@ -961,6 +997,23 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
         if (child.controller.signal.aborted) {
           throw child.controller.signal.reason ?? abortError()
         }
+        /*
+         * [2.0.0] 自我学习闭环的入口：把与本子任务最相关的历史教训注入提示词。
+         *
+         * 记忆读取失败不能影响本次派发（宁可不带教训，也不能因此不做任务），
+         * 所以整段用 try/catch 兜底；文件不存在时 renderLessonsBrief 返回空串。
+         */
+        let lessonsBrief = ''
+        try {
+          lessonsBrief = renderLessonsBrief({
+            department: subtask.department,
+            title: subtask.title,
+            objective: subtask.objective,
+            cwd: options.cwd,
+          })
+        } catch {
+          lessonsBrief = ''
+        }
         activation = await ctx.subagents.startActivation({
           provider: 'spawn',
           label: `${subtask.department}:${subtask.id} ${subtask.title}`.slice(0, 120),
@@ -993,6 +1046,7 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
                 conversationContext,
                 statuses: record.statuses,
                 previousFailure: attempt > 1 ? lastFailure : null,
+                lessonsBrief,
               }),
             }],
             parent: options.agent,
@@ -5767,6 +5821,50 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     }
   }
 
+  /**
+   * [2.0.0] 只读的「永久教训记忆」入口。
+   *
+   * 用户要求这些经验必须能被复核。主 Agent 在阶段三可以用它查：记住了什么、
+   * 哪些同类错误在重复发生、文件到底写在哪。它只读文件，不改任何计划状态。
+   */
+  async function lessonsTool(_agent: any, args: any) {
+    const parsed = isRecord(args) ? args : {}
+    const action = String(parsed.action ?? 'list')
+    const file = resolveLessonsFile()
+    try {
+      if (action === 'stats') {
+        return { ok: true, ...lessonStats(file) }
+      }
+      if (action === 'search') {
+        const query = String(parsed.query ?? '').trim()
+        const rows = query
+          ? readLessons(file).filter((item) =>
+            `${item.title} ${item.problems.join(' ')} ${item.detours.join(' ')} ${item.prevention.join(' ')}`
+              .toLowerCase()
+              .includes(query.toLowerCase()))
+          : readLessons(file)
+        const limit = Math.min(Math.max(Number(parsed.limit) || 10, 1), 50)
+        return { ok: true, file, total: rows.length, lessons: rows.slice(-limit).reverse() }
+      }
+      const department = typeof parsed.department === 'string' ? parsed.department.trim() : ''
+      const limit = Math.min(Math.max(Number(parsed.limit) || 10, 1), 50)
+      const lessons = department
+        ? readLessons(file).filter((item) => item.department === department)
+        : readLessons(file)
+      const ranked = department
+        ? rankLessons(lessons, { department, limit, now: Date.now() })
+        : lessons.slice(-limit).reverse()
+      return { ok: true, file, total: lessons.length, lessons: ranked }
+    } catch (error) {
+      return {
+        ok: false,
+        file,
+        error: truncate(error instanceof Error ? error.message : String(error), 300),
+        lessons: [],
+      }
+    }
+  }
+
   function dispose() {
     // [1.10.4] 定时器不能吊住进程，也不能在记录清空后复活一个已销毁的计划。
     for (const record of state.records.values()) clearAutoResumeTimer(record, 'dispose')
@@ -5790,6 +5888,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     followupTool,
     escalateTool,
     verifyTool: verifySubtask,
+    lessonsTool,
     instructTool,
     handoffTool,
     replanPlan,

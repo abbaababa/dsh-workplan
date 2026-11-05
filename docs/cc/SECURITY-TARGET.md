@@ -74,8 +74,9 @@
 | `dsh_workplan_instruct` | 模型工具 | 双向 | 仅对「待指示」行下发主 Agent 决定并恢复执行 |
 | `dsh_workplan_handoff` | 模型工具 | 双向 | 跨部门需求处置；仅根会话可用 |
 | `dsh_workplan_verify` | 模型工具 | 双向 | 子 Agent 在阶段三提交三阶段证据做核验；阶段一/二返回 `PHASE_GATE` |
+| `dsh_workplan_lessons` | 模型工具 | 读出 | 只读查看永久教训记忆（list/search/stats）；不写计划状态 |
 
-（1.9–1.13 新增 6 个工具（含 1.13.0 的三阶段核验）与取代/重规划能力；接口参数与失败行为完整枚举见 `docs/cc/ADV-FSP-FUNCTIONAL-SPEC.md`。）
+（1.9–2.0 新增 7 个工具（含 1.13.0 的三阶段核验与 2.0.1 的教训记忆）与取代/重规划能力；接口参数与失败行为完整枚举见 `docs/cc/ADV-FSP-FUNCTIONAL-SPEC.md`。）
 
 **不在 TOE 内**：DSH 本体（身份认证、会话存储、模型推理）、Node.js 运行时、操作系统、浏览器。
 

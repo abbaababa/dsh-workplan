@@ -43,6 +43,12 @@ function phasesFixture(overrides: any = {}) {
       allPassed: true,
       checks: [{ criterion: '接口可用', method: 'curl /health', evidence: 'HTTP 200' }],
       requirementCheck: '用户原要求已逐条核对，无遗漏。',
+      retrospective: {
+        problems: ['一开始误以为接口不需要鉴权，探测返回 401；根因是没先读鉴权中间件。'],
+        detours: ['直接 curl 生产地址，浪费两轮排查。'],
+        resolutions: ['先读鉴权中间件确认 token 头，再带 token 请求 /health。'],
+        prevention: ['遇到接口探测，先读鉴权实现再发请求。'],
+      },
     },
     ...overrides,
   }

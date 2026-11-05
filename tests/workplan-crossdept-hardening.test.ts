@@ -72,6 +72,12 @@ function phasesFixture() {
         { criterion: 'A2', method: '核对行数与 sha256', evidence: 'rows=1200 sha256=abc' },
       ],
       requirementCheck: '两条验收标准均已覆盖。',
+      retrospective: {
+        problems: ['第一次取数时字段名写错，脚本静默产出 0 行；根因是没有先核对样本字段。'],
+        detours: ['先写了完整脚本才发现字段不匹配，返工一次。'],
+        resolutions: ['先抽样读 3 行确认字段，再改脚本重跑并核对行数与 sha256。'],
+        prevention: ['遇到取数任务，先用 3 行样本确认字段，再写脚本。'],
+      },
     },
   }
 }

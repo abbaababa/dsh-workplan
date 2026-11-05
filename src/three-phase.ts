@@ -19,6 +19,8 @@
  * 回放日志都能看到每个部门到底梳理了什么、按什么思路做、验证了什么。
  */
 
+import { type Retrospective, validateRetrospective } from './lessons.js'
+
 /** 三阶段顺序不可颠倒；这里也是结果块里 `phases` 的键名。 */
 export const THREE_PHASE_IDS = Object.freeze(['planning', 'execution', 'verification'] as const)
 export const THREE_PHASE_VERSION = 1
@@ -55,6 +57,14 @@ export type VerificationPhase = {
   allPassed: boolean
   checks: PhaseCheck[]
   requirementCheck: string
+  /**
+   * [2.0.0] 阶段三的自我学习复盘（用户 2026-11-05 强制要求）。
+   *
+   * 三阶段仍是「规划 → 执行 → 验证」三个阶段：复盘不是第四个阶段，而是
+   * 验证阶段收尾的必填项 —— 完成之后、报 done 之前，必须把本次全过程遇到的
+   * 问题、弯路、解决方式与防再犯规则说清楚，并由 lessons.ts 落盘成永久记忆。
+   */
+  retrospective: Retrospective
 }
 
 export type ThreePhases = {
@@ -199,12 +209,15 @@ export function validatePhaseEvidence(value: any, expectedAcceptance: any = []):
   }
   if (errors.some((item) => item.startsWith('phases.execution'))) failedPhase ||= 'execution'
 
+  const retroCheck = validateRetrospective(verificationRaw?.retrospective)
+  for (const error of retroCheck.errors) fail('verification', error)
   const verification: VerificationPhase = {
     allPassed: verificationRaw?.allPassed === true,
     checks: [],
     requirementCheck: typeof verificationRaw?.requirementCheck === 'string'
       ? verificationRaw.requirementCheck.trim().slice(0, MAX_PHASE_ITEM_CHARS)
       : '',
+    retrospective: retroCheck.retrospective,
   }
   if (verificationRaw && verificationRaw.allPassed !== true) {
     fail('verification', 'phases.verification.allPassed 必须为 true：只要有一条验收标准未通过或未验证，就不得报 done')
@@ -289,7 +302,10 @@ export function phaseSummaryLine(phases: ThreePhases): string {
   return [
     `阶段一 规划（问题梳理 ${phases.planning.problemAnalysis.length} 条 / 可执行思路 ${phases.planning.approach.length} 步）`,
     `阶段二 执行（${phases.execution.steps.length} 步${deviations ? ` / 偏离 ${deviations} 处` : ''}）`,
-    `阶段三 验证（${phases.verification.checks.length} 项${phases.verification.allPassed ? '，全部通过' : '，未全部通过'}）`,
+    `阶段三 验证（${phases.verification.checks.length} 项${phases.verification.allPassed ? '，全部通过' : '，未全部通过'}；`
+      + `复盘 ${phases.verification.retrospective.problems.length} 个问题 / `
+      + `${phases.verification.retrospective.detours.length} 条弯路 / `
+      + `${phases.verification.retrospective.prevention.length} 条防再犯规则）`,
   ].join('；')
 }
 
@@ -311,6 +327,13 @@ export function threePhasePromptLines(): string[] {
     '  严格按阶段一整理出的思路执行。出现新事实需要偏离时，必须记录偏离原因、证据与调整后的做法，不得静默改道。',
     '【阶段三 · 验证阶段】',
     '  执行完成后逐条验证验收标准与用户原要求：每条都要有可复核的证据（命令输出/文件/引用）；验证未通过不得报 done，无法确认写 unverified。',
+    '【阶段三收尾 · 自我学习复盘（强制）】',
+    '  报 done 之前必须把 phases.verification.retrospective 写全，四项缺一不可：',
+    '  1) problems：本次全过程遇到的所有问题（现象 + 根因），至少 1 条；',
+    '  2) detours：走过的弯路、返工与无效尝试（确实没有就写空数组 []，不要编造）；',
+    '  3) resolutions：最终是如何解决上述问题的，至少 1 条，可与 problems 一一对应；',
+    '  4) prevention：以后如何预防再犯，至少 1 条，必须写成「遇到…先…」的可执行硬规则。',
+    '  插件会在完成判定时复核这四项，并在通过后把复盘写入永久记忆文件；下次派发同类任务时，历史教训会自动出现在提示词里。',
     '插件使用规则（严格执行）：',
     '  - 阶段一、二：dsh-workplan 插件禁用。不得调用任何 dsh_workplan_* 工具（派发、查询、改判、验证等一律不用）；唯一例外是遇阻时的 dsh_workplan_escalate 安全上报通道，它不是计划/执行/验证能力。',
     '  - 阶段三：可以调用 dsh_workplan_verify 让插件做最终核验：提交 planning / execution / verification 三阶段证据，插件返回 passed 或仍需补齐的 gaps；未通过先修复再回报。',

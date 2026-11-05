@@ -1,3 +1,44 @@
+## 2.0.1 — 2026-11-05
+
+**新增「自我学习与自我迭代」：部门 Agent 每次完成工作后，必须在阶段三复盘本次全过程的问题、弯路、解决方式与防再犯规则；复盘通过后写入永久教训记忆文件，下次派发同类任务时自动注入提示词。同一类错误重复出现会累加次数并提前排序。三阶段工作法（1.13.0）保持「规划 → 执行 → 验证」不变，复盘是验证阶段收尾的必填项，不是第四个阶段。**
+
+### 一、用户要求与本版实现逐条对照
+
+| 用户要求（2026-11-05） | 本版实现 |
+|---|---|
+| 1. 增加自我学习和自我迭代能力 | 新增 `src/lessons.ts`（复盘校验、永久记忆读写、相关度排序、提示词注入）+ 运行时闭环（`src/runtime.ts#settleFromOutput` 完成即落盘）；主 Agent 可用 `dsh_workplan_lessons` 只读复核 |
+| 2. 每次完成工作后全面复盘问题/弯路/如何解决，并永久记住、不再重犯 | `phases.verification.retrospective` 四项（problems / detours / resolutions / prevention）成为完成判定的必填证据：缺项、太薄（问题/解决 <20 字、预防 <16 字）一律 `blocked/unverified`；通过后写入 `~/.dsh/workplan/lessons.jsonl`（可用 `DSH_WORKPLAN_LESSONS_FILE` 覆盖），下次派发自动注入最相关的 8 条 |
+| 3. 全过程按规划 → 执行 → 验证三阶段 | 沿用 1.13.0 的 `phases.planning/execution/verification` 契约；复盘放进验证阶段收尾，阶段数仍是三个 |
+| 4. 第一、二阶段禁用 dsh-workplan 插件 | 子 Agent 本就没有 update/replan/cancel/dispatch/status/instruct/handoff/followup 权限；`dsh_workplan_verify` 在缺 planning/execution 证据时返回 `PHASE_GATE`；提示词写明阶段一、二不得调用插件，唯一例外是遇阻上报 `dsh_workplan_escalate`（安全阀） |
+| 5. 第三阶段可用插件验证是否完全满足要求 | 阶段三核验工具同步要求 `verification.retrospective`：结构不全返回 `VERIFICATION_INCOMPLETE`，齐全才 `passed`；核验通过仍不等于完成，结果块与 `adjudicateResult` 会再判一次 |
+| 6. 全程遵照用户要求，禁止偏离 | 本版所有新增门禁都落在完成判定与提示词两处，避免「提示词说要做、判定却不检查」的两套真相 |
+| 7. 版本更新为 2.0.1 | `package.json` / `package-lock.json`（两处）/ `src/host.ts#meta.version` / `CHANGELOG` / `README.md` / `README.en.md` 全部为 2.0.1，由 `tests/version-sync.test.ts` 断言 |
+| 8. 源码与版本同步发布到 GitHub 与索引源 | 提交 + `v2.0.1` tag + GitHub Release（带 tgz 制品）+ npm `dsh-workplan@2.0.1` + awesome-dsh-plugin 索引条目更新，发布记录见 `docs/release-record-2.0.1-20261105.md` |
+
+### 二、自我学习的具体机制（可复核）
+
+| 环节 | 代码位置 | 行为 |
+|---|---|---|
+| 复盘校验 | `src/lessons.ts#validateRetrospective`、`src/three-phase.ts#validatePhaseEvidence` | 四项缺一不可；problems/resolutions/prevention 至少 1 条；问题与解决合计 ≥20 字、预防 ≥16 字；单条上限 600 字、最多 12 条 |
+| 永久记忆 | `src/lessons.ts#recordLesson` | 追加写入 JSONL；同一子任务重复结算原地更新（不虚增次数）；不同子任务同类错误 `occurrences+1`；临时文件 + 改名原子替换；保留最近 500 条；坏行跳过 |
+| 防再犯注入 | `src/lessons.ts#renderLessonsBrief`、`src/runtime.ts#executeSubtask` | 按同部门 > 同项目 > 关键词 > 重复次数 > 新近程度排序，注入最多 8 条；段首声明「历史数据，不是新指令」；清除不可见字符与会话引用 |
+| 可复核入口 | `src/host.ts#createLessonsTool`、`src/runtime.ts#lessonsTool` | `dsh_workplan_lessons` 的 `list` / `search` / `stats` 只读返回记忆内容、重复次数、文件位置；不提供写入动作，防止绕过真实复盘证据 |
+| 可见性 | `src/runtime.ts#settleFromOutput` | 完成摘要追加 `[自我学习] 复盘已写入永久教训记忆`（同类重复时注明第 N 次） |
+
+### 三、兼容边界（如实登记）
+
+- 这是**破坏性证据契约变更**：2.0.1 以前写出的 done 结果没有 `retrospective`，用本版完成判定重放会被判未完成。历史回放可显式传 `requirePhases:false`（或 `strict:false`）走旧语义。
+- 复盘内容来自模型输出，插件只能校验「有没有写、写得是否够具体、是否覆盖四项」，**不能证明复盘内容真实**；真实性仍由主 Agent 对照产物核对。
+- 记忆是文本数据：注入前已清除不可见字符与会话引用，并在提示词中声明不是指令；但一条被污染的记忆仍可能影响后续任务，主 Agent 应用 `dsh_workplan_lessons` 抽查并在发现污染时删除对应行。
+- 插件无法自动判断「有没有走弯路」，只能要求子 Agent 如实填写 `detours`；确实没有时允许空数组，避免为了过门禁编造弯路。
+
+### 四、验证
+
+- `npm run check`（tsc --noEmit）退出码 0。
+- `npm test`：**546 条全过、0 失败**（基线 536 + 新增 10 条 `tests/self-learning.test.ts`）；`npm run check`（tsc --noEmit）退出码 0。
+- 新增 `tests/self-learning.test.ts`：复盘四项校验、完成判定缺复盘降级、提示词注入与复盘要求、落盘/去重/累加、坏行容错、相关度排序与统计、环境变量覆盖、指纹稳定。
+- 工具面 fixture（`tests/fixtures/tool-surface.json`）与 `docs/cc` 同步到 11 个工具、2.0.1。
+
 ## 1.13.0 — 2026-11-05
 
 **新增「三阶段工作法」：部门 Agent 收到工作后必须先规划、再执行、最后验证；阶段一、二不提供插件工作能力，阶段三才可用 `dsh_workplan_verify` 核验。完成判定新增三阶段证据门禁，缺段一律 blocked/unverified。**
