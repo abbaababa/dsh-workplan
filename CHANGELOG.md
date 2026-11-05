@@ -1,3 +1,39 @@
+## 2.0.3 — 2026-11-05
+
+**修复「官方 `/goal` 目标指令会让 dsh-workplan 自动分解永远不触发」的真实缺陷：goal 第一轮现在作为合法任务入口参与自动分解；已有进行中计划时 goal 轮次绝不抢跑。**
+
+### 一、问题与证据链
+
+用户 2026-11-05 报告：使用官方 DeepSeek Harness 的「目标 goal」指令后，dsh-workplan 的自动任务分解似乎不会触发。核查代码后确认这不是猜测，而是一条可复现的契约缺口：
+
+| # | 事实 | 证据位置 |
+|---|---|---|
+| 1 | `/goal <objective>` 命令只写 goal 领域状态，**不产生** `user/message` | `@deepseek-ai/dsh-command-goal` 的 `create` 分支 |
+| 2 | goal 的自动续跑轮次由 round driver 以 `source.kind = "goal"` 的 user 消息送达，文本形如 `<goal_round>Objective: "…"</goal_round>` | `@deepseek-ai/dsh-goal-round-driver/lib/index.js` 的 `renderGoalRoundPrompt` 与 `createUserMessage` |
+| 3 | 2.0.2 的 `humanMessages()` 只接受 `source.kind === 'user'` 或未标记的消息 | `src/runtime.ts#humanMessages` |
+| 4 | `maybePlan()` 在 `human.length === 0` 时直接返回，不进入规划 | `src/runtime.ts#maybePlan` |
+
+1+2+3+4 合并后的结论：如果任务是通过 `/goal` 设置的，整条 goal 生命周期内都不存在「人类消息」，插件永远不会自动分解该任务。人工消息路径（普通输入框任务）不受影响。
+
+### 二、改了什么
+
+- 新增 `goalRoundPlanningTask(ctx, payload, existing)`：只接受 `source.kind === 'goal'` 且 `round === 1` 的消息作为自动分解入口。
+- `maybePlan()` 在没有任何人工消息时改走该入口；任务文本优先级为：`goals` 领域服务的结构化 `objective` → 从官方 `<goal_round>` 信封解析 JSON objective → 整条消息原文。
+- 防抢跑：会话里存在进行中计划（`executing` / `paused` / `pending` / `verification` 等）时，goal 轮次直接放行不建计划；`done` / `ended` / `cancelled` / `superseded` / `degraded` / `clarify` 属于历史记录，不拦新任务。
+- 人工消息路径、`humanMessages()` 的既有语义、执行中变更（changeRequest）与 replan 规则全部保持不变。
+
+### 三、验证
+
+- 新增 `tests/goal-round-planning.test.ts`：7 条断言覆盖 round 1/round 2、goals 服务优先、信封解析、无 objective 兜底、进行中计划防抢跑、历史终态放行。
+- `npm test`：553 条用例全过；`npm run check`（tsc --noEmit）退出码 0。
+- `npm run build` 重新生成 `lib/`、`dist/`、`client.js`，与 `src/` 同步。
+
+### 四、发布
+
+- npm：`dsh-workplan@2.0.3`
+- GitHub Release：`v2.0.3`，附 `dsh-workplan-2.0.3.tgz` 制品
+- 索引源（dsh-plugin-catalog 链路）：条目 tarball 指向 `v2.0.3` Release，等待上游 CI 生成 catalog
+
 ## 2.0.2 — 2026-11-05
 
 **更正「第一、二阶段禁用 dsh-workplan 插件」的适用范围：这条只适用于 2026-11-05 本次优化会话，不是对所有后续会话的永久产品规则。2.0.2 起，提示词、工具描述、README 与协作文档不再声明全局禁用；三阶段工作法与「验证工具缺前两阶段证据返回 PHASE_GATE」的证据门禁保持不变。**
