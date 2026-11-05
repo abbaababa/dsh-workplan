@@ -5289,6 +5289,53 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
          * 是 serial 事件，抛错 ⇒ 该回合以 error 收尾 ⇒ runner 走 fail()：
          * 不打印正文、非零退出。交互式会话维持原样（只 steer，不抛错）。
          */
+        /*
+         * [2.0.5] U1=B：交互式会话放行，但必须留痕。
+         *
+         * 旧行为是 `return` 了事——用户看到回合正常结束，却没有任何地方写着
+         * 「这个回合其实是没通过门禁被放出来的」。B 方案不动「不硬拦」这个
+         * 决定，只把放行本身记成一件事：
+         *   1. 记录收进 record.releasedIncomplete（durable，刷新后仍在）；
+         *   2. 往会话追加一条 notice，用户当场能看见；
+         *   3. 日志留一行，便于事后对时间线。
+         * 三处都写同一组数字，避免「面板说 8/8、通知说 5/8」这种二次矛盾。
+         */
+        if (!failClosedActive) {
+          const stuck = derivePlanSnapshot(record.statuses)
+          const released = (stuck.statuses ?? [])
+            .filter((item: any) => item.status !== 'done')
+            .map((item: any) => String(item.subtaskId))
+          record.releasedIncomplete = {
+            turn,
+            at: Date.now(),
+            done: stuck.stats.done,
+            total: stuck.stats.total,
+            remaining: released,
+          }
+          ctx.logger?.warn?.(
+            `dsh-workplan: 回合 ${turn} 连续 ${book.count} 次未通过交付就绪，按 B 方案放行但留痕：`
+            + `${stuck.stats.done}/${stuck.stats.total}，未完成 ${released.join(', ') || '无'}`,
+          )
+          try {
+            session.append('user/message', makeUserMessage(
+              [
+                `⚠️ 本轮未通过交付就绪检查，已按「放行但留痕」结束（计划 ${record.plan.planId}）`,
+                `进度 ${stuck.stats.done}/${stuck.stats.total}；未完成：${released.join(', ') || '无'}`,
+                '本回合的内容不是最终交付；产物若已在盘上，下一回合核验后仍可交付。',
+              ].join('\n'),
+              {
+                kind: 'workplan-release',
+                form: 'notice',
+                summary: `未就绪放行 ${stuck.stats.done}/${stuck.stats.total}`,
+              },
+            ), { surfaceOp: 'append' })
+          } catch (error) {
+            ctx.logger?.warn?.(
+              `dsh-workplan: 放行留痕写入失败：${error instanceof Error ? error.message : String(error)}`,
+            )
+          }
+          return
+        }
         if (failClosedActive) {
           const stuck = derivePlanSnapshot(record.statuses)
           const remaining = (stuck.statuses ?? [])
