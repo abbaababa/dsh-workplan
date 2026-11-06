@@ -169,6 +169,8 @@ function asObject(value: any) {
 
 export type WorkplanConfig = {
   cwd?: string
+  /** [2.1.3] 单次规划器调用上限（毫秒），亦可用 DSH_WORKPLAN_PLANNER_TIMEOUT_MS。 */
+  plannerTimeoutMs?: number
   childTimeoutMs?: number
   idleTimeoutMs?: number
   totalTimeoutMs?: number
@@ -1341,6 +1343,7 @@ export function apply(ctx: any, config: WorkplanConfig = {}) {
       buildHash: LOADED_BUILD.buildHash,
     },
     cwd: typeof config.cwd === 'string' ? config.cwd : undefined,
+    plannerTimeoutMs: numericSetting(config.plannerTimeoutMs, 'DSH_WORKPLAN_PLANNER_TIMEOUT_MS'),
     childTimeoutMs: numericSetting(config.childTimeoutMs, 'DSH_WORKPLAN_CHILD_TIMEOUT_MS'),
     idleTimeoutMs: numericSetting(config.idleTimeoutMs, 'DSH_WORKPLAN_IDLE_TIMEOUT_MS'),
     totalTimeoutMs: numericSetting(config.totalTimeoutMs, 'DSH_WORKPLAN_TOTAL_TIMEOUT_MS'),

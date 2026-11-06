@@ -174,6 +174,15 @@ function readinessOf(record: any, snapshot?: any) {
 
 export const PLANNER_TIMEOUT_MS = 300000
 /**
+ * Wall-clock ceiling for ONE planner attempt (a single LLM stream).
+ *
+ * 2.1.1 把固定 120s 提到 300s，只是推迟了超时，没解决「单次调用被固定超时
+ * 卡死」的结构性问题。2.1.3 起改为可配置：DSH_WORKPLAN_PLANNER_TIMEOUT_MS
+ * （毫秒，>0），未配置时回落到这里的默认值。这样复杂任务可以按需放宽，
+ * 而不必改代码重新发布。
+ */
+export const PLANNER_IDLE_TIMEOUT_MS = 90000
+/**
  * Absolute ceiling for one child execution.
  *
  * 300 000 ms used to be the *only* limit, and because it was purely a wall
@@ -433,6 +442,7 @@ function contextGuardStrict() {
 
 async function runPlanner(ctx: any, options: any) {
   const { taskText, cwd, sessionId, modelSelection, signal, conversationContext = '', budget = {}, sourceMessageIds = [] } = options
+  const plannerTimeoutMs = Number(options.plannerTimeoutMs ?? PLANNER_TIMEOUT_MS)
   let lastErrors: string[] = []
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     if (signal.aborted) throw abortError()
@@ -441,7 +451,7 @@ async function runPlanner(ctx: any, options: any) {
     signal.addEventListener('abort', onAbort, { once: true })
     const timeout = setTimeout(() => {
       controller.abort(new PlanError('规划器超时', 'PLANNER_TIMEOUT'))
-    }, PLANNER_TIMEOUT_MS)
+    }, plannerTimeoutMs)
     try {
       let prompt = buildPlannerPrompt(taskText, cwd, conversationContext, budget)
       if (lastErrors.length > 0) {
@@ -2935,6 +2945,12 @@ function respondJson(res: any, status: any, payload: any) {
 
 export type WorkplanRuntimeOptions = {
   cwd?: string
+  /**
+   * [2.1.3] 单次规划器调用的墙钟上限（毫秒）。来自
+   * `DSH_WORKPLAN_PLANNER_TIMEOUT_MS` 或显式配置；缺省回落到
+   * `PLANNER_TIMEOUT_MS`。复杂任务（长上下文 / 多子任务 JSON）可按需放宽。
+   */
+  plannerTimeoutMs?: number
   /** Absolute ceiling per child execution, clamped by `normaliseChildTimeout`. */
   childTimeoutMs?: number
   /** No-progress window per child execution, clamped by `normaliseIdleTimeout`. */
@@ -6307,6 +6323,7 @@ async function maybePlan(ctx: any, state: any, payload: any, downstream: any, op
       sessionId: session.id,
       modelSelection,
       signal: payload.signal,
+      plannerTimeoutMs: Number(options?.limits?.plannerTimeoutMs ?? options?.plannerTimeoutMs ?? PLANNER_TIMEOUT_MS),
       conversationContext,
       sourceMessageIds: human.map((message: any) => message.id).filter((id: any) => typeof id === 'string'),
       /*
