@@ -172,7 +172,7 @@ function readinessOf(record: any, snapshot?: any) {
   })
 }
 
-export const PLANNER_TIMEOUT_MS = 120000
+export const PLANNER_TIMEOUT_MS = 300000
 /**
  * Absolute ceiling for one child execution.
  *
@@ -486,6 +486,12 @@ async function runPlanner(ctx: any, options: any) {
       }
       lastErrors = validated.errors ?? []
     } catch (error) {
+      // 规划器自身的墙钟超时：LLM 层会把 abort 掩码成泛化的
+      // "DeepSeek Messages request aborted"，丢失真实原因。这里优先识别
+      // PLANNER_TIMEOUT，抛出明确错误，避免误报成“偶发中断”。
+      if (controller.signal.aborted && (controller.signal.reason as any)?.code === 'PLANNER_TIMEOUT') {
+        throw new PlanError('规划器超时：任务分解未在时限内完成，请缩短任务文本或提高 PLANNER_TIMEOUT_MS', 'PLANNER_TIMEOUT')
+      }
       if (signal.aborted || (controller.signal.aborted && (controller.signal.reason as any)?.code === 'ABORTED')) {
         throw abortError()
       }
