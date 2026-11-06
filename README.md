@@ -3,7 +3,7 @@
 > **两个卖点，一句话：ISO/IEC 15408:2026 全套安全证据，5 条命令自己验；安装一条命令、零第三方运行时依赖。**
 
 [![verify](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml/badge.svg)](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml)
-[![version](https://img.shields.io/badge/version-2.1.1-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v2.1.1)
+[![version](https://img.shields.io/badge/version-2.1.2-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v2.1.2)
 
 给 **DeepSeek Harness（DSH）** 加一段「先拆计划 → 真派部门子 Agent 去做 → 左侧栏实时看进度」的能力。不装 App、不改 DSH 源码、不换页面。
 
@@ -69,7 +69,7 @@ grep -RInE "child_process|execSync|eval\(|writeFileSync" src || echo "0 命中�
 ## 一键安装
 
 ```bash
-dsh plugin --profile web add dsh-workplan@2.1.1
+dsh plugin --profile web add dsh-workplan@2.1.2
 ```
 
 装完**重启一次 DSH Web**（或重新载入当前页面）让插件生效。
