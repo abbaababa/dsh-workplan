@@ -1,6 +1,8 @@
 # 安全操作与准备程序（AGD_OPS.1 / AGD_PRE.1 对齐）／ Secure Operation & Preparation
 
 > 对象：dsh-workplan v1.12.0 ｜ 日期：2026-11-03 ｜ 撰写：T5 ｜ 性质：公开自评估文档，不宣称 CC 认证。
+>
+> **版本说明（2026-11-06 补记）**：本文是 v1.12.0 时点的评估快照，正文里的版本号与实测数字都属于那次评估，不改写历史；当前发布版本、下载校验值与变更记录以 README 徽章、CHANGELOG 和 GitHub Release 页为准。
 
 ## 0. 覆盖的差距编号
 
@@ -13,7 +15,7 @@ G-11（安全相关操作不成文）、G-12（安装缺完整性校验步骤）
 ```bash
 # 1) 确认包来源是官方 npm 注册表与最新版本号
 npm view dsh-workplan version dist.tarball
-# 期望：版本为 README 宣称的最新版（当前 1.12.0），tarball 域名为 registry.npmjs.org
+# 期望：输出与 README 徽章一致的最新版本号，tarball 域名为 registry.npmjs.org
 
 # 2) 下载后校验完整性（sha512 由 npm 提供；发布包 sha256 见 GitHub Release 页附件）
 npm pack dsh-workplan --pack-destination /tmp && shasum -a 256 /tmp/dsh-workplan-*.tgz

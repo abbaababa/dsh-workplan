@@ -1066,6 +1066,17 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
         code: 'COMM_FORMAT_REJECTED',
         message: rejectedRow.error,
       }
+    } else if (record.commFormatRejections && typeof record.commFormatRejections === 'object') {
+      /*
+       * [2.1.0] 续跑路径：受阻行已被 `resetBlockedStatuses` 重置，退回原因
+       * 保存在本轮的 `commFormatRejections` 里（见 dispatchPlan 的重置前置抄写）。
+       * 消费一次即删，避免同一条退回通知被后续任意一次重试重复带上。
+       */
+      const stored = record.commFormatRejections[String(subtask.id)]
+      if (typeof stored === 'string' && stored.trim() !== '') {
+        lastFailure = { attempt: 1, code: 'COMM_FORMAT_REJECTED', message: stored }
+        delete record.commFormatRejections[String(subtask.id)]
+      }
     }
   }
   /*
@@ -1803,7 +1814,29 @@ export async function dispatchPlan(ctx: any, record: any, options: any) {
      */
     const repairing = record.phase === 'blocked'
     if (repairing) record.resumeCount = Number(record.resumeCount ?? 0) + 1
+    /*
+     * [2.1.0] 格式退回通知必须先抄下来，再重置受阻行。
+     *
+     * 用户 2026-11-06 的要求是「不符合要求立刻退回，通知其重新检查格式」。
+     * `resetBlockedStatuses` 会把受阻行清成待跑（blockedKind / error 一并清掉），
+     * 于是 executeSubtask 再也看不到「上一次是格式退回」，退回通知永远送不到
+     * 部门人员——退回就只剩状态行上一个记号。这里在重置前把退回原因按子任务
+     * 抄进本轮记录，由 executeSubtask 消费并随提示词发回；重置后这条信息仍
+     * 生效于下一次激活，消费一次即删，不会污染后续无关重试。
+     */
+    const rejectedForRedo: Array<[string, string]> = []
+    for (const row of Array.isArray(record.statuses) ? record.statuses : []) {
+      if (row?.blockedKind === 'comm-format' && typeof row?.error === 'string' && row.error.trim() !== '') {
+        rejectedForRedo.push([String(row.subtaskId), row.error])
+      }
+    }
     record.statuses = resetBlockedStatuses(record.statuses)
+    if (rejectedForRedo.length > 0) {
+      record.commFormatRejections = {
+        ...(record.commFormatRejections && typeof record.commFormatRejections === 'object' ? record.commFormatRejections : {}),
+        ...Object.fromEntries(rejectedForRedo),
+      }
+    }
     // A resume produces a new durable outcome; without clearing this flag the
     // second result message was never written and a page refresh replayed the
     // stale blocked state.

@@ -1,3 +1,39 @@
+## 2.1.1 — 2026-11-06
+
+**修复 2.1.0 的三处「说到了但没做到」：格式退回通知在续跑时送不到部门人员、中文 README 的安装命令仍指旧版本、安全文档里有一句「当前 1.12.0」的错误陈述。**
+
+### 一、退回通知为什么没送到（根因）
+
+用户要求是「结果不符合格式立刻退回，通知其重新检查格式」。2.1.0 把退回原因写进了状态行（`blockedKind:'comm-format'` + `error`），但续跑路径的顺序错了：
+
+1. 计划被判 `blocked` 后再次派发，`dispatchPlan` 先调用 `resetBlockedStatuses`，把受阻行连同 `blockedKind` / `error` 一起清成待跑；
+2. `executeSubtask` 随后才去读「这一行上次是不是格式退回」，此时信息已经被清掉；
+3. 结果：退回只留下一个状态记号，子 Agent 重跑时看到的提示词与第一次完全一样（实测两次提示词长度都是 4374 字符），只能把同样的格式错误再交一遍。
+
+修复（`src/runtime.ts`）：
+
+- `dispatchPlan` 在 `resetBlockedStatuses` **之前**扫出 `blockedKind === 'comm-format'` 的行，把退回原因抄进 `record.commFormatRejections`；
+- `executeSubtask` 在行内 `blockedKind` 已被清掉时改读这份记录，作为 `COMM_FORMAT_REJECTED` 的上次失败原因带给子提示词；
+- 消费一次即删，同一条退回通知不会被后续无关重试重复带上。
+
+修复后实测：第 2 次激活的提示词多出「上一次尝试失败」段，包含失败类型 `COMM_FORMAT_REJECTED` 与逐条不合规项（4374 → 4584 字符）。
+
+### 二、另外两处修正
+
+- `README.zh.md:72` 的安装命令仍是 `dsh-workplan@1.12.3`，而同文件徽章已是新版本——用户会照着装错版本。已改为 `dsh-workplan@2.1.1`。（`tests/version-sync.test.ts` 只校验 `README.md` 与 `README.en.md`，所以这个缺口一直没被测出来。）
+- `docs/cc/AGD-OPS-SECURE-OPERATION.md` 的安装校验步骤写着「当前 1.12.0」，是唯一一处面向用户的过期「当前版本」陈述。已改为版本中立表述，并在文首补一条带日期的版本说明：正文其余 1.12.0 都是那次评估的历史快照，不改写历史。
+
+### 三、新增验证
+
+- 新增 `tests/workplan-comm-format-e2e.test.ts`（2 条）：用真实运行时 + 假子会话跑完整链路——不合规结果判 `blocked/comm-format` 且不计完成；修正后同一子任务可判 `done`；**并断言第 2 次激活的提示词确实带「上一次尝试失败」段、失败类型与逐条不合规项**（把「通知」环节钉成回归用例）。
+- `npm run check`（tsc --noEmit）退出码 0。
+- `npm test`：580 条用例，pass 580 / fail 0。
+
+### 四、边界
+
+- 修复只影响「因格式不合规被退回」的行；超时、no-ack、escalated 等其它受阻原因的通知路径不变。
+- `commFormatRejections` 是单轮内的传递载体，不写进会话事件；跨轮重跑依赖状态行上的 `blockedKind/error`，二者仍在结果消息里原样保留。
+
 ## 2.1.0 — 2026-11-06
 
 **建立主 Agent 与部门人员之间的统一沟通交流格式契约（下发—自检—核验—退回闭环），并保留 2.0.5 草案的规划器 JSON 结构修复。**
