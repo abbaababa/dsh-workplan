@@ -142,12 +142,20 @@ test('[1.11.0] 兼容档 strict=false 仍按 1.10.6 解释无证据块', () => {
   assert.equal(verdict.verification, 'legacy')
 })
 
-test('[1.11.0] C-19：验收自称 pass 但没有证据 → 降级 unverified', () => {
+test('[2.1.0] C-19 修订：验收自称 pass 但没有证据 → 按沟通格式契约 F4 退回', () => {
+  /*
+   * 1.11.0 的语义是「降级 unverified 但仍算 done，交给交付门禁事后拦」；
+   * 用户 2026-11-06 的沟通格式机制把处理前移为「立刻退回重交」：
+   * pass 必须带证据（F4），空证据回执不再以 done 入档。降级逻辑保留，
+   * 退回通知里仍能看到被降级的验收项。
+   */
   const verdict = adjudicateResult({
     output: block({ status: 'done', phases: phasesFixture(), acceptance: [{ criterion: '测试通过', result: 'pass' }] }),
   })
-  assert.equal(verdict.status, 'done')
+  assert.equal(verdict.status, 'blocked')
   assert.equal(verdict.verification, 'unverified')
+  assert.equal(verdict.blockedKind, 'comm-format')
+  assert.match(String(verdict.error), /F4/)
   assert.equal(verdict.acceptance[0].result, 'unverified')
   assert.equal(verdict.acceptance[0].evidence, '')
 })

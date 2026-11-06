@@ -971,7 +971,13 @@ function settleFromOutput(record: any, subtask: any, output: any, guard: Subtask
         ? { closure: 'done', blockedKind: null }
         : {
             closure: 'blocked',
-            blockedKind: 'failed',
+            /*
+             * [2.1.0] 沟通交流格式退回是独立的受阻类型：工作本身可能已完成，
+             * 只是结果格式不合规，须退回重交。看板与主 Agent 据此区分
+             * 「做错了」与「交错了」；退回通知（不合规条目清单）已在
+             * error 字段里，由 adjudicateResult 写入。
+             */
+            blockedKind: verdict.blockedKind === 'comm-format' ? 'comm-format' : 'failed',
           }),
   }, guard)
   if (verdict.status === 'blocked') {
@@ -1039,6 +1045,29 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
     ? options.attemptOffset
     : 1
   let lastFailure: any = options.priorFailure ?? null
+  /*
+   * [2.1.0] 格式退回通知必须在下一次激活送达部门人员（用户 2026-11-06 的
+   * 强制要求：不符合要求立刻退回，通知其重新检查格式后重交）。
+   *
+   * 结果被 `adjudicateResult` 判为 blocked/comm-format 后，退回通知（不合规
+   * 条目清单）落在状态行 error 里；主 Agent 把该行复位为 in_progress 后
+   * blockedKind 保留（只有 settle 的 assigned/done 写入才会清它）。这里据此
+   * 把退回通知作为 COMM_FORMAT_REJECTED 的上次失败原因带回子提示词，部门
+   * 人员重跑时能看到「退回原因 + 逐条修正要求」，而不是从零重做、把同一
+   * 格式错误再交一次。
+   */
+  if (!lastFailure) {
+    const rejectedRow = Array.isArray(record.statuses)
+      ? record.statuses.find((item: any) => item?.subtaskId === subtask.id)
+      : null
+    if (rejectedRow?.blockedKind === 'comm-format' && typeof rejectedRow?.error === 'string' && rejectedRow.error.trim() !== '') {
+      lastFailure = {
+        attempt: 1,
+        code: 'COMM_FORMAT_REJECTED',
+        message: rejectedRow.error,
+      }
+    }
+  }
   /*
    * [1.8.6] The interrupt has to outlive the thrown error.
    *
@@ -1116,7 +1145,11 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
                 cwd: options.cwd,
                 conversationContext,
                 statuses: record.statuses,
-                previousFailure: attempt > 1 ? lastFailure : null,
+                /*
+                 * [2.1.0] 不再用 attempt>1 做门槛：被格式退回的行复位后第 1 次
+                 * 激活也必须带上退回通知，否则「退回」只是写了一行状态。
+                 */
+                previousFailure: lastFailure ?? null,
                 lessonsBrief,
               }),
             }],
@@ -5290,7 +5323,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
          * 不打印正文、非零退出。交互式会话维持原样（只 steer，不抛错）。
          */
         /*
-         * [2.0.5] U1=B：交互式会话放行，但必须留痕。
+         * [2.1.0] U1=B：交互式会话放行，但必须留痕。
          *
          * 旧行为是 `return` 了事——用户看到回合正常结束，却没有任何地方写着
          * 「这个回合其实是没通过门禁被放出来的」。B 方案不动「不硬拦」这个

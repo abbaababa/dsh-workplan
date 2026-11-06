@@ -1,3 +1,65 @@
+## 2.1.0 — 2026-11-06
+
+**建立主 Agent 与部门人员之间的统一沟通交流格式契约（下发—自检—核验—退回闭环），并保留 2.0.5 草案的规划器 JSON 结构修复。**
+
+### 一、问题与证据链
+
+用户 2026-11-05 在同一会话里连续两次遇到自动分解失败：
+
+| # | 事实 | 证据 |
+|---|---|---|
+| 1 | 第一次：`Expected ',' or '}' after property value in JSON at position 12475` | 会话降级消息原文 |
+| 2 | 第二次：规划器 JSON 被 max tokens 截断，旧实现先 `lastIndexOf('}')` 找不到结尾括号，直接判 `NO_JSON` | `src/plan.ts#extractJson` 旧实现 |
+| 3 | 两次都不是「没规划」，而是「规划结果有一个字符的结构瑕疵」 | 降级消息均带 `degraded:true` 与原 JSON 错误 |
+
+2.0.4 修的是**子 Agent 回执**的解析（`repairEvidenceJson`），规划器入口的 `extractJson` 仍是裸 `JSON.parse`，是同一个病根的另一个出口。
+
+### 二、改了什么
+
+- **结构修复**：新增 `repairJsonStructure()`——配平未闭合的 `{` `[` `"`、去掉尾逗号、把字符串内的裸换行/制表符/控制符转义。**只修结构，不新增或猜测任何字段值**。
+- **截断修复**：新增 `truncatedCandidates()`——输出被 max tokens 截断时，从尾部逐个丢弃不完整成员（每次都是「本来就残缺、不可用」的内容），最多 24 轮，每轮尝试解析。
+- **不再误判 NO_JSON**：旧实现要求文本里存在结尾 `}`，截断输出因此被判「没有 JSON 对象」；现在只要以 `{` 起头就进入修复流程。
+- **失败仍然如实报错**：修不好照旧抛 `INVALID_JSON`，不静默返回空计划；成功修复时打印一条 warn 日志说明「只补括号/逗号，未改内容」。
+
+### 三、验证
+
+- 新增离线自检 10 条，全部通过：合法 JSON、少一个 `}`、少两个 `}]`、尾逗号、字符串内裸换行、截断 70%、截断 55%、代码块包裹、无 JSON（应抛 `NO_JSON`）、纯空白（应抛 `EMPTY_OUTPUT`）。
+- `npm run check`（tsc --noEmit）退出码 0；`npm run build` 重新生成 `lib/`、`dist/`、`client.js`。
+- `npm test` 全套回归见本版本 CI 输出。
+
+### 四、边界（不夸大）
+
+- 结构修复无法把「内容本身就错」的 JSON 变成正确内容；它只解决括号/逗号/截断这类机械损伤。
+- 丢弃尾部残缺成员意味着该成员的信息丢失，调用方的 schema 校验仍会拦下缺字段的计划，不会因此产出半成品计划。
+
+### 五、沟通交流格式契约（本次核心）
+
+用户 2026-11-06 的强制要求：派发工作的同时附带一份统一的沟通交流格式要求；部门人员提交结果前依此自查；主 Agent 收到后依同一份格式核验，不合规立刻退回，通知其重新检查格式后全盘重交。
+
+| 环节 | 落地位置 | 行为 |
+|---|---|---|
+| 下发 | `src/comm-format.ts#renderCommFormatSpec` → `src/plan.ts#buildChildPrompt` 末尾 | 每个子任务提示都附带 F1–F9 九条格式规范与「提交前自查（强制）」指令 |
+| 自检 | 同上（提示词内强制指令） | 部门人员提交前逐条对照 F1–F9 |
+| 核验 | `src/comm-format.ts#checkCommFormatCompliance` → `src/plan.ts#adjudicateResult` done 路径前 | 主 Agent 用同一份规范逐条核验 F1–F8（F9 为诚信约束，由三阶段门禁与人工复核兜底） |
+| 退回 | `adjudicateResult` 返回 `blockedKind:'comm-format'` + `renderCommFormatRejection` | 不合规即判 blocked，退回通知写明逐条不合规项与修正要求 |
+| 重交 | `src/runtime.ts#executeSubtask` 的 `lastFailure` 注入 | 复位重派时把退回通知作为上次失败原因（`COMM_FORMAT_REJECTED`）随提示词发回，子 Agent 看到具体不合规条目，只补缺口不重做 |
+
+九条规范：F1 证据块标记成对、F2 status 合法、F3 三阶段齐全、F4 pass 必须带证据、F5 验收条数不少于计划、F6 产物条目合法（kind ∈ file/url/note 且 ref 非空）、F7 复盘四项、F8 blocked 必须带 question、F9 不得编造。
+
+设计边界（不夸大）：
+
+- 只拦 `done` 路径。解析失败、验收缺口、三阶段缺失已被更早的门禁拦下，保留原有更具针对性的诊断，不用格式条目覆盖。
+- `requirePhases:false`（历史回放 / 明确关闭新契约）不追溯否决旧日志里按当时规则合法的 done。
+- F6 只校验「产物声明的合法性」，是否必须交付文件由计划验收标准决定——避免把无文件产物的写作类子任务误判为不合规。
+- F9 不做自动判定：编造检测需要语义理解而非结构校验，把它写成提示词级诚信约束，由三阶段门禁与人工复核承担。
+
+### 六、验证
+
+- `npm run check`（tsc --noEmit）退出码 0。
+- `npm test`：578 条用例，pass 578 / fail 0。
+- 新增 `tests/workplan-comm-format.test.ts`：覆盖 F1–F8 逐条拒收、合规放行、退回通知文案、`requirePhases:false` 兼容边界。
+- 既有用例按新契约修订 1 条：`workplan-evidence-contract.test.ts` 的 C-19 由「空证据 pass 降级 unverified 仍算 done」改为「按 F4 退回 blocked/comm-format」——这是用户要求的行为前移，不是放宽。
+
 ## 2.0.4 — 2026-11-05
 
 **修复「子 Agent 干完活却交不了差」的四条判定缺陷，并给交互式会话收尾加上「放行但留痕」。**
