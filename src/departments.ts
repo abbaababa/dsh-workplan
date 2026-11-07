@@ -26,6 +26,28 @@
  * task growing a penetration-testing subtask).
  */
 
+/**
+ * [2.1.5] Expert-persona standard: personnel who receive assigned work are top
+ * global experts in their field, not ordinary department staff.
+ *
+ * Single source of truth for the persona, consumed by the planner prompt (how
+ * the planner must staff and grade a subtask) and by the child-agent prompt
+ * (how the executing agent must hold itself). Keeping it here means both
+ * prompts cannot drift apart — the same rule the 1.12.0 catalogue applies to
+ * responsibilities.
+ */
+export const DEPARTMENT_EXPERT_STANDARD = Object.freeze({
+  /** Shown to the planner: who receives each assignment and how to grade it. */
+  planner:
+    '每个部门的执行者都是该部门内来自全球相关领域的顶尖专家（不是普通部门人员）：'
+    + '分配时按专家定位填写 role，验收时按专家水准要求根因、证据与可复核性。',
+  /** Shown to the executing child agent: the persona it must act as. */
+  child:
+    '你代表该领域来自全球的顶尖专家水准（不是普通部门人员）：'
+    + '先抓根因与全局再落地，结论必须有可复核证据，方案要经得起同行评审，'
+    + '不留浅层补丁、不遗留问题。',
+})
+
 export interface DepartmentCapability {
   id: string
   zh: string
