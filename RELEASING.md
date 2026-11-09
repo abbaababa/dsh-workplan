@@ -48,7 +48,7 @@ npm run build && git diff --exit-code -- lib client.js
 | 执行脚本（已入仓） | `scripts/w5-cross-version-check.mjs`（`git ls-files` 可见） |
 | 通过判据 | `RESULT: PASS` 且 EXIT=0（六条断言全 PASS） |
 | 失败处置 | 不得打 tag / 不得发布；保留脚本 JSON 输出 |
-| 当前状态 | 已登记；**执行判据待复核**（2026-11-04 实测 `RESULT: FAIL (1)`，见本节「已知偏差」） |
+| 当前状态 | 已消解（2026-11-09 判据修订，见本节「已知偏差」）；修订后双跑 `RESULT: PASS` |
 
 用途：证明「终态计划不再死锁 present」这次解耦没有把旧版行为改坏，并且新版写出的 `superseded` 信封交给旧读端时只会安全降级、不会变成可交付。脚本用 `node` 直接驱动两份 `lib/`（无 DSH 服务、无网络），即所谓 headless 运行。
 
@@ -58,18 +58,18 @@ rm -rf /tmp/w5-old && mkdir -p /tmp/w5-old
 git archive v1.8.19 lib | tar -x -C /tmp/w5-old
 
 # 新版使用刚构建的 lib；root 日志切片是外部证据夹具，可用 W5_ROOT_LOG 覆盖
-W5_ROOT_LOG=/Users/open/Documents/Stocks/_baseline_work/root/root.jsonl \
+W5_ROOT_LOG=../_baseline_work/root/root.jsonl \
   node scripts/w5-cross-version-check.mjs \
     /tmp/w5-old/lib/runtime.js "$PWD/lib/runtime.js" "$PWD/lib/plan.js"
 ```
 
 前置：① 已执行 `npm run build`（`lib/` 与 `src/` 同步）；② 本地存在 tag `v1.8.19`；③ 夹具 root 日志可读（默认路径见脚本；`W5_ROOT_LOG` 可覆盖，缺夹具时本步**不得判 PASS**，按未验证记录并停下）。
 
-PASS 判据：脚本最后打印 `RESULT: PASS` 且 EXIT=0，六条断言全 PASS（旧版复现生产拒绝文案、旧版 present 拒绝且 steer 触发、新版 present 放行且 steer=0、新版对终态计划仍拒绝 dispatch、superseded 写入为单条 full 覆盖信封、旧读端降级为 cancelled 且仍拒绝交付）。耗时约 1 秒。
+PASS 判据：脚本最后打印 `RESULT: PASS` 且 EXIT=0，六条断言全 PASS（旧版复现生产拒绝文案、旧版 present 拒绝且 steer 触发、新版无取消 trap（steer=0）且 present 由 2.2.x 证据门禁拒绝（`EVIDENCE_GAP`，未落实 handoff 所致）、新版对终态计划仍拒绝 dispatch、superseded 写入为单条 full 覆盖信封、旧读端降级为 cancelled 且仍拒绝交付）。耗时约 1 秒。
 
 失败处置：不得打 tag / 不得发布；保留脚本 JSON 输出；若「旧版复现生产文案」失败，先确认夹具 `root.jsonl` 的 seq 7168/7175 未被改写（`event7168Sha256` 应为 `36fc488d…`），再判断是回归还是证据过期。
 
-**已知偏差（2026-11-04 实测，待确认处理方式）**
+**已知偏差（2026-11-04 实测；2026-11-09 已通过判据修订消解，非运行例外）**
 
 在 1.12.2 工作树按本节命令执行（`lib/` 与 `dist/` 同源、sha256 一致；旧版 `lib/` 由
 `git archive v1.8.19` 取出；夹具 `root.jsonl` 的 `event7168Sha256 = 36fc488d…` 未被改写），
@@ -84,9 +84,7 @@ PASS 判据：脚本最后打印 `RESULT: PASS` 且 EXIT=0，六条断言全 PAS
   字符串（`grep -c` 为 0）；该错误码由 1.9.1（`c6c3a0a`）引入，跨部门需求闸门由 1.11.0
   （`71f0b65`，`openHandoffs`）引入。历史夹具在现行「会话内全部计划一起判」的闸门下，
   会先命中兄弟计划的证据缺口。
-- **待确认**：这属于「探针断言/夹具随版本演进而过期」还是「产品回归」，需工程与质量确认后
-  再决定处理方式（更新断言与夹具，或改用不含未处置需求的日志切片）。确认前本步骤只能记为
-  **未通过**，不得记 PASS、不得据此打 tag。复现输出见
+- **已消解（2026-11-09，主 Agent 裁决 T4 清单 G4 · 选项 B）**：确认属「探针断言随版本演进而过期」，**非产品回归**——2.2.6 对象感知读取把历史 handoff 正确解析出来，现行闸门返回 `EVIDENCE_GAP` 正是本版证据门禁的设计语义。断言 3 已修订为 2.2.x 门禁语义（steer=0 且拒绝码 `EVIDENCE_GAP`、拒绝理由为未落实 handoff；注释引用工作区根目录 `_t5_release_execution_20261109/w5-verdict-diagnosis-T5.md`），修订后探针双跑 `RESULT: PASS`（JSON 留档同目录）。本条为判据口径修正，不是运行例外。复现输出见
   `_t3_rw5_20261104/w5_probe_output_20261104.txt`（工作区根目录）。
 
 ## 2. 提交与打标签
@@ -159,6 +157,36 @@ curl -s https://cdn.jsdelivr.net/npm/dsh-plugin-catalog/index.json \
 在 `docs/release-record-<version>-<date>.md` 写下可复核的证据：tag、commit、npm `shasum`、
 Release 制品 URL 与 sha256、catalog 版本、复验命令输出。发布记录不是仪式，它是下一次排障的
 唯一时间线。
+
+### 6.1 标准动作（每次修复验收必做）：运行态指纹 = 磁盘指纹
+
+**为什么定为标准**：2026-11-07 的规划器 300 秒超时事故里，修复代码 10:40:03 就已构建完成，
+但运行中的进程是 10:02:39 启动、加载的仍是旧字节（`build 6512166d9d425f7d`）。同一故障在
+2.1.1→2.1.5 之间复发过，而「代码改了，进程里跑的却不是改后的字节」必须先被证据排除，
+否则会把「没生效」误判成「修复无效」，或把「还没重启」误判成「修好了」。
+
+**做法**：用户手动重启 DSH（禁止自行重启）后，两条命令各跑一次，比对结果。
+
+```bash
+# ① 运行态自报指纹：调用插件状态工具，回显形如
+#    v2.1.6｜build e391f4d49758b982｜pid 3557｜启动 2026/11/7 10:50:24
+#    （工具名 dsh_workplan_status；回显由 src/host.ts 的 runtimeIdentity 拼装）
+
+# ② 磁盘复刻指纹：按 src/host.ts:43-60 的同一算法（四文件依次 sha256 取前 16 位）
+printf '%s' "$(cat lib/host.js lib/runtime.js lib/plan.js lib/watchdog.js)" \
+  | shasum -a 256 | cut -c1-16
+```
+
+**判定（三选一，不许含糊）**：
+
+- **相同** → 运行态与磁盘逐字节同一产物，修复确已加载 = 通过。把两条输出原文贴进
+  `docs/release-record-<version>-<date>.md`。
+- **不同** → 进程仍在跑旧字节，或加载了别的副本 = **验收不通过**：先按 §1 核对工作区与
+  构建，再请用户手动重启，重启后重跑本动作。
+- 回显 `build unknown` → 进程读不到入口文件，如实记为「**无法确认**」，不得当作通过。
+
+> 旁证（可选但推荐）：比对四入口文件的 `stat mtime` 与进程启动时刻，构建时间必须**早于**启动
+> 时间，否则新进程不可能加载到新字节。
 
 ## 7. 回滚
 

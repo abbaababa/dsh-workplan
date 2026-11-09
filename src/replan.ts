@@ -193,6 +193,8 @@ const REPLACEMENT_FIELDS = [
   'outputs',
   'acceptance',
   'risk',
+  // [2.2.0][T13b/推理等级] 替换行可显式改档位；未给时 mergeReplacement 继承旧行。
+  'reasoningEffort',
 ] as const
 
 /** 用调用方给的替换内容覆盖旧子任务的同名字段；未给字段原样继承。 */
@@ -422,6 +424,8 @@ export function planReplan(plan: any, changes: any, options: any = {}): ReplanRe
         ? raw.acceptance.map((item: any) => truncate(String(item), 800))
         : ['复述完成的工作并给出可核对证据'],
       risk: truncate(String(raw.risk ?? '需求变更后新增，原计划未覆盖'), 1000),
+      // [2.2.0][T13b/推理等级] 只登记字段名：显式档位原样透传，缺失时留给 readSubtasks 回落 high。
+      ...(typeof raw.reasoningEffort === 'string' ? { reasoningEffort: raw.reasoningEffort } : {}),
       insertedBy: 'replan',
       replannedReason: truncate(String(raw.reason ?? reason), MAX_REPLAN_REASON_CHARS),
     }

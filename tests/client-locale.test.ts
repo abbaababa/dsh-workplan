@@ -12,6 +12,8 @@ const REQUIRED_KEYS = [
   'stats.progress',
   'phase.pending',
   'phase.planning',
+  // [2.2.5][T5] clarify 记录（任务信息不足先澄清）的徽标词汇，缺键会回显原始键名。
+  'phase.clarify',
   'phase.executing',
   'phase.integrating',
   'phase.done',

@@ -189,7 +189,18 @@ const rs = result.realSlice
 const sw = result.supersededDowngrade
 ck('1.8.19 reproduces the production denial text', rs.oldMessageMatchesProductionError === true)
 ck('1.8.19 traps the turn: present denied and steer fired', rs.old.presentAfterCancel !== null && rs.old.steers >= 1)
-ck('current does not trap: present allowed, no steer', rs.current.presentAfterCancel === null && rs.current.steers === 0)
+/*
+ * [2.2.x][2026-11-09 T5] 断言 3 判据修订（1.11.0 口径 → 2.2.x 门禁语义；主 Agent G4 裁决选项 B）：
+ * 1.11.0 原判据「新版 present 放行且 steer=0」已过期。1.9.1(c6c3a0a) 引入 EVIDENCE_GAP、
+ * 1.11.0(71f0b65) 引入跨部门需求闸门后，现行「会话内全部计划一起判」的门禁会先命中日志切片
+ * 中兄弟计划 wp-4ad0038f（8/8 done 但 H1–H5 未处置）的证据缺口；2.2.6 的对象感知读取把这段
+ * 历史 handoff 正确解析出来，present 返回 EVIDENCE_GAP 正是本版证据门禁的设计语义（非回归）。
+ * 新判据：无取消 trap（steers=0）且 present 拒绝码为 EVIDENCE_GAP、拒绝理由为未落实 handoff。
+ * 依据与两次实测留档：工作区根目录 _t5_release_execution_20261109/w5-verdict-diagnosis-T5.md。
+ */
+ck('current does not trap: no steer; 2.2.x evidence gate denies present with EVIDENCE_GAP',
+   rs.current.steers === 0 && rs.current.presentAfterCancel?.code === 'EVIDENCE_GAP'
+     && (rs.current.presentAfterCancel.message ?? '').includes('需求未落实'))
 ck('current still refuses dispatch on a terminal plan', rs.current.dispatch.code === 'PLAN_CANCELLED')
 ck('superseded write yields one full-coverage envelope', sw.write.superseded === 'superseded' && sw.write.coverage === 'full' && sw.write.envelopes === 1)
 ck('old reader downgrades superseded to cancelled and still refuses', sw.oldReader.phase === 'cancelled' && sw.oldReader.superseded === false && sw.oldPresent.denied === true && sw.oldDispatch.code === 'PLAN_CANCELLED')

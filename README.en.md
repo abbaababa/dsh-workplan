@@ -3,7 +3,7 @@
 > **Two selling points, one line: a full ISO/IEC 15408:2026 evidence pack you can verify with 5 commands, and a one-command install with zero runtime dependencies.**
 
 [![verify](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml/badge.svg)](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml)
-[![version](https://img.shields.io/badge/version-2.1.5-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v2.1.5)
+[![version](https://img.shields.io/badge/version-2.2.6-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v2.2.6)
 
 Adds "plan first → dispatch real department subagents → watch progress in the sidebar" to **DeepSeek Harness (DSH)**. No app, no DSH source patch, no page replacement.
 
@@ -80,7 +80,7 @@ The full contract — roles, data shapes, state machine, recovery, and the three
 ## Install
 
 ```bash
-dsh plugin --profile web add dsh-workplan@2.1.5
+dsh plugin --profile web add dsh-workplan@2.2.6
 ```
 
 Restart the DSH Web process (or reload the page) so the bundle is picked up.
@@ -145,6 +145,9 @@ A passing retrospective is appended to the **permanent lesson memory** at `~/.ds
 | Dispatch budget per round | 20 min | `DSH_WORKPLAN_TOTAL_TIMEOUT_MS` |
 | Single subagent ceiling | 15 min | `DSH_WORKPLAN_CHILD_TIMEOUT_MS` |
 | No-progress window | 5 min | `DSH_WORKPLAN_IDLE_TIMEOUT_MS` |
+| Planner no-progress ceiling | 5 min (**measured from the last output chunk**; still streaming keeps pushing it out) | `DSH_WORKPLAN_PLANNER_TIMEOUT_MS` |
+| Planner stall window | 90 s (zero chunks of any kind after output started = wedged) | `DSH_WORKPLAN_PLANNER_IDLE_TIMEOUT_MS` |
+| Planner absolute ceiling | 15 min (= no-progress ceiling × 3, streaming or not) | scales with `…_PLANNER_TIMEOUT_MS` |
 | Automatic resumes | 4 | `DSH_WORKPLAN_MAX_RESUMES` |
 | Subagent concurrency | 5 (fixed) | — |
 

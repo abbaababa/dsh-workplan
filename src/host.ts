@@ -111,7 +111,13 @@ const PROMPT_SECTION = [
    */
   '5. 「完成」只有一个判据：计划里全部子任务都是 done，**且** deliveryReady=true（每个 done 项 verification="structured"、acceptance 非空且逐项 result="pass"、无缺失产物）。用户取消 ≠ 完成：取消只停止执行，未完成项仍然是未完成。`dsh_workplan_dispatch` 返回 ok:true / complete:true 只表示调用成功或状态全 done，必须再看 deliveryReady 与 完成 X/Y；只要 deliveryReady=false 或还有 pending/blocked，就禁止 present 交付物、禁止写“已完成/最终版/已交付”、禁止给收尾性最终答复，必须先再次调用 dsh_workplan_dispatch 续跑剩余项。',
   '6. 如果续跑被拒绝、受阻项无法恢复、证据补不齐、计划已取消但未完成，或用户要求先看中间结果：答复开头必须写「未完成：剩余 N 项（列出 ID）与原因」，正文只能按中间结果表述，不得包装成成品。取消不会给你交付许可。',
-  '7. 子任务有硬执行上限（默认 15 分钟/步）与整轮预算（默认 20 分钟）：子 Agent 接近上限时应先把已完成内容落盘并在结论里列出路径。任何「达到执行上限」「本轮预算用尽」都不等于「什么都没做」：状态里的 error 会列出「声明产物已在盘上」，必须先用文件核对；若产物已覆盖验收标准，用 dsh_workplan_update 复核改判，只补缺失部分再续跑，禁止无视盘上产物把整步重跑。',
+  /*
+   * [2.2.0][T5/O-5a] E1：超时是安全兜底（防止任务无限运行），不是交付期限。
+   * 旧句把「每步 15 分钟」的规模参考写成硬性上限，等于对外承诺固定完成时间；
+   * 改为「协商上限＋安全兜底」，并给出 extendMs 协商入口。安全概念与事故溯源
+   * （上方 1.8.7/1.8.13 注释）全部保留，不删。
+   */
+  '7. 子任务的时间是「协商上限」＋「安全兜底」，不是固定交付期限：规模参考 15 分钟量级（仅供参考、非承诺，实际时长由执行专家开工预告协商决定），整轮预算（默认 20 分钟）同样只是安全兜底，不是交付期限。子 Agent 接近上限时应先把已完成内容落盘并在结论里列出路径。任何「达到协商上限」「本轮预算用尽」都不等于「什么都没做」：状态里的 error 会列出「声明产物已在盘上」，必须先用文件核对；若产物已覆盖验收标准，用 dsh_workplan_update 复核改判，只补缺失部分再续跑，禁止无视盘上产物把整步重跑。确认需要更多时间时，主 Agent 可用 dsh_workplan_update 的 extendMs 协商放宽（放宽永远有界：累计超过初始协商上限的一倍即拒绝，转新轮续跑或转 escalate 请主 Agent/用户裁决）。',
   '8. 出现「待指示」项（closure=escalated，左侧栏显示「待指示」并附问题摘录）时，必须在当轮处理：用 dsh_workplan_instruct 下发决定（投递到子会话并把该行恢复为执行中），或确认放弃后用 dsh_workplan_update 置 blocked。不要沉默略过，也不要把待指示当成普通失败——它是一条还没被回答的请示，会一直占着交付门禁。',
   '9. 出现「已下发未响应」（ackOverdue）时，不要重复派发：先用 dsh_workplan_status 看该行 childId 与已等待时长，必要时用 dsh_workplan_followup 投递一次说明；超过硬超时仍未响应会记为 blocked（blockedKind=no-ack），可以再下发指示复活。',
   /*
@@ -169,8 +175,10 @@ function asObject(value: any) {
 
 export type WorkplanConfig = {
   cwd?: string
-  /** [2.1.3] 单次规划器调用上限（毫秒），亦可用 DSH_WORKPLAN_PLANNER_TIMEOUT_MS。 */
+  /** [2.1.3][2.1.6] 单次规划器调用的无进展窗口（毫秒），亦可用 DSH_WORKPLAN_PLANNER_TIMEOUT_MS。 */
   plannerTimeoutMs?: number
+  /** [2.1.6] 输出开始后的完全静默窗口（毫秒），亦可用 DSH_WORKPLAN_PLANNER_IDLE_TIMEOUT_MS。 */
+  plannerIdleTimeoutMs?: number
   childTimeoutMs?: number
   idleTimeoutMs?: number
   totalTimeoutMs?: number
@@ -224,6 +232,7 @@ function createUpdateTool(runtime: any) {
       + '当主 Agent 核对子任务结果、发现完成不实或需要修正时使用。'
       + '把子任务标成 done 时，必须同时给出真实的 verification 与 acceptance（每项 result="pass"），'
       + '否则计划不会变成可交付状态（deliveryReady=false，present 会被拒绝）。'
+      + '运行中的子任务需要更多时间时，传 extendMs（毫秒）即可协商放宽，不需要 force；放宽永远有界（累计 ≤ 初始协商上限 × 1），超出转新轮续跑或转 escalate 请主 Agent 裁决。'
       + '这些字段会写入会话日志，刷新/重启后仍然生效。',
     parameters: {
       type: 'object',
@@ -239,7 +248,7 @@ function createUpdateTool(runtime: any) {
         status: {
           type: 'string',
           enum: ['pending', 'in_progress', 'done', 'blocked'],
-          description: '新的状态。',
+          description: '新的状态（普通改判必填；仅协商时限时可省略，改传 extendMs / timeNotice）。',
         },
         progress: {
           type: 'integer',
@@ -313,8 +322,40 @@ function createUpdateTool(runtime: any) {
           description: '待指示项（closure=escalated）的答复文本：与 status="in_progress" 一起使用，'
             + '会投递给子会话并把该行恢复为执行中。等价于 dsh_workplan_instruct。',
         },
+        /*
+         * [2.2.0][T5/O-4c] 延期事务（方案 §2.2 / §5.4；D-28 教训：runtime 会读取的
+         * 字段必须在这里显式声明，additionalProperties:false 会让未声明参数被严格
+         * 宿主直接拒收）。extendMs 只推移协商截止并重置计时，不改状态判定，运行中
+         * 无需 force（TASK_RUNNING 的唯一豁免）；放宽永远有界（累计 ≤ 初始协商
+         * 上限 × 1），超出由 runtime 拒绝并转「请主 Agent 裁决」。
+         */
+        extendMs: {
+          type: 'integer',
+          description: '延期毫秒数（正整数，仅主 Agent 可用）：只推移本子任务的协商截止并重置计时，'
+            + '不改状态判定；运行中可用，不需要 force。除非另传 status，否则可省略 status。'
+            + '放宽永远有界：累计延期 ≤ 初始协商上限的一倍，超出会被拒绝并提示转新轮续跑或转 escalate 请主 Agent 裁决。',
+        },
+        /*
+         * [2.2.0][T5/O-4c] O-2a 专家开工预告：{declaredMinutes, reason}。与 extendMs
+         * 同属「只记录、不改判定」的时限信息，运行中同样放行。
+         */
+        timeNotice: {
+          type: 'object',
+          description: '专家开工预告（O-2a）：{ declaredMinutes, reason }，只记入协商流水，不改状态与判定。',
+          properties: {
+            declaredMinutes: { type: 'number', description: '预计完成本子任务的分钟数（仅供参考、非承诺）。' },
+            reason: { type: 'string', description: '预告理由（可选）。' },
+          },
+          required: ['declaredMinutes'],
+          additionalProperties: false,
+        },
       },
-      required: ['subtaskId', 'status'],
+      /*
+       * [2.2.0][T5/O-4c] status 不再是无条件必填：纯延期/纯预告事务（只带
+       * extendMs / timeNotice）是合法调用，runtime 会按「不改判定只改时限/记录」
+       * 处理；普通改判缺 status 仍由 runtime 以 INVALID_STATUS 拒绝。
+       */
+      required: ['subtaskId'],
       additionalProperties: false,
     },
     output: {
@@ -1120,7 +1161,38 @@ function createStatusTool(runtime: any) {
           )
         }
         const running = result.running === true
-        return textContent(
+        const planner = isRecord(result.planner) ? result.planner : null
+        const statuses = Array.isArray(result.statuses) ? result.statuses : []
+        /*
+         * [2.2.3][N1] 模型可见面补齐：planner 与 noticeChannel 之前只进结构化
+         * value，DSH 只把 render 文本写进对话，导致 D5/D1-b 结构性不可读。
+         * 这里只做只读展示，不改变状态机；缺失字段不编造。
+         */
+        const plannerLine = planner
+          ? `规划器：推理等级 ${String(planner.reasoningEffort ?? '未记录')}`
+            + `｜来源 ${String(planner.reasoningEffortSource ?? '未记录')}`
+            + `｜判定 ${String(planner.outcome ?? '未记录')}`
+            + (typeof planner.model === 'string' && planner.model ? `｜模型 ${planner.model}` : '')
+          : ''
+        const channelLines = statuses
+          .filter((item: any) => isRecord(item?.noticeChannel))
+          .slice(0, 12)
+          .map((item: any) => {
+            const channel = item.noticeChannel
+            const at = Number(channel.at) > 0
+              ? new Date(Number(channel.at)).toLocaleString('zh-CN', { hour12: false })
+              : '—'
+            const observedAt = Number(channel.observedAt) > 0
+              ? new Date(Number(channel.observedAt)).toLocaleString('zh-CN', { hour12: false })
+              : '—'
+            return `${String(item.subtaskId ?? '')} 通道：${String(channel.state ?? '')}`
+              + `｜target ${String(channel.target ?? '—')}`
+              + `｜caller ${String(channel.caller ?? '—')}`
+              + `｜at ${at}`
+              + `｜observedAt ${observedAt}`
+              + `｜reason ${String(channel.reason ?? '—')}`
+          })
+        return textContent([
           `计划 ${String(result.planId ?? '')}｜${running ? '执行中' : '未在执行'}`
           + `｜阶段：${phaseLabel(result.phase)}`
           + `｜完成 ${Number(stats.done ?? 0)}/${Number(stats.total ?? 0)}，受阻 ${Number(stats.blocked ?? 0)}`
@@ -1129,7 +1201,9 @@ function createStatusTool(runtime: any) {
             ? `｜已 ${Math.round(Number(result.elapsedMs) / 1000)}s`
             : '')
           + (identity ? `｜${identity}` : ''),
-        )
+          plannerLine,
+          ...channelLines,
+        ].filter(Boolean).join('\n'))
       },
     },
     async execute(args: any, exec: any) {
@@ -1228,7 +1302,9 @@ function createDispatchTool(runtime: any) {
      * call is killed while the dispatcher is still legitimately working and the
      * plan looks stuck. Derive it from the resolved limits.
      */
-    timeoutMs: Number(runtime?.limits?.totalTimeoutMs ?? 1200000) + 20000,
+    timeoutMs: Number(runtime?.limits?.totalTimeoutMs ?? 0) > 0
+      ? Number(runtime.limits.totalTimeoutMs) + 20000
+      : 24 * 60 * 60 * 1000,
     async execute(args: any, exec: any) {
       const parsed = asObject(args) ?? {}
       return runtime.dispatchTool(exec.agent, parsed, exec.signal)
@@ -1297,15 +1373,16 @@ function settingEnv(envName: string) {
   return typeof process !== 'undefined' ? process.env?.[envName] : undefined
 }
 
-function numericSetting(configValue: any, envName: string) {
+function numericSetting(configValue: any, envName: string, allowZero = false) {
+  const positive = (value: number) => Number.isFinite(value) && (allowZero ? value >= 0 : value > 0)
   if (configValue !== undefined && configValue !== null && configValue !== '') {
     const numeric = Number(configValue)
-    if (Number.isFinite(numeric) && numeric > 0) return numeric
+    if (positive(numeric)) return numeric
   }
   const raw = typeof process !== 'undefined' ? process.env?.[envName] : undefined
   if (raw === undefined || raw === '') return undefined
   const numeric = Number(raw)
-  return Number.isFinite(numeric) && numeric > 0 ? numeric : undefined
+  return positive(numeric) ? numeric : undefined
 }
 
 /**
@@ -1344,9 +1421,10 @@ export function apply(ctx: any, config: WorkplanConfig = {}) {
     },
     cwd: typeof config.cwd === 'string' ? config.cwd : undefined,
     plannerTimeoutMs: numericSetting(config.plannerTimeoutMs, 'DSH_WORKPLAN_PLANNER_TIMEOUT_MS'),
+    plannerIdleTimeoutMs: numericSetting(config.plannerIdleTimeoutMs, 'DSH_WORKPLAN_PLANNER_IDLE_TIMEOUT_MS'),
     childTimeoutMs: numericSetting(config.childTimeoutMs, 'DSH_WORKPLAN_CHILD_TIMEOUT_MS'),
     idleTimeoutMs: numericSetting(config.idleTimeoutMs, 'DSH_WORKPLAN_IDLE_TIMEOUT_MS'),
-    totalTimeoutMs: numericSetting(config.totalTimeoutMs, 'DSH_WORKPLAN_TOTAL_TIMEOUT_MS'),
+    totalTimeoutMs: numericSetting(config.totalTimeoutMs, 'DSH_WORKPLAN_TOTAL_TIMEOUT_MS', true),
     maxResumes: numericSetting(config.maxResumes, 'DSH_WORKPLAN_MAX_RESUMES'),
     /*
      * [1.10.6] 三态解析：显式配置 > 显式环境变量 > 默认开启。
@@ -1493,7 +1571,7 @@ export function apply(ctx: any, config: WorkplanConfig = {}) {
 
 export const meta = {
   name,
-  version: '2.1.5',
+  version: '2.2.6',
   promptOrder: PROMPT_ORDER,
   routes: ['/dsh-workplan/plans', '/dsh-workplan/vendor/chart.umd.js'],
 }

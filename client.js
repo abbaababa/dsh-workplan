@@ -69,6 +69,7 @@ window.__ModuleLoader__.load({
                 "phase": {
                     "pending": "还没开始",
                     "planning": "正在安排",
+                    "clarify": "等信息中",
                     "executing": "正在做",
                     "integrating": "正在收尾",
                     "done": "已完成",
@@ -213,7 +214,27 @@ window.__ModuleLoader__.load({
                 "vizStageTitle": "分步进度",
                 "vizOverall": "总体进度",
                 "allPlansHint": "上面是当前各会话最新计划的合计；历史计划不在此汇总，下面每张卡片只统计本计划。",
-                "openHint": "打开左侧「任务进度」看完整安排。"
+                "openHint": "打开左侧「任务进度」看完整安排。",
+                "timeNegotiation": "时长协商",
+                "reasoningEffort": "推理等级",
+                "estimateMinutes": "预估时长",
+                "negotiatedCeiling": "协商上限",
+                "derived": "派生",
+                "negotiatedDeadline": "协商截止",
+                "startedAtLabel": "开始时间",
+                "remaining": "剩余",
+                "minutes": "分钟",
+                "seconds": "秒",
+                "timeExtensions": "延期记录",
+                "startNotice": "开工预告",
+                "timeWarning": "到点预警",
+                "pendingAdjudication": "待裁决",
+                "pendingAdjudicationHint": "到点后按安全兜底结算：等待主 Agent 决定延期 / 重试 / 接受。",
+                "noticeChannel": "预告通道",
+                "noticeChannelObserved": "已观测到送达",
+                "noticeChannelAwaiting": "等待观测",
+                "noticeChannelNotObserved": "未观测到送达",
+                "reason": "原因",
             },
             "en": {
                 "groupLive": "In progress",
@@ -266,6 +287,7 @@ window.__ModuleLoader__.load({
                 "phase": {
                     "pending": "Not started",
                     "planning": "Planning",
+                    "clarify": "Waiting for info",
                     "executing": "In progress",
                     "integrating": "Wrapping up",
                     "done": "Done",
@@ -409,7 +431,27 @@ window.__ModuleLoader__.load({
                 "vizStageTitle": "Step progress",
                 "vizOverall": "Overall progress",
                 "allPlansHint": "These totals cover the latest plan in each live session; older plans are not included. Each card below counts only its own plan.",
-                "openHint": "Open “Task progress” on the left for the full plan."
+                "openHint": "Open “Task progress” on the left for the full plan.",
+                "timeNegotiation": "Time negotiation",
+                "reasoningEffort": "Reasoning effort",
+                "estimateMinutes": "Estimate",
+                "negotiatedCeiling": "Negotiated ceiling",
+                "derived": "derived",
+                "negotiatedDeadline": "Negotiated deadline",
+                "startedAtLabel": "Started at",
+                "remaining": "remaining",
+                "minutes": "min",
+                "seconds": "s",
+                "timeExtensions": "Extensions",
+                "startNotice": "Start notice",
+                "timeWarning": "Approaching deadline",
+                "pendingAdjudication": "Awaiting decision",
+                "pendingAdjudicationHint": "Safety fallback at the deadline: the main agent will decide whether to extend, retry, or accept.",
+                "noticeChannel": "Notice channel",
+                "noticeChannelObserved": "Delivery observed",
+                "noticeChannelAwaiting": "Awaiting observation",
+                "noticeChannelNotObserved": "Delivery not observed",
+                "reason": "reason",
             }
         };
         function flattenLocale(source, prefix = '', out = {}) {
@@ -983,6 +1025,12 @@ window.__ModuleLoader__.load({
 .dsh-wp-subtask-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; color: var(--dsw-alias-label-secondary); font-size: 12px; }
 .dsh-wp-subtask-body { margin-top: 6px; }
 .dsh-wp-subtask-body > div { margin-top: 4px; }
+/* [2.2.0][T3/O-2a][O-3b][O-4c] 时长协商信息块：预估 / 协商上限 / 延期 / 开工预告 / 预警 / 通道。
+   只做展示，全部由服务端状态行与计划定义提供；字段缺失时整块不渲染（降级不报错）。 */
+.dsh-wp-time { margin-top: 8px; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--dsw-alias-line-1, rgba(148,163,184,.22)); background: rgba(148,163,184,.06); }
+.dsh-wp-time-title { font-size: 12px; font-weight: 650; color: var(--dsw-alias-label-secondary, #475569); margin-bottom: 4px; }
+.dsh-wp-time-row { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; color: var(--dsw-alias-label-primary, #0f172a); font-variant-numeric: tabular-nums; }
+.dsh-wp-time-note { margin: 4px 0 0; font-size: 12px; color: var(--dsw-alias-label-secondary, #475569); overflow-wrap: anywhere; }
 .dsh-wp-subtask-body p { margin-top: 2px; overflow-wrap: anywhere; }
 .dsh-wp-error-text { color: var(--dsw-alias-state-error-primary); overflow-wrap: anywhere; }
 .dsh-wp-muted { color: var(--dsw-alias-label-secondary); }
@@ -1110,6 +1158,11 @@ window.__ModuleLoader__.load({
         function clampPct(value) {
             const number = Number(value);
             return Number.isFinite(number) ? Math.max(0, Math.min(100, Math.round(number))) : 0;
+        }
+        /** 只接受有限正数；0/NaN/负数一律视为「没有这个字段」，用于展示层降级。 */
+        function positiveNumber(value) {
+            const number = Number(value);
+            return Number.isFinite(number) && number > 0 ? number : null;
         }
         function formatTime(value) {
             if (!value)
@@ -1487,6 +1540,90 @@ window.__ModuleLoader__.load({
         function ErrorBanner({ message, onRetry, t }) {
             return h('div', { className: 'dsh-wp-banner dsh-wp-banner--error', role: 'alert' }, h('div', { className: 'dsh-wp-section-title' }, t('error')), h('div', { className: 'dsh-wp-error-text' }, message || t('noResult')), h('button', { type: 'button', className: 'dsh-wp-button', style: { marginTop: '8px' }, onClick: onRetry }, t('retry')));
         }
+        /*
+         * [2.2.0][T3/O-2a][O-3b][O-4c] 看板：时长协商信息（T1 台账 A2 的可见入口）。
+         *
+         * 只展示服务端已经下发的计划字段与状态行字段：
+         *   - 计划定义：estimateMinutes（预估）、timeoutMs（协商上限）、reasoningEffort（推理等级）；
+         *   - 状态行：startedAt/deadlineAt（协商截止）、timeJournal（延期/预告历史）、
+         *     timeNotice（开工预告）、timeWarning（到点预警）、noticeChannel（子→主通道是否送达）、
+         *     pendingAdjudication（到点后的待裁决标记）。
+         *
+         * 客户端不推导状态机、不补造字段：任何字段缺失就少显示一行；全部缺失整块不渲染，
+         * 绝不出现 undefined / [object Object]。
+         */
+        function TimeNegotiation({ item, subtask, t }) {
+            const estimate = positiveNumber(subtask?.estimateMinutes);
+            const deadlineAt = positiveNumber(item?.deadlineAt);
+            const startedAt = positiveNumber(item?.startedAt);
+            const journal = Array.isArray(item?.timeJournal) ? item.timeJournal : [];
+            const extensions = journal
+                .filter((entry) => entry?.action === 'extend' && positiveNumber(entry?.extendMs))
+                .slice(-3);
+            /*
+             * [2.2.3][N2] D2「协商上限」结构性不可达：计划里没有 timeoutMs 时，
+             * 用 deadlineAt - startedAt - 已延期 派生一个只读上限，明确标注“派生”，
+             * 不写回计划、不把派生值冒充用户授权值。
+             */
+            const extensionTotal = extensions.reduce((sum, entry) => sum + Number(positiveNumber(entry?.extendMs) ?? 0), 0);
+            const declaredCeiling = positiveNumber(subtask?.timeoutMs);
+            const derivedCeiling = !declaredCeiling && startedAt && deadlineAt
+                ? Math.max(0, deadlineAt - startedAt - extensionTotal)
+                : null;
+            const ceiling = declaredCeiling ?? derivedCeiling;
+            const ceilingLabel = declaredCeiling ? t('negotiatedCeiling') : `${t('negotiatedCeiling')}（${t('derived')}）`;
+            const notice = item?.timeNotice && typeof item.timeNotice === 'object' ? item.timeNotice : null;
+            const warning = item?.timeWarning && typeof item.timeWarning === 'object' ? item.timeWarning : null;
+            const channel = item?.noticeChannel && typeof item.noticeChannel === 'object' ? item.noticeChannel : null;
+            const pending = item?.pendingAdjudication === true;
+            if (!estimate && !ceiling && !deadlineAt && !notice && !warning && !channel && !pending && extensions.length === 0) {
+                return null;
+            }
+            const remainingMs = deadlineAt ? Math.max(0, deadlineAt - Date.now()) : null;
+            const facts = [];
+            if (estimate)
+                facts.push(`${t('estimateMinutes')}：${estimate} ${t('minutes')}`);
+            if (ceiling)
+                facts.push(`${ceilingLabel}：${Math.round(ceiling / 60000)} ${t('minutes')}`);
+            if (deadlineAt) {
+                const left = remainingMs && remainingMs > 0
+                    ? `（${t('remaining')} ${Math.max(1, Math.round(remainingMs / 60000))} ${t('minutes')}）`
+                    : '';
+                facts.push(`${t('negotiatedDeadline')}：${formatTime(deadlineAt)}${left}`);
+            }
+            const notes = [];
+            if (notice) {
+                const declared = positiveNumber(notice.declaredMinutes);
+                const reason = typeof notice.reason === 'string' && notice.reason
+                    ? `（${t('reason')}：${notice.reason.slice(0, 80)}）`
+                    : '';
+                notes.push(declared
+                    ? `${t('startNotice')}：${declared} ${t('minutes')}${reason}`
+                    : `${t('startNotice')}${reason}`);
+            }
+            if (extensions.length > 0) {
+                notes.push(`${t('timeExtensions')}：${extensions.map((entry) => `+${Math.round(Number(entry.extendMs) / 60000)} ${t('minutes')}`).join('；')}`);
+            }
+            if (warning) {
+                const remaining = positiveNumber(warning.remainingMs);
+                notes.push(`${t('timeWarning')}：${remaining
+                    ? `${t('remaining')} ${Math.round(remaining / 1000)} ${t('seconds')}`
+                    : t('pendingAdjudication')}`);
+            }
+            if (channel) {
+                const stateText = channel.state === 'observed' ? t('noticeChannelObserved')
+                    : channel.state === 'awaiting' ? t('noticeChannelAwaiting') : t('noticeChannelNotObserved');
+                const reason = typeof channel.reason === 'string' && channel.reason
+                    ? `（${t('reason')}：${channel.reason}）`
+                    : '';
+                notes.push(`${t('noticeChannel')}：${stateText}${reason}`);
+            }
+            if (pending)
+                notes.push(`${t('pendingAdjudication')}：${t('pendingAdjudicationHint')}`);
+            return h('div', { className: 'dsh-wp-time' }, h('div', { className: 'dsh-wp-time-title' }, t('timeNegotiation')), facts.length > 0
+                ? h('div', { className: 'dsh-wp-time-row' }, facts.map((fact, factIndex) => h('span', { key: String(factIndex) }, fact)))
+                : null, notes.map((note, noteIndex) => h('p', { key: String(noteIndex), className: 'dsh-wp-time-note' }, note)));
+        }
         function SubtaskRow({ item, subtask, index, t }) {
             const status = item?.status ?? 'pending';
             /*
@@ -1537,7 +1674,10 @@ window.__ModuleLoader__.load({
             const instructionOverdue = item?.instructionOverdue === true;
             const tone = closure === 'replanned' ? 'idle' : toneOfStatus(status);
             const pct = clampPct(item?.progress ?? 0);
-            return h('div', { className: `dsh-wp-subtask dsh-wp-tone-${tone}` }, h('div', { className: 'dsh-wp-subtask-head' }, h('div', { className: 'dsh-wp-subtask-title' }, `${workLabel(t, index)}：${subtask.title}`), closureLabel ? h(Pill, { tone: closureTone }, closureLabel) : null, instructionOverdue ? h(Pill, { tone: 'blocked' }, t('closureNoAck')) : null, h(Pill, { tone }, progressText(item, t))), h('div', { className: 'dsh-wp-subtask-meta' }, h('span', null, `${t('who')}：${deptName(t, subtask.department)} · ${subtask.role}`)), h('div', { className: 'dsh-wp-subtask-body' }, h('p', null, h('strong', null, `${t('what')}：`), subtask.objective), h('div', null, h('strong', null, `${t('how')}：`), h(Bullets, { items: subtask.method })), h('div', null, h('strong', null, `${t('doneWhen')}：`), h(Bullets, { items: subtask.acceptance })), subtask.outputs?.length ? h('div', null, h('strong', null, `${t('willDeliver')}：`), h(Bullets, { items: subtask.outputs })) : null, subtask.dependsOn?.length ? h('p', { className: 'dsh-wp-muted' }, `${t('waitFor')}：先等前面的工作做完，才能开始这一步。`) : null), status === 'in_progress' ? h(Progress, { value: pct, tone }) : null, status === 'in_progress' ? h('div', { className: 'dsh-wp-progress-meta' }, h('span', null, `${t('progressLabel')} ${pct}%`)) : null, 
+            const effort = typeof subtask?.reasoningEffort === 'string' && ['low', 'high', 'max'].includes(subtask.reasoningEffort)
+                ? subtask.reasoningEffort
+                : null;
+            return h('div', { className: `dsh-wp-subtask dsh-wp-tone-${tone}` }, h('div', { className: 'dsh-wp-subtask-head' }, h('div', { className: 'dsh-wp-subtask-title' }, `${workLabel(t, index)}：${subtask.title}`), closureLabel ? h(Pill, { tone: closureTone }, closureLabel) : null, instructionOverdue ? h(Pill, { tone: 'blocked' }, t('closureNoAck')) : null, h(Pill, { tone }, progressText(item, t))), h('div', { className: 'dsh-wp-subtask-meta' }, h('span', null, `${t('who')}：${deptName(t, subtask.department)} · ${subtask.role}`), effort ? h(Pill, { tone: 'idle' }, `${t('reasoningEffort')}：${effort}`) : null), h('div', { className: 'dsh-wp-subtask-body' }, h('p', null, h('strong', null, `${t('what')}：`), subtask.objective), h('div', null, h('strong', null, `${t('how')}：`), h(Bullets, { items: subtask.method })), h('div', null, h('strong', null, `${t('doneWhen')}：`), h(Bullets, { items: subtask.acceptance })), subtask.outputs?.length ? h('div', null, h('strong', null, `${t('willDeliver')}：`), h(Bullets, { items: subtask.outputs })) : null, subtask.dependsOn?.length ? h('p', { className: 'dsh-wp-muted' }, `${t('waitFor')}：先等前面的工作做完，才能开始这一步。`) : null), h(TimeNegotiation, { item, subtask, t }), status === 'in_progress' ? h(Progress, { value: pct, tone }) : null, status === 'in_progress' ? h('div', { className: 'dsh-wp-progress-meta' }, h('span', null, `${t('progressLabel')} ${pct}%`)) : null, 
             /*
              * [1.11.0] 跨部门需求（用户 m00687）：提出方、指派对象、答复都必须在
              * 进度栏可见。否则用户只能从结果消息的一段文字里猜「这条需求谁在办、

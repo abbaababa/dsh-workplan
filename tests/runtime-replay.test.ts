@@ -475,3 +475,67 @@ test('派发途中取消（结果消息 phase=cancelled）在回放后仍是已�
   assert.equal(record.cancelled, true)
   assert.equal(record.cancelRecorded, true, '取消已由 durable 结果消息记录')
 })
+
+test('人工改判链（escalated→instructed→done→reported）重启回放后完整保留（2.2.6 D-1 回归）', () => {
+  /*
+   * D-1 复现（2026-11-08，artifacts/2.2.5-post-restart-regression.md §4）：
+   * durable workplan-update 自 1.11.0 起携带 closure，但回放 patch 不传它，
+   * 行停在 escalated 时 status=done 的改判会被 applyStatus 拒绝并被裸 catch
+   * 吞掉——重启后「待指示」行永久卡死（wp-3c8c84b2 T2 实证）。
+   * 修复：回放 patch 补 closure;本测试按同一条改判链断言最终行=done/reported。
+   */
+  const plan = {
+    planId: 'wp-d1',
+    sessionId: 'session-replay-d1',
+    createdTurn: 1,
+    createdAt: 1000,
+    title: 'D-1 回归',
+    contradictions: { primary: { statement: '人工改判链必须跨重启保留' } },
+    stages: [{ id: 'S1', subtasks: [{ id: 'T1', dependsOn: [] }] }],
+  }
+  const escalate = buildUpdateMessage({
+    planId: 'wp-d1',
+    subtaskId: 'T1',
+    status: 'blocked',
+    closure: 'escalated',
+    revision: 4,
+    note: '子 Agent 结束状态为 error',
+  })
+  const instruct = buildUpdateMessage({
+    planId: 'wp-d1',
+    subtaskId: 'T1',
+    status: 'in_progress',
+    closure: 'instructed',
+    revision: 6,
+  })
+  const done = buildUpdateMessage({
+    planId: 'wp-d1',
+    subtaskId: 'T1',
+    status: 'done',
+    closure: 'done',
+    verification: 'structured',
+    revision: 8,
+    note: '主 Agent 代为完成并验证',
+  })
+  const reported = buildUpdateMessage({
+    planId: 'wp-d1',
+    subtaskId: 'T1',
+    status: 'done',
+    closure: 'reported',
+    revision: 10,
+  })
+  const events = [
+    { type: 'user/message', data: buildPlanMessage(plan) },
+    { type: 'user/message', data: escalate },
+    { type: 'user/message', data: instruct },
+    { type: 'user/message', data: done },
+    { type: 'user/message', data: reported },
+  ]
+  const session = { seq: events.length, header: { createdAt: 1000 }, eventAt: (n: number) => events[n] }
+  const record: any = reconstructFromSession(session, 'wp-d1')
+  const row = record.statuses.find((item: any) => item.subtaskId === 'T1')
+  assert.equal(row.status, 'done', '最终改判链必须把行带到 done')
+  assert.equal(row.closure, 'reported', 'closure 链 escalated→instructed→done→reported 必须完整回放')
+  assert.equal(row.revision, 10, 'revision 必须单调推进到最后一条改判')
+  assert.equal(row.verification, 'structured', '人工改判携带的结构化证据必须保留')
+})

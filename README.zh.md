@@ -3,7 +3,7 @@
 > **两个卖点，一句话：ISO/IEC 15408:2026 全套安全证据，5 条命令自己验；安装一条命令、零第三方运行时依赖。**
 
 [![verify](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml/badge.svg)](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml)
-[![version](https://img.shields.io/badge/version-2.1.5-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v2.1.5)
+[![version](https://img.shields.io/badge/version-2.2.6-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v2.2.6)
 
 给 **DeepSeek Harness（DSH）** 加一段「先拆计划 → 真派部门子 Agent 去做 → 左侧栏实时看进度」的能力。不装 App、不改 DSH 源码、不换页面。
 
@@ -69,7 +69,7 @@ grep -RInE "child_process|execSync|eval\(|writeFileSync" src || echo "0 命中�
 ## 一键安装
 
 ```bash
-dsh plugin --profile web add dsh-workplan@2.1.5
+dsh plugin --profile web add dsh-workplan@2.2.6
 ```
 
 装完**重启一次 DSH Web**（或重新载入当前页面）让插件生效。
@@ -134,6 +134,9 @@ dsh plugin --profile web add "$(pwd)"
 | 单轮派发预算 | 20 分钟 | `DSH_WORKPLAN_TOTAL_TIMEOUT_MS` |
 | 单个子 Agent 上限 | 15 分钟 | `DSH_WORKPLAN_CHILD_TIMEOUT_MS` |
 | 子 Agent 无进展判定 | 5 分钟 | `DSH_WORKPLAN_IDLE_TIMEOUT_MS` |
+| 规划器无进展上限 | 5 分钟（**自上一个输出块起算**，一直在输出就一直顺延） | `DSH_WORKPLAN_PLANNER_TIMEOUT_MS` |
+| 规划器静默判定 | 90 秒（输出开始后连一个字都不再来才算卡死） | `DSH_WORKPLAN_PLANNER_IDLE_TIMEOUT_MS` |
+| 规划器绝对上限 | 15 分钟（= 无进展上限 × 3，有无产出都到此为止） | 随 `…_PLANNER_TIMEOUT_MS` 等比变化 |
 | 自动续跑次数 | 4 次 | `DSH_WORKPLAN_MAX_RESUMES` |
 | 并发子 Agent | 5 个（固定） | — |
 

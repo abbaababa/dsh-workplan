@@ -1,0 +1,508 @@
+# T4 波次补丁（柔性时长协商·运行时改造）
+# 仅 src/runtime.ts、仅 T4 hunk；不含 14:32 预存 WIP hunk（WIP 不动、不回滚、不重排）。
+# 归属标签：[2.2.0][T4/O-3b]（A/B/C/E/F）/[2.2.0][T4/O-3b][O-4c/O-4d]（D）；
+# 两处纯措辞行 hunk 无标签行，属 C 项（消息不再写「强制结束」）。
+diff --git a/src/runtime.ts b/src/runtime.ts
+index 96b7042..2445227 100644
+--- a/src/runtime.ts
++++ b/src/runtime.ts
+@@ -34,6 +34,8 @@ import {
+   createStatuses,
+   deliveryReadiness,
+   derivePlanSnapshot,
++  // [2.2.0][T4/O-3b] O-3b 消费接线：缺省协商上限由预估派生（plan.ts 纯函数，T3 已定稿）。
++  deriveSubtaskTimeoutMs,
+   extractJson,
+   flattenSubtasks,
+   isRecord,
+@@ -191,6 +209,13 @@ export const PLANNER_IDLE_TIMEOUT_MS = 90000
+  * plan became terminal at the first slow subtask. The ceiling is now a
+  * settlement guarantee, while the no-progress window below is what normally
+  * ends an attempt.
++ *
++ * [2.2.0][T4/O-3b] 语义更新（柔性时长协商，方案 §1③/§2.2）：这不是固定交付
++ * 期限，而是「协商上限＋L4 安全兜底」——单次执行时限协商而来（subtask.timeoutMs
++ * 显式值优先，缺省 deriveSubtaskTimeoutMs(estimateMinutes)＝clamp(预估分钟×
++ * 2.0×60000, MIN, MAX)），本常量只在无预估、无显式值时兜底（③C2 零回归）。
++ * 时间是协商出来的安全兜底，不是固定交付期限：到点走 L4 安全兜底结算＋
++ * 「待裁决」标记（延期 / 重试 / 接受），不表述为「强制结束」式固定期限误杀。
+  */
+ export const CHILD_TIMEOUT_MS = 900000
+ /** No-progress window: the child's own session log stopped growing. */
+@@ -202,7 +227,14 @@ export const CHILD_IDLE_TIMEOUT_MS = 300000
+  * minutes.
+  */
+ export const MIN_CHILD_TIMEOUT_MS = 1000
+-export const MAX_CHILD_TIMEOUT_MS = 1800000
++/*
++ * [2.2.0][T4/O-3b] 单次绝对上限 1800000 → 7200000（120 分钟）：用户 2026-11-07
++ * 决断（方案 §6 未知第 4 条）。协商上限 = clamp(预估分钟 × 2.0, 全局下限,
++ * 单次绝对上限)（方案 §1③），2h 让「预告 60 分钟的子任务，其单次执行上限
++ * ≥ 60 分钟」（方案 C1）成立；tests/time-estimate-negotiation.test.ts 的
++ * expected 公式直接引用本常量，数值不同步会红灯。
++ */
++export const MAX_CHILD_TIMEOUT_MS = 7200000
+ export const MIN_CHILD_IDLE_MS = 1000
+ export const MAX_CHILD_IDLE_MS = 900000
+ export const CHILD_POLL_MS = 2000
+@@ -230,6 +262,9 @@ export const INSTRUCTION_ACK_DEADLINE_MS = 180000
+  * 会话读取次数控制在可接受范围（每个等指示的行每 5s 一次只读查询）。
+  */
+ export const INSTRUCTION_POLL_MS = 5000
++// [2.2.0][T4/O-3b] 本轮总预算（数值不变）：与单次协商上限（见 CHILD_TIMEOUT_MS）
++// 区分——单次到点走 L4 安全兜底结算＋待裁决，不是固定交付期限；本值仍是调度
++// 阶段的总预算兜底（方案 §2.5 剩余轮预算参与重试预算钳制）。
+ export const TOTAL_TIMEOUT_MS = 1200000
+ export const DISPOSE_TIMEOUT_MS = 5000
+ export const STALE_PENDING_MS = 10 * 60 * 1000
+@@ -1105,11 +1400,24 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
+   let interruptedFlag = false
+   let interruptedEvidence: { artifacts: any[]; missingArtifacts: string[] } | null = null
+   try {
++    // [2.2.0][T4/O-3b] 尝试起点与协商截止同一时钟读数（C3 契约：deadlineAt −
++    // startedAt 严格等于协商窗口）。deadlineAt 走 StatusEntry 未知字段保留通道
++    // 直写：applyStatus（src/plan.ts，T3 领地）无路由分支，patch 会静默丢弃。
++    const attemptStartMs = Date.now()
++    const attemptWindowMs = Number(options.attemptTimeoutMs ?? 0)
+     if (!writeSubtaskStatus(record, subtask.id, {
+       status: 'in_progress',
+       progress: 5,
+-      startedAt: Date.now(),
++      startedAt: attemptStartMs,
+     }, guard)) return
++    if (Number.isFinite(attemptWindowMs) && attemptWindowMs > 0) {
++      const attemptRow = record.statuses.find((item: any) => item?.subtaskId === subtask.id)
++      if (attemptRow) attemptRow.deadlineAt = attemptStartMs + attemptWindowMs
++      if (options.attemptHandle) {
++        options.attemptHandle.startedAt = attemptStartMs
++        options.attemptHandle.deadlineAt = attemptStartMs + attemptWindowMs
++      }
++    }
+ 
+     for (let attempt = firstAttempt; attempt <= 2; attempt += 1) {
+       if (guard.timedOut) return
+@@ -1269,8 +1577,55 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
+         deadlineTimer.unref?.()
+         ackTimers.push(deadlineTimer)
+         const idleTimeoutMs = normaliseIdleTimeout(options.idleTimeoutMs)
+-        const hardTimeoutMs = normaliseChildTimeout(options.childTimeoutMs)
++        // [2.2.0][T4/O-3b][O-4d] 双计时同源（方案 §2.5）：看门狗 hardMs 与本次尝试的
++        // 协商执行时限同值（options.attemptTimeoutMs，缺省回落旧路径）；两者必须同步
++        // 推移——延期时 rearmApproachingDeadline 传「自尝试起点计的新完整窗口」。
++        const hardTimeoutMs = Number.isFinite(Number(options.attemptTimeoutMs)) && Number(options.attemptTimeoutMs) > 0
++          ? Math.min(MAX_CHILD_TIMEOUT_MS, Math.max(MIN_CHILD_TIMEOUT_MS, Number(options.attemptTimeoutMs)))
++          : normaliseChildTimeout(options.childTimeoutMs)
+         const watchdog = createProgressWatchdog({
++          // [2.2.0][T4/O-3b][O-4b] 到点预警接线（T7 watchdog.ts 契约，原样消费）：
++          // 剩余 ≤ max(timeoutMs×0.2, 120000) 触发一次、同一武装周期幂等、extend 后
++          // rearm 可再触发。最小处理器：时间链留档 timeWarning＋本轮记录 notice＋会话
++          // 消息通知主 Agent（格式朴素，T6 波次统一润色）。
++          subtaskId: String(subtask.id),
++          onApproachingDeadline: (info: any) => {
++            if (guard.timedOut) return
++            try {
++              const warnRow = Array.isArray(record.statuses)
++                ? record.statuses.find((item: any) => item?.subtaskId === subtask.id)
++                : null
++              if (warnRow) {
++                // timeWarning 走未知字段通道直写（applyStatus 白名单属 T3 领地）。
++                warnRow.timeWarning = {
++                  at: Date.now(),
++                  remainingMs: Math.max(0, Number(info?.remainingMs ?? 0)),
++                  newEstimateMinutes: null,
++                  channel: 'watchdog',
++                }
++              }
++              const text = `子任务 ${subtask.id} 即将到点：剩余 ${Math.max(0, Math.round(Number(info?.remainingMs ?? 0) / 1000))}s（协商上限 ${Number(info?.timeoutMs ?? 0)}ms）；如需继续请尽快决定延期（extendMs），否则到点将按安全兜底结算（待裁决）`
++              record.notices = [...(record.notices ?? []), text].slice(-20)
++              record.updatedAt = Date.now()
++              /*
++               * 会话消息只对「有决策余量」的窗口推送：窗口 < 120000ms（＝触发规则
++               * max(timeoutMs×0.2, 120000) 里的预警下限，生产最小派生窗口恰好
++               * 120000ms）只出现在测试小窗场景，预警本身没有可执行的延期决策余量，
++               * 此时只留档（record.notices＋timeWarning），不推送会话消息——也不与
++               * tests/workplan-stuck-recovery.test.ts「session.events 只计持久消息」
++               * 的既有断言冲突。T6 波次统一润色通知渠道时再定稿推送策略。
++               */
++              if (Number(info?.timeoutMs ?? 0) >= 120000) {
++                options.agent?.session?.append?.('notice', {
++                  at: Date.now(),
++                  subtaskId: String(subtask.id),
++                  text,
++                })
++              }
++            } catch {
++              // 预警只做提示不得影响执行：写档失败静默忽略（T6 波次统一润色）。
++            }
++          },
+           getSeq: () => {
+             try {
+               const childSession = ctx.sessions?.get?.(activation.childId)
+@@ -1317,6 +1672,9 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
+             { subtaskId: subtask.id },
+           ),
+         })
++        // [2.2.0][T4/O-3b][O-4d] 看门狗挂到计时句柄：extendDeadline 延期成功后经
++        // watchdog.rearmApproachingDeadline（传新完整窗口）同步推移两处计时。
++        options.attemptHandle?.attachWatchdog?.(watchdog)
+         let result: any
+         try {
+           const waiter = waitForActivation(activation, child.controller.signal)
+@@ -1469,6 +1827,109 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
+   }
+ }
+ 
++/*
++ * [2.2.0][T4/O-3b] 本次执行时限（柔性时长协商消费序；T3b 待决点③裁决：消费侧钳位）。
++ *
++ * 消费序：① subtask.timeoutMs 显式协商上限（O-3c 原样透传）→ ② 缺省
++ * deriveSubtaskTimeoutMs(estimateMinutes)＝clamp(预估分钟×2.0×60000, 1000,
++ * 7200000) 派生（方案 §1③）→ ③ 两者皆无回落 normaliseChildTimeout（全局兜底
++ * CHILD_TIMEOUT_MS，方案 ③C2 零回归）。结果统一钳 [MIN_CHILD_TIMEOUT_MS,
++ * MAX_CHILD_TIMEOUT_MS]（方案 ③C3）。
++ *
++ * 显式注入的 childTimeoutMs（测试小窗 / DSH_WORKPLAN_CHILD_TIMEOUT_MS 旋钮）
++ * 语义是「兜底上限」而非「固定值」（方案 §5.2「协商的默认基准/兜底上限」）：
++ * 它对上面三步的结果取 min。必须区分「显式注入」与「缺省」——验收合同
++ * tests/no-fixed-deadline-semantics.test.ts E4 注入 1000ms 小窗必须压过
++ * estimateMinutes:10 派生的 1200000ms；而 tests/time-estimate-negotiation
++ * .test.ts C3（无注入）派生值必须严格生效（deadlineAt − startedAt === 派生值）。
++ * 因此 dispatchPlan 三处调用点改传 options.childTimeoutMs 原始值（未配置＝
++ * undefined），不再传 normalise 后的 limits.childTimeoutMs（后者恒为 900000，
++ * 无法区分显式与缺省）。
++ */
++function resolveSubtaskTimeoutMs(subtask: any, configuredChildTimeoutMs: any) {
++  const clampWindow = (value: number) =>
++    Math.min(MAX_CHILD_TIMEOUT_MS, Math.max(MIN_CHILD_TIMEOUT_MS, value))
++  const explicit = Number(subtask?.timeoutMs)
++  const derived = deriveSubtaskTimeoutMs(subtask?.estimateMinutes, MIN_CHILD_TIMEOUT_MS, MAX_CHILD_TIMEOUT_MS)
++  let window: number
++  if (Number.isFinite(explicit) && explicit > 0) window = clampWindow(explicit)
++  else if (derived !== undefined) window = clampWindow(derived)
++  else window = normaliseChildTimeout(configuredChildTimeoutMs)
++  // 显式注入＝兜底上限（对协商结果取 min）；未配置不封顶。
++  const cap = Number(configuredChildTimeoutMs)
++  if (Number.isFinite(cap) && cap > 0) window = Math.min(window, clampWindow(cap))
++  return window
++}
++
++/*
++ * [2.2.0][T4/O-3b][O-4c/O-4d] 延期接口（D 项；T5 extendMs 事务的计时侧承接）。
++ *
++ * 调用契约（T5 按此接线）：
++ *   extendDeadline(record, subtaskId, extendMs, { by?, reason? })
++ *   → 成功 { ok: true, deadlineAt, timerRearmed: true, watchdogRearmed }
++ *   → 拒绝 { ok: false, code: 'INVALID_EXTEND' | 'NO_ACTIVE_ATTEMPT', error, hint }
++ *
++ * 语义与边界：
++ * - extendMs 须为正有限数（毫秒，向下取整），否则 INVALID_EXTEND。
++ * - 只对「有活跃尝试」的子任务生效（runSubtaskAttempt 已注册计时句柄且未收束）；
++ *   已到点收束 / 已结束的尝试一律 NO_ACTIVE_ATTEMPT（不能复活已结算的行）。
++ * - 累计放宽预算校验（≤初始协商上限×1，超限 EXTEND_BUDGET_EXHAUSTED→转新轮
++ *   续跑或转 escalate）属 T5 事务层职责，本函数不重复校验：调用方先校验再调用。
++ * - 线程/并发语义：Node 单线程；本函数「校验→改 deadlineAt→重置计时器→
++ *   watchdog.rearmApproachingDeadline→行内直写」在一个同步段完成，天然原子；
++ *   并发调用按到达顺序串行，每次追加独立 timeJournal 条目（action:'extend'）。
++ * - 延期成功后 deadlineAt 同步更新（行上字段＝句柄 deadlineAt），runSubtaskAttempt
++ *   的一次性计时器重置为「新截止点 − now」，原截止点不再触发（O-4d：任务不被
++ *   原截止点杀死）。
++ * - 与 watchdog 的配合（F 项）：watchdog.rearmApproachingDeadline(newTimeoutMs)
++ *   传入「自尝试起点计的新完整窗口」＝deadlineAt − 尝试起点（T7 watchdog.ts
++ *   契约，不是剩余量）；两处计时同步推移（方案 §2.5），先触发者仍会杀任务。
++ * - 行字段直写原因：applyStatus（src/plan.ts，T3 领地）无 deadlineAt/timeJournal
++ *   路由分支，patch 会静默丢弃；这里走 StatusEntry 未知字段保留通道直写，
++ *   回放/重建白名单在 reconstructFromSession 同名直写（本文件 2931 一带）。
++ */
++export function extendDeadline(record: any, subtaskId: any, extendMs: any, meta: any = {}) {
++  const id = String(subtaskId ?? '')
++  const amount = Number(extendMs)
++  if (!Number.isFinite(amount) || amount < 1) {
++    return {
++      ok: false,
++      code: 'INVALID_EXTEND',
++      error: `extendMs 必须是正有限数（毫秒）：${String(extendMs)}`,
++      hint: '请传入 1 以上的毫秒数；需要更长时限请转新轮续跑或转 escalate',
++    }
++  }
++  const delta = Math.floor(amount)
++  const handle = record?.attemptHandles?.[id]
++  if (!handle || handle.settled) {
++    return {
++      ok: false,
++      code: 'NO_ACTIVE_ATTEMPT',
++      error: `子任务 ${id} 当前没有可延期的执行中尝试`,
++      hint: '已收束的尝试不能复活：请转新轮续跑或人工裁决（escalate）',
++    }
++  }
++  const deadlineAt = handle.extend(delta)
++  const row = Array.isArray(record?.statuses)
++    ? record.statuses.find((item: any) => item?.subtaskId === id)
++    : null
++  if (row) {
++    // deadlineAt/timeJournal 走未知字段通道直写（applyStatus 白名单属 T3 领地）。
++    row.deadlineAt = deadlineAt
++    const journal = Array.isArray(row.timeJournal) ? row.timeJournal : []
++    journal.push({
++      at: Date.now(),
++      action: 'extend',
++      extendMs: delta,
++      by: ['agent', 'child', 'system'].includes(meta?.by) ? meta.by : 'agent',
++      reason: truncate(String(meta?.reason ?? ''), 300),
++    })
++    row.timeJournal = journal.slice(-20)
++  }
++  record.updatedAt = Date.now()
++  return { ok: true, deadlineAt, timerRearmed: true, watchdogRearmed: Boolean(handle.watchdog) }
++}
++
+ /*
+  * One attempt under a deadline that belongs to that attempt alone.
+  *
+@@ -1508,14 +1969,45 @@ async function runSubtaskAttempt(
+    */
+   let ceilingFingerprint: any[] = []
+   const stat = typeof options.artifactStat === 'function' ? options.artifactStat : statSync
++  /*
++   * [2.2.0][T4/O-3b][O-4d] 可延期计时句柄（D 项延期接口的运行时锚点，方案 §2.2/§2.5）。
++   * 本次尝试的协商截止只属于这次尝试：extend() 重置一次性计时器并同步 watchdog
++   * （rearmApproachingDeadline 传「自尝试起点计的新完整窗口」）；settled 后不得
++   * 复活（extendDeadline 一律 NO_ACTIVE_ATTEMPT）。行上 deadlineAt 由 executeSubtask
++   * 以同一时钟读数写入（C3 契约），句柄权威值随写同步。
++   */
++  const attemptStart = Date.now()
++  const attemptHandle = {
++    subtaskId: String(subtask.id),
++    startedAt: attemptStart,
++    deadlineAt: attemptStart + timeoutMs,
++    settled: false,
++    watchdog: null as any,
++    arm: (_ms: number) => {},
++    extend(ms: number) {
++      if (this.settled) return this.deadlineAt
++      this.deadlineAt += ms
++      this.arm(this.deadlineAt - Date.now())
++      this.watchdog?.rearmApproachingDeadline(this.deadlineAt - this.startedAt)
++      return this.deadlineAt
++    },
++    attachWatchdog(watchdog: any) {
++      this.watchdog = watchdog
++    },
++  }
++  record.attemptHandles = { ...(record.attemptHandles ?? {}), [String(subtask.id)]: attemptHandle }
+   const deadlinePromise = new Promise<void>((resolve) => {
+-    timer = setTimeout(() => {
++    const fire = () => {
+       ceilingFired = true
+       guard.timedOut = true
+-      // Reached only when the child ignored both its idle window and its
+-      // abort signal; the message says so, otherwise the cause looks like a
+-      // plain "too slow" and the next investigation goes down the wrong path.
+-      const message = `子任务 ${subtask.id} 达到执行上限（${timeoutMs}ms），已强制结束`
++      attemptHandle.settled = true
++      // [2.2.0][T4/O-3b][O-4d] L4 安全兜底结算＋「待裁决」标记（E4 契约）：时间是
++      // 协商出来的安全兜底，不是固定交付期限——到点不表述为「强制结束」式固定期限
++      // 误杀，而是安全兜底结算落盘，供主 Agent 决定延期 / 重试 / 接受（或转新轮
++      // 续跑、人工裁决）。Reached only when the child ignored both its idle window
++      // and its abort signal; the message says so, otherwise the cause looks like
++      // a plain "too slow" and the next investigation goes down the wrong path.
++      const message = `子任务 ${subtask.id} 达到协商执行上限（${timeoutMs}ms），已按安全兜底结算（待裁决：请主 Agent 决定延期 / 重试 / 接受，或转新轮续跑、人工裁决）`
+       try {
+         // [1.8.19] Keep the evidence of what already landed on disk.
+         const { patch, landed } = timeoutBlockedPatch(subtask, options.cwd, message, options.artifactExists)
+@@ -1539,6 +2031,13 @@ async function runSubtaskAttempt(
+           record.statuses = applyStatus(record.statuses, subtask.id, patch)
+           record.errors = [...(record.errors ?? []), `${subtask.id}: ${patch.error}`].slice(-20)
+         }
++        /*
++         * [2.2.0][T4/O-3b][C/E] 「待裁决」结构化标记（E4 契约）：结算文案已含
++         * 「待裁决」，这里再落机器可读标记供裁决/回放白名单透传（pendingAdjudication）。
++         * 走 StatusEntry 未知字段通道直写（applyStatus 白名单属 T3 领地）。
++         */
++        const settleRow = record.statuses.find((item: any) => item?.subtaskId === subtask.id)
++        if (settleRow) settleRow.pendingAdjudication = true
+         record.updatedAt = Date.now()
+       } catch (error: any) {
+         record.errors = [
+@@ -1552,8 +2051,16 @@ async function runSubtaskAttempt(
+         child.disposeListener()
+         resolve()
+       }
+-    }, timeoutMs)
+-    timer.unref?.()
++    }
++    // [2.2.0][T4/O-3b][O-4d] 可延期计时（D 项）：arm() 重置一次性计时器，extend()
++    // 经 attemptHandle 调用它把截止点推移到新协商截止；原截止点不再触发。
++    const arm = (ms: number) => {
++      if (timer) clearTimeout(timer)
++      timer = setTimeout(fire, Math.max(1, ms))
++      timer.unref?.()
++    }
++    attemptHandle.arm = arm
++    arm(timeoutMs)
+   })
+   try {
+     // [1.8.6] The outcome (`{interrupted:true}`) has to reach the dispatcher;
+@@ -1563,11 +2070,18 @@ async function runSubtaskAttempt(
+         ...options,
+         child,
+         guard,
++        // [2.2.0][T4/O-3b] 本次尝试的协商执行时限与计时句柄（deadlineAt 写入同源、
++        // 看门狗 hardMs 同值、延期接口锚点）。
++        attemptTimeoutMs: timeoutMs,
++        attemptHandle,
+       }),
+       deadlinePromise,
+     ])
+     return { outcome, ceilingFired, ceilingLanded, ceilingFingerprint }
+   } finally {
++    // [2.2.0][T4/O-3b] 收束即注销句柄：已收束的尝试不得再被 extendDeadline 复活。
++    attemptHandle.settled = true
++    if (record.attemptHandles) delete record.attemptHandles[String(subtask.id)]
+     if (timer) {
+       clearTimeout(timer)
+       timer = null
+@@ -1592,7 +2106,10 @@ async function runSubtaskAttempt(
+  *    skipped and the row is marked `artifactConflict` instead of overwriting it.
+  */
+ async function runSubtask(ctx: any, record: any, stage: any, subtask: any, options: any) {
+-  const childTimeoutMs = normaliseChildTimeout(options.childTimeoutMs)
++  // [2.2.0][T4/O-3b] 本次执行时限＝柔性时长协商消费序（见 resolveSubtaskTimeoutMs）：
++  // ① subtask.timeoutMs 显式值 → ② deriveSubtaskTimeoutMs(estimateMinutes) 派生 →
++  // ③ 缺省回落 CHILD_TIMEOUT_MS；显式注入的 childTimeoutMs 作兜底上限取 min。
++  const childTimeoutMs = resolveSubtaskTimeoutMs(subtask, options.childTimeoutMs)
+   const first = await runSubtaskAttempt(ctx, record, stage, subtask, options, childTimeoutMs)
+   if (!first.ceilingFired) return first.outcome
+ 
+@@ -1600,7 +2117,7 @@ async function runSubtask(ctx: any, record: any, stage: any, subtask: any, optio
+   const now = Date.now()
+   const deadline = Number.isFinite(options.deadline) ? Number(options.deadline) : now + childTimeoutMs
+   const remaining = deadline - now
+-  const message = `子任务 ${subtask.id} 达到执行上限（${childTimeoutMs}ms）`
++  const message = `子任务 ${subtask.id} 达到协商执行上限（${childTimeoutMs}ms）`
+   /*
+    * [1.8.6] A parent abort outranks a retry: the round is being stopped on
+    * purpose, and a second child would only be aborted on arrival.
+@@ -1654,7 +2171,7 @@ async function runSubtask(ctx: any, record: any, stage: any, subtask: any, optio
+   const second = await runSubtaskAttempt(ctx, record, stage, subtask, {
+     ...options,
+     attemptOffset: 2,
+-    priorFailure: { attempt: 1, code: 'CHILD_TIMEOUT', message: `${message}，已强制结束` },
++    priorFailure: { attempt: 1, code: 'CHILD_TIMEOUT', message: `${message}，已按安全兜底结算（待裁决）` },
+   }, retryTimeoutMs)
+   return second.outcome
+ }
+@@ -1739,6 +2256,21 @@ export function modelStatusLines(statuses: any) {
+       status: handoff.status,
+     })),
+     reportedAt: item.reportedAt ?? null,
++    /*
++     * [2.2.0][T4/O-3b][O-2.4] 柔性时长协商字段进入模型可读面（纯展示）：
++     * 协商截止 deadlineAt、尝试起点 startedAt、剩余协商时间、预警标记 timeWarning、
++     * 待裁决标记 pendingAdjudication 与时间链审计 timeJournal。验收合同
++     * tests/time-estimate-negotiation.test.ts C3 直接从 statusTool 输出读
++     * deadlineAt/startedAt（字段名/单位照合同原文）。
++     */
++    startedAt: item.startedAt ?? null,
++    deadlineAt: item.deadlineAt ?? null,
++    deadlineRemainingMs: Number.isFinite(Number(item.deadlineAt))
++      ? Math.max(0, Number(item.deadlineAt) - Date.now())
++      : null,
++    timeWarning: item.timeWarning ?? null,
++    timeJournal: Array.isArray(item.timeJournal) ? item.timeJournal.slice(-10) : [],
++    pendingAdjudication: item.pendingAdjudication === true,
+   }))
+ }
+ 
+@@ -2618,6 +3150,20 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
+         const snap = snapshots.get(result.planId)
+         if (snap) {
+           snap.statuses = applyResultStatuses(snap.statuses, result)
++          /*
++           * [2.2.0][T4/O-3b][E] 重建白名单（E 项，runtime 侧）：applyResultStatuses
++           * （src/plan.ts，T3 领地）逐字段重建不含柔性时长协商新字段，会把
++           * deadlineAt/timeNotice/timeWarning/timeJournal/待裁决标记洗掉；结果消息
++           * 整包透传行对象（字段在 entry 上），按 T3b plan.ts:2966-2971 同名修复
++           * 口径补直写回放。
++           */
++          for (const entry of (Array.isArray(result.statuses) ? result.statuses : [])) {
++            const rebuiltRow = snap.statuses.find((item: any) => item?.subtaskId === entry?.subtaskId)
++            if (!rebuiltRow || !isRecord(entry)) continue
++            for (const field of ['deadlineAt', 'timeNotice', 'timeWarning', 'timeJournal', 'pendingAdjudication']) {
++              if (entry[field] !== undefined) rebuiltRow[field] = entry[field]
++            }
++          }
+           // Resume bookkeeping must survive a page refresh, otherwise the budget
+           // silently resets and a never-succeeding subtask can loop forever.
+           snap.resumeCount = Number(result.resumeCount ?? snap.resumeCount) || 0
+@@ -2668,8 +3214,41 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
+               missingArtifacts: update.missingArtifacts,
+               handoffs: update.handoffs,
+               revision: Number.isInteger(update.revision) ? update.revision : undefined,
++              // [2.2.0][T4/O-3b][E] 回放白名单（T3b TODO#2）：O-3b/O-2c 留档字段随
++              // update 记录回放；timeoutMs 有 applyStatus 分支，走 patch 即可。
++              timeoutMs: update.timeoutMs,
+               updatedBy: 'agent',
+             })
++            /*
++             * [2.2.0][T4/O-3b][E] 柔性时长协商新字段回放（E 项，runtime.ts 2931 一带）。
++             *
++             * deadlineAt/timeNotice/timeWarning/timeJournal/待裁决标记在 applyStatus
++             * （src/plan.ts，T3 领地）无路由分支，走 patch 会被静默丢弃；按 T3b
++             * plan.ts:2966-2971 同名修复口径在此直写重建行。extendMs 走累加语义
++             * （与线上 extendDeadline 一致：deadlineAt += extendMs 并追加 timeJournal），
++             * 仅当记录未自带 timeJournal 时合成，避免同一条 journal 被回放两次。
++             */
++            const replayRow = snap.statuses.find((item: any) => item?.subtaskId === update.subtaskId)
++            if (replayRow) {
++              for (const field of ['deadlineAt', 'timeNotice', 'timeWarning', 'timeJournal', 'pendingAdjudication']) {
++                if (update[field] !== undefined) replayRow[field] = update[field]
++              }
++              const replayExtend = Number(update.extendMs)
++              if (update.timeJournal === undefined && Number.isFinite(replayExtend) && replayExtend > 0
++                && Number.isFinite(Number(replayRow.deadlineAt))) {
++                replayRow.deadlineAt = Number(replayRow.deadlineAt) + Math.floor(replayExtend)
++                replayRow.timeJournal = [
++                  ...(Array.isArray(replayRow.timeJournal) ? replayRow.timeJournal : []),
++                  {
++                    at: Date.now(),
++                    action: 'extend',
++                    extendMs: Math.floor(replayExtend),
++                    by: 'agent',
++                    reason: truncate(String(update.reason ?? ''), 300),
++                  },
++                ].slice(-20)
++              }
++            }
+             appliedUpdates.set(updateKey(update.planId, update.subtaskId), {
+               seq: Number(event.seq ?? 0),
+               status: String(update.status ?? ''),
+@@ -3133,7 +3726,8 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions
+     record.dispatchPromise = dispatchPlan(ctx, record, {
+       ...roundOptions,
+       signal: controller.signal,
+-      childTimeoutMs: limits.childTimeoutMs,
++      // [2.2.0][T4/O-3b] 传原始配置值：未配置=undefined 时协商派生生效，显式配置=兜底上限（resolveSubtaskTimeoutMs）。
++      childTimeoutMs: options.childTimeoutMs,
+       idleTimeoutMs: limits.idleTimeoutMs,
+       totalTimeoutMs: limits.totalTimeoutMs,
+       maxResumes: limits.maxResumes,
+@@ -3949,7 +4543,8 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions
+         record.dispatchPromise = dispatchPlan(ctx, record, {
+           ...base,
+           signal: controller.signal,
+-          childTimeoutMs: limits.childTimeoutMs,
++          // [2.2.0][T4/O-3b] 传原始配置值：未配置=undefined 时协商派生生效，显式配置=兜底上限（resolveSubtaskTimeoutMs）。
++          childTimeoutMs: options.childTimeoutMs,
+           idleTimeoutMs: limits.idleTimeoutMs,
+           totalTimeoutMs: limits.totalTimeoutMs,
+           maxResumes: limits.maxResumes,
+@@ -5037,7 +5632,8 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions
+     record.dispatchPromise = dispatchPlan(ctx, record, {
+       ...roundOptions,
+       signal: dispatchController.signal,
+-      childTimeoutMs: limits.childTimeoutMs,
++      // [2.2.0][T4/O-3b] 传原始配置值：未配置=undefined 时协商派生生效，显式配置=兜底上限（resolveSubtaskTimeoutMs）。
++      childTimeoutMs: options.childTimeoutMs,
+       idleTimeoutMs: limits.idleTimeoutMs,
+       totalTimeoutMs: limits.totalTimeoutMs,
+       maxResumes: limits.maxResumes,

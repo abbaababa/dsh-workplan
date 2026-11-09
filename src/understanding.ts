@@ -1247,10 +1247,18 @@ export function auditTaskUnderstanding(plan: any, context: PlanAuditContext = {}
     const found = fromConversation ?? resolvePronounAntecedentInline(reference.token, taskText)
     if (!found) return reference
     // Option letters are resolved only when the conversation lists that option
-    // as a listed choice ("A 方案" / "B 选项"), not a bare letter in a word.
+    // as a listed choice, not a bare letter in a word. Listed-choice markers:
+    // "C 方案" / "C 选项" and the enumeration forms "C=…" / "C＝…" / "C：…" /
+    // "C、…" / "C)…" / "C）…" / "C.…" / "C．…" (marker must be followed by
+    // content). Q10-style reports enumerate options as "A=… / B=… / C=…";
+    // [2.2.6] the old regex only accepted 方案/选项, so a plain "选C" was
+    // falsely judged unresolvable, burned two full planner attempts (~12 min
+    // of silent planning in session-a404d49d) and degraded a legitimate task.
     // Task-text entities never satisfy this rule on their own: the option must
     // be defined where the user chose it, i.e. in the conversation.
-    const listedOption = new RegExp('(?:^|[^A-Za-z])' + reference.token + '\\s*(?:方案|选项)')
+    const listedOption = new RegExp(
+      '(?:^|[^A-Za-z])' + reference.token + '\\s*(?:方案|选项|=|＝|：|:|、|\\)|）|\\.|．)\\s*\\S',
+    )
     if (/^[A-D]$/.test(reference.token) && !listedOption.test(conversation)) return reference
     /*
      * [T3] Record where the referent came from. Reusing 'context' for an

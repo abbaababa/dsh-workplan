@@ -1,3 +1,357 @@
+## 2.2.6 — 2026-11-08
+
+**本版三项修复：D-1 重启回放丢弃人工改判的 closure 字段；跨部门需求落盘变 `[object Object]`（handoff 序列化）；任务自动分解期间界面零提示（进度可见性）。**
+
+### 修复 D-1：重启回放丢弃人工改判的 closure 字段——重启后「待指示」行永久卡死的确证缺陷（起源 1.7.0，非 2.2.5 引入）
+
+### 修复
+
+- 回放 patch 补上 `closure: update.closure`：durable 的 `workplan-update` 自 1.11.0 起携带 closure，但 `reconstructFromSession` 的回放 patch 一直没把它传给 `applyStatus`；行停在 escalated 时，`status=done` 的改判被「非法闭环迁移 escalated→done」拒绝，整条 update 被裸 catch 吞掉。实证：wp-3c8c84b2 T2（改判链 blocked/escalated→instructed→done→reported，durable rev4→rev10 全部单调合法），重启重建=blocked/escalated/rev5（artifacts/2.2.5-post-restart-regression.md §4 D-1）。
+- 裸 catch 改为 `console.warn` 留痕（fail-closed 而非 fail-silent）：单条坏记录不再无声消失，回放继续。
+
+### 验证（红-绿）
+
+- 新回归测试 `人工改判链（escalated→instructed→done→reported）重启回放后完整保留`（tests/runtime-replay.test.ts）：
+  - **红**：摘掉修复跑全量 → 651 项中恰好 1 失败，失败点=「closure 链 escalated→instructed→done→reported 必须完整回放」；
+  - **绿**：恢复修复 → **651/651 通过**；`npm run check` 0 错误。
+
+### 修复（二）：跨部门需求落盘变 `[object Object]`（handoff 序列化）
+
+- **病根**：handoff/needs/options 入库路径上有 4 个点位用隐式 `String(对象)` 把对象形需求整体转成字面量 `[object Object]`，部门信息一并丢失（写坏点 W1–W4：`src/plan.ts` `readEvidenceNeeds` / `mergeHandoffsFromNeeds` / `readEvidenceOptions`，`src/runtime.ts` escalate；根因报告 `_t1_dualdefect_rootcause_20261108/root-cause-and-boundary-report.md` §2.2）。
+- **修复**：4 个点位全部改为对象感知的受控序列化——对象形需求按 `{department, need, purpose}` 组装为「部门：需求（用途）」可读文本，并把合法部门键存入 `handoff.department`；嵌套对象兜底为循环引用安全、undefined 安全的受控 JSON（`safeJsonText`）；字符串形需求逐字不变；历史 `[object Object]` 记录加载不抛错、存量逐字段不改写。全部改动以 `[2.2.6][T4]` 锚点标记，src 与 lib 一一对应。实证：主计划 wp-db6de2f0 的 T1–T4 四条需求均被写成 `request="[object Object]"、department:null`。
+- **证据**：`_t4_need_serialization_fix/fix-report.md`；专项回归 **10/10**（evidence/01，含幂等与历史记录共存用例）；坏模式 `String(item ?? '')` 在 src 与 lib 中 **0 命中**。
+
+### 修复（三）：任务自动分解期间界面零提示（进度可见性）
+
+- **病根**：分解全程（`runPlanner`，最长 3 次尝试 × 300s 窗口 + 退避）发生在 pre-step 钩子内同步 await，期间插件零 `session.append`、零 `records.set`——侧栏 4 秒轮询与「正在安排」词汇早已存在，只是从未收到数据（断点层=未发出，插件层，非宿主限制、非前端渲染缺陷）。
+- **修复**（零新组件、零新路由、零推送机制）：
+  - **进行中**：进入分解先写占位进度卡，侧栏 4 秒轮询内出现「正在安排」徽标 + 「正在生成任务分解…」标题；
+  - **重试中**：每次可重试失败，卡片错误区追加「第 N 次尝试失败（原因码）：真因；正在重试（约 X 秒后），第 (N+1)/3 次」，并仅在会退避重试时发一条聊天通知（**每轮至多 2 条**，第 3 次失败直接进降级文案不叠加）；
+  - **失败带真因**：3 次全败走既有降级横幅（含逐次真因链），真因截断 ≤120 字符、错误码（如 `ECONNREFUSED`）原样保留；
+  - **等信息中**：信息不足先澄清的场景徽标不再回显原始键名 `clarify`（zh「等信息中」/ en "Waiting for info"）；
+  - **用户中止**：全静默、不残留假「进行中」、不丢上一份终态进度；重试语义零变化（`onProgress` 为只读观察点，退避执行块逐字未动）。
+- **证据**：`_t5_visibility_impl_20261108/implementation-notes.md`；专项回归 **5/5**（对照交互规范 `_t3_visibility_spec_20261108/interaction-spec.md` C2/C3 模板断言）。
+
+### 验证（合并态统一回归）
+
+T4（序列化）与 T5（可见性）并行改动同一批文件，在合并构建上做统一体检，**总判定 GO、产品级失败项 = 0**（`_t6_dualfix_regression_20261108/T6_双修复回归测试报告.md`）：
+
+- 合并产物一致性：构建前后双检哈希 15/15 + 根 client.js 一致；`npm run check` exit 0；
+- 全量套件 **666/666 通过**（= 661 + 5，计数精确吻合；full-test-666.log）；
+- 上一轮守卫与双向回归不回退：守卫 6/6、抖动正例 8/8 断言、AUTH 反例 4/4、cause 链 3/3、取消传播 3/3、真故障反例 7/7（1564–1678ms，与基线 1.454s 同量级带内）；
+- 执行偏差披露：真故障反例组首跑 3 断言失败系漏注入占位密钥（执行偏差而非产品回归），补齐后 3 次 7/7，首跑日志留档（negative-result.attempt1-missing-env.txt）。
+
+### 边界
+
+- 两项双缺陷修复的**生环境复验**（手工重启 dsh web 后新会话触发自动分解，核对「进行中 / 重试中 / 失败带真因 / 等信息中」四态）待用户执行；可见性聊天通知（通道 B）能否在分解等待期间即时上屏属宿主运行态行为（H-1），侧栏卡片（4 秒轮询）为保底通道，不依赖它。
+- wp-db6de2f0 四条历史损坏记录的原文已从子会话日志提取留档（minimal-change-points.json `extractedSamples`），可恢复；回填走 `dsh_workplan_update`，存量数据一字不改。
+- **D-3 未在本版修复**（轮次中途完成只存内存、重启丢当前计划状态）：需要把每子任务结算改为 mid-round durable 写入，属轮次生命周期改造，风险大于本版可承受；维持 SG4 登记，建议 2.2.7 专项处理。缓解：重要节点后不要立刻重启；主 Agent 会在整轮完成后再建议重启。
+- G1–G10 与 SG1/SG3 等条件项不变；整体交付仍受 2.2.3 门禁 NO-GO 约束。
+
+### 安装
+
+```bash
+npm install dsh-workplan@2.2.6
+```
+
+## 2.2.5 — 2026-11-08
+
+**轮次预算默认关闭：不再在子任务协商截止之前用“本轮预算用尽”切断整轮；子任务自己的预估/协商/延期/预警仍是唯一时间治理。**
+
+### 修复
+
+- `TOTAL_TIMEOUT_MS` 默认改为 **0**（不设整轮硬预算）；`totalTimeoutMs=0` 现在表示“关闭轮次预算”，正数（配置/`DSH_WORKPLAN_TOTAL_TIMEOUT_MS`）才启用安全兜底，最小 60s。
+- `dispatchPlan` 在关闭时使用 10 年哨兵值，避免 `Infinity` 参与计时器/差值；`staleAfter` 同步放宽；host 工具调用超时在关闭时用 24h 兜底。
+- 规划器提示词与计划消息不再写“本轮总预算 20 分钟/需要 N 轮”；改为“本轮不设固定总预算，子任务按 estimateMinutes 与协商截止/延期执行”。
+- 预算到点提示仅在显式启用正数预算时出现；关闭时不会出现“本轮预算用尽，等待续跑”。
+- 子任务协商机制不变：`estimateMinutes`、`timeoutMs`/`deadlineAt`、`extendMs`、`timeNotice`、`timeWarning`、`pendingAdjudication` 仍按原逻辑工作。
+
+### 版本说明
+
+- 按用户要求跳过 2.2.4，直接使用 **2.2.5**。
+- 2.2.3 的 N1（status 文本面 planner/通道）与 N2（看板“协商上限（派生）”）保留；2.2.5 只改轮次预算。
+
+### 热修（2026-11-08 同日，修复首版 2.2.5 的秒杀 bug）
+
+- **现场事故**：首版 2.2.5 的无预算哨兵值取 **10 年**，超过 Node `setTimeout` 上限（2³¹−1 ≈ 24.8 天），Node 把延时强制改为 **1 毫秒**（TimeoutOverflowWarning）。结果：计划派发后 1ms 整轮定时器就触发，全部子任务瞬间被「总执行超时」杀死（17:36 一批 38ms、18:01 一批 8ms，各 6/6 与 3/3 全灭）。
+- **修复**：哨兵值改为 **20 天**（1,728,000,000ms < 2³¹−1，安全且对单轮等价于“无预算”）；`dispatchPlan` 的整轮定时器额外钳制在 `ROUND_TIMER_MAX_MS = 2,000,000,000ms`，双重保险。
+- **验证**：`npm run check` 0；`npm test` 650/650；构建 build `e04e7c26f277e71a`（lib 四入口复算）。事故根因行号：`src/runtime.ts` 原 `setTimeout(..., Math.max(1000, deadline - Date.now()))`。
+
+### 验证
+
+### 边界
+
+- 关闭轮次预算后，每个子任务自己的 `timeoutMs`/到期结算仍生效；没有“整轮硬切断”。若子任务自身卡住，仍需按子任务协商/延期或主 Agent 处理。
+- 2.2.3 的 D2 Console/D6-e/F1-R1/F4 负向等缺口仍为 CONDITIONAL/UNKNOWN，不因 2.2.5 自动变 PASS。
+
+### 安装
+
+```bash
+npm install dsh-workplan@2.2.5
+```
+
+## 2.2.3 — 2026-11-08
+
+**把 2.2.2 只进结构化返回值的 D1/D5 可观测字段补到模型可见文本面，并让 D2 的“协商上限”可被观察；不改状态机。**
+
+### 新增 / 修复
+
+- **N1（status 文本面）**：`dsh_workplan_status` 的 render 文本新增：
+  - `规划器：推理等级 / 来源 / 判定 / 模型`（来源可为 `default-max` 或 `env`）；
+  - 每行 `通道：state｜target｜caller｜at｜observedAt｜reason`。
+  这两类字段此前只在结构化 `value` 里，DSH 只把 render 文本写进对话，导致 D5 planner 与 D1-b awaiting 快照在模型侧结构性不可读。
+- **N2（D2 协商上限）**：前端 `TimeNegotiation` 在计划未声明 `timeoutMs` 时，用 `deadlineAt - startedAt - 已延期` 派生一个只读上限，并标注“派生”；不写回计划、不冒充用户授权值。计划显式 `timeoutMs` 仍优先。
+- **N3（可选日志）未实施**：stdout/stderr 落盘属启动配置，不在本版改码范围内，避免夸大。
+
+### 验证
+
+- `npm run check` 0 错误；`npm test` **650/650 通过**（含版本同步、状态渲染、时间协商 UI 既有用例）。
+- 2.2.3 需要用户手动重启 DSH 才会加载；重启前运行态仍是 2.2.2。
+- 重启后需重新采集：D5 planner、D1-b awaiting、D2 协商上限截图；2.2.2 的运行态证据不继承。
+
+### 边界
+
+- D2 的 Console 仍为 UNKNOWN（用户不看 Console）；截图-only 最高 CONDITIONAL。
+- D6-e 真实负向回执仍为 0 条；D6 仍 CONDITIONAL，除非出现真实事件。
+- F1/F4 运行态负向分支仍不可达；只能如实标 UNKNOWN/接受残余。
+
+### 安装
+
+```bash
+npm install dsh-workplan@2.2.3
+```
+
+## 2.2.2 — 2026-11-08
+
+**修复 F1/F4 回放边界，并让规划器的推理档位遥测进入 status 可读面（D5 真实环境取证）。**
+
+### 修复
+
+- **F1（noticeChannel 空值回放边界）**：结果载荷里的 `noticeChannel:null`/非法值不再导致整条结果行被跳过（done 行回放成 pending、摘要/验收全丢）；回放前先校验，非法值按“无字段”处理，重建时不写回 null。
+- **F4（无活 Agent 时的目标回落）**：`injected` 为空且没有活 `agent.id` 时 fail-closed 为 `TARGET_NOT_INJECTED`，不再回落到 `plan.sessionId` 当消息目标。
+- **D5（规划器遥测可读）**：`dsh_workplan_status` 新增 `planner` 字段（provider/model/reasoningEffort/source/outcome/at），成功计划也能在真实运行态核对“规划器未继承主 Agent”。
+- 包含 2.2.1 的会话损坏热修（`appendUserMessage` + 修复脚本），2.2.2 是叠加版本。
+
+### 验证
+
+- F1/F4：修复前 5 条失败、修复后 19/19；隔离副本全量 650/650；生产源码 `tsc --noEmit` 0。
+- 2.2.2 构建后全量测试与 D5/E2E 证据在重启后采集；本版不把源码级验证冒充运行态验证。
+
+### 边界
+
+- F3 仍为部分关闭（超时状态行不写结论，需产品决定口径）。
+- 2.2.2 需要用户手动重启 DSH 才会加载；重启前运行态仍是 2.2.1。
+
+### 安装
+
+```bash
+npm install dsh-workplan@2.2.2
+```
+
+## 2.2.1 — 2026-11-08
+
+**修复：完成即时通知与到点预警把纯字符串写进 `user/message`，导致会话历史无法加载（`failed to project session … Cannot read properties of undefined (reading 'kind')`）。**
+
+### 问题
+
+2.2.0 新增的两条“即时通知”路径把**纯字符串**直接作为 `user/message` 事件载荷写入会话：
+
+- `runtime.ts` 的 `emitSubtaskDoneNotice()`：子任务完成即写 `[dsh-workplan] 子任务 … 已完成并结算：…`；
+- 看门狗到点预警：`timeoutMs ≥ 120000` 时写 `子任务 … 即将到点：…`。
+
+DSH 0.2.2-rc.1 的 `Session.append()` 只对**对象**载荷执行消息校验（`isRecord(data)` 分支），字符串因此被原样持久化。回放时 `goal` 投影对每条 `user/message` 读取 `event.data.source.kind`，字符串没有 `source`，抛出 `TypeError`；DSH 将其包装为 `SESSION_QUERY_CORRUPT_SESSION`，Web 端显示：
+
+```
+历史加载失败：failed to project session "session-…": Cannot read properties of undefined (reading 'kind') (gateway/internal)
+```
+
+现场证据（2026-11-08，工作区根目录）：
+
+- `session-a404d49d-86b2-448d-8b3d-648423ffa146`：投影缓存水位 seq 1035（12:42 写入）；12:43:11 首个坏事件 seq 1036（T2 完成通知）；截至修复脚本 dry-run 时共 7 条（seq 1036/1038/1046/1047/1049/1054/1055，含两条到点预警）。
+- 同工作区 `session-4ce46ec9-236e-46f6-978b-c5fe7f52815f`：seq 2002/2003/2007/2008 共 4 条同类坏事件。
+
+### 改了什么
+
+- 新增 `appendUserMessage(session, payload, source?)`（`src/plan.ts`）：
+  - 字符串自动包装为完整 DSH `UserMessage`：稳定 `id`、`role:'user'`、`content:[{type:'text',text}]`、非空 `source.kind`，并固定 `surfaceOp:'append'`；
+  - 对象先按 DSH `user/message` 契约校验（id/role/content/source.kind）；不合格在 `session.append()` 之前抛错，坏事件不再有机会进入追加日志。
+- `runtime.ts` 全部 10 处、`supersede.ts` 1 处 `user/message` 写入统一改走该 helper；两条纯字符串路径被彻底消除。
+- 新增回归测试 `tests/workplan-user-message-shape.test.ts`：
+  - 字符串通知必须落成合法 UserMessage；
+  - 缺 id / 缺 source / 空 `source.kind` 的载荷必须在 append 前拒绝；
+  - `runtime.ts`、`supersede.ts` 不得再出现直接 `append('user/message', …)`，防止未来绕过 helper。
+
+### 已损坏会话的一次性修复
+
+2.2.1 只阻止**新增**坏事件；已写入磁盘的字符串事件仍需修复。新增 `scripts/repair-malformed-user-messages.mjs`：
+
+- 默认 dry-run；`--write` 才落盘；
+- 只把 `user/message` 的字符串载荷改写为合法 UserMessage，**不改 seq/time/surfaceOp/sourceEventSeqs、不丢事件**；遇到其他异常形状中止并要求人工确认，不猜测；
+- 原文件先备份为 `*.bak-<timestamp>`，再原子替换；
+- 写入后重新解压逐行复验：事件总数不变、seq 连续、所有 `user/message` 形状合法；
+- 支持 `--scan-recent [--hours 24]`：停机后按最近修改时间再扫一遍，防止其他正在运行的会话在停机前又写入同类坏事件；
+- 仅当投影缓存水位落在被修复区间时，才把缓存文件移开（避免把坏事件后的缓存当基线）；
+- 检测到日志仍被进程占用（例如 DSH 正在运行）时拒绝 `--write`，必须先停服。
+
+### 边界
+
+- DSH 0.2.2-rc.1 的 append 校验对非对象载荷不报错，这是本次事故能落地的前置条件；插件侧已自校验，建议上游在 `validateSessionEventData()` 对非记录消息载荷直接拒绝（不在本插件改动范围）。
+- 修复脚本处理所有字符串 `user/message` 载荷：已知 dsh-workplan 文案标 `workplan`，未知文案标 `recovered`，原文逐字保留；其他异常形状中止并要求人工确认。其他插件若写入对象但缺字段的坏载荷，仍需各自修复。
+- `session-a404d49d…` 在修复时仍被 DSH 进程持有，必须先停服再执行 `--write`；停服/重启由用户手工完成。
+
+### 验证
+
+- `npm run check`、`npm test` 全量通过（含新增回归测试）。
+- 修复脚本在两个受影响会话上 dry-run 通过；对已关闭的 `session-4ce46ec9…` 执行 `--write` 后复验：2018 个事件、seq 连续、全部 `user/message` 形状合法，原文件已备份。
+- 版本号同步：`package.json` / `package-lock.json`（两处）/ `src/host.ts` meta / README×3 / `tests/fixtures/tool-surface.json` 全部为 2.2.1。
+
+### 升级
+
+本仓库当前以本地 link 方式安装：`~/.dsh/profiles/web/node_modules/dsh-workplan → <工作区>/plugins/dsh-workplan`。重新构建后，**手工重启 DSH** 即可加载 2.2.1；重启前先按上节停服修复运行中的会话。
+
+## 2.2.0 — 2026-11-08
+
+**柔性时长协商：时间从「固定闸门」变成「协商上限 + 安全兜底」；子任务完成即时通知；子 Agent 推理等级自决；子→主开工预告通道修复并进入看板。**
+
+### 问题
+
+2.1.x 的子任务共用一条写死的执行时限，到点按「强制结束」处理：专家没有开工预告、没有超预估预警、没有申请延期的通道；主 Agent 也无法在运行中放宽。与此同时，部门子 Agent 的推理档位跟着主 Agent 走，规划器也继承主 Agent 档位——主 Agent 用低档省成本时，拆解与执行会被整体降档。真实环境还复现了「子→主开工预告」通道结构性不可达：插件用 `delivery:'caller'` 派发，宿主不会追加父会话 id，插件却让子 Agent 向不存在的目标 `"lead"` 发消息，预告静默丢失。
+
+### 改了什么
+
+- **时间语义**：`estimateMinutes` 放宽到 1–240 的整数（越界拒绝，不再静默钳成 15）；新增可选 `timeoutMs`；缺省时按 `clamp(预估分钟 × 2.0 × 60000, 1000, 7200000)` 派生协商上限；显式 `timeoutMs` 优先。上限 7,200,000ms（120 分钟）为用户 2026-11-07 决断。
+- **专家协议**：派发提示词新增「柔性时长协商协议」——开工前报预估、超预估立即报新预估并申请延期、完成即报核心结论；明确不设固定完成时间。
+- **主 Agent 放宽**：`dsh_workplan_update` 新增 `extendMs` / `timeNotice`；运行中纯时限事务无需 `force`；累计放宽 ≤ 初始协商上限 × 1，超限拒绝并提示裁决；仅主 Agent 可用。
+- **到点兜底**：到点不再是「强制结束」，改为「达到协商执行上限，已按安全兜底结算（待裁决）」；保留落盘产物、自动重试一次、状态行写 `pendingAdjudication`；`escalated` 优先，不被超时覆盖。
+- **完成即时通知**：后台/自动派发轮次中，子任务真正 `done` 后立即向主会话推送一条含摘要、验收计数、用时的通知（≤5 秒、幂等、先于整轮批量结果；只有 `done` 才推，不误报）。
+- **到点预警**：看门狗在剩余 ≤ max(协商上限 20%, 2 分钟) 时提醒一次，写 `timeWarning` 与 `timeJournal`，不拦截、不自动延期；延期后重新武装可再提醒。
+- **推理等级**：子任务支持 `reasoningEffort: low/high/max`（缺省回落 high）；校验非法值；重规划 replace/add 保留或显式覆盖；部门子会话只取子任务自己的档位，绝不继承主 Agent；规划器未设专用旋钮时取默认 `max`，不再继承主 Agent（用户 2026-11-08 决策 5）；规划器遥测记录实际生效档位与来源。
+- **子→主开工预告通道**：由插件注入真实父会话 id，提示词改用宿主契约的 `send_message({agent_id, message})`，彻底移除 `target:"lead"`；状态行新增 `noticeChannel`（target/targetSource/caller/at/observedAt/reason），结算时到父会话日志实证「已观测/未观测」，失败留四项日志，不再静默丢失。
+- **看板**：任务行展示推理等级、预估时长、协商上限、协商截止、延期记录、开工预告、到点预警、子→主通道状态与待裁决标记；字段缺失时整块降级不渲染。
+- **版本号**：package.json / package-lock（两处）/ `src/host.ts` meta.version / README×3 / 工具面 fixture 全量同步 2.2.0。
+
+### 兼容性与边界
+
+- 时间字段为 advisory（仅供参考），不参与可交付判定；旧计划缺少新字段时按旧路径运行（显式 `timeoutMs` → 预估派生 → 全局兜底）。
+- `wait`（同步）模式不推完成即时通知：主 Agent 阻塞在工具调用中，轮级结果消息即完成通道。自动派发/自动续跑/async 模式推送。
+- 运行中刷新/重启仍可能丢「运行中尝试」的 `deadlineAt`；轮末结果消息会恢复。该边界与决策单第 5 条一致。
+- 子→主通道仍受宿主 lineage 校验约束：插件只注入本轮父会话 id，不提供任意目标发送、不新增插件工具面。
+
+### 验证
+
+- 全量测试 `npm test` 通过（含新增 notice-channel、看板协商展示、规划器停止继承、时间协商/延期/预警用例）。
+- 真实环境 e2e 需由用户手工重启 DSH 后执行（本仓库不自行重启），验证项与证据要求见 `docs/` 下的 2.2.0 决策单、实施记录与重启后验证报告。
+
+### 安装
+
+```bash
+npm install dsh-workplan@2.2.0
+```
+
+### 并入的 2.1.7 WIP：规划器超时抢救（原 2026-11-07 未发布段，按用户 2026-11-08 决定并入 2.2.0）
+
+
+**修复规划器超时第四次复发的根因：定时器中止不再把 900 秒的产出整体作废（抢救 + 遥测补字数 + 两个可选旋钮）。**
+
+#### 问题
+
+2.1.6 把计时改成「按有没有产出」，但绝对上限（900s）撞上时仍是**整体丢弃**：
+2026-11-07 同一会话里 `PLANNER_TIMEOUT_HARD` 连续出现 4 次，现场为
+「模型 mimo-v2.6-flash｜耗时 900.0s｜收到 11694 个输出块｜提示词 5102 字」。
+模型明明持续产出了 15 分钟，最后什么都没留下。三个结构性缺陷：
+
+- **正文随局部变量蒸发**：`collectStream` 的 `text` 是局部变量，定时器一 abort，
+  for-await 直接抛错，900 秒流出的正文连同 `lastText` 一起消失——已写完的计划
+  （哪怕只差收尾 `}` 之外全部就绪）被整体扔掉，只能降级。
+- **遥测恒缺「输出 N 字」**：abort 时 `lastText` 恒为空串，`textChars` 记成 0，
+  事后无法判断「模型到底写没写完」，失败现场不可复盘。
+- **无界生成 + 无独立推理档**：规划器调用不传 `maxTokens`（慢模型可无限吐），
+  且无条件继承主 agent 的推理档——慢模型 + 高档位正是 900 秒内完不成的放大器；
+  连续 `INVALID_JSON` 也印证输出过长被截断。
+
+#### 改了什么
+
+- **抢救（`salvagePartialPlan`）**：正文边流边落进 `sink`；定时器中止 / 缺 finish
+  信号时，若正文末尾已闭合（`}`），按与正常路径完全一致的三道闸
+  （`extractJson` → `validatePlan` → `validatePlanContext`）重新验收，通过则照常返回
+  计划，判定记 `SALVAGED`（成功记录保留该判定，不被 `ok` 覆盖）。拦腰截断的 JSON
+  一律不救——宁可降级也不交残缺计划；strict 上下文闸同样不被绕过。
+- **遥测补字数**：`textChars = max(lastText, sink)`，abort 现场从此有「输出 N 字」。
+- **两个可选旋钮（不设 = 行为与旧版完全一致）**：
+  - `DSH_WORKPLAN_PLANNER_MAX_TOKENS`：单次生成封顶，非法取值回落（不打成 NaN）；
+  - `DSH_WORKPLAN_PLANNER_REASONING_EFFORT`：规划专用推理档，覆盖继承值。
+- **版本号 2.1.7 全量同步**（package.json / package-lock / meta.version /
+  README×3 / tool-surface fixture）。
+- 新增 `tests/planner-salvage.test.ts`（5 条）：抢救成功、截断不救但留字数、
+  缺 finish 信号可救、strict 闸不被绕过、两旋钮透传与回落；与既有
+  `tests/planner-timeout.test.ts` 12 条一并通过。
+
+#### 边界（不夸大）
+
+- 抢救只认「末尾已闭合」的正文；被截断的输出仍按原判定降级，宁缺毋滥。
+- 旋钮默认关闭，不改变任何现有行为；封顶过小会触发截断回喂重试，属可调参数。
+
+### 安装
+
+```bash
+npm install dsh-workplan@2.2.0
+```
+
+## 2.1.6 — 2026-11-07
+
+**修复规划器超时第三次复发：把「按墙钟掐断」改成「按有没有产出计时」，并把失败现场如实带回。**
+
+### 问题
+
+2.1.1 把 120s 提到 300s、2.1.3 把常量改成可配置，默认值依旧是 300s 的**固定墙钟**，
+于是同一个故障第三次发生：2026-11-07 10:05:19.666 规划器开始生成计划，
+10:10:19.700 被 abort 并降级（会话原始日志实测 **300.06 秒**，随后 10:10:19.727 才进入
+模型第 1 步）。也就是说：**模型只要还在正常输出，也会在第 300 秒被掐断**，
+提高默认值和开放配置都没有解决这个结构问题。
+
+同时暴露四个伴生缺陷：
+
+- `PLANNER_IDLE_TIMEOUT_MS`（90s）只声明、从未接线，是死代码：既不能更快识别卡死，
+  也不能保护正常输出。
+- 报错让用户「提高 `PLANNER_TIMEOUT_MS`」——那是**源码常量**，运行时真正的旋钮是
+  `DSH_WORKPLAN_PLANNER_TIMEOUT_MS`，照做改不到任何东西。
+- `limits` 里根本没有 `plannerTimeoutMs`，`options.limits.plannerTimeoutMs` 永远是
+  `undefined`，配置 → limits → 单次调用这条链路断在中间。
+- 失败现场什么都不留：没有模型、没有耗时、没有输出块数、没有判定码，事后只能从会话
+  JSONL 反推「恰好 300 秒」。
+
+### 改了什么
+
+- **计时策略改为三扇窗（`src/runtime.ts` `runPlanner`）**：
+  1. 无进展窗口（`plannerTimeoutMs`，默认 300s）自**上一个 chunk** 起算，首个 chunk
+     之前同样适用；持续产出 ⇒ 窗口不断后移，慢而稳定的长任务不再被误杀。
+  2. 静默窗口（`plannerIdleTimeoutMs`，默认 90s）在首个 chunk 之后生效：文本、推理、
+     usage 一个都没有才算卡死；不小于无进展窗口即等于关闭。`PLANNER_IDLE_TIMEOUT_MS`
+     从此真正参与计时。
+  3. 绝对上限 = 无进展窗口 × `PLANNER_HARD_MULTIPLIER`（默认 900s）：有无产出都到此
+     为止，规划失败永远是「有限时间 + 可执行建议」。
+- **报错给出真实旋钮**：`DSH_WORKPLAN_PLANNER_TIMEOUT_MS` / `DSH_WORKPLAN_PLANNER_IDLE_TIMEOUT_MS`，
+  并区分 `PLANNER_TIMEOUT`（没进展）、`PLANNER_IDLE`（输出后停滞）、`PLANNER_TIMEOUT_HARD`（超绝对上限）。
+- **规划器遥测**：每次尝试记录 provider / model / reasoningEffort / 提示词字数 / 输出块数 /
+  耗时 / 判定码；成功写进 `record.planner`，失败作为 `detail` 直接出现在降级消息里。
+  `DSH_WORKPLAN_DEBUG=1` 时逐次打印。
+- **`limits` 补齐** `plannerTimeoutMs` / `plannerIdleTimeoutMs`，配置 → limits → 单次调用同一链路。
+- 新增配置项 `plannerIdleTimeoutMs`（`DSH_WORKPLAN_PLANNER_IDLE_TIMEOUT_MS`）；
+  新增 `normalisePlannerWindow`（拒绝 0/负数/NaN，避免把计时器打成 1ms 立刻超时）。
+- 测试 `tests/planner-timeout.test.ts` 覆盖四类判定与报错文案；版本号 2.1.6 全量同步
+  （package.json / package-lock / meta.version / README×3 / tool-surface fixture）。
+- **新增修复验收标准动作**（`RELEASING.md §6.1`）：每次修复验收都必须比对
+  「**运行态指纹 = 磁盘指纹**」——`dsh_workplan_status` 回显的 `build <16位>` 与
+  `printf '%s' "$(cat lib/host.js lib/runtime.js lib/plan.js lib/watchdog.js)" | shasum -a 256 | cut -c1-16`
+  必须一致，不一致即验收不通过。起因正是本次事故：修复 10:40:03 已构建完成，
+  而运行进程 10:02:39 启动、加载的仍是旧字节 `6512166d9d425f7d`。
+
+### 安装
+
+```bash
+npm install dsh-workplan@2.1.6
+```
+
 ## 2.1.5 — 2026-11-07
 
 **把「接收分配任务的部门人员」升级为该领域全球顶尖专家，而非普通部门人员（要求 1 + 2 同步落到源码）。**
@@ -1906,7 +2260,7 @@ npm test   # 137 tests / 137 pass / 0 fail
 
 ```bash
 # 1) 完整回归（含本次新增的 17 条用例）
-cd /Users/open/Documents/Stocks/plugins/dsh-workplan && npm test
+cd plugins/dsh-workplan && npm test
 # 2) 只跑本次的两个新用例文件
 node --test dist-tests/tests/session-end-convergence.test.js dist-tests/tests/ended-group.test.js
 # 3) 面板验收（人工）：打开一个「已结束、未完成」的会话，

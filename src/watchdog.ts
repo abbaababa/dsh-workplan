@@ -94,6 +94,28 @@ export function describeError(value: unknown): string {
   return String(value)
 }
 
+/**
+ * Warning window floor: two minutes. The approaching-deadline window is
+ * `max(timeoutMs × 0.2, WARN_FLOOR_MS)` (O-4b, design doc §2.3/§2.6 #9).
+ */
+const WARN_FLOOR_MS = 120_000
+
+/**
+ * What `onApproachingDeadline` reports once per armed warning cycle (O-4b).
+ *
+ * The warning is a signal, never a gate (design doc §5.3「预警是提示，不是拦截」):
+ * this module cannot extend anything on its own, and the payload only reports
+ * facts so the caller can decide whether to grant `extendMs`.
+ */
+export interface ApproachingDeadlineInfo {
+  /** Which subtask is nearing its ceiling (optional `subtaskId` input; '' when absent). */
+  subtaskId: string
+  /** Milliseconds left before the current ceiling fires. */
+  remainingMs: number
+  /** The ceiling currently in force, ms measured from the attempt start. */
+  timeoutMs: number
+}
+
 /** One live progress watchdog around a single child execution. */
 export interface ProgressWatchdog {
   /** Rejects once with the PlanError built by `makeError`; never resolves. */
@@ -104,6 +126,17 @@ export interface ProgressWatchdog {
   lastProgressAt(): number
   /** How many times the observed session log grew. */
   progressEvents(): number
+  /**
+   * Push the absolute ceiling (ms from the attempt start) to `newHardMs` and
+   * re-arm the one-shot approaching-deadline warning (O-4d). The watchdog never
+   * moves the ceiling by itself — only an explicit call here does.
+   */
+  extend(newHardMs: number): void
+  /**
+   * Alias of `extend` under the T4/T5 parallel-construction contract name:
+   * identical semantics and implementation — new ceiling plus warning re-arm.
+   */
+  rearmApproachingDeadline(newTimeoutMs: number): void
 }
 
 /**
@@ -115,6 +148,9 @@ export interface ProgressWatchdog {
  * @param input.pollMs - observation period.
  * @param input.makeError - builds the rejection for the decided reason.
  * @param input.onProgress - called after each observed log growth.
+ * @param input.onApproachingDeadline - called once per armed cycle when the
+ *   remaining time enters `max(timeoutMs × 0.2, WARN_FLOOR_MS)` before the ceiling (O-4b).
+ * @param input.subtaskId - reported back inside `onApproachingDeadline` info (optional).
  * @param input.now - clock, injectable for tests.
  * @returns a watchdog handle.
  */
@@ -125,6 +161,8 @@ export function createProgressWatchdog(input: {
   makeError: (reason: Exclude<TimeoutReason, null>) => Error
   pollMs?: number
   onProgress?: (info: { now: number; seq: number; elapsedMs: number }) => void
+  onApproachingDeadline?: (info: ApproachingDeadlineInfo) => void
+  subtaskId?: string
   now?: () => number
 }): ProgressWatchdog {
   const clock = input.now ?? (() => Date.now())
@@ -134,6 +172,12 @@ export function createProgressWatchdog(input: {
   let lastSeq: number | null = null
   let growth = 0
   let settled = false
+  // [2.2.0][O-4b/O-4d] Absolute ceiling (ms from `startedAt`) currently in
+  // force. Only `rearm` below moves it — the warning itself never extends
+  // anything, so an un-extended ceiling still settles as `exhausted`.
+  let hardMs = Math.max(1, Math.floor(input.hardMs))
+  // [2.2.0][O-4b] One-shot warning latch per armed cycle; cleared by `rearm`.
+  let warned = false
   let timer: ReturnType<typeof setInterval> | null = null
   let rejectOnce: (error: Error) => void = () => {}
 
@@ -152,6 +196,34 @@ export function createProgressWatchdog(input: {
       timer = null
     }
     rejectOnce(input.makeError(reason))
+  }
+
+  // [2.2.0][O-4d] 推移绝对上限（自尝试起点计）并重新武装一次性预警。
+  // 看门狗自身没有延期能力：只有调用方显式调用才会动上限
+  // （design doc §5.3「预警是提示，不是拦截」）。
+  const rearm = (newTimeoutMs: number) => {
+    if (settled || !Number.isFinite(newTimeoutMs)) return
+    hardMs = Math.max(1, Math.floor(newTimeoutMs))
+    warned = false
+  }
+
+  // [2.2.0][O-4b] 即将超时预警：剩余 ≤ max(timeoutMs × 0.2, WARN_FLOOR_MS)
+  // （取大者）且到点之前（remainingMs > 0，D1「到点之前到达」）时触发一次；
+  // 同一武装周期内幂等（warned 闩锁），rearm 后按新时限重新武装。
+  const warnApproachingDeadline = (now: number) => {
+    if (warned || !input.onApproachingDeadline) return
+    const remainingMs = hardMs - (now - startedAt)
+    if (remainingMs <= 0 || remainingMs > Math.max(hardMs * 0.2, WARN_FLOOR_MS)) return
+    warned = true
+    try {
+      input.onApproachingDeadline({
+        subtaskId: input.subtaskId ?? '',
+        remainingMs,
+        timeoutMs: hardMs,
+      })
+    } catch {
+      // An observer must never break the watchdog.
+    }
   }
 
   const poll = () => {
@@ -177,12 +249,13 @@ export function createProgressWatchdog(input: {
         }
       }
     }
+    warnApproachingDeadline(now)
     const reason = pickTimeoutReason({
       now,
       startedAt,
       lastProgressAt: lastProgress,
       idleMs: Math.max(1, Math.floor(input.idleMs)),
-      hardMs: Math.max(1, Math.floor(input.hardMs)),
+      hardMs,
       progressObservable: lastSeq !== null,
     })
     if (reason) finish(reason)
@@ -203,5 +276,11 @@ export function createProgressWatchdog(input: {
     },
     lastProgressAt: () => lastProgress,
     progressEvents: () => growth,
+    extend: (newHardMs: number) => {
+      rearm(newHardMs)
+    },
+    rearmApproachingDeadline: (newTimeoutMs: number) => {
+      rearm(newTimeoutMs)
+    },
   }
 }

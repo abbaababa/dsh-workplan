@@ -27,6 +27,7 @@
  * 防线。
  */
 import {
+  appendUserMessage,
   buildCancelMessage,
   derivePlanSnapshot,
   flattenSubtasks,
@@ -383,7 +384,7 @@ export function supersedePlanRecord(session: any, record: any, args: any, deps: 
     return deny(SUPERSEDE_CODES.WRITE_FAILED, `构造取代记录失败：${error?.message ?? String(error)}`)
   }
   try {
-    session.append('user/message', message, { surfaceOp: 'append' })
+    appendUserMessage(session, message)
   } catch (error: any) {
     record.errors = [...(Array.isArray(record?.errors) ? record.errors : []),
       `写入取代记录失败：${error instanceof Error ? error.message : String(error)}`].slice(-20)

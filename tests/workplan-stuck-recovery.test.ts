@@ -285,7 +285,7 @@ test('watchdog fires when the child log stops growing and stays quiet when it gr
 test('timeouts are clamped so a bad config cannot disable or explode them', () => {
   assert.equal(normaliseChildTimeout(0), 900000)
   assert.equal(normaliseChildTimeout(1), 1000)
-  assert.equal(normaliseChildTimeout(60 * 60 * 1000), 1800000)
+  assert.equal(normaliseChildTimeout(24 * 60 * 60 * 1000), 7200000)
   assert.equal(normaliseIdleTimeout(0), 300000)
   assert.equal(normaliseIdleTimeout(1), 1000)
   assert.equal(normaliseIdleTimeout(60 * 60 * 1000), 900000)
@@ -409,7 +409,9 @@ test('a dispatch promise that never settles cannot answer "already running" fore
   record.dispatchPromise = new Promise(() => {})
   record.dispatchStartedAt = Date.now() - 30 * 60 * 1000
   const ctx = makeCtx(() => doneChild())
-  const runtime = createWorkplanRuntime(ctx)
+  // [2.2.5] 默认不设整轮预算；本用例专门验证“旧派发卡住”的失效判定，
+  // 因此显式给一个 60s 预算，让 staleAfter = 预算 + 2 分钟仍可触发。
+  const runtime = createWorkplanRuntime(ctx, { totalTimeoutMs: 60000 })
   runtime.state.records.set(session.id, record)
 
   const result = await runtime.dispatchTool({ session, options: {} }, {}, new AbortController().signal)

@@ -76,6 +76,23 @@ export const COMM_FORMAT_SPEC = Object.freeze({
       description: '不得编造、虚构或伪造任何证据、文件路径、命令输出或验收结果；无法确认的项目必须写 unverified',
       rationale: '虚假证据一旦通过交付门禁，用户拿到的就是不可信的成品' }),
   ]),
+  /*
+   * [2.2.0][T3/O-2c] 结果块可选字段（方案 §2.4：「模板增加 timeSpentMinutes、
+   * finalEstimateMinutes 字段」；方案 §2.5：「时间字段纯 advisory：不参与可
+   * 交付判定，不加拒绝码」）。
+   *
+   * 纯增量：不属于 F1-F9 门禁条目（requirements 冻结不动、版本号不升），
+   * 缺失或不合法一律不判不合规——仅供用时回填与协商审计，adjudicateResult
+   * 以 readAdvisoryMinutes 透传。
+   */
+  optionalFields: Object.freeze([
+    Object.freeze({ name: 'timeSpentMinutes', type: 'integer', unit: '分钟', required: false,
+      description: '实际耗时回填（完成即回报时如实填写；未知可省略）',
+      semantics: 'advisory：不参与可交付判定，缺失/非法不判不合规' }),
+    Object.freeze({ name: 'finalEstimateMinutes', type: 'integer', unit: '分钟', required: false,
+      description: '最终预估回填（与开工前预告不一致时以此为准，用于协商审计）',
+      semantics: 'advisory：不参与可交付判定，缺失/非法不判不合规' }),
+  ]),
 })
 
 /**
