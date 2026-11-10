@@ -1,0 +1,38 @@
+{
+ "kind": "workplan-verification-final",
+ "plan": "wp-a0690a88",
+ "subtask": "T4",
+ "by": "lead-takeover",
+ "at": "2026-11-10T13:52:48.786Z",
+ "checks": [
+  {
+   "id": "A1",
+   "item": "GitHub 远端源码与本地一致",
+   "method": "git ls-remote origin refs/heads/main vs git rev-parse HEAD",
+   "evidence": "两端均 67013bab789bfba3cd00c96bb645c8e1e2a085e2 逐字节一致；tag v2.3.2 解引用=bd95cbdf7a4baa3a4b891afe9fbbfde1163a4f20=Release 提交（记录提交 67013ba 在 tag 后，符合惯例）",
+   "result": "pass"
+  },
+  {
+   "id": "A2",
+   "item": "索引源可检索该 version 并可下载",
+   "method": "packument HTTP GET + tarball GET + sha256",
+   "evidence": "https://registry.npmjs.org/dsh-workplan →200 latest=2.3.2 含 2.3.2；tarball GET 200 bytes=1375360 sha256=dfbf533b3da364e658d384c31aaf2aab8318f3a74f3c8c2ff24caf6bd7b10e21 与 GitHub Release 制品逐字节同哈希",
+   "result": "pass"
+  },
+  {
+   "id": "A3",
+   "item": "三处版本字符串逐字节一致",
+   "method": "package.json / git tag / registry + version-sync 门禁",
+   "evidence": "package.json=2.3.2；tag 名 v2.3.2；npm=2.3.2；CHANGELOG 顶条目 2.3.2；version-sync 测试（五处一致断言）在 724/0/0 全量中通过",
+   "result": "pass"
+  },
+  {
+   "id": "A4",
+   "item": "发布流程无手工遗漏步骤（可复现）",
+   "method": "对照 RELEASING.md §1–§8 逐步核对 + 上游条目",
+   "evidence": "check→build→724/0/0→bump 提交(含产物)→tag→push→tag 干净检出 ci/build/pack→gh release(200)→npm publish→双通道回读→条目 PR#13893 diff v2.2.8→v2.3.2(OPEN,合并权上游)；T1/T2/T3 方案报告在盘",
+   "result": "pass"
+  }
+ ],
+ "context": "T4 专家前两轮产物(wp-verification-T4.*@21:23/21:24 受阻快照)保留引用；其指示轮因结果块构造再障，按 2.3.0 机制由主 Agent 接管终版复验，专家已完成部分零丢弃"
+}
