@@ -539,3 +539,62 @@ test('人工改判链（escalated→instructed→done→reported）重启回放�
   assert.equal(row.revision, 10, 'revision 必须单调推进到最后一条改判')
   assert.equal(row.verification, 'structured', '人工改判携带的结构化证据必须保留')
 })
+
+test('旧版 closure:done 快照改判回放不再被「非法闭环迁移 reported→done」吞掉（2.3.0 hotfix，用户截图 wp-3080d01d T6/T7）', () => {
+  /*
+   * 事故复现（2026-11-10 重启终端截图）：2.0.4 之前 live 侧把已回报行的 closure
+   * 误写回 'done' 并随 durable 改判消息留档；回放透传该快照时撞迁移表，整条改判
+   * （含 verification/acceptance）被裸 catch 忽略——重启后行退回缺证据态。
+   * 修复口径与 2.0.4 live 侧镜像：行已 reported 且事件 closure='done' 时按
+   * 「复核补齐」处理，保留已回报事实并完整应用证据字段。
+   */
+  const plan = {
+    planId: 'wp-reported-done-replay',
+    sessionId: 'session-reported-done-replay',
+    createdTurn: 1,
+    createdAt: 1000,
+    title: 'reported→done 回放回归',
+    contradictions: { primary: { statement: '旧版 done 快照不得在回放时被丢弃' } },
+    stages: [{ id: 'S1', subtasks: [{ id: 'T6', dependsOn: [] }] }],
+  }
+  const statuses = createStatuses(plan)
+  const childRow: any = statuses.find((item: any) => item.subtaskId === 'T6')
+  Object.assign(childRow, {
+    status: 'done',
+    closure: 'reported',
+    progress: 100,
+    revision: 4,
+    updatedBy: 'child',
+    verification: 'legacy',
+  })
+  const resultMessage = buildResultMessage({
+    planId: plan.planId,
+    sessionId: plan.sessionId,
+    dispatchedAt: 1500,
+    statuses,
+    errors: [],
+    stats: computeStats(statuses),
+  })
+  const staleSnapshotAdjudication = buildUpdateMessage({
+    planId: plan.planId,
+    subtaskId: 'T6',
+    status: 'done',
+    closure: 'done',
+    revision: 5,
+    verification: 'structured',
+    acceptance: [{ criterion: 'A1', result: 'pass', evidence: '测试输出' }],
+    note: '主 Agent 复核补齐证据（旧版嵌了 closure=done 快照）',
+  })
+  const events = [
+    { type: 'user/message', data: buildPlanMessage(plan) },
+    { type: 'user/message', data: resultMessage },
+    { type: 'user/message', data: staleSnapshotAdjudication },
+  ]
+  const session = { seq: events.length, header: { createdAt: 1000 }, eventAt: (n: number) => events[n] }
+  const record: any = reconstructFromSession(session, 'wp-reported-done-replay')
+  const row = record.statuses.find((item: any) => item.subtaskId === 'T6')
+  assert.equal(row.status, 'done', '改判必须回放生效，不得退回缺证据态')
+  assert.equal(row.closure, 'reported', '已回报事实必须保留（2.0.4 口径），不得被旧快照退回')
+  assert.equal(row.verification, 'structured', '改判携带的结构化证据必须完整回放')
+  assert.equal(row.revision, 5, 'revision 必须推进到改判事件')
+})
