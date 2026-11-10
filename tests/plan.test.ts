@@ -546,3 +546,38 @@ test('dispatch runs real DAG subtasks and does not hit the loop guard', async ()
   assert.equal(seen.length, 2)
 })
 
+
+test('用户附件渲染进 messageText：规划器/锚点/派发全链路可见（2.3.1 D1，图片盲区缺陷回归）', () => {
+  /*
+   * 事故复现（2026-11-10 截图任务）：用户消息 content 为 [image 块, text 块]，
+   * 旧 messageText 只收 text 块 → 附件元数据在到达规划器前丢失 → fresh 专家
+   * 看不见图、被迫 escalate 请示往返。现在 image 块必须渲染成含 attachment-id
+   * 的标注行，与正文同面进入所有既有消费方。
+   */
+  const message = {
+    role: 'user',
+    content: [
+      {
+        type: 'image',
+        attachment: {
+          attachmentId: 'sha256:807593d3db4b4c0401dad12a325b1c28b8ba9f0b7eb1dc236d286928e2afbe1c',
+          mediaType: 'image/jpeg',
+          width: 1320,
+          height: 1610,
+          bytes: 389436,
+          name: 'IMG_0455.jpeg',
+        },
+      },
+      { type: 'text', text: '修复截图显示的此插件引发的问题。' },
+    ],
+  }
+  const text = messageText(message)
+  assert.ok(text.includes('修复截图显示的此插件引发的问题。'), '正文必须原样保留')
+  assert.ok(text.includes('[用户附件]'), '附件标注行必须并入文本面')
+  assert.ok(text.includes('sha256:807593'), 'attachment-id 必须透出（接收方可直接读取）')
+  assert.ok(text.includes('IMG_0455.jpeg'), '文件名必须透出')
+  assert.ok(text.includes('禁止凭空猜测'), '读取指引必须随行')
+  // 零回归面：纯文本消息与无元数据图片块的输出必须与旧行为逐字节一致
+  assert.equal(messageText({ content: [{ type: 'text', text: 'a' }, { type: 'text', text: 'b' }] }), 'a\nb')
+  assert.equal(messageText({ content: [{ type: 'image' }, { type: 'text', text: 'a' }] }), 'a', '无元数据的 image 块不得渲染垃圾行')
+})
