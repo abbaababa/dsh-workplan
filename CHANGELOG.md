@@ -1,3 +1,7 @@
+## 2.2.9 — 2026-11-10
+
+- 红字复发族治本（用户 2026-11-10 截图实证）：收束类计时器去 unref 分类治理（存活恰 3 处卫生类白名单）；结算结果块缺失与解析失败同闸有界回喂 + 盘上结算备份自动采纳（EVIDENCE_MISSING）；防回归四件套（handle-policy 静态守卫、全局事件循环测试锚、run-tests cancelled===0 硬断言、CI node22+26 双矩阵）。
+
 ## 2.2.8 — 2026-11-10
 
 - 修复 CI 红叉根因（2.2.6/2.2.7 提交 cancelled→exit 1）：attempt 上限计时器 unref 导致裸事件循环进程排空、兜底链无法收束；计时器改 ref，finally 收束照旧 clearTimeout。
