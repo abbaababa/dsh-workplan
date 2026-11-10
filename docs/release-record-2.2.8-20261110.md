@@ -47,3 +47,17 @@ curl -s https://cdn.jsdelivr.net/npm/dsh-plugin-catalog/index.json | grep -o '"i
 
 当前进程仍加载旧字节（pid 见会话状态行）。用户手工重启 DSH 后：
 ① `dsh_workplan_status` 回显指纹；② 磁盘指纹 `printf '%s' "$(cat lib/host.js lib/runtime.js lib/plan.js lib/watchdog.js)" | shasum -a 256 | cut -c1-16`；两者相同才判「修复已加载」。本节在重启后由主 Agent 补记比对结果。
+
+## 7. PR #13802 闭环状态（2026-11-10 12:40 补记）
+
+用户复核指出 PR 页面曾显示 2.2.7；实测残留仅在「门面层」，现已全清：
+
+| 层 | 状态（gh 实测） |
+|---|---|
+| 标题 | `chore: bump abbaababa/dsh-workplan tarball to v2.2.8` ✔ |
+| 正文 | npm 2.2.8 + v2.2.8 资产 URL + sha256 `3f8c6805…de53`（与 Release 资产下载流互证） ✔ |
+| 提交 | 单一提交 `78a0b962`（消息含 v2.2.8；旧 2.2.7 提交经重建分支消除） ✔ |
+| diff | 唯一改动行 `+tarball: …/v2.2.8/dsh-workplan-2.2.8.tgz`；`grep -c '2.2.7' = 0` ✔ |
+| npm | registry `dist-tags.latest = 2.2.8` ✔ |
+
+**唯一残留与平台机制声明**：头分支名 `bump-dsh-workplan-2.2.7` 仍含旧版本号。GitHub 不支持「保持 PR 编号更换头分支」——实测 rename 即触发跨仓 PR 自动 CLOSED（已 rename back + `gh pr reopen` 无损恢复，head sha 不变）。分支名是 git ref 名称、**非任何消费方读取的版本引用**（catalog CI 读合并后 yml 内容）；上游合并后删除该分支即全链无任何 2.2.7 展示面。是否换干净分支名新开 PR（换编号）由用户裁决，见会话记录。
