@@ -196,3 +196,20 @@ cat lib/host.js lib/runtime.js lib/plan.js lib/watchdog.js \
 - npm：`npm unpublish dsh-workplan@<version>`（24 小时内）或发布一个 `-fix` 补丁版本，不覆盖旧版本号。
 - GitHub：`gh release delete v<version>`，tag 保留可追溯。
 - 索引源：改回上一个可用 `tarball` 并提 PR。
+
+## 7. 计时器句柄分类（handle-policy）—— 发布前必读
+
+> 背景：`docs/rootcause-red-x-recurrence-20261110-T1.md`（CI cancelled 红叉 4 次复发的根因报告）。
+> 可执行契约：`tests/handle-policy.test.ts`（未分类即红）；全局测试锚：`tests/setup-event-loop-anchor.ts`
+> 经 `scripts/run-tests.mjs` 以 `--import` 注入每个测试子进程，`cancelled === 0` 由运行器硬断言。
+
+- **收束类计时器**（不触发则子任务/轮次无法到达终态：attempt 上限、轮次总预算 totalTimer、
+  no-ack deadlineTimer/deadline、auto-resume、watchdog、dispose 超时）**禁止 `unref()`**。
+  裸事件循环（node:test / headless / 宿主排空瞬间）下 unref = 允许进程在收束前排空退出 →
+  node 22 判 cancelledByParent → CI 红叉。生命周期必须由收束路径 `clearTimeout/clearInterval`
+  管理（不会悬挂宿主）。
+- **卫生类计时器**（不触发只丢一条通知/轮询：noticeTimer、poll、notice）**必须保留 `unref()`**
+  ——插件不得拖住正在关闭的 DSH 宿主。新增卫生类点位必须显式加进 handle-policy 白名单并附分类理由。
+- 新增任何 `setTimeout/setInterval`：默认按收束类处理（ref + 明确清理路径）；选卫生类必须过白名单。
+- 发布前本地复跑 `npm run verify`（test 脚本已内置全局锚与 cancelled===0 硬断言）；CI 为
+  node 22 + 26 双矩阵，两版全绿才算过——单版本绿不代表修复（2.2.7 教训：本地 node 26 假绿）。

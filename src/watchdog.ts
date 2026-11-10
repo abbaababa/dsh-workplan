@@ -262,7 +262,8 @@ export function createProgressWatchdog(input: {
   }
 
   timer = setInterval(poll, pollMs)
-  timer.unref?.()
+  // [2.2.9][handle-policy] 收束类（T1 报告 R4）：看门狗是卡死子任务的最后收束保证，unref 时
+  // 裸循环下看门狗失效。finish()/stop() 均 clearInterval，生命周期与子任务尝试绑定，不会悬挂宿主。
 
   return {
     fired,

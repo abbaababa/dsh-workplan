@@ -5003,6 +5003,7 @@ export function buildChildPrompt({
     EVIDENCE_MARKER_BEGIN,
     '{"status":"done","blockedReason":"","phases":{"planning":{"problemAnalysis":["要解决的问题 1（含现状/约束/未知/主要矛盾）"],"constraints":["..."],"unknowns":["..."],"approach":["第 1 步：做什么 → 产出什么 → 如何证明"]},"execution":{"steps":["实际执行的步骤"],"deviations":[]},"verification":{"allPassed":true,"checks":[{"criterion":"A1","method":"怎么验证","evidence":"命令输出/文件/引用"}],"requirementCheck":"逐条核对用户原要求的结果","retrospective":{"problems":["本次遇到的问题（现象+根因）"],"detours":["走过的弯路/返工/无效尝试；确实没有就写 []"],"resolutions":["最终是如何解决的"],"prevention":["以后如何预防再犯：遇到…先…"]}}},"acceptance":[{"criterion":"A1 把上面的验收标准原文抄在这里","result":"pass","evidence":"用命令输出、文件路径或引用证明"}],"artifacts":[{"kind":"file","ref":"相对工作目录的路径"}],"needs":[],"question":"","options":[],"timeSpentMinutes":0,"finalEstimateMinutes":0}',
     EVIDENCE_MARKER_END,
+    '- [2.2.9] 盘上结算备份（必做）：发送结果块之前，先把同一份 JSON 写入 reports/wp-settlement-<你的子任务 ID>.json（相对工作目录）。收尾消息因异常（error/截断/超时）丢失时，宿主会自动采纳该备份结算，避免「已完成的工作」被误判为「缺失回报」而受阻并级联冻结下游。',
     '- status 只能是 done / blocked / partial；partial 会被当作受阻处理。',
     '- acceptance 必须逐条覆盖上面的验收标准：criterion 以 A1、A2… 开头对号入座（编号不可省略）；result 只能是 pass / fail / unverified。无法确认就写 unverified，不要写 pass。',
     '- artifacts 写你实际产出或修改的文件（kind=file，ref 用相对路径）、链接（kind=url）或说明（kind=note）。',

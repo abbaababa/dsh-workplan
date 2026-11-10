@@ -1,0 +1,1050 @@
+diff --git a/.github/workflows/verify.yml b/.github/workflows/verify.yml
+index e407808..5381e60 100644
+--- a/.github/workflows/verify.yml
++++ b/.github/workflows/verify.yml
+@@ -11,6 +11,12 @@ permissions:
+ jobs:
+   verify:
+     runs-on: ubuntu-latest
++    # [2.2.9][P-4] node 22（故障显形版本）+ node 26（本地开发版本）双矩阵：
++    # 消除 T1 报告 RC-3「验证环境与故障环境不一致」——本地全绿不再可能是假绿。
++    strategy:
++      fail-fast: false
++      matrix:
++        node-version: [22, 26]
+     steps:
+       - name: Check out
+         uses: actions/checkout@v4
+@@ -18,7 +24,7 @@ jobs:
+       - name: Set up Node.js
+         uses: actions/setup-node@v4
+         with:
+-          node-version: 22
++          node-version: ${{ matrix.node-version }}
+           cache: npm
+ 
+       - name: Install
+diff --git a/RELEASING.md b/RELEASING.md
+index 9de5aa2..ef64fe3 100644
+--- a/RELEASING.md
++++ b/RELEASING.md
+@@ -196,3 +196,20 @@ cat lib/host.js lib/runtime.js lib/plan.js lib/watchdog.js \
+ - npm：`npm unpublish dsh-workplan@<version>`（24 小时内）或发布一个 `-fix` 补丁版本，不覆盖旧版本号。
+ - GitHub：`gh release delete v<version>`，tag 保留可追溯。
+ - 索引源：改回上一个可用 `tarball` 并提 PR。
++
++## 7. 计时器句柄分类（handle-policy）—— 发布前必读
++
++> 背景：`docs/rootcause-red-x-recurrence-20261110-T1.md`（CI cancelled 红叉 4 次复发的根因报告）。
++> 可执行契约：`tests/handle-policy.test.ts`（未分类即红）；全局测试锚：`tests/setup-event-loop-anchor.ts`
++> 经 `scripts/run-tests.mjs` 以 `--import` 注入每个测试子进程，`cancelled === 0` 由运行器硬断言。
++
++- **收束类计时器**（不触发则子任务/轮次无法到达终态：attempt 上限、轮次总预算 totalTimer、
++  no-ack deadlineTimer/deadline、auto-resume、watchdog、dispose 超时）**禁止 `unref()`**。
++  裸事件循环（node:test / headless / 宿主排空瞬间）下 unref = 允许进程在收束前排空退出 →
++  node 22 判 cancelledByParent → CI 红叉。生命周期必须由收束路径 `clearTimeout/clearInterval`
++  管理（不会悬挂宿主）。
++- **卫生类计时器**（不触发只丢一条通知/轮询：noticeTimer、poll、notice）**必须保留 `unref()`**
++  ——插件不得拖住正在关闭的 DSH 宿主。新增卫生类点位必须显式加进 handle-policy 白名单并附分类理由。
++- 新增任何 `setTimeout/setInterval`：默认按收束类处理（ref + 明确清理路径）；选卫生类必须过白名单。
++- 发布前本地复跑 `npm run verify`（test 脚本已内置全局锚与 cancelled===0 硬断言）；CI 为
++  node 22 + 26 双矩阵，两版全绿才算过——单版本绿不代表修复（2.2.7 教训：本地 node 26 假绿）。
+diff --git a/docs/rootcause-red-x-recurrence-20261110-T1.md b/docs/rootcause-red-x-recurrence-20261110-T1.md
+new file mode 100644
+index 0000000..0131522
+--- /dev/null
++++ b/docs/rootcause-red-x-recurrence-20261110-T1.md
+@@ -0,0 +1,110 @@
++# 根因诊断报告：CI「红叉/cancelled 红字」为何多次复发（T1 · 2026-11-10）
++
++> 仓库：`/Users/open/Documents/Stocks/plugins/dsh-workplan`（HEAD `3aed805`，v2.2.8）
++> 基线锚定：`src/runtime.ts` sha256 `173944207a4fc35f…1f0a`（8492 行）；本报告所有行号以此为准。
++> 诊断人：T1（资深 SRE · Node.js 事件循环与 CI 诊断）
++
++## 0. 执行摘要（一段话）
++
++「红字/红叉」= CI（GitHub Actions，node 22）上 `node --test` 把等待中的用例判为 `cancelledByParent` → exit 1 → 提交状态红叉；本地 node 26 因 test runner 自带存活句柄而假绿。**它复发 4 次（1.5.0 起每次 push、2.1.2 版本漂移另一类、2.2.6、2.2.7）的根本原因不是某一行代码，而是三条结构性诱因叠加**：①生产代码把「必须触发才能收束的 deadline 计时器」与「卫生性计时器」一律 `unref()`，在裸事件循环下进程排空即死；②第一次修复（`9f0de34`）选择在**测试侧加锚**治标，未动生产模式，锚覆盖靠手工、新文件即漏；③本地 node 26 与 CI node 22 的 runner 句柄行为差异让问题只在 CI 显形，显形滞后于引入。2.2.8 只修了 1 处（attempt 上限计时器），**当前 src/ 仍有 9 处同类 unref，且 9 个触及这些路径的测试文件全部无锚**——同类竞态的复发面依然存在。
++
++## 1. 「红字」的确切所指
++
++- CI 日志红字：`# cancelled 3`（node:test 汇总行）+ exit code 1 → GitHub 提交状态红叉。
++- 机理（`9f0de34` 提交信息原文，逐字）：
++  > "Node 22 then cancels a pending test as soon as the loop drains with no ref'd handle left, which is why verify has been red on every push since 1.5.0 while the suite passed on Node 26."
++- 同机理在 2.2.8 修复注释中再次确认（`src/runtime.ts:2727-2731`）：unref 时裸事件循环进程（node:test / CI node22）在等待竞态期间排空退出，用例被 `cancelledByParent` → exit 1 → 红叉；本地 node26 因 runner 自带句柄"竞态获胜"而假绿。
++
++## 2. 历史复发时间线（git 实证，`git log --all --date=short`）
++
++| # | 时间 | 提交 | 事件 | 修复方式 | 是否治本 |
++|---|---|---|---|---|---|
++| 1 | 2026-10-28→29 | `98989d9`(1.4.3)→`9f0de34` | **自 1.5.0 起每次 push CI verify 全红**（node 22 cancelled），本地 node 26 全绿 | 测试侧加 `eventLoopAnchor`（ref'd setInterval + after 钩子清理），仅覆盖当时受影响的少数文件 | ❌ 治标：生产 unref 模式原样保留 |
++| 2 | 2026-11-06 | `c2ec7b2` | 另一类红叉：2.1.2 漏同步 6 处版本号 → version-sync 门禁红 | 补齐 6 处版本号 | ✅（该类）；说明「红叉」有独立第二成因类 |
++| 3 | 2026-11-09→10 | 2.2.6（`f1e3f7b`）| CI 再现 cancelled 红叉（3 条用例 `cancelledByParent`，`pass 663/fail 0/cancelled 3`） | `dc39eeb`(2.2.7) 宣称"cancelled 之源消除（699/699, cancelled 0）"——**本地 node 26 验证** | ❌ 本地假绿再次骗过验证 |
++| 4 | 2026-11-10 | `dc39eeb`(2.2.7) 提交本身在远端 CI 仍红 | attempt 上限计时器仍带 `unref` → 远端 node 22 复现同类排空 | `70c89f2`(2.2.8) 删除该行 unref + 注释禁令；远端 CI `completed success` | ⚠️ 单点治本；同类 9 处未动 |
++
++**复发计数：事件循环排空类 3 次（#1、#3、#4），版本漂移类 1 次（#2）。**
++
++## 3. 为什么多次发生：根因 + 触发条件矩阵（A1）
++
++### 结构性根因（3 条）
++
++- **RC-1 句柄策略二元冲突（主根因）**：插件运行在 DSH 宿主内，`unref()` 是刻意卫生设计（宿主关闭时不被插件计时器拖住，`9f0de34` 提交信息："unref'd on purpose so a shutting down host is not held open"）。但**收束语义计时器**（attempt 上限、round 总预算、ack deadline、auto-resume 延迟、watchdog）必须真实触发才能让子任务/轮次到达终态。在"进程内只有这些计时器在等"的裸事件循环窗口（node:test、headless、宿主排空瞬间），unref = 允许进程在收束前排空退出 → cancelled/静默死亡。**"不拖住宿主"与"保证收束"在同一句柄上互斥，代码未做分类，一律选了前者。**
++- **RC-2 修复层次错位**：#1 的修复把锚加在**测试文件**（每文件手工一份），不是运行时或全局 setup。锚覆盖 = 手工枚举，任何新增/改动的触及计时器路径的测试文件默认无保护。实证：当前 12/97 个测试文件有锚，而 **9 个触及 unref 计时器路径的测试文件（§4.2）与 12 个有锚文件的交集为空**——最需要保护的文件恰好全部裸奔，目前靠"测试自身 await 的 promise 恰好持有句柄"侥幸不触发。
++- **RC-3 验证环境与故障环境不一致**：故障只在 node 22（CI）显形；开发/验证在 node 26（本地，实测 `node -v` = v26.9.0）。node 26 的 test runner 自带存活句柄使排空竞态"获胜"→ 本地 699/699 全绿被当成修复证据（2.2.7 即如此误判），远端才暴露。**本地全绿对这类缺陷零检出能力。**
++
++### 触发条件矩阵
++
++| 条件 | 取值 | 说明 |
++|---|---|---|
++| 进程类型 | 裸事件循环（node:test / headless / 宿主排空瞬间） | 宿主常驻时 HTTP server 等 ref'd 句柄掩盖问题 |
++| Node 版本 | 22（触发）vs 26（掩盖） | node:test 对 loop drain 的取消语义差异 |
++| 等待窗口 | 所有存活句柄均 unref 的时刻 | 例：attempt 计时器被 clear 后仅剩 auto-resume 延迟计时器的窗口 |
++| 计时器类别 | 收束类（必须触发）受致命影响；卫生类（notice/poll）仅丢通知 | 见 §4 分类 |
++
++## 4. 当前代码全部风险点清单（A2/A3）
++
++扫描命令：`grep -rn 'unref\|\.ref()' src/`、`grep -n 'setTimeout\|setInterval' src/*.ts`（全覆盖 `src/runtime.ts` 18 处、`src/client.ts` 3 处、`src/watchdog.ts` 2 处计时器点位，无遗漏）。
++
++### 4.1 生产代码：9 处存活 unref（2.2.8 修复后仍在）
++
++分类口径：**收束类** = 不触发则子任务/轮次无法到达终态（危险）；**卫生类** = 不触发只丢一条通知/轮询（低危）。
++
++| # | 位置 | 计时器 | 类别 | 触发条件 | 影响 | 优先级 |
++|---|---|---|---|---|---|---|
++| R1 | `src/runtime.ts:3115` | `totalTimer` 轮次总预算 → abort TOTAL_TIMEOUT | **收束** | 裸循环下整轮仅剩此计时器（与已修的 attempt 计时器同构！） | 轮次不收束为 TOTAL_TIMEOUT，进程排空 → cancelled/静默死 | **P0** |
++| R2 | `src/runtime.ts:2173` | `deadlineTimer` 180s no-ack 判定 → blocked+abort | **收束** | 派发后子会话未启动、无其他 ref'd 句柄 | no-ack 永不判定，行悬死 | **P0** |
++| R3 | `src/runtime.ts:5678` | auto-resume 延迟计时器 | **收束** | 轮次结束→续跑窗口内进程无其他句柄 | 自动续跑永不发生，计划静默停摆 | **P0** |
++| R4 | `src/watchdog.ts:265` | watchdog 轮询 interval（idle/hard 超时判定） | **收束** | 子会话执行期间宿主句柄排空 | 超时看门狗失效，卡死子任务无人收束 | **P0** |
++| R5 | `src/runtime.ts:6334` | 指示 ack deadline → blocked no-ack | **收束** | instruct 后窗口内裸循环 | 指示无回执永不判 blocked | P1 |
++| R6 | `src/runtime.ts:1201` | dispose 超时 reject（Promise.race 臂） | **收束**（弱） | dispose 挂起且无其他句柄 | race 永不 settle，进程直接退出而非报错 | P1 |
++| R7 | `src/runtime.ts:2140` | ack notice（ackOverdue 标记） | 卫生 | 同上 | 丢一次"已下发未响应"提示 | P2 |
++| R8 | `src/runtime.ts:6301/6311` | 指示 poll interval + notice | 卫生 | 同上 | 丢确认轮询/提示（deadline R5 兜底） | P2 |
++| R9 | `src/runtime.ts:6282` 关联 `6301` | （同 R8 poll） | 卫生 | 同上 | 同 R8 | P2 |
++
++**ref'd（安全）点位备查**：`runtime.ts:729`（sleepAbortable）、`889/891`（runPlanner progress/hard，planner 收束依赖，现为 ref——正确）、`2726`（attempt 上限，2.2.8 已修，带禁令注释）；`client.ts:1580/3077/3079` 为浏览器 UI 计时器，不在 node 事件循环风险面内。
++
++### 4.2 测试代码：暴露面（RC-2 实证）
++
++- 有 `eventLoopAnchor` 的文件：**12/97**（planner-*、time-*、workplan-auto-retry/budget-*/dispatch-modes/status-lock/stuck-recovery）。
++- 触及 unref 计时器路径（grep `ackOverdue|no-ack|autoResume|TOTAL_TIMEOUT|instructionOverdue|startWatchdog|dispose timeout|ASSIGN_ACK`）的文件：`auto-resume-policy`、`interrupt-announce`、`workplan-closure-ack-escalation`、`workplan-closure-n1-n5`、`workplan-comm-format-e2e`、`workplan-followup-tool`、`workplan-monotonicity`、`workplan-retry-feedback`、`workplan-unparsable-retry` —— **9 个全部无锚（交集=∅）**。
++- 风险：这些文件当前通过是因为测试自身 await 的 promise/桩件恰好持有句柄；任何桩件时序调整（如改用真计时器、加长等待）都会复现 #3/#4 型红叉。触发条件：node 22 + 等待窗口内句柄全 unref。建议：全局 setup 锚（见 §6 P-2）后此类风险整体消除。优先级 **P1**。
++
++### 4.3 CI 环境因素（假红/假绿其他来源）
++
++- `.github/workflows/verify.yml`：node-version **22** 固定单版本；`npm run verify` = check+test；另有 `git diff --exit-code -- lib client.js` 构建产物新鲜度门禁（漏 build 即红——第二类"非事件循环"红叉源，与 #2 版本漂移同类：门禁红 ≠ 逻辑错，需看红叉的具体 job/step 名分诊）。
++- 本地 v26.9.0 与 CI 22 无矩阵交集 → RC-3 持续存在。建议 CI 增加 26 矩阵或本地验证强制 `node 22` 跑一遍（§6 P-4）。
++
++## 5. 本地 vs CI 环境差异完整影响面（A1 支撑）
++
++| 维度 | 本地（node 26.9.0） | CI（node 22） | 影响 |
++|---|---|---|---|
++| node:test loop-drain 语义 | runner 自带存活句柄，排空竞态获胜 | 排空即 cancel pending 用例，exit 1 | 同类缺陷本地 0 检出（#3 误判"cancelled 0"即此） |
++| 验证结论效力 | 699/699 全绿 ≠ 修复 | 唯一真实判据 | 2.2.7 的"之源消除"宣称被远端证伪 |
++| 构建门禁 | 手工 build 通常新鲜 | `git diff --exit-code` 强制 | 漏提交 lib/ 即红（历史 #2 类） |
++
++## 6. 防回归建议（交 T2 实施，按优先级）
++
++- **P-1（P0）收束计时器去 unref 分类改造**：R1–R6 六处收束类计时器删除 `unref()`（与 2.2.8 attempt 修法一致：ref 持有 + 收束路径 `finally clearTimeout`，不会悬挂宿主）；R7–R9 卫生类保留 unref 并加注释声明类别。**验收：`grep -c 'unref' src/runtime.ts src/watchdog.ts` 只剩卫生类白名单点位。**
++- **P-2（P0）测试全局锚取代手工锚**：新增单一 `tests/setup-event-loop-anchor.ts`（或 `node --test --import` 全局 setup），持一个 ref'd interval + 全局 after 清理；删除 12 份手工锚防漂移。任何新测试文件自动获得保护，消除 RC-2。
++- **P-3（P1）静态守卫测试**：仿 `tests/version-sync.test.ts` 门禁模式，新增 `handle-policy.test.ts`：解析 src/ 全部 `setTimeout/setInterval` 点位，断言"收束类白名单内禁止出现 unref、白名单外必须 unref"，把 §4.1 分类固化为可执行契约。任何未来新增计时器未分类即红。
++- **P-4（P1）CI 断言与环境对齐**：test 脚本输出显式断言 `cancelled === 0`（当前 exit 1 间接体现，但汇总行断言可区分"fail"与"cancelled"两类红）；CI 增加 node 26 矩阵或 RELEASING 增加"发布前 node 22 本地复跑"硬步骤，消除 RC-3。
++- **P-5（P2）文档固化**：把"收束 vs 卫生"句柄分类写进 RELEASING/贡献指南，附本报告 §3 矩阵。
++
++## 7. 证据索引（全部可复跑）
++
++1. 时间线：`git log --all --format='%h %ad %s' --date=short -i --grep='unref' --grep='cancel' --grep='红叉' --grep='alive'`（§2 各行）。
++2. 机理原文：`git show 9f0de34`（提交信息 + eventLoopAnchor diff）；`sed -n '2715,2745p' src/runtime.ts`（2.2.8 禁令注释）。
++3. unref 全量扫描：`grep -rn 'unref\|\.ref()' src/` → runtime.ts 1201/2140/2173/3115/5678/6301/6311/6334 + watchdog.ts:265（9 处）+ 2727 注释行。
++4. 计时器全量点位：`grep -n 'setTimeout\|setInterval' src/runtime.ts src/client.ts src/watchdog.ts`（runtime 18、client 3、watchdog 2）。
++5. 锚覆盖：`grep -ln 'eventLoopAnchor' tests/*.ts` = 12；`ls tests/*.ts | wc -l` = 97；路径触及 `grep -ln 'ackOverdue|no-ack|autoResume|TOTAL_TIMEOUT|instructionOverdue|startWatchdog|dispose timeout|ASSIGN_ACK' tests/*.ts` = 9（交集空）。
++6. CI 配置：`.github/workflows/verify.yml`（node 22、verify、lib 新鲜度门禁）；`package.json:71-72`（test/verify 脚本）；本地 `node -v` = v26.9.0。
++7. 第二类红叉：`git show c2ec7b2 --stat`（版本漂移 6 处）；`tests/version-sync.test.ts` 存在。
++8. 基线：`git rev-parse HEAD` = `3aed805…`；`shasum -a 256 src/runtime.ts` = `173944207a4f…`。
++
++## 8. 边界与未验证项（如实声明）
++
++- 本轮截图原件未直接读取（子任务输入注明"待确认"）；「红字=cancelledByParent 汇总行/提交红叉」的判定基于会话上下文中主 Agent 已实证的 2.2.6/2.2.7 红叉记录（`pass 663/fail 0/cancelled 3`）与用户追问脉络，与全部 git 证据自洽。若截图另指其他红字，§4.3 提供了分诊入口（看 job/step 名），报告主体结论不受影响。
++- node 22 与 26 的 node:test 句柄差异细节引自本仓库两处一手记录（9f0de34 提交信息、runtime.ts:2727 注释）与远端 CI 实测结果，未另行查 Node 官方 changelog 逐版本比对（20 分钟全链时限内的取舍）。
++- R4（watchdog）在宿主常驻场景实际由宿主句柄兜底，其 P0 定级针对裸循环/headless 场景；宿主是否在所有版本都持有 ref'd 句柄未逐一验证。
+diff --git a/lib/plan.js b/lib/plan.js
+index b642b50..d575809 100644
+--- a/lib/plan.js
++++ b/lib/plan.js
+@@ -4878,6 +4878,7 @@ leadAgentId = '', leadAgentIdSource = 'none', }) {
+         EVIDENCE_MARKER_BEGIN,
+         '{"status":"done","blockedReason":"","phases":{"planning":{"problemAnalysis":["要解决的问题 1（含现状/约束/未知/主要矛盾）"],"constraints":["..."],"unknowns":["..."],"approach":["第 1 步：做什么 → 产出什么 → 如何证明"]},"execution":{"steps":["实际执行的步骤"],"deviations":[]},"verification":{"allPassed":true,"checks":[{"criterion":"A1","method":"怎么验证","evidence":"命令输出/文件/引用"}],"requirementCheck":"逐条核对用户原要求的结果","retrospective":{"problems":["本次遇到的问题（现象+根因）"],"detours":["走过的弯路/返工/无效尝试；确实没有就写 []"],"resolutions":["最终是如何解决的"],"prevention":["以后如何预防再犯：遇到…先…"]}}},"acceptance":[{"criterion":"A1 把上面的验收标准原文抄在这里","result":"pass","evidence":"用命令输出、文件路径或引用证明"}],"artifacts":[{"kind":"file","ref":"相对工作目录的路径"}],"needs":[],"question":"","options":[],"timeSpentMinutes":0,"finalEstimateMinutes":0}',
+         EVIDENCE_MARKER_END,
++        '- [2.2.9] 盘上结算备份（必做）：发送结果块之前，先把同一份 JSON 写入 reports/wp-settlement-<你的子任务 ID>.json（相对工作目录）。收尾消息因异常（error/截断/超时）丢失时，宿主会自动采纳该备份结算，避免「已完成的工作」被误判为「缺失回报」而受阻并级联冻结下游。',
+         '- status 只能是 done / blocked / partial；partial 会被当作受阻处理。',
+         '- acceptance 必须逐条覆盖上面的验收标准：criterion 以 A1、A2… 开头对号入座（编号不可省略）；result 只能是 pass / fail / unverified。无法确认就写 unverified，不要写 pass。',
+         '- artifacts 写你实际产出或修改的文件（kind=file，ref 用相对路径）、链接（kind=url）或说明（kind=note）。',
+diff --git a/lib/runtime.js b/lib/runtime.js
+index 2ad19ba..04e658c 100644
+--- a/lib/runtime.js
++++ b/lib/runtime.js
+@@ -12,7 +12,7 @@
+  * in this file is allowed to escape as an unhandled rejection from a listener.
+  */
+ import { randomUUID } from 'node:crypto';
+-import { existsSync, realpathSync, statSync } from 'node:fs';
++import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
+ import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+ import { createNoticeChannel, finaliseNoticeChannel, formatNoticeChannelLog, observeRelayedNotice, readLeadAgentId, resolveLeadAgentId, validateNoticeChannel, } from './notice-channel.js';
+ import { MAX_CONCURRENT, PlanError, aggregateInvariantViolations, appendUserMessage, applyStatus, attachPlanMeta, blockCancelledDependents, buildChildPrompt, buildCancelMessage, buildClarifyMessage, createPlannerProgressReporter, buildDegradedMessage, buildPlanMessage, buildPlannerPrompt, buildResultMessage, buildStopSteerText, createStatuses, DEFAULT_REASONING_EFFORT, deliveryReadiness, derivePlanSnapshot, 
+@@ -1098,7 +1098,8 @@ async function disposeActivation(activation, record, subtaskId, guard) {
+             activation.dispose(),
+             new Promise((_, reject) => {
+                 timer = setTimeout(() => reject(new Error('dispose timeout')), DISPOSE_TIMEOUT_MS);
+-                timer.unref?.();
++                // [2.2.9][handle-policy] 收束类（T1 报告 R6）：dispose 超时臂必须真实触发，
++                // unref 时裸事件循环下进程先排空、race 永不 settle 也不报错。下方 finally 照常 clearTimeout。
+             }),
+         ]);
+     }
+@@ -1644,6 +1645,16 @@ export function shouldRetryAttempt(error, attempt, remainingMs, idleTimeoutMs) {
+     if (code === 'EVIDENCE_UNPARSABLE') {
+         return Number(remainingMs) > Number(idleTimeoutMs);
+     }
++    /*
++     * [2.2.9] 结果块缺失与 unparsable 同闸（用户 2026-11-10 红字复发族）：
++     * 结算的唯一载体是收尾消息块，任何异常收尾（error/截断/超时）都会丢；
++     * 旧实现 missing 一次即 blocked 并级联冻结下游（看板红字「待裁决/需处理」
++     * 反复出现的结构根因之一）。回喂补报（勿重做已完成工作）同样要求剩余
++     * 预算大于一个空闲窗口；「最多两次」由函数开头 attempt 上限统一把关。
++     */
++    if (code === 'EVIDENCE_MISSING') {
++        return Number(remainingMs) > Number(idleTimeoutMs);
++    }
+     return true;
+ }
+ /*
+@@ -2056,6 +2067,7 @@ async function executeSubtask(ctx, record, stage, subtask, options) {
+                         return;
+                     writeSubtaskStatus(record, subtask.id, { ackOverdue: true }, guard);
+                 }, ASSIGN_ACK_NOTICE_MS);
++                // [2.2.9][handle-policy] 卫生类（T1 报告 R7）：只丢一次「已下发未响应」提示，保留 unref。
+                 noticeTimer.unref?.();
+                 ackTimers.push(noticeTimer);
+                 /*
+@@ -2090,7 +2102,8 @@ async function executeSubtask(ctx, record, stage, subtask, options) {
+                         child.controller.abort(new PlanError(message, 'CHILD_NO_ACK', { subtaskId: subtask.id }));
+                     }
+                 }, ASSIGN_ACK_DEADLINE_MS);
+-                deadlineTimer.unref?.();
++                // [2.2.9][handle-policy] 收束类（T1 报告 R2）：180s no-ack 判定必须真实触发；unref 时
++                // 裸循环在判定前排空、行悬死（CI cancelled 红叉根因族）。ack 与收束路径均有 clearAckTimers 清理。
+                 ackTimers.push(deadlineTimer);
+                 const idleTimeoutMs = normaliseIdleTimeout(options.idleTimeoutMs);
+                 // [2.2.0][T4/O-3b][O-4d] 双计时同源（方案 §2.5）：看门狗 hardMs 与本次尝试的
+@@ -2267,6 +2280,56 @@ async function executeSubtask(ctx, record, stage, subtask, options) {
+                     settleFromOutput(record, subtask, output, guard, options, settleVerdict, probeInterruptedEvidence(output, subtask, options.cwd, options.artifactExists));
+                     return;
+                 }
++                /*
++                 * [2.2.9] 结果块**缺失**（子会话收尾异常：error/截断/超时）= 与 unparsable
++                 * 同族的有界回喂重试，且优先采纳盘上结算备份。
++                 *
++                 * 红字复发族根因（用户 2026-11-10 截图：T1 超时/缺失结算→blocked→级联
++                 * 冻结→「已结束·需处理」）：结算唯一载体是收尾消息块，单点、原子、无
++                 * 盘上备份；丢块后旧实现一次即 blocked。现在两层恢复：
++                 *  ① 盘上备份优先：子会话按提示词约定在收尾前把结果块 JSON 写入
++                 *     reports/wp-settlement-<subtaskId>.json（见 plan.ts 子提示词）；
++                 *     消息块缺失时读该文件重裁决，合法即照常结算（来源留档）；
++                 *  ② 无备份且预算够一个空闲窗口 → 抛 EVIDENCE_MISSING 回喂同一子会话，
++                 *     附在盘产物清单与「只补交结果块、勿重做已完成工作」；重试耗尽才
++                 *     按实 blocked（既有 settleFromOutput 路径，严格性不变：缺失永不计 done）。
++                 */
++                if (settleVerdict && settleVerdict.verification === 'unverified'
++                    && /结果块缺失/.test(String(settleVerdict.error ?? ''))) {
++                    const settleBackup = join(options.cwd ?? process.cwd(), 'reports', `wp-settlement-${subtask.id}.json`);
++                    let backupVerdict = null;
++                    let backupText = '';
++                    try {
++                        backupText = readFileSync(settleBackup, 'utf8');
++                        backupVerdict = adjudicateResult({
++                            output: backupText,
++                            strict: true,
++                            expectedAcceptance: Array.isArray(subtask?.acceptance) ? subtask.acceptance : [],
++                        });
++                        if (!backupVerdict || /结果块缺失|无法解析/.test(String(backupVerdict.error ?? '')))
++                            backupVerdict = null;
++                    }
++                    catch {
++                        backupVerdict = null;
++                    }
++                    if (backupVerdict) {
++                        settleFromOutput(record, subtask, backupText, guard, options, backupVerdict, probeInterruptedEvidence(backupText, subtask, options.cwd, options.artifactExists));
++                        record.errors = [
++                            ...(record.errors ?? []),
++                            `${subtask.id}: 消息结果块缺失，已采纳盘上结算备份 ${settleBackup}（[2.2.9] 恢复路径）`,
++                        ].slice(-20);
++                        return;
++                    }
++                    const missingLanded = probeInterruptedArtifacts(output, subtask, options.cwd, options.artifactExists);
++                    const missingError = new PlanError('结果块缺失，本次回报不能结算（工作本身不计失败）'
++                        + (missingLanded.length > 0
++                            ? `；已核到在盘产物：${missingLanded.slice(0, 6).join('、')}`
++                            : '')
++                        + '——请勿重做已完成的工作，只补交完整结构化结果块（WORKPLAN_EVIDENCE 标记成对、JSON 合法）后重新回报', 'EVIDENCE_MISSING', { subtaskId: subtask.id });
++                    if (shouldRetryAttempt(missingError, attempt, deadline - Date.now(), idleTimeoutMs)) {
++                        throw missingError;
++                    }
++                }
+                 /*
+                  * [1.7.0] Evidence decides the verdict.
+                  *
+@@ -3037,7 +3100,9 @@ export async function dispatchPlan(ctx, record, options) {
+         // [2.2.5][热修] 双重保险：即使哨兵值/配置未来被改成超限值，也把延时钳在
+         // Node setTimeout 上限之内，杜绝“1ms 触发”的整轮秒杀。
+     }, Math.min(Math.max(1000, deadline - Date.now()), ROUND_TIMER_MAX_MS));
+-    totalTimer.unref?.();
++    // [2.2.9][handle-policy] 收束类（T1 报告 R1，P0）：轮次总预算计时器必须真实触发（与 2.2.8
++    // 已修的 attempt 上限计时器同构）；unref 时裸循环在 TOTAL_TIMEOUT 前排空 → node:test 判
++    // cancelledByParent → CI 红叉。收束路径 finally 有 clearTimeout(totalTimer)，不会悬挂宿主。
+     record.dispatchedAt = Date.now();
+     record.phase = 'executing';
+     record.updatedAt = record.dispatchedAt;
+@@ -5525,7 +5590,9 @@ export function createWorkplanRuntime(ctx, options = {}) {
+                 ctx.logger?.warn?.(`dsh-workplan: 自动续跑失败：${error instanceof Error ? error.message : String(error)}`);
+             }
+         }, decision.delayMs);
+-        timer.unref?.();
++        // [2.2.9][handle-policy] 收束类（T1 报告 R3）：自动续跑计时器是计划走向下一轮的唯一驱动，
++        // unref 时裸循环下续跑永不发生、计划静默停摆。clearAutoResumeTimer 在人工派发/状态写入/
++        // 取消/指示/dispose/rearm 各路径统一撤销；延时自身有界，不会悬挂宿主。
+         book.timer = timer;
+         return decision;
+     }
+@@ -6155,6 +6222,7 @@ export function createWorkplanRuntime(ctx, options = {}) {
+             }
+             stop();
+         }, INSTRUCTION_POLL_MS);
++        // [2.2.9][handle-policy] 卫生类（T1 报告 R8）：回执轮询只提供提前确认，deadline 判定兜底，保留 unref。
+         poll.unref?.();
+         timers.push(poll);
+         const notice = setTimeout(() => {
+@@ -6167,6 +6235,7 @@ export function createWorkplanRuntime(ctx, options = {}) {
+                 // The row moved on between the read and the write; nothing to report.
+             }
+         }, INSTRUCTION_ACK_NOTICE_MS);
++        // [2.2.9][handle-policy] 卫生类（T1 报告 R9）：只丢一次「指示未回执」提示，保留 unref。
+         notice.unref?.();
+         timers.push(notice);
+         const deadline = setTimeout(() => {
+@@ -6194,7 +6263,8 @@ export function createWorkplanRuntime(ctx, options = {}) {
+             }
+             stop();
+         }, INSTRUCTION_ACK_DEADLINE_MS);
+-        deadline.unref?.();
++        // [2.2.9][handle-policy] 收束类（T1 报告 R5）：指示 no-ack 判定必须真实触发；触发/回执即 stop()
++        // 清掉整组计时器，延时有界（INSTRUCTION_ACK_DEADLINE_MS），不会悬挂宿主。
+         timers.push(deadline);
+     }
+     /**
+diff --git a/lib/watchdog.js b/lib/watchdog.js
+index 42fc600..811bc6b 100644
+--- a/lib/watchdog.js
++++ b/lib/watchdog.js
+@@ -211,7 +211,8 @@ export function createProgressWatchdog(input) {
+             finish(reason);
+     };
+     timer = setInterval(poll, pollMs);
+-    timer.unref?.();
++    // [2.2.9][handle-policy] 收束类（T1 报告 R4）：看门狗是卡死子任务的最后收束保证，unref 时
++    // 裸循环下看门狗失效。finish()/stop() 均 clearInterval，生命周期与子任务尝试绑定，不会悬挂宿主。
+     return {
+         fired,
+         stop() {
+diff --git a/package.json b/package.json
+index 33df01a..5a801b2 100644
+--- a/package.json
++++ b/package.json
+@@ -68,7 +68,7 @@
+     "clean": "rm -rf dist dist-tests",
+     "build": "rm -rf dist && tsc -p tsconfig.json && cp dist/*.js lib/ && cp dist/client.js client.js",
+     "check": "tsc -p tsconfig.json --noEmit",
+-    "test": "npm run build && rm -rf dist-tests && tsc -p tsconfig.test.json && node --test dist-tests/tests/*.test.js",
++    "test": "npm run build && rm -rf dist-tests && tsc -p tsconfig.test.json && node scripts/run-tests.mjs",
+     "verify": "npm run check && npm test",
+     "preview": "node scripts/render-preview.ts --emit"
+   },
+diff --git a/scripts/run-tests.mjs b/scripts/run-tests.mjs
+new file mode 100644
+index 0000000..525aaf6
+--- /dev/null
++++ b/scripts/run-tests.mjs
+@@ -0,0 +1,58 @@
++#!/usr/bin/env node
++/**
++ * [2.2.9][P-4] 测试运行器（package.json `test` 脚本的收口）：
++ *  ① 以 `--import dist-tests/tests/setup-event-loop-anchor.js` 给每个测试子进程注入全局
++ *     事件循环锚（探针实证：--import 只进子进程、after() 钩子正常清理、runner 不被悬挂）；
++ *  ② 强制 TAP 输出并**硬断言 cancelled === 0**：任何 cancelledByParent 都被显式点名并 exit 1，
++ *     不再只靠 node --test 的退出码间接体现——把「fail 红」与「cancelled 红」两类问题在日志层
++ *     就区分开（2.2.6 事故里 `pass 663/fail 0/cancelled 3` 被当成"差不多绿了"的教训）。
++ *  ③ 汇总行显式打印 pass/fail/cancelled/exit，供本地与 CI 日志直接取证。
++ */
++import { spawn } from 'node:child_process'
++import { readdirSync } from 'node:fs'
++import { join, resolve } from 'node:path'
++import { pathToFileURL } from 'node:url'
++
++const root = resolve(process.cwd())
++const testsDir = join(root, 'dist-tests', 'tests')
++const anchor = join(testsDir, 'setup-event-loop-anchor.js')
++const files = readdirSync(testsDir).filter((f) => f.endsWith('.test.js')).sort().map((f) => join(testsDir, f))
++if (files.length === 0) {
++  console.error('[run-tests] dist-tests/tests 下没有 *.test.js：先跑 tsc -p tsconfig.test.json')
++  process.exit(1)
++}
++
++const child = spawn(
++  process.execPath,
++  ['--import', pathToFileURL(anchor).href, '--test', '--test-reporter=tap', ...files],
++  { cwd: root, stdio: ['ignore', 'pipe', 'inherit'], env: process.env },
++)
++
++let out = ''
++child.stdout.on('data', (chunk) => {
++  out += chunk
++  process.stdout.write(chunk)
++})
++child.on('error', (error) => {
++  console.error(`[run-tests] 无法启动测试进程：${error.message}`)
++  process.exit(1)
++})
++child.on('close', (code) => {
++  const grab = (label) => {
++    const m = out.match(new RegExp(`^(?:#|ℹ)\\s+${label}\\s+(\\d+)`, 'm'))
++    return m ? Number(m[1]) : null
++  }
++  const cancelled = grab('cancelled') ?? 0
++  const pass = grab('pass')
++  const fail = grab('fail')
++  console.error(`[run-tests] pass=${pass ?? '?'} fail=${fail ?? '?'} cancelled=${cancelled} exit=${code}`)
++  if (cancelled > 0) {
++    console.error(
++      '[run-tests] ❌ cancelled > 0：事件循环排空导致 node:test 取消等待中的用例'
++      + '（CI 红叉根因族，T1 报告 §1）。排查顺序：① tests/handle-policy.test.ts 是否红（收束类计时器'
++      + ' 被 unref）；② setup-event-loop-anchor 是否仍被 --import 注入（event-loop-anchor-global.test.ts）。',
++    )
++    process.exit(1)
++  }
++  process.exit(code ?? 1)
++})
+diff --git a/src/plan.ts b/src/plan.ts
+index a049556..59b0bfa 100644
+--- a/src/plan.ts
++++ b/src/plan.ts
+@@ -5003,6 +5003,7 @@ export function buildChildPrompt({
+     EVIDENCE_MARKER_BEGIN,
+     '{"status":"done","blockedReason":"","phases":{"planning":{"problemAnalysis":["要解决的问题 1（含现状/约束/未知/主要矛盾）"],"constraints":["..."],"unknowns":["..."],"approach":["第 1 步：做什么 → 产出什么 → 如何证明"]},"execution":{"steps":["实际执行的步骤"],"deviations":[]},"verification":{"allPassed":true,"checks":[{"criterion":"A1","method":"怎么验证","evidence":"命令输出/文件/引用"}],"requirementCheck":"逐条核对用户原要求的结果","retrospective":{"problems":["本次遇到的问题（现象+根因）"],"detours":["走过的弯路/返工/无效尝试；确实没有就写 []"],"resolutions":["最终是如何解决的"],"prevention":["以后如何预防再犯：遇到…先…"]}}},"acceptance":[{"criterion":"A1 把上面的验收标准原文抄在这里","result":"pass","evidence":"用命令输出、文件路径或引用证明"}],"artifacts":[{"kind":"file","ref":"相对工作目录的路径"}],"needs":[],"question":"","options":[],"timeSpentMinutes":0,"finalEstimateMinutes":0}',
+     EVIDENCE_MARKER_END,
++    '- [2.2.9] 盘上结算备份（必做）：发送结果块之前，先把同一份 JSON 写入 reports/wp-settlement-<你的子任务 ID>.json（相对工作目录）。收尾消息因异常（error/截断/超时）丢失时，宿主会自动采纳该备份结算，避免「已完成的工作」被误判为「缺失回报」而受阻并级联冻结下游。',
+     '- status 只能是 done / blocked / partial；partial 会被当作受阻处理。',
+     '- acceptance 必须逐条覆盖上面的验收标准：criterion 以 A1、A2… 开头对号入座（编号不可省略）；result 只能是 pass / fail / unverified。无法确认就写 unverified，不要写 pass。',
+     '- artifacts 写你实际产出或修改的文件（kind=file，ref 用相对路径）、链接（kind=url）或说明（kind=note）。',
+diff --git a/src/runtime.ts b/src/runtime.ts
+index 1781200..7361f94 100644
+--- a/src/runtime.ts
++++ b/src/runtime.ts
+@@ -13,7 +13,7 @@
+  */
+ 
+ import { randomUUID } from 'node:crypto'
+-import { existsSync, realpathSync, statSync } from 'node:fs'
++import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs'
+ import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
+ 
+ import {
+@@ -1198,7 +1198,8 @@ async function disposeActivation(activation: any, record: any, subtaskId: string
+       activation.dispose(),
+       new Promise((_: any, reject: any) => {
+         timer = setTimeout(() => reject(new Error('dispose timeout')), DISPOSE_TIMEOUT_MS)
+-        timer.unref?.()
++        // [2.2.9][handle-policy] 收束类（T1 报告 R6）：dispose 超时臂必须真实触发，
++        // unref 时裸事件循环下进程先排空、race 永不 settle 也不报错。下方 finally 照常 clearTimeout。
+       }),
+     ])
+   } catch (error: any) {
+@@ -1733,6 +1734,16 @@ export function shouldRetryAttempt(error: any, attempt: any, remainingMs: any, i
+   if (code === 'EVIDENCE_UNPARSABLE') {
+     return Number(remainingMs) > Number(idleTimeoutMs)
+   }
++  /*
++   * [2.2.9] 结果块缺失与 unparsable 同闸（用户 2026-11-10 红字复发族）：
++   * 结算的唯一载体是收尾消息块，任何异常收尾（error/截断/超时）都会丢；
++   * 旧实现 missing 一次即 blocked 并级联冻结下游（看板红字「待裁决/需处理」
++   * 反复出现的结构根因之一）。回喂补报（勿重做已完成工作）同样要求剩余
++   * 预算大于一个空闲窗口；「最多两次」由函数开头 attempt 上限统一把关。
++   */
++  if (code === 'EVIDENCE_MISSING') {
++    return Number(remainingMs) > Number(idleTimeoutMs)
++  }
+   return true
+ }
+ 
+@@ -2137,6 +2148,7 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
+           if (row?.closure !== 'assigned' || row?.dispatchSeq !== dispatchSeq) return
+           writeSubtaskStatus(record, subtask.id, { ackOverdue: true }, guard)
+         }, ASSIGN_ACK_NOTICE_MS)
++        // [2.2.9][handle-policy] 卫生类（T1 报告 R7）：只丢一次「已下发未响应」提示，保留 unref。
+         noticeTimer.unref?.()
+         ackTimers.push(noticeTimer)
+         /*
+@@ -2170,7 +2182,8 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
+             child.controller.abort(new PlanError(message, 'CHILD_NO_ACK', { subtaskId: subtask.id }))
+           }
+         }, ASSIGN_ACK_DEADLINE_MS)
+-        deadlineTimer.unref?.()
++        // [2.2.9][handle-policy] 收束类（T1 报告 R2）：180s no-ack 判定必须真实触发；unref 时
++        // 裸循环在判定前排空、行悬死（CI cancelled 红叉根因族）。ack 与收束路径均有 clearAckTimers 清理。
+         ackTimers.push(deadlineTimer)
+         const idleTimeoutMs = normaliseIdleTimeout(options.idleTimeoutMs)
+         // [2.2.0][T4/O-3b][O-4d] 双计时同源（方案 §2.5）：看门狗 hardMs 与本次尝试的
+@@ -2354,6 +2367,59 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
+             probeInterruptedEvidence(output, subtask, options.cwd, options.artifactExists))
+           return
+         }
++        /*
++         * [2.2.9] 结果块**缺失**（子会话收尾异常：error/截断/超时）= 与 unparsable
++         * 同族的有界回喂重试，且优先采纳盘上结算备份。
++         *
++         * 红字复发族根因（用户 2026-11-10 截图：T1 超时/缺失结算→blocked→级联
++         * 冻结→「已结束·需处理」）：结算唯一载体是收尾消息块，单点、原子、无
++         * 盘上备份；丢块后旧实现一次即 blocked。现在两层恢复：
++         *  ① 盘上备份优先：子会话按提示词约定在收尾前把结果块 JSON 写入
++         *     reports/wp-settlement-<subtaskId>.json（见 plan.ts 子提示词）；
++         *     消息块缺失时读该文件重裁决，合法即照常结算（来源留档）；
++         *  ② 无备份且预算够一个空闲窗口 → 抛 EVIDENCE_MISSING 回喂同一子会话，
++         *     附在盘产物清单与「只补交结果块、勿重做已完成工作」；重试耗尽才
++         *     按实 blocked（既有 settleFromOutput 路径，严格性不变：缺失永不计 done）。
++         */
++        if (settleVerdict && settleVerdict.verification === 'unverified'
++          && /结果块缺失/.test(String(settleVerdict.error ?? ''))) {
++          const settleBackup = join(options.cwd ?? process.cwd(), 'reports', `wp-settlement-${subtask.id}.json`)
++          let backupVerdict: any = null
++          let backupText = ''
++          try {
++            backupText = readFileSync(settleBackup, 'utf8')
++            backupVerdict = adjudicateResult({
++              output: backupText,
++              strict: true,
++              expectedAcceptance: Array.isArray(subtask?.acceptance) ? subtask.acceptance : [],
++            })
++            if (!backupVerdict || /结果块缺失|无法解析/.test(String(backupVerdict.error ?? ''))) backupVerdict = null
++          } catch {
++            backupVerdict = null
++          }
++          if (backupVerdict) {
++            settleFromOutput(record, subtask, backupText, guard, options, backupVerdict,
++              probeInterruptedEvidence(backupText, subtask, options.cwd, options.artifactExists))
++            record.errors = [
++              ...(record.errors ?? []),
++              `${subtask.id}: 消息结果块缺失，已采纳盘上结算备份 ${settleBackup}（[2.2.9] 恢复路径）`,
++            ].slice(-20)
++            return
++          }
++          const missingLanded = probeInterruptedArtifacts(output, subtask, options.cwd, options.artifactExists)
++          const missingError = new PlanError(
++            '结果块缺失，本次回报不能结算（工作本身不计失败）'
++              + (missingLanded.length > 0
++                ? `；已核到在盘产物：${missingLanded.slice(0, 6).join('、')}`
++                : '')
++              + '——请勿重做已完成的工作，只补交完整结构化结果块（WORKPLAN_EVIDENCE 标记成对、JSON 合法）后重新回报',
++            'EVIDENCE_MISSING',
++            { subtaskId: subtask.id },
++          )
++          if (shouldRetryAttempt(missingError, attempt, deadline - Date.now(), idleTimeoutMs)) {
++            throw missingError
++          }
++        }
+         /*
+          * [1.7.0] Evidence decides the verdict.
+          *
+@@ -3112,7 +3178,9 @@ export async function dispatchPlan(ctx: any, record: any, options: any) {
+     // [2.2.5][热修] 双重保险：即使哨兵值/配置未来被改成超限值，也把延时钳在
+     // Node setTimeout 上限之内，杜绝“1ms 触发”的整轮秒杀。
+   }, Math.min(Math.max(1000, deadline - Date.now()), ROUND_TIMER_MAX_MS))
+-  totalTimer.unref?.()
++  // [2.2.9][handle-policy] 收束类（T1 报告 R1，P0）：轮次总预算计时器必须真实触发（与 2.2.8
++  // 已修的 attempt 上限计时器同构）；unref 时裸循环在 TOTAL_TIMEOUT 前排空 → node:test 判
++  // cancelledByParent → CI 红叉。收束路径 finally 有 clearTimeout(totalTimer)，不会悬挂宿主。
+   record.dispatchedAt = Date.now()
+   record.phase = 'executing'
+   record.updatedAt = record.dispatchedAt
+@@ -5675,7 +5743,9 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions
+         ctx.logger?.warn?.(`dsh-workplan: 自动续跑失败：${error instanceof Error ? error.message : String(error)}`)
+       }
+     }, decision.delayMs)
+-    timer.unref?.()
++    // [2.2.9][handle-policy] 收束类（T1 报告 R3）：自动续跑计时器是计划走向下一轮的唯一驱动，
++    // unref 时裸循环下续跑永不发生、计划静默停摆。clearAutoResumeTimer 在人工派发/状态写入/
++    // 取消/指示/dispose/rearm 各路径统一撤销；延时自身有界，不会悬挂宿主。
+     book.timer = timer
+     return decision
+   }
+@@ -6298,6 +6368,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions
+       }
+       stop()
+     }, INSTRUCTION_POLL_MS)
++    // [2.2.9][handle-policy] 卫生类（T1 报告 R8）：回执轮询只提供提前确认，deadline 判定兜底，保留 unref。
+     poll.unref?.()
+     timers.push(poll)
+     const notice = setTimeout(() => {
+@@ -6308,6 +6379,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions
+         // The row moved on between the read and the write; nothing to report.
+       }
+     }, INSTRUCTION_ACK_NOTICE_MS)
++    // [2.2.9][handle-policy] 卫生类（T1 报告 R9）：只丢一次「指示未回执」提示，保留 unref。
+     notice.unref?.()
+     timers.push(notice)
+     const deadline = setTimeout(() => {
+@@ -6331,7 +6403,8 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions
+       }
+       stop()
+     }, INSTRUCTION_ACK_DEADLINE_MS)
+-    deadline.unref?.()
++    // [2.2.9][handle-policy] 收束类（T1 报告 R5）：指示 no-ack 判定必须真实触发；触发/回执即 stop()
++    // 清掉整组计时器，延时有界（INSTRUCTION_ACK_DEADLINE_MS），不会悬挂宿主。
+     timers.push(deadline)
+   }
+ 
+diff --git a/src/watchdog.ts b/src/watchdog.ts
+index f1f32c4..28b44f6 100644
+--- a/src/watchdog.ts
++++ b/src/watchdog.ts
+@@ -262,7 +262,8 @@ export function createProgressWatchdog(input: {
+   }
+ 
+   timer = setInterval(poll, pollMs)
+-  timer.unref?.()
++  // [2.2.9][handle-policy] 收束类（T1 报告 R4）：看门狗是卡死子任务的最后收束保证，unref 时
++  // 裸循环下看门狗失效。finish()/stop() 均 clearInterval，生命周期与子任务尝试绑定，不会悬挂宿主。
+ 
+   return {
+     fired,
+diff --git a/tests/event-loop-anchor-global.test.ts b/tests/event-loop-anchor-global.test.ts
+new file mode 100644
+index 0000000..bdc759d
+--- /dev/null
++++ b/tests/event-loop-anchor-global.test.ts
+@@ -0,0 +1,25 @@
++import assert from 'node:assert/strict'
++import test from 'node:test'
++
++/*
++ * [2.2.9][P-2] 全局事件循环锚的注入自检（治本 T1 报告 RC-2「修复层次错位」+ RC-3「验证环境
++ * 与故障环境不一致」）。
++ *
++ * 锚由 scripts/run-tests.mjs 以 `--import tests/setup-event-loop-anchor.js` 注入每个测试子进程：
++ * 只要锚在，测试子进程内永远存在一个 ref'd 句柄，「loop 排空 → node 22 把等待中用例判
++ * cancelledByParent」的竞态在任何 node 版本上都结构性不可触发——不再依赖 runner 自带句柄
++ * 的版本差异（node 26 假绿的根源），也不再依赖每文件手工加锚（12/97 覆盖、新文件即漏）。
++ *
++ * 本测试若红：说明 --import 接线断了（脚本/路径/编译产物变更），保护整体失效，必须修复后才能信任
++ * 任何一轮「本地全绿」的结论。
++ */
++test('[2.2.9][P-2] 全局事件循环锚已注入本测试子进程且为 ref 句柄', () => {
++  const anchor = (globalThis as any).__DSH_WORKPLAN_EVENT_LOOP_ANCHOR__
++  assert.ok(
++    anchor,
++    'tests/setup-event-loop-anchor 未经 --import 注入：裸事件循环（CI node 22）下 cancelledByParent 红叉保护失效'
++    + '（T1 报告 RC-2/RC-3）。检查 package.json test 脚本与 scripts/run-tests.mjs。',
++  )
++  assert.equal(typeof anchor.hasRef, 'function', '锚应是 node 计时器句柄（Timeout）')
++  assert.equal(anchor.hasRef(), true, '锚必须处于 ref 状态：unref 的锚无法阻止 loop 排空')
++})
+diff --git a/tests/handle-policy.test.ts b/tests/handle-policy.test.ts
+new file mode 100644
+index 0000000..5d73ed3
+--- /dev/null
++++ b/tests/handle-policy.test.ts
+@@ -0,0 +1,83 @@
++import assert from 'node:assert/strict'
++import { readdirSync, readFileSync } from 'node:fs'
++import path from 'node:path'
++import test from 'node:test'
++
++/*
++ * [2.2.9][P-3] handle-policy 静态守卫 —— T1 根因报告（docs/rootcause-red-x-recurrence-20261110-T1.md）
++ * §4.1 计时器分类的可执行契约，治本 RC-1（句柄策略二元冲突）。
++ *
++ * 口径：
++ *  - 收束类计时器（不触发则子任务/轮次无法到达终态：attempt 上限、轮次总预算、no-ack deadline、
++ *    auto-resume、watchdog、dispose 超时）**禁止 unref**——node:test/裸事件循环下 unref = 允许进程
++ *    在收束前排空退出 → cancelledByParent → CI 红叉（2.2.6/2.2.7 两次复发的根因族）。其生命周期
++ *    由收束路径的 clearTimeout/clearInterval 管理，不会悬挂宿主（2.2.8 attempt 修法同款口径）。
++ *  - 卫生类计时器（不触发只丢一条通知/轮询：noticeTimer、poll、notice）**必须保留 unref**——
++ *    插件不得拖住正在关闭的 DSH 宿主（9f0de34 的原始卫生动机）。
++ *
++ * 任何未来新增计时器：默认不得 unref；确属卫生类必须显式加进本测试白名单并附分类理由，否则此测试红。
++ * 这就是「未分类即红」的防回归门禁：把一次性诊断固化成持续契约。
++ */
++const SRC_DIR = path.resolve(process.cwd(), 'src')
++
++/** 卫生类 unref 白名单：句柄名 → 出现次数（精确契约，多一处少一处都红）。 */
++const HYGIENE_WHITELIST: Record<string, number> = {
++  // runtime.ts 派发 ack 提示（T1 R7）
++  noticeTimer: 1,
++  // runtime.ts 指示回执轮询（T1 R8）
++  poll: 1,
++  // runtime.ts 指示未回执提示（T1 R9）
++  notice: 1,
++}
++
++/** 历史事故点位黑名单：显式命名，回归时给出最直白的报错（与白名单检查互为双保险）。 */
++const CONVERGENCE_FORBIDDEN = ['timer', 'totalTimer', 'deadlineTimer', 'deadline', 'attemptTimer']
++
++function collectUnrefNames(file: string): string[] {
++  const text = readFileSync(path.join(SRC_DIR, file), 'utf8')
++  const names: string[] = []
++  for (const m of text.matchAll(/([A-Za-z_$][\w$]*)\s*\.\s*unref/g)) names.push(m[1])
++  return names
++}
++
++test('[2.2.9][P-3] handle-policy：src/ 全部 unref 点位 === 卫生类白名单（收束类禁止 unref）', () => {
++  const files = readdirSync(SRC_DIR).filter((f) => f.endsWith('.ts')).sort()
++  assert.ok(files.includes('runtime.ts') && files.includes('watchdog.ts'), 'src/ 布局变化，本守卫需同步更新')
++
++  const found = new Map<string, string[]>()
++  for (const f of files) {
++    const names = collectUnrefNames(f)
++    if (names.length > 0) found.set(f, names)
++  }
++
++  // 1) 精确集合契约：只有 runtime.ts 的三处卫生类点位允许 unref。
++  assert.deepEqual(
++    Object.fromEntries([...found.entries()].map(([f, n]) => [f, n.sort()])),
++    { 'runtime.ts': ['notice', 'noticeTimer', 'poll'] },
++    'unref 点位与 handle-policy 契约不符：收束类计时器（必须触发才能到达终态）禁止 unref；'
++    + '新增卫生类计时器必须显式加入 tests/handle-policy.test.ts 白名单并附分类理由。'
++    + '背景见 docs/rootcause-red-x-recurrence-20261110-T1.md §3/§4.1。',
++  )
++
++  // 2) 黑名单显式核查：历史事故句柄名永不回归（报错信息直指事故族）。
++  for (const [f, names] of found) {
++    for (const n of names) {
++      assert.ok(
++        !CONVERGENCE_FORBIDDEN.includes(n),
++        `${f}: 收束类计时器「${n}」不得 unref（CI cancelled 红叉根因族，T1 报告 R1-R6）`,
++      )
++    }
++  }
++
++  // 3) 白名单计数核查：卫生类 unref 被误删也会红（反向回归：插件拖住关闭中的宿主）。
++  for (const [name, count] of Object.entries(HYGIENE_WHITELIST)) {
++    const actual = (found.get('runtime.ts') ?? []).filter((n) => n === name).length
++    assert.equal(actual, count, `卫生类计时器「${name}」应保留 unref ${count} 处（实际 ${actual}）：删掉会拖住关闭中的宿主`)
++  }
++})
++
++test('[2.2.9][P-3] handle-policy：watchdog 收束 interval 不得回归 unref（T1 R4）', () => {
++  const text = readFileSync(path.join(SRC_DIR, 'watchdog.ts'), 'utf8')
++  assert.ok(!/\.unref/.test(text), 'watchdog.ts 出现 unref：看门狗是卡死子任务的最后收束保证，必须保持 ref 句柄')
++  assert.ok(/setInterval\(poll, pollMs\)/.test(text), 'watchdog 轮询结构变化，本守卫需同步复核')
++})
+diff --git a/tests/npm-test-scope.test.ts b/tests/npm-test-scope.test.ts
+index 8d78187..1176630 100644
+--- a/tests/npm-test-scope.test.ts
++++ b/tests/npm-test-scope.test.ts
+@@ -28,11 +28,30 @@ test('npm test 只从 tests/ 收集用例，scripts/ 的探针不参与编译与
+   const pkg = readJson('package.json')
+   const testScript: string = pkg.scripts.test
+ 
+-  // 1. 默认测试入口只跑 dist-tests/tests/*.test.js，不接受额外目录/文件参数。
++  // 1. [2.2.9] 默认测试入口收口到 scripts/run-tests.mjs（全局事件循环锚 --import 注入
++  //    + cancelled===0 硬断言，见 tests/setup-event-loop-anchor.ts / P-2、P-4），
++  //    不接受额外目录/文件参数。
+   assert.match(
+     testScript,
+-    /node --test dist-tests\/tests\/\*\.test\.js$/,
+-    `npm test 入口必须以 node --test dist-tests/tests/*.test.js 结尾，实际：${testScript}`,
++    /node scripts\/run-tests\.mjs$/,
++    `npm test 入口必须以 node scripts/run-tests.mjs 结尾，实际：${testScript}`,
++  )
++  // 1b. 运行器只从 dist-tests/tests 收集 *.test.js，且与 R-W5-01 探针零关联——
++  //    原「只跑 dist-tests/tests/*.test.js」的边界由运行器代码显式承接。
++  const runner = readFileSync(path.join(root, 'scripts', 'run-tests.mjs'), 'utf8')
++  assert.match(
++    runner,
++    /join\(root,\s*'dist-tests',\s*'tests'\)/,
++    'run-tests.mjs 必须只从 dist-tests/tests 收集用例',
++  )
++  assert.match(
++    runner,
++    /endsWith\('\.test\.js'\)/,
++    `run-tests.mjs 必须只收集 *.test.js（setup-event-loop-anchor.js 等非用例文件不得进测试集合）`,
++  )
++  assert.ok(
++    !runner.includes('w5-cross-version-check'),
++    'run-tests.mjs 不得引用 R-W5-01 跨版本探针（它属于发版清单，不属于 npm test）',
+   )
+   // 2. 测试编译配置只收 src 与 tests，且显式排除 scripts/。
+   const tsconfigTest = readJson('tsconfig.test.json')
+diff --git a/tests/setup-event-loop-anchor.ts b/tests/setup-event-loop-anchor.ts
+new file mode 100644
+index 0000000..4385d01
+--- /dev/null
++++ b/tests/setup-event-loop-anchor.ts
+@@ -0,0 +1,31 @@
++/**
++ * [2.2.9][P-2] 全局事件循环锚 —— 由 scripts/run-tests.mjs 以 `node --test --import` 加载，
++ * 注入每一个测试子进程（治本 T1 报告 RC-2：旧修复为每文件手工加锚，覆盖 12/97、且与触及
++ * unref 计时器路径的 9 个测试文件交集为空——最需要保护的文件恰好全部裸奔）。
++ *
++ * 机理：node 22 的 node:test 在「loop 排空且无 ref'd 句柄」时会把等待中的用例判为
++ * cancelledByParent → exit 1 → CI 红叉；node 26 因 runner 自带句柄竞态获胜而假绿（RC-3）。
++ * 本锚持有一个 ref'd setInterval：测试子进程内永远存在存活句柄，排空竞态在**任何 node 版本**
++ * 上都结构性不可触发——不再依赖版本行为差异，也不再依赖手工枚举。
++ *
++ * 清理三层（探针实证，2026-11-10）：①正常路径 node:test after() 钩子——经 --import 加载的
++ * 模块里注册的 after 会绑定到该子进程文件级根钩子，测试完即 clearInterval，子进程立即退出；
++ * ②failsafe：10 分钟后强制放锚（unref'd，不阻碍退出），防钩子意外失效悬挂子进程；
++ * ③锚体为 no-op interval，零业务副作用。
++ *
++ * tests/event-loop-anchor-global.test.ts 断言本模块注入成功且句柄为 ref 态；
++ * 该测试红 = 接线断裂（脚本/路径/编译产物变更），保护整体失效，禁止信任当轮「全绿」结论。
++ */
++import { after } from 'node:test'
++
++const anchor = setInterval(() => {}, 1_000)
++const failsafe = setTimeout(() => clearInterval(anchor), 600_000)
++failsafe.unref?.()
++;(globalThis as any).__DSH_WORKPLAN_EVENT_LOOP_ANCHOR__ = anchor
++
++try {
++  after(() => clearInterval(anchor))
++} catch {
++  // 非测试上下文加载（理论上不发生：探针实证 runner 父进程不加载 --import 模块）：
++  // after 不可用时由 failsafe 兜底放锚。
++}
+diff --git a/tests/workplan-evidence-missing-retry.test.ts b/tests/workplan-evidence-missing-retry.test.ts
+new file mode 100644
+index 0000000..f725a6f
+--- /dev/null
++++ b/tests/workplan-evidence-missing-retry.test.ts
+@@ -0,0 +1,224 @@
++/*
++ * [2.2.9] 结算容错第二族：结果块**缺失**（子会话收尾异常：error/截断/超时）。
++ *
++ * 缺陷现场（用户 2026-11-10 截图红字复发族）：结算唯一载体是收尾消息块，
++ * 单点、原子、无盘上备份；丢块后旧实现一次即 blocked 并级联冻结下游
++ * （看板「已结束·需处理 / 2 卡住了 0/2」反复出现）。
++ * 修复后的契约（本文件逐条钉死）：
++ *  A1 EVIDENCE_MISSING 与 CHILD_NOT_COMPLETED / EVIDENCE_UNPARSABLE 同闸有界重试；
++ *  A2 盘上备份（reports/wp-settlement-<id>.json）存在且合法 → 单次激活即采纳结算，不回喂；
++ *  A3 无备份 → 回喂同一子会话「只补交结果块、勿重做已完成工作」，补交后正常 done；
++ *  A4 回喂耗尽仍缺失 → 按实 blocked（verification=unverified），缺失永不计 done；
++ *  A5 既有 unparsable / CHILD_NOT_COMPLETED 语义不回归（同闸单测逐字断言）。
++ */
++import test from 'node:test'
++import assert from 'node:assert/strict'
++import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++
++import {
++  EVIDENCE_MARKER_BEGIN,
++  EVIDENCE_MARKER_END,
++  adjudicateResult,
++  buildPlanMessage,
++} from '../src/plan.js'
++import { createWorkplanRuntime, shouldRetryAttempt } from '../src/runtime.js'
++
++process.env.DSH_WORKPLAN_LESSONS_FILE = join(
++  tmpdir(),
++  `t9-evidence-missing-lessons-${process.pid}.jsonl`,
++)
++
++function phasesFixture() {
++  return {
++    planning: {
++      problemAnalysis: ['现状：结算块缺失一次即 blocked 并级联冻结下游，看板红字反复出现；约束：缺失永不计 done、既有同族语义不回归；未知：盘上备份能否被采纳；主要矛盾：恢复路径与结算严格性必须在同一闸内并存；边界：只改结算链与提示词约定。'],
++      constraints: ['缺失永不计 done', '有界重试不无限循环'],
++      unknowns: [],
++      approach: ['第 1 步：补交完整结果块 → 产出结构化结算 → 证明：行状态 done 且 verification=structured'],
++    },
++    execution: { steps: ['补交结果块'], deviations: [] },
++    verification: {
++      allPassed: true,
++      checks: [{ criterion: 'A1 通道可用', method: 'node --test', evidence: 'pass 输出' }],
++      requirementCheck: '逐条核对通过',
++      retrospective: {
++        problems: ['现象：子会话收尾异常（error/截断/超时）导致结果块丢失，旧实现一次即 blocked 并级联冻结下游；根因：结算唯一载体是收尾消息块，单点无备份。'],
++        detours: [],
++        resolutions: ['为缺失族补上与 unparsable 同闸的有界回喂重试，并新增盘上结算备份采纳路径，恢复能力与结算严格性在同一闸内并存。'],
++        prevention: ['遇到收尾异常先写盘上备份再发消息块；结算链任何新增唯一载体都必须配套盘上备份或有界重试恢复路径，避免单点丢失。'],
++      },
++    },
++  }
++}
++
++function compliantOutput() {
++  const payload = {
++    status: 'done',
++    blockedReason: '',
++    phases: phasesFixture(),
++    acceptance: [{ criterion: 'A1 通道可用', result: 'pass', evidence: 'node --test pass 输出' }],
++    artifacts: [],
++    needs: [],
++    question: '',
++    options: [],
++  }
++  return `做完了。\n${EVIDENCE_MARKER_BEGIN}\n${JSON.stringify(payload)}\n${EVIDENCE_MARKER_END}`
++}
++
++function proseOnly() {
++  return '活干完了，报告如下：一切正常。（忘记附结果块）'
++}
++
++function makePlan() {
++  return {
++    planId: 'wp-t9-missing',
++    title: '缺失结算验收',
++    taskUnderstanding: { originalRequest: '验证缺失恢复', deliverable: '不误判' },
++    contradictions: { primary: { statement: '恢复与严格性并存' }, secondary: [], transformationConditions: [] },
++    stages: [{
++      id: 'S1',
++      name: '实施',
++      goal: '交付',
++      rationale: '落盘优先',
++      checkpoint: '可核对',
++      subtasks: [{
++        id: 'T1',
++        title: '实现通道',
++        department: 'engineering',
++        role: 'engineer',
++        objective: '实现通道并通过验收',
++        method: ['实现', '测试'],
++        inputs: [],
++        outputs: ['reports/t9-核对报告.md'],
++        acceptance: ['通道可用'],
++        risk: '低',
++        dependsOn: [],
++      }],
++    }],
++  }
++}
++
++function makeSession(cwd: string) {
++  const events: any[] = []
++  return {
++    id: 'session-t9-missing',
++    header: { createdAt: 1000, cwd },
++    get seq() {
++      return events.length
++    },
++    append(type: string, data: any) {
++      events.push({ type, data })
++      return data
++    },
++    eventAt: (seq: number) => events[seq],
++    events,
++  }
++}
++
++function completed(text: string) {
++  return { stopReason: 'completed', output: [{ type: 'text', text }] }
++}
++
++function makeRuntime(outputs: string[], cwd: string) {
++  const prompts: string[] = []
++  const session = makeSession(cwd)
++  session.append('user/message', buildPlanMessage(makePlan()))
++  const ctx = {
++    logger: { warn() {} },
++    subagents: {
++      startActivation: async (activation: any) => {
++        const prompt = String(activation?.request?.prompt?.[0]?.text ?? '')
++        prompts.push(prompt)
++        const output = outputs.shift() ?? compliantOutput()
++        return {
++          childId: `child-t9-${prompts.length}`,
++          result: Promise.resolve(completed(output)),
++          dispose: async () => {},
++        }
++      },
++    },
++    sessions: { get: () => undefined, list: () => [], eventAt: () => undefined },
++  }
++  const runtime = createWorkplanRuntime(ctx, {
++    totalTimeoutMs: 60_000,
++    idleTimeoutMs: 30_000,
++    childTimeoutMs: 20_000,
++    maxResumes: 4,
++    autoResume: false,
++  })
++  return { session, runtime, prompts }
++}
++
++function rowOf(out: any, id = 'T1') {
++  return (Array.isArray(out?.statuses) ? out.statuses : []).find((item: any) => item.subtaskId === id)
++}
++
++/* ------------------------------------------------------------------ 纯函数闸 */
++
++test('A1/A5：EVIDENCE_MISSING 与同族码同闸，attempt≥2 必停；既有码不回归', () => {
++  assert.equal(shouldRetryAttempt({ code: 'EVIDENCE_MISSING' }, 1, 60_000, 10_000), true,
++    '预算够一个空闲窗口 → 缺失必须回喂补报，不是一次即 blocked')
++  assert.equal(shouldRetryAttempt({ code: 'EVIDENCE_MISSING' }, 1, 5_000, 10_000), false,
++    '预算不足 → 按实受阻')
++  assert.equal(shouldRetryAttempt({ code: 'EVIDENCE_MISSING' }, 2, 60_000, 10_000), false,
++    '有界：绝不无限循环')
++  // A5 不回归：同族与既有码逐字保持。
++  assert.equal(shouldRetryAttempt({ code: 'EVIDENCE_UNPARSABLE' }, 1, 60_000, 10_000), true)
++  assert.equal(shouldRetryAttempt({ code: 'CHILD_NOT_COMPLETED' }, 1, 60_000, 10_000), true)
++  assert.equal(shouldRetryAttempt({ code: 'CHILD_NOT_COMPLETED' }, 2, 60_000, 10_000), false)
++})
++
++test('A2 前置：无标记散文被判「结果块缺失」且 verification=unverified（缺失永不计 done）', () => {
++  const verdict = adjudicateResult({ output: proseOnly(), expectedAcceptance: ['通道可用'] })
++  assert.equal(verdict.status, 'blocked')
++  assert.equal(verdict.verification, 'unverified')
++  assert.match(String(verdict.error), /结果块缺失/)
++})
++
++/* ------------------------------------------------------------------ e2e */
++
++test('A2：盘上备份合法 → 单次激活即采纳结算，不回喂不重做', async () => {
++  const cwd = mkdtempSync(join(tmpdir(), 'dsh-wp-t9-'))
++  mkdirSync(join(cwd, 'reports'), { recursive: true })
++  writeFileSync(join(cwd, 'reports', 'wp-settlement-T1.json'), JSON.stringify({
++    status: 'done',
++    blockedReason: '',
++    phases: phasesFixture(),
++    acceptance: [{ criterion: 'A1 通道可用', result: 'pass', evidence: '盘上备份' }],
++    artifacts: [],
++    needs: [],
++  }))
++  const { session, runtime, prompts } = makeRuntime([proseOnly()], cwd)
++  const signal = new AbortController().signal
++  const result: any = await runtime.dispatchTool({ session, options: {} }, {}, signal)
++  const row = rowOf(result)
++  assert.equal(prompts.length, 1, '备份可采纳时不得回喂第二次')
++  assert.equal(row?.status, 'done', '备份结算：已完成的工作不被误判缺失')
++})
++
++test('A3：无备份 → 回喂「只补交结果块、勿重做」，补交后正常 done', async () => {
++  const cwd = mkdtempSync(join(tmpdir(), 'dsh-wp-t9-'))
++  const { session, runtime, prompts } = makeRuntime([proseOnly(), compliantOutput()], cwd)
++  const signal = new AbortController().signal
++  const result: any = await runtime.dispatchTool({ session, options: {} }, {}, signal)
++  const row = rowOf(result)
++  assert.equal(prompts.length, 2, '缺失触发一次有界回喂')
++  assert.match(prompts[1], /结果块缺失/, '回喂文案点名缺失')
++  assert.match(prompts[1], /勿重做已完成的工作/, '回喂禁止重做（保住已落盘成果）')
++  assert.equal(row?.status, 'done')
++  assert.equal(row?.verification, 'structured')
++})
++
++test('A4：回喂耗尽仍缺失 → 按实 blocked，缺失永不计 done', async () => {
++  const cwd = mkdtempSync(join(tmpdir(), 'dsh-wp-t9-'))
++  const { session, runtime, prompts } = makeRuntime([proseOnly(), proseOnly(), proseOnly()], cwd)
++  const signal = new AbortController().signal
++  const result: any = await runtime.dispatchTool({ session, options: {} }, {}, signal)
++  const row = rowOf(result)
++  assert.equal(row?.status, 'blocked', '重试耗尽按实受阻')
++  assert.notEqual(row?.verification, 'structured', '缺失永不计 done/structured')
++  assert.match(String(row?.error ?? ''), /结果块缺失/)
++  assert.ok(prompts.length <= 3, '有界：最多两次激活')
++})

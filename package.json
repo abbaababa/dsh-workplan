@@ -68,7 +68,7 @@
     "clean": "rm -rf dist dist-tests",
     "build": "rm -rf dist && tsc -p tsconfig.json && cp dist/*.js lib/ && cp dist/client.js client.js",
     "check": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && rm -rf dist-tests && tsc -p tsconfig.test.json && node --test dist-tests/tests/*.test.js",
+    "test": "npm run build && rm -rf dist-tests && tsc -p tsconfig.test.json && node scripts/run-tests.mjs",
     "verify": "npm run check && npm test",
     "preview": "node scripts/render-preview.ts --emit"
   },

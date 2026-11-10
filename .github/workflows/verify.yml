@@ -11,6 +11,12 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    # [2.2.9][P-4] node 22（故障显形版本）+ node 26（本地开发版本）双矩阵：
+    # 消除 T1 报告 RC-3「验证环境与故障环境不一致」——本地全绿不再可能是假绿。
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [22, 26]
     steps:
       - name: Check out
         uses: actions/checkout@v4
@@ -18,7 +24,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: ${{ matrix.node-version }}
           cache: npm
 
       - name: Install

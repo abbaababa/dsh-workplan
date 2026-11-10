@@ -28,11 +28,30 @@ test('npm test 只从 tests/ 收集用例，scripts/ 的探针不参与编译与
   const pkg = readJson('package.json')
   const testScript: string = pkg.scripts.test
 
-  // 1. 默认测试入口只跑 dist-tests/tests/*.test.js，不接受额外目录/文件参数。
+  // 1. [2.2.9] 默认测试入口收口到 scripts/run-tests.mjs（全局事件循环锚 --import 注入
+  //    + cancelled===0 硬断言，见 tests/setup-event-loop-anchor.ts / P-2、P-4），
+  //    不接受额外目录/文件参数。
   assert.match(
     testScript,
-    /node --test dist-tests\/tests\/\*\.test\.js$/,
-    `npm test 入口必须以 node --test dist-tests/tests/*.test.js 结尾，实际：${testScript}`,
+    /node scripts\/run-tests\.mjs$/,
+    `npm test 入口必须以 node scripts/run-tests.mjs 结尾，实际：${testScript}`,
+  )
+  // 1b. 运行器只从 dist-tests/tests 收集 *.test.js，且与 R-W5-01 探针零关联——
+  //    原「只跑 dist-tests/tests/*.test.js」的边界由运行器代码显式承接。
+  const runner = readFileSync(path.join(root, 'scripts', 'run-tests.mjs'), 'utf8')
+  assert.match(
+    runner,
+    /join\(root,\s*'dist-tests',\s*'tests'\)/,
+    'run-tests.mjs 必须只从 dist-tests/tests 收集用例',
+  )
+  assert.match(
+    runner,
+    /endsWith\('\.test\.js'\)/,
+    `run-tests.mjs 必须只收集 *.test.js（setup-event-loop-anchor.js 等非用例文件不得进测试集合）`,
+  )
+  assert.ok(
+    !runner.includes('w5-cross-version-check'),
+    'run-tests.mjs 不得引用 R-W5-01 跨版本探针（它属于发版清单，不属于 npm test）',
   )
   // 2. 测试编译配置只收 src 与 tests，且显式排除 scripts/。
   const tsconfigTest = readJson('tsconfig.test.json')
