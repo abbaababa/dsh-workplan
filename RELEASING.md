@@ -172,8 +172,11 @@ Release 制品 URL 与 sha256、catalog 版本、复验命令输出。发布记�
 #    v2.1.6｜build e391f4d49758b982｜pid 3557｜启动 2026/11/7 10:50:24
 #    （工具名 dsh_workplan_status；回显由 src/host.ts 的 runtimeIdentity 拼装）
 
-# ② 磁盘复刻指纹：按 src/host.ts:43-60 的同一算法（四文件依次 sha256 取前 16 位）
-printf '%s' "$(cat lib/host.js lib/runtime.js lib/plan.js lib/watchdog.js)" \
+# ② 磁盘复刻指纹：按 src/host.ts:43-60 的同一算法（四文件完整字节依次
+#    sha256 取前 16 位）。必须用 cat 管道保留各文件尾换行；$(cat …) 的命令
+#    替换会剥尾换行，产生与运行态的假「不匹配」（2026-11-10 实测纠正，
+#    假值样本 bdb1ab2712cc538a 留档于 release-record-2.2.8）。
+cat lib/host.js lib/runtime.js lib/plan.js lib/watchdog.js \
   | shasum -a 256 | cut -c1-16
 ```
 

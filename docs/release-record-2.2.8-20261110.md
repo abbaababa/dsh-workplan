@@ -43,10 +43,13 @@ gh api repos/abbaababa/dsh-workplan/releases/tags/v2.2.8 --jq '.assets[0].size' 
 curl -s https://cdn.jsdelivr.net/npm/dsh-plugin-catalog/index.json | grep -o '"id":"dsh-workplan"'  # PR 合并+上游发版后命中
 ```
 
-## 6. 运行态指纹（§6.1，待用户重启后补）
+## 6. 运行态指纹（§6.1，2026-11-10 12:45 补记完成）
 
-当前进程仍加载旧字节（pid 见会话状态行）。用户手工重启 DSH 后：
-① `dsh_workplan_status` 回显指纹；② 磁盘指纹 `printf '%s' "$(cat lib/host.js lib/runtime.js lib/plan.js lib/watchdog.js)" | shasum -a 256 | cut -c1-16`；两者相同才判「修复已加载」。本节在重启后由主 Agent 补记比对结果。
+- 用户已手工重启 DSH（pid 6112，启动 2026-11-10 12:08:55）。
+- ① 运行态自报：`v2.2.8｜build 6a8a74c16977996d`。
+- ② 磁盘复刻（完整字节算法）：`6a8a74c16977996d` —— **相同** ⇒ 运行态与磁盘逐字节同一产物，2.2.8 确已加载。
+- 文档缺陷补记：RELEASING §6.1 原命令 `printf '%s' "$(cat …)"` 因命令替换剥尾换行，与实现（readFileSync 完整字节 sha256 前 16 位）不符，曾产出假不匹配值 `bdb1ab2712cc538a`（负样本留档）；已纠正为 `cat … | shasum -a 256 | cut -c1-16`。
+- 旁证：lib 四文件 mtime 11:54:23 早于进程启动 12:08:55。
 
 ## 7. PR #13802 闭环状态（2026-11-10 12:40 补记）
 
