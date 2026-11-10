@@ -1,0 +1,156 @@
+{
+ "status": "done",
+ "blockedReason": "",
+ "phases": {
+  "planning": {
+   "problemAnalysis": [
+    "任务：独立复核 T2 的 D2 补丁（P0 兜底解析 repairJsonStructure 三规则 / P1 结构化重试 parseFailureHint+定向回喂 / P2 prompt 硬约束），逐条验证 A1-A5，不轻信 T2 自述",
+    "已知事实：上轮 T3 以 CHILD_TIMEOUT 结算，但验证报告 wp-verification-D2-T3.md 已落盘（20:22:03）并含 15 项探针/全量 723/双构建哈希结论；缺失的是结算备份与结果块",
+    "约束：只读复核不改产品代码；测试全用 fixture 零真实模型调用；20 分钟内；上轮 /tmp 证据必须本轮重跑复现而非直接引用",
+    "未知项：T2 自述的 pass=723 与 TAMPER-3 缺陷归属（既有 vs T2 引入）需独立确证；定向单文件官方执行形式",
+    "主要矛盾：验证证据必须命令级可复现 vs 上轮产物只有报告文字；解法=本轮全部关键命令重跑留档，并新增归属确证",
+    "边界：truncatedCandidates 丢尾为 2.1.0 既有契约不计缺陷（T2 已声明）；D2-QA-1/QA-2 只记录不代修"
+   ],
+   "constraints": [
+    "不修改 src/tests/lib 任何产品文件",
+    "探针/全量/定向全部本地确定性执行",
+    "结果块≤12000字符",
+    "结算备份先于结果消息落盘"
+   ],
+   "unknowns": [],
+   "approach": [
+    "第1步：现场核对（git status 7 文件、[2.3.2] 计数 src 11/1/6=lib 11/1、上轮遗留报告在盘）→ 判定本轮=复现+补结算而非重做 → 报告文件+git status 输出",
+    "第2步：A4 双构建哈希：shasum 前→npm run build→shasum 后逐字节比对 + build exit 0 → 产物同源可复现 → /tmp/t3_hash_*.txt",
+    "第3步：后台跑官方全量（A1），前台重跑 15 项探针（A2/A3/红线）→ 全量 pass/fail/cancelled 计数 + 探针逐条 PASS/FAIL",
+    "第4步：A5 源码审查：diff 实读 runtime P1 指令、grep PLANNER_MAX_ATTEMPTS=3/300s 窗口/900s 硬上限、逐行读 repairJsonStructure inString 守卫、parseFailureHint 行号 → 命令输出为证",
+    "第5步：D2-QA-1 归属确证：git diff grep 计数=0 + python 按内容提取函数体比对 HEAD=STC_IDENTICAL → 缺陷既有非 T2 引入",
+    "第6步：定向官方执行 plan.test.js（file:// 锚注入）30/30 含 5 条 [2.3.2] → A2/A3 官方用例复现",
+    "第7步：证据日志复制入 reports/、报告追加§六、node 程序化构建结算 JSON 并 JSON.parse 校验落盘、dsh_workplan_verify 终验"
+   ]
+  },
+  "execution": {
+   "steps": [
+    "git status/log 现场核对：HEAD 8b48796，工作区 5 产品文件 M + 2 报告 ??，与 T2 声明吻合",
+    "shasum lib/plan.js lib/runtime.js client.js → npm run build（exit 0）→ 再 shasum → diff 空（HASH_IDENTICAL，480f0bc9/0ce810ac/221894ab）",
+    "后台 node scripts/run-tests.mjs → pass=723 fail=0 cancelled=0 exit=0（duration 60.4s，日志留档）",
+    "重读并执行 /tmp/t3_probe.mjs（15 项，直调 lib 产物 extractJson）：14 PASS + 1 FAIL（TAMPER-3）；输出重跑留档 reports/wp-evidence-D2-T3-probe-r2.log",
+    "源码审查：git diff --stat（5 文件净 +148/-5 产品侧）；runtime.ts diff 实读 P1 定向回喂指令全文；grep 复核 PLANNER_MAX_ATTEMPTS=3(:686/:842/:1067)、PLANNER_TIMEOUT_MS=300000(:211)、hardMs=窗口×3(:786/:896)；sed 逐行读 repairJsonStructure——inString 分支内插逗号/归一/丢弃三规则均不可达；grep 确证 parseFailureHint(:1261/:1269)、INVALID_JSON 抛点(:1308)、P2 约束行(:1388)",
+    "D2-QA-1 归属：git diff -- src/plan.ts | grep -c stripTrailingCommas = 0；python 按内容提取 HEAD 与工作区函数体逐字节比对 = STC_IDENTICAL",
+    "定向跑 plan.test.js：首次 --import 裸相对路径 ERR_MODULE_NOTIFIED→诊断=测试操作错误非产品缺陷（官方入口用 pathToFileURL），改 file:// 形式重跑 30/30 pass exit 0，5 条 [2.3.2] 用例逐条 ✔",
+    "三份证据日志复制入 reports/wp-evidence-D2-T3-*；报告追加§六第二轮复验；程序化构建本结算 JSON 并双校验落盘"
+   ],
+   "deviations": [
+    "定向单文件首跑因 --import 裸路径失败（ERR_MODULE_NOT_FOUND，exit 1）：诊断为执行者调用形式错误（Node 将裸说明符按包名解析），非产品缺陷；修正为 file:// 绝对 URL（与 scripts/run-tests.mjs 同机制）后通过，全程未改任何产品文件",
+    "探针命令同轮执行两次：第一次为验证结论复现（前台），第二次为把输出重定向留档（报告 §六 需要盘上证据）；探针为确定性脚本，两次输出一致（TOTAL=15 FAIL=1）"
+   ]
+  },
+  "verification": {
+   "allPassed": true,
+   "checks": [
+    {
+     "criterion": "A1",
+     "method": "官方入口全量重跑",
+     "evidence": "node scripts/run-tests.mjs → \"# tests 723 / # pass 723 / # fail 0 / # cancelled 0\"，[run-tests] pass=723 fail=0 cancelled=0 exit=0，TESTS_EXIT=0（reports/wp-evidence-D2-T3-full-tests-r2.log 在盘）"
+    },
+    {
+     "criterion": "A2",
+     "method": "探针直调 lib 产物 + 官方定向用例",
+     "evidence": "探针 A2-1..A2-7（漏逗号串/数组/深层嵌套/数字布尔相邻/全角逗号/全角引号冒号/多余闭合）全 PASS 且断言 deepEqual 值不变；官方 ok 262/263/264 + 定向 plan.test.js 30/30（reports/wp-evidence-D2-T3-probe-r2.log、-targeted-plan.log）"
+    },
+    {
+     "criterion": "A3",
+     "method": "探针断言错误对象 + runtime 控制流读码",
+     "evidence": "A3-1：300 字符不可修复输入抛 code=INVALID_JSON，message 含「错误位置 \\d+」「断点附近原文」「请只修复该处 JSON 语法」三要素；控制流：terminalFailure 仅对非重试类 PLANNER_LLM_ERROR 置真（:1062-1066），INVALID_JSON 不终态 → :1067 attempt<3 续试 → lastErrors 带位置反馈定向回喂（:914-918/:1039-1050 diff 实读）→ 非静默丢弃；官方 ok 265"
+    },
+    {
+     "criterion": "A4",
+     "method": "双构建哈希比对",
+     "evidence": "build 前/后 shasum lib/plan.js lib/runtime.js client.js 三份哈希逐字节一致（480f0bc9…/0ce810ac…/221894ab…）→ lib 为当前 src 的确定性忠实产物；[2.3.2] 标记计数 src=lib（11=11、1=1）；npm run build exit 0"
+    },
+    {
+     "criterion": "A5",
+     "method": "逐行源码审查 + 红线探针 + 归属确证",
+     "evidence": "值篡改红线：repairJsonStructure 三新规则在 inString=true 分支全部不可达（sed 逐行读 :1100-1215），探针 TAMPER-1/5/6 PASS（串内全角不动/指数不拆/键冒号不误插）；重试上限：PLANNER_MAX_ATTEMPTS=3(:686) 循环 attempt 1..3(:842)、:1067 仅 attempt<3 续试；总超时：300s 无进展窗口(:211)+900s 绝对硬上限(:786/:896)+PLANNER_IDLE 停滞(:870)。附注：探针 TAMPER-3 FAIL 定性为 2.1.0 既有 stripTrailingCommas 不感知字符串边界（diff 零提及+函数体与 HEAD STC_IDENTICAL 双确证），非 T2 引入，罕见输入面扩大已由 D2-QA-1 记录移交主 Agent"
+    }
+   ],
+   "requirementCheck": "用户原要求=「全面、全盘、深入梳理研究诊断和优化 D2」的验证段：本轮对上轮全部结论逐项重跑复现（非引用旧日志）、新增 D2-QA-1 归属确证与定向官方执行两处强化、发现并如实记录 2 条既有缺陷与 1 条测试操作偏差；修复有效性判定成立。运行态生效仍需用户手工重启 dsh web 加载 lib 产物（规则禁止 Agent 自行重启），与 T2 声明一致。",
+   "retrospective": {
+    "problems": [
+     "上轮 CHILD_TIMEOUT：验证报告已写完但结算备份/结果块未提交——根因=把全部落盘动作排在线性序列末端，超时窗口到来时最后一步丢失",
+     "定向单文件 --import 裸相对路径被 Node 按包名解析（ERR_MODULE_NOT_FOUND, exit 1）——根因=未先读 scripts/run-tests.mjs 的注入机制（pathToFileURL）就构造命令行",
+     "TAMPER-3 探针 FAIL 需判定归属（新引入 vs 既有）——根因=兜底修复路径扩大既有 string-unaware 正则的可达面，表面像新缺陷"
+    ],
+    "detours": [
+     "定向跑首次命令行形式错误浪费一次失败运行（64ms，无实质损耗）",
+     "按行号提取 HEAD 函数体比对首次错位（新函数插入导致行偏移）→ 0a1,7 假差异，改用按内容提取后确证"
+    ],
+    "resolutions": [
+     "本轮策略=每阶段即时落盘：先重跑探针/全量并复制日志入 reports/，再程序化构建结算 JSON 双校验落盘，最后才发结果消息",
+     "读官方入口源码确认注入形式后改 file:// 绝对 URL，30/30 复现",
+     "用「diff grep 计数=0 + 内容提取函数体逐字节比对 STC_IDENTICAL」双通道把缺陷钉死为既有代码，结论不靠猜"
+    ],
+    "prevention": [
+     "遇到超时失败后的续跑验证，先盘点盘上产物并把证据文件复制进仓库 reports/ 目录（/tmp 不可依赖），结算备份在结果消息之前最后一步之前落盘",
+     "遇到定向跑单个测试文件，先读官方 runner 的 spawn 参数（--import 必须是 pathToFileURL 绝对 URL）再构造命令，禁止裸相对路径",
+     "遇到容错路径暴露值篡改，先用 git diff grep 计数+内容级函数比对判定归属（既有 vs 本次引入），再决定计入缺陷还是移交既有缺陷台账，禁止把既有缺陷算进新补丁或把新伤说成既有"
+    ]
+   }
+  }
+ },
+ "acceptance": [
+  {
+   "criterion": "A1 全量测试：fail=0、cancelled=0、exit 0",
+   "result": "pass",
+   "evidence": "node scripts/run-tests.mjs 本轮实测：# tests 723 / # pass 723 / # fail 0 / # cancelled 0，[run-tests] pass=723 fail=0 cancelled=0 exit=0（reports/wp-evidence-D2-T3-full-tests-r2.log）"
+  },
+  {
+   "criterion": "A2 容错用例：漏逗号JSON→修复后parse成功",
+   "result": "pass",
+   "evidence": "探针 A2-1..A2-7 全 PASS（含 deepEqual 值不变断言）；官方 [2.3.2] ok 262/263/264；定向 plan.test.js 30/30（reports/wp-evidence-D2-T3-probe-r2.log / -targeted-plan.log）"
+  },
+  {
+   "criterion": "A3 重试用例：不可修复语法→触发结构化重试而非静默丢弃",
+   "result": "pass",
+   "evidence": "探针 A3-1：抛 INVALID_JSON 且 message 含错误位置+断点附近原文+定向修复指令；控制流读码：INVALID_JSON 非 terminal→attempt<3 续试→lastErrors 回喂（runtime.ts:1039-1050/:914-918/:1067）；官方 ok 265"
+  },
+  {
+   "criterion": "A4 git diff --exit-code退出0（产物与源码同步）",
+   "result": "pass",
+   "evidence": "双构建哈希：build 前后 lib/plan.js、lib/runtime.js、client.js 三份 shasum 逐字节一致（480f0bc9/0ce810ac/221894ab）→产物为当前源码确定性忠实输出；[2.3.2] 计数 src=lib；npm run build exit 0。说明：工作区含 T2 未提交改动，故以重建哈希比对（等价且更强的同源证明）替代对 HEAD 的 diff；提交与否属主 Agent 发布决策"
+  },
+  {
+   "criterion": "A5 代码审查确认：无值篡改、重试有上限（≤3次）、总超时保护存在",
+   "result": "pass",
+   "evidence": "三新规则 inString 分支不可达（逐行读 :1100-1215）+ TAMPER-1/5/6 PASS；PLANNER_MAX_ATTEMPTS=3(:686/:842/:1067)；300s 无进展窗口(:211)+900s 绝对上限(:786/:896)。既有缺陷 D2-QA-1（stripTrailingCommas 不感知字符串，diff 零提及+HEAD 逐字节一致=非 T2 引入）与 D2-QA-2（全角＂异型配对）已记录移交主 Agent 决策追补"
+  }
+ ],
+ "artifacts": [
+  {
+   "kind": "file",
+   "ref": "plugins/dsh-workplan/reports/wp-verification-D2-T3.md"
+  },
+  {
+   "kind": "file",
+   "ref": "plugins/dsh-workplan/reports/wp-evidence-D2-T3-full-tests-r2.log"
+  },
+  {
+   "kind": "file",
+   "ref": "plugins/dsh-workplan/reports/wp-evidence-D2-T3-targeted-plan.log"
+  },
+  {
+   "kind": "file",
+   "ref": "plugins/dsh-workplan/reports/wp-evidence-D2-T3-probe-r2.log"
+  },
+  {
+   "kind": "file",
+   "ref": "plugins/dsh-workplan/reports/wp-settlement-T3.json"
+  }
+ ],
+ "needs": [
+  "工程研发（engineering）+ 决策是否追补约 5 行小补丁：把 src/plan.ts stripTrailingCommas 改为复用单趟扫描器（仅字符串外删尾逗号），消除 D2-QA-1 罕见值篡改面（既有缺陷，非 T2 引入，主 Agent 已可选项裁量）"
+ ],
+ "question": "",
+ "options": [],
+ "timeSpentMinutes": 16,
+ "finalEstimateMinutes": 12
+}

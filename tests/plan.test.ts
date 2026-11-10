@@ -581,3 +581,66 @@ test('用户附件渲染进 messageText：规划器/锚点/派发全链路可见
   assert.equal(messageText({ content: [{ type: 'text', text: 'a' }, { type: 'text', text: 'b' }] }), 'a\nb')
   assert.equal(messageText({ content: [{ type: 'image' }, { type: 'text', text: 'a' }] }), 'a', '无元数据的 image 块不得渲染垃圾行')
 })
+
+/*
+ * [2.3.2][D2-T2] 解析容错三类损伤回归（诊断报告 §2 穿透矩阵转绿锚点：
+ * plugins/dsh-workplan/reports/wp-diagnosis-D2-T1.md）。现场：qwen3.8-flash
+ * INVALID_JSON ×3、86.9 秒白烧——旧修复器只「补」不「插/删/归一」。
+ */
+test('[2.3.2] A/B/L：成员间漏逗号 → 容错修复后解析成功', () => {
+  assert.deepEqual(extractJson('{"a":"x" "b":1}'), { a: 'x', b: 1 })
+  assert.deepEqual(extractJson('{"items":["a" "b"]}'), { items: ['a', 'b'] })
+  assert.deepEqual(extractJson('{"s":[{"t":[{"id":"T1" "x":2}]}]}'), { s: [{ t: [{ id: 'T1', x: 2 }] }] })
+  // 数字/布尔相邻同样插逗号；指数记号（1.5e-3）不得被误拆成两个 token。
+  assert.deepEqual(extractJson('{"n":1 "m":2, "ok":true "no":false}'), { n: 1, m: 2, ok: true, no: false })
+  assert.deepEqual(extractJson('{"v":1.5e-3}'), { v: 0.0015 })
+})
+
+test('[2.3.2] C/D：全角标点仅在字符串外归一，字符串内一字不动', () => {
+  assert.deepEqual(extractJson('{"a":1， "b":2}'), { a: 1, b: 2 })
+  assert.deepEqual(extractJson('{“a”:1}'), { a: 1 })
+  assert.deepEqual(extractJson('{"note":"内文，含全角“引号”一字不动"}'), { note: '内文，含全角“引号”一字不动' })
+})
+
+test('[2.3.2] E：多余闭合括号丢弃；F/G/H/I 既有能力零回归', () => {
+  assert.deepEqual(extractJson('{"a":{}}}'), { a: {} })
+  assert.deepEqual(extractJson('{"a":[1,2}'), { a: [1, 2] }) // F 错型闭合（对象形态=真实规划器输出）
+  assert.deepEqual(extractJson('{"a":[1,2,'), { a: [1, 2] }) // G 截断抢救
+  assert.deepEqual(extractJson('{"a":"l1\nl2"}'), { a: 'l1\nl2' }) // H 裸换行转义
+  assert.deepEqual(extractJson('{"a":1,}'), { a: 1 }) // I 尾逗号
+})
+
+test('[2.3.2] A4：本地修不动的括号/语法损伤抛 INVALID_JSON 时携带错误位置与断点附近原文（结构化重试的定向反馈）', () => {
+  const pad = 'x'.repeat(300)
+  const broken = `{"a"=1,"b":{"c":2},"long":"${pad}"}` // 键后错型分隔符：插/删/归一与截断抢救都救不了，必须回喂模型
+  let caught: any = null
+  try {
+    extractJson(broken)
+  } catch (error: any) {
+    caught = error
+  }
+  assert.ok(caught, '非法 JSON 不得静默通过')
+  assert.equal(caught.code, 'INVALID_JSON')
+  assert.match(caught.message, /错误位置 \d+，断点附近原文（字符 \d+-\d+）：/)
+  assert.match(caught.message, /请只修复该处 JSON 语法/)
+})
+
+test('[2.3.2] P2：规划器 prompt 硬性约束含半角标点/成员逗号/括号成对自检', () => {
+  const planner = buildPlannerPrompt('测试任务', '/tmp', '')
+  assert.ok(planner.includes('只允许半角标点'), '必须防中文模型全角标点注入')
+  assert.ok(planner.includes('必须有逗号'), '成员间逗号必须成硬约束')
+  assert.ok(planner.includes('括号成对'), '闭合自检必须成硬约束')
+})
+
+test('[2.3.2] D2-QA-1 回归：stripTrailingCommas 字符串边界感知——值内「半角逗号+空白+闭括号」一字不动', () => {
+  /*
+   * T3 审查实锤（探针 TAMPER-3）：旧正则 /,(\s*[}\]])/g 会把字符串值内部的
+   * "p, } q" 吃成 "p } q"——值篡改红线。修复后仅字符串外逗号被删。
+   */
+  const keep = '{"a":1,"note":"p, } q",}'
+  assert.deepEqual(extractJson(keep), { a: 1, note: 'p, } q' }, '修复路径下串内 ", }" 必须一字不动')
+  const trimmed = '{"a":1,"b":[1,2,],}'
+  assert.deepEqual(extractJson(trimmed), { a: 1, b: [1, 2] }, '结构层尾逗号仍按旧语义删除')
+  const escaped = '{"note":"x\\", }y, } tail",}'
+  assert.deepEqual(extractJson(escaped), { note: 'x", }y, } tail' }, '转义引号后的串内逗号不误删')
+})
