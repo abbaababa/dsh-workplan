@@ -2664,6 +2664,107 @@ export function extendDeadline(record: any, subtaskId: any, extendMs: any, meta:
 }
 
 /*
+ * [2.3.0][T1] 专家执行时间机制 v2.3.0（用户 2026-11-10 四项要求，全链路）：
+ *  (a) 预估上报 → 告知用户：recordTimeNotice 落档后向主会话推送「请把预期用时
+ *      转告用户」的即时通知；
+ *  (b) 超时 → 放宽 → 告知专家：延期事务成功后把最新执行时限推送给执行中的专家
+ *      子会话，并附「必须在保证工作质量的前提下高效率执行」硬要求；
+ *  (c) 二次超时 → 主 Agent 接手：runSubtaskAttempt 的到点收束对每行计数
+ *      （timeoutCount），第二次超时置 takeoverRequired，并用 buildTakeoverBrief
+ *      登记专家已完成产物、mergePreservedArtifacts 做「禁止丢弃已完成部分」的
+ *      只读保护合并。
+ * 向后兼容：全部走 StatusEntry 未知字段直写通道（与 deadlineAt/timeJournal
+ * 同族），回放白名单同步透传；不改任何既有判定与既有字段语义。
+ */
+export const TAKEOVER_AFTER_TIMEOUTS = 2
+
+/**
+ * [2.3.0][T1] 组装「主 Agent 接手包」：已完成部分（专家已落盘产物 + 已登记
+ * artifacts）逐条快照，未完成部分按 outputs 反推。instruction 是硬约束文案：
+ * 禁止丢弃已完成部分——接手只补缺口，不整步重跑、不删除或覆盖专家产物。
+ */
+export function buildTakeoverBrief(subtask: any, row: any, landedRefs: any, timeoutCount: any) {
+  const refs = (Array.isArray(landedRefs) ? landedRefs : [])
+    .map((item: any) => String(item ?? ''))
+    .filter(Boolean)
+    .slice(0, 20)
+  const completedArtifacts = (Array.isArray(row?.artifacts) ? row.artifacts : [])
+    .filter((item: any) => item?.kind === 'file' && typeof item?.ref === 'string' && item.ref)
+    .map((item: any) => ({ kind: 'file', ref: item.ref, exists: item.exists !== false }))
+    .slice(0, 20)
+  const outputs = (Array.isArray(subtask?.outputs) ? subtask.outputs : [])
+    .map((item: any) => String(item ?? ''))
+    .filter(Boolean)
+  const remainingOutputs = outputs.filter((ref: string) => !refs.includes(ref))
+  return {
+    at: Date.now(),
+    timeoutCount: Number(timeoutCount) || 0,
+    landedRefs: refs,
+    completedArtifacts,
+    remainingOutputs,
+    instruction: '主 Agent 只接手未完成部分：landedRefs/completedArtifacts 是专家已'
+      + '完成并登记保护的产物，只读、禁止丢弃、禁止删除或覆盖、禁止整步重跑；'
+      + '仅继续 remainingOutputs 与未满足的验收标准。',
+  }
+}
+
+/**
+ * [2.3.0][T1] 「禁止丢弃已完成部分」的只读保护合并（A4 硬编码点）：
+ * 接手登记的保护清单（takeoverBrief.landedRefs）与行上 artifacts 取并集，
+ * 只增不减——任何后续对 artifacts 的写入都不可能丢掉已完成部分。
+ * 纯函数，可脱离宿主回归。
+ */
+export function mergePreservedArtifacts(artifacts: any, preservedRefs: any) {
+  const list = (Array.isArray(artifacts) ? artifacts : [])
+    .filter((item: any) => item && typeof item === 'object' && typeof item.ref === 'string')
+    .map((item: any) => ({ ...item }))
+  const seen = new Set(list.map((item: any) => String(item.ref)))
+  for (const rawRef of Array.isArray(preservedRefs) ? preservedRefs : []) {
+    const ref = String(rawRef ?? '')
+    if (!ref || seen.has(ref)) continue
+    // 保护条目固定 kind:'file'/exists:true：登记发生在产物确认在盘的时刻。
+    list.push({ kind: 'file', ref, exists: true, preservedByTakeover: true })
+    seen.add(ref)
+  }
+  return list.slice(-40)
+}
+
+/**
+ * [2.3.0][T1] 放宽成功后告知执行中的专家最新时限（A2 的「告知」半边）。
+ * 走 ctx.subagents.sendMessage 与 follow-up 同一投递通道：运行中的子会话在下一
+ * 步收到。投递失败不阻断延期事务（时限已经推移），只留档 record.errors。
+ */
+async function notifyExpertOfExtension(ctx: any, agent: any, record: any, subtaskId: string, deadlineAt: number) {
+  const row = Array.isArray(record?.statuses)
+    ? record.statuses.find((item: any) => item?.subtaskId === subtaskId)
+    : null
+  const childId = String(row?.childId ?? '')
+  const service: any = ctx?.subagents
+  if (!childId) {
+    return { ok: false, error: '该行没有活跃子会话（childId 缺失），专家续跑时可从状态行 deadlineAt 读取最新时限' }
+  }
+  if (!service || typeof service.sendMessage !== 'function') {
+    return { ok: false, error: '当前部署没有可用的 subagent 服务，无法投递延期告知' }
+  }
+  const remainingMin = Math.max(1, Math.ceil((Number(deadlineAt) - Date.now()) / 60000))
+  const text = `【dsh-workplan·延期告知】子任务 ${subtaskId} 的执行时限已由主 Agent 放宽：`
+    + `最新执行时间为 ${new Date(Number(deadlineAt)).toISOString()}（约剩 ${remainingMin} 分钟）。`
+    + '你必须在保证工作质量的前提下高效率执行：优先推进高价值步骤，已完成内容及时落盘，'
+    + '并在回报中明确区分「已完成 / 未完成」。收到本通知后请继续当前工作，不要重新开始。'
+  try {
+    await service.sendMessage(agent, childId, [{ type: 'text', text }], {})
+    if (row) {
+      const journal = Array.isArray(row.timeJournal) ? row.timeJournal : []
+      journal.push({ at: Date.now(), action: 'notify-expert', deadlineAt: Number(deadlineAt), by: 'system' })
+      row.timeJournal = journal.slice(-20)
+    }
+    return { ok: true }
+  } catch (error: any) {
+    return { ok: false, error: truncate(error instanceof Error ? error.message : String(error), 300) }
+  }
+}
+
+/*
  * One attempt under a deadline that belongs to that attempt alone.
  *
  * [1.10.6] Split out of `runSubtask` so a ceiling timeout can be retried with a
@@ -2740,7 +2841,15 @@ async function runSubtaskAttempt(
       // 续跑、人工裁决）。Reached only when the child ignored both its idle window
       // and its abort signal; the message says so, otherwise the cause looks like
       // a plain "too slow" and the next investigation goes down the wrong path.
-      const message = `子任务 ${subtask.id} 达到协商执行上限（${timeoutMs}ms），已按安全兜底结算（待裁决：请主 Agent 决定延期 / 重试 / 接受，或转新轮续跑、人工裁决）`
+      // [2.3.0][T1] 计数在组装文案前预读：第 1 次超时的文案要求「必须放宽并
+      // 告知专家」；第 2 次及以后的文案要求「主 Agent 接手、已完成部分只读
+      // 保护、禁止丢弃」。错误文本是结果消息/看板/续跑判定的共同来源，所以
+      // 接手语义必须在这里就落进 message，而不是只进即时通知。
+      const preRow = record.statuses.find((item: any) => item?.subtaskId === subtask.id)
+      const timeoutCountAtFire = Number(preRow?.timeoutCount ?? 0) + 1
+      const message = timeoutCountAtFire >= TAKEOVER_AFTER_TIMEOUTS
+        ? `子任务 ${subtask.id} 第 ${timeoutCountAtFire} 次达到协商执行上限（${timeoutMs}ms），已按安全兜底结算（待裁决：takeoverRequired——预估时间已两次超时，请主 Agent 直接接手完成尚未完成的部分；专家已完成并落盘的部分已登记只读保护，禁止丢弃、禁止整步重跑）`
+        : `子任务 ${subtask.id} 第 ${timeoutCountAtFire} 次达到协商执行上限（${timeoutMs}ms），已按安全兜底结算（待裁决：请主 Agent 立即放宽（extendMs，放宽后插件自动告知专家最新时限与保证质量高效率要求）/ 重试 / 接受，或转新轮续跑、人工裁决）`
       try {
         // [1.8.19] Keep the evidence of what already landed on disk.
         const { patch, landed } = timeoutBlockedPatch(subtask, options.cwd, message, options.artifactExists)
@@ -2771,6 +2880,40 @@ async function runSubtaskAttempt(
          */
         const settleRow = record.statuses.find((item: any) => item?.subtaskId === subtask.id)
         if (settleRow) settleRow.pendingAdjudication = true
+        /*
+         * [2.3.0][T1] 超时计数与二次超时接手（用户要求 1/2 的机读落点）：
+         * 每次到点收束给状态行 timeoutCount +1 并记入 timeJournal（action:'timeout'）。
+         *  第 1 次超时 → 即时通知主 Agent「必须放宽（extendMs）并告知专家最新时限」，
+         *    告知专家由延期事务自动投递（notifyExpertOfExtension）；
+         *  第 2 次超时 → takeoverRequired=true + buildTakeoverBrief 登记已完成部分，
+         *    mergePreservedArtifacts 把已落盘产物并入行 artifacts（只读保护、只增不减），
+         *    主 Agent 接手只继续 remainingOutputs 与未满足验收，禁止丢弃已完成部分。
+         * 计数走 StatusEntry 未知字段直写通道，回放白名单同步透传。
+         */
+        if (settleRow) {
+          const timeoutCount = timeoutCountAtFire
+          settleRow.timeoutCount = timeoutCount
+          const timeoutJournal = Array.isArray(settleRow.timeJournal) ? settleRow.timeJournal : []
+          timeoutJournal.push({ at: Date.now(), action: 'timeout', timeoutCount, by: 'system' })
+          settleRow.timeJournal = timeoutJournal.slice(-20)
+          if (timeoutCount >= TAKEOVER_AFTER_TIMEOUTS) {
+            // 禁止丢弃已完成部分：接手包 + artifacts 只增不减的并集合并。
+            settleRow.takeoverRequired = true
+            settleRow.takeoverBrief = buildTakeoverBrief(subtask, settleRow, ceilingLanded, timeoutCount)
+            settleRow.artifacts = mergePreservedArtifacts(settleRow.artifacts, settleRow.takeoverBrief.landedRefs)
+          }
+          try {
+            const takeoverText = timeoutCount >= TAKEOVER_AFTER_TIMEOUTS
+              ? `子任务 ${subtask.id} 已第 ${timeoutCount} 次达到协商时限（二次超时）：按 2.3.0 机制本行已置「主 Agent 接手」（takeoverRequired）。`
+                + `专家已完成并登记保护的部分（只读、禁止丢弃）：${(ceilingLanded as string[]).slice(0, 8).join('、') || '（见 takeoverBrief）'}；`
+                + '请主 Agent 直接接手继续未完成部分，不要整步重跑、不要删除或覆盖已登记产物。'
+              : `子任务 ${subtask.id} 第 1 次达到协商时限：按 2.3.0 机制请主 Agent 尽快用 dsh_workplan_update(extendMs) 放宽，`
+                + '延期成功后插件会自动把最新时限与「保证质量、高效率执行」要求告知专家；如判断无需再放宽，请接手继续未完成部分（已完成产物将只读保护）。'
+            announceSubtaskInterrupt(record, options.session ?? options.agent?.session, subtask.id, takeoverText)
+          } catch {
+            // 通知失败不影响结算（与预警同一纪律）。
+          }
+        }
         record.updatedAt = Date.now()
       } catch (error: any) {
         record.errors = [
@@ -3007,6 +3150,23 @@ export function modelStatusLines(statuses: any) {
     timeWarning: item.timeWarning ?? null,
     timeJournal: Array.isArray(item.timeJournal) ? item.timeJournal.slice(-10) : [],
     pendingAdjudication: item.pendingAdjudication === true,
+    // [2.3.0][T1] 预估上报（A1）也要进模型可读面：主 Agent 告知用户前先读这里。
+    timeNotice: item.timeNotice ?? null,
+    /*
+     * [2.3.0][T1] 超时计数 / 二次超时接手进入模型可读面：主 Agent 一眼能看出
+     * 该行第几次超时、是否必须接手、接手包里哪些是只读保护的已完成产物。
+     */
+    timeoutCount: Number(item.timeoutCount ?? 0),
+    takeoverRequired: item.takeoverRequired === true,
+    takeoverBrief: item.takeoverBrief ?? null,
+    /*
+     * [2.3.0][T1] 已完成产物的只读保护登记必须进模型可读面：statusTool 的行
+     * 来自本函数，此前不序列化 artifacts，导致 takeoverRequired 的「禁止丢弃
+     * 已完成部分」清单对主 Agent 不可见。只透出对象形条目，照录不改写。
+     */
+    artifacts: (Array.isArray(item.artifacts) ? item.artifacts : [])
+      .filter((entry: any) => entry && typeof entry === 'object' && typeof entry.ref === 'string')
+      .map((entry: any) => ({ ...entry })),
     /*
      * [2.2.0][T3/O-2a] 子→主预告通道的结论必须进入模型可读面。
      *
@@ -3939,7 +4099,7 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
           for (const entry of (Array.isArray(result.statuses) ? result.statuses : [])) {
             const rebuiltRow = snap.statuses.find((item: any) => item?.subtaskId === entry?.subtaskId)
             if (!rebuiltRow || !isRecord(entry)) continue
-            for (const field of ['deadlineAt', 'timeNotice', 'timeWarning', 'timeJournal', 'pendingAdjudication']) {
+            for (const field of ['deadlineAt', 'timeNotice', 'timeWarning', 'timeJournal', 'pendingAdjudication', 'timeoutCount', 'takeoverRequired', 'takeoverBrief']) {
               if (entry[field] !== undefined) rebuiltRow[field] = entry[field]
             }
             /*
@@ -4106,7 +4266,7 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
              */
             const replayRow = snap.statuses.find((item: any) => item?.subtaskId === update.subtaskId)
             if (replayRow) {
-              for (const field of ['deadlineAt', 'timeNotice', 'timeWarning', 'timeJournal', 'pendingAdjudication']) {
+              for (const field of ['deadlineAt', 'timeNotice', 'timeWarning', 'timeJournal', 'pendingAdjudication', 'timeoutCount', 'takeoverRequired', 'takeoverBrief']) {
                 if (update[field] !== undefined) replayRow[field] = update[field]
               }
               const replayExtend = Number(update.extendMs)
@@ -4806,7 +4966,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
    * 路由分支，按 T4 直写通道写行（StatusEntry 保留未知字段；回放白名单已透传
    * timeNotice，刷新后不丢）。
    */
-  function recordTimeNotice(record: any, subtaskId: string, notice: any) {
+  function recordTimeNotice(record: any, subtaskId: string, notice: any, session?: any) {
     const row = Array.isArray(record?.statuses)
       ? record.statuses.find((item: any) => item?.subtaskId === subtaskId)
       : null
@@ -4829,6 +4989,23 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     })
     row.timeJournal = journal.slice(-20)
     record.updatedAt = at
+    /*
+     * [2.3.0][T1] 预估上报 → 告知用户（用户要求 1 的前半段闭环）：专家的开工
+     * 预告落档后，插件立即向主会话推送一条即时通知，明确「请把此预期执行
+     * 时间告知用户」；新预告覆盖旧预告（每条新预告各通知一次，与「开工预告」
+     * 协议一致）。通知是观测设施：写失败只留档 errors，绝不影响记录与执行。
+     */
+    if (session) {
+      try {
+        appendUserMessage(session, `【dsh-workplan·专家预估上报】子任务 ${subtaskId} 的执行专家`
+          + `预估执行时间 ${Number(notice?.declaredMinutes)} 分钟`
+          + (reason ? `（${reason}）` : '')
+          + `；请把此预期执行时间告知用户。若执行中超时，请主 Agent 放宽（extendMs）`
+          + '并告知专家最新时限，连续两次超时则由主 Agent 接手未完成部分（已完成产物只读保护，禁止丢弃）。')
+      } catch (error: any) {
+        record.errors = [...(record.errors ?? []), `${subtaskId} 预估上报通知写入失败：${truncate(String(error?.message ?? error), 200)}`].slice(-20)
+      }
+    }
   }
 
   async function updateStatus(agent: any, args: any): Promise<any> {
@@ -5003,7 +5180,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
        * [2.2.0][T5/O-4c] 预告与指示同一次到达时，指示成功落行后再记预告：
        * 指示失败不该留下一笔「专家已预告」的记录。
        */
-      if (hasTimeNotice && instructed?.ok !== false) recordTimeNotice(record, subtaskId, timeNoticeArg)
+      if (hasTimeNotice && instructed?.ok !== false) recordTimeNotice(record, subtaskId, timeNoticeArg, session)
       return instructed
     }
     if (current?.closure === 'escalated') {
@@ -5070,9 +5247,17 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         }
       }
       extension = extended
+      /*
+       * [2.3.0][T1] 用户要求 1 后半段：放宽成功后必须把「最新执行时间」告知
+       * 专家，同时附「必须在保证工作质量的前提下高效率执行」硬要求，让专家
+       * 有准备（收到通知继续当前工作，不重新开始）。投递失败不回滚延期——
+       * 时限已经推移，只是告知通道未达：留档 errors，回执带 childNotified
+       * 供主 Agent 决定是否用 dsh_workplan_followup 补发。
+       */
+      extension.childNotified = (await notifyExpertOfExtension(ctx, agent, record, subtaskId, extension.deadlineAt)).ok
     }
     if (!statusRequested) {
-      if (hasTimeNotice) recordTimeNotice(record, subtaskId, timeNoticeArg)
+      if (hasTimeNotice) recordTimeNotice(record, subtaskId, timeNoticeArg, session)
       /*
        * 纯时限事务到此结束。方案 §2.2 效果 3：状态行 revision +1（延期/预告也是
        * 行变更，同样受 STALE_WRITE 乐观锁保护）；状态与判定一个字段都不改。
@@ -5098,6 +5283,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
               deadlineAt: extension.deadlineAt,
               timerRearmed: extension.timerRearmed,
               watchdogRearmed: extension.watchdogRearmed,
+              childNotified: extension.childNotified === true,
             }
           : {}),
         ...(hasTimeNotice ? { timeNotice: written?.timeNotice ?? null } : {}),
@@ -5142,10 +5328,23 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       updatedBy: 'agent',
     })
     /*
+     * [2.3.0][T1] 禁止丢弃已完成部分（A4 的第二个硬编码保护点）：接手行
+     * （takeoverRequired）后续任何一次 artifacts 写入，都把 takeoverBrief 登记
+     * 的保护产物并集合并回来——只增不减，主 Agent 改判时不可能删掉专家已完成
+     * 的产物清单，只能在其基础上补缺口。
+     */
+    if (args?.artifacts !== undefined) {
+      const protectedRow = record.statuses.find((item: any) => item?.subtaskId === subtaskId)
+      if (protectedRow?.takeoverRequired === true && Array.isArray(protectedRow?.takeoverBrief?.landedRefs)
+        && protectedRow.takeoverBrief.landedRefs.length > 0) {
+        protectedRow.artifacts = mergePreservedArtifacts(protectedRow.artifacts, protectedRow.takeoverBrief.landedRefs)
+      }
+    }
+    /*
      * [2.2.0][T5/O-4c] 带 status 的调用同时带 timeNotice 时，预告记录在改判落行
      * 之后写入：applyStatus 抛错（如非法 verification）时不会留下半写的预告。
      */
-    if (hasTimeNotice) recordTimeNotice(record, subtaskId, timeNoticeArg)
+    if (hasTimeNotice) recordTimeNotice(record, subtaskId, timeNoticeArg, session)
     if (status === 'blocked') {
       record.statuses = markDependentsBlocked(record.plan, record.statuses, subtaskId, { reason: summary || '主 Agent 标记受阻' })
     }
