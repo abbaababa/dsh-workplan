@@ -20,6 +20,7 @@ import {
   MAX_STAGES,
   MAX_SUBTASKS,
   PLAN_VERSION,
+  REASONING_EFFORTS,
   applyStatus,
   flattenSubtasks,
   isRecord,
@@ -194,6 +195,9 @@ const REPLACEMENT_FIELDS = [
   'acceptance',
   'risk',
   // [2.2.0][T13b/推理等级] 替换行可显式改档位；未给时 mergeReplacement 继承旧行。
+  // [2.2.7][T4/五档+G1] 档位合法集合 = REASONING_EFFORTS（low / medium / high /
+  // xhigh / max），入口校验见 replanFieldError 的 reasoningEffort 分支——非法值
+  // 在 replan 期即拒绝，不再透传到计划对象、派发期才被静默回落。
   'reasoningEffort',
 ] as const
 
@@ -201,7 +205,14 @@ const REPLACEMENT_FIELDS = [
 function mergeReplacement(old: any, replacement: any, id: string, reason: string): any {
   const next: any = clone(old)
   for (const key of REPLACEMENT_FIELDS) {
-    if (replacement?.[key] !== undefined) next[key] = clone(replacement[key])
+    if (replacement?.[key] === undefined) continue
+    /*
+     * [2.2.7][T4/G1] reasoningEffort 显式 null 按「缺失」处理（与 plan.ts
+     * readSubtasks 的 hasEffort 语义对齐）：替换行继承旧行档位，
+     * 不用 null 覆盖，避免派发期回落 high 与「继承旧行」语义分叉。
+     */
+    if (key === 'reasoningEffort' && replacement[key] === null) continue
+    next[key] = clone(replacement[key])
   }
   next.id = id
   delete next.supersededAt
@@ -247,6 +258,19 @@ function replanFieldError(raw: any): string | null {
     if (value.length > max) return `${key} 最长 ${max} 字符`
     return null
   }
+  /*
+   * [2.2.7][T4/五档+G1] reasoningEffort 入口白名单（replace/add 两路共用本函数）：
+   * 与 plan.ts readSubtasks 语义对齐——缺失/显式 null 合法（replace 继承旧行、
+   * add 留给派发期回落 high），非缺失值必须是 REASONING_EFFORTS 五档之一
+   * （low / medium / high / xhigh / max），非法值拒绝、不改写。补上此校验前，
+   * 任意字符串可透传进计划对象，直到派发期才被 runtime 白名单静默回落。
+   */
+  const effort = raw?.reasoningEffort
+  const effortError = effort === undefined || effort === null
+    ? null
+    : typeof effort !== 'string' || !REASONING_EFFORTS.includes(effort)
+      ? 'reasoningEffort 必须是 low / medium / high / xhigh / max 之一（缺失合法：replace 继承旧行、add 派发期回落；非法值拒绝，不改写）'
+      : null
   return list('dependsOn', 12, 16)
     ?? list('method', 12, 800)
     ?? list('inputs', 12, 800)
@@ -256,6 +280,7 @@ function replanFieldError(raw: any): string | null {
     ?? one('title', 200)
     ?? one('objective', 2000)
     ?? one('risk', 1000)
+    ?? effortError
 }
 
 export function planReplan(plan: any, changes: any, options: any = {}): ReplanResult {
@@ -424,7 +449,9 @@ export function planReplan(plan: any, changes: any, options: any = {}): ReplanRe
         ? raw.acceptance.map((item: any) => truncate(String(item), 800))
         : ['复述完成的工作并给出可核对证据'],
       risk: truncate(String(raw.risk ?? '需求变更后新增，原计划未覆盖'), 1000),
-      // [2.2.0][T13b/推理等级] 只登记字段名：显式档位原样透传，缺失时留给 readSubtasks 回落 high。
+      // [2.2.0][T13b/推理等级] 只登记字段名：显式档位经 replanFieldError 五档白名单
+      // 校验后原样透传（low / medium / high / xhigh / max）；缺失时本行不经
+      // readSubtasks，由派发期 runtime 回落 DEFAULT_REASONING_EFFORT（high）。
       ...(typeof raw.reasoningEffort === 'string' ? { reasoningEffort: raw.reasoningEffort } : {}),
       insertedBy: 'replan',
       replannedReason: truncate(String(raw.reason ?? reason), MAX_REPLAN_REASON_CHARS),

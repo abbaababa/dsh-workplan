@@ -80,7 +80,7 @@ The full contract — roles, data shapes, state machine, recovery, and the three
 ## Install
 
 ```bash
-dsh plugin --profile web add dsh-workplan@2.2.6
+dsh plugin --profile web add dsh-workplan@2.2.7
 ```
 
 Restart the DSH Web process (or reload the page) so the bundle is picked up.

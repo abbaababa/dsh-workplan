@@ -1,3 +1,56 @@
+## 2.2.7 — 2026-11-09
+
+**本版修复：规划器/派发侧推理档位兼容性——qwen 类模型上自动分解开局即降级、部门专家派发期即中断的根因（用户 2026-11-09 报告）；同时补齐执行中断的即时通知（用户 2026-11-09 报告的核心体验缺陷）。**
+
+### 根因
+
+宿主 dsh-llm 在发起网络请求之前，把请求的 `reasoningEffort` 与目标模型声明的
+`reasoning.efforts` 清单比对，不在清单内即抛 `UNSUPPORTED_REASONING_EFFORT`
+（本地失败，重试不会自愈）。规划器默认档 `max`、子任务档位白名单 `low/high/max`
+都假设主链路模型支持这三档；一旦运行在 qwen 这类只声明 `low/medium/xhigh` 的
+模型上：第一次规划调用即被宿主拒绝 → 整次自动分解降级（PLANNER_LLM_ERROR）；
+同一枚雷在派发侧——计划里的 `high/max` 行派给 qwen 子会话同样即抛，专家
+「执行过程中发生中断」的诱因之一。
+
+
+### 执行中断即时通知（【dsh-workplan·执行中断】）
+
+用户报告：部门专家执行中被中断时，主会话直到整轮结果消息才一并交代——期间
+界面只剩进度不动，用户无法区分「在慢慢做」与「已经失败」。既有即时通道只
+覆盖完成（emitSubtaskDoneNotice）与到点预警，中断类事件全部只写
+record.errors（主 Agent 下次读记录才可见）。
+
+本版把中断事件与完成事件同等对待，一发生就往主会话写纯文本 user/message，
+文案固定三段：发生什么（错误码+真因摘录）、系统正在怎么处理（自动重试/收束/
+待拍板）、对用户意味着什么（不是任务失败终局）。覆盖五个静默点：
+
+- 执行失败自动重试（第 N 次被打断 + 原因 + 正在回喂重试）；
+- 重试耗尽/不可重试的最终受阻（真因 + 在盘产物线索 + 处置去向）；
+- 执行链路未预期异常（如实留档并即报）；
+- 派发后 no-ack（性质：疑似根本没启动，非执行失败）；
+- 子 Agent 请示 escalate（补充人类可读摘录；结构化 update 仍照写）。
+
+纪律：每个子任务整轮至多 3 条（interruptNoticeCount cap）；写失败只留档
+record.errors，绝不影响执行；用户主动取消（parentSignal.aborted）与整轮
+超时（guard.timedOut）静默。回归 `tests/interrupt-announce.test.ts`（单元
+cap + 集成「第一次 error 结束 → 即时通知含真因与重试说明 → 第二次成功结算」）；
+A4 用例升级为镜像契约：零虚报完成，但中断必须如实即报；stall 用例的结果消息
+计数显式排除中断通知。全量 678 用例通过。
+
+### 修复：发送前按模型能力钳制档位（治本，不按模型名猜名单）
+
+- 新增 `clampEffortToSupported` + `resolveSupportedEfforts`（`src/runtime.ts`）：
+  发送任何带档位的请求前，用宿主公开能力面 `llm.resolveModelInfo` 读出目标模型
+  实际声明的档位清单，把请求档位钳制到清单内等效档——清单包含则原样；否则取
+  不高于请求档的最高支持档（max→xhigh、high→medium）；全部更强则取最弱支持档；
+  模型无 reasoning 元数据则不发送该字段；能力查询不可用则保持旧行为。
+- 规划器（`runPlanner`）：钳制后档位实际发送，遥测记录实际值并在
+  `reasoningEffortSource` 标注 `clamped(原档)`；钳制发生时 console.warn 留现场。
+- 派发侧（部门子会话 `agentOptions`）：同一钳制；能力不可查询时保持同步路径
+  （不引入额外 await 微任务，notice-channel 运行时集成用例零改动通过）。
+- 回归：`tests/planner-effort-clamp.test.ts` 共 10 例（纯函数规则、旧宿主兼容、
+  qwen 钳制、无 reasoning 元数据、派发三档映射）；全量 676 用例通过。
+
 ## 2.2.6 — 2026-11-08
 
 **本版三项修复：D-1 重启回放丢弃人工改判的 closure 字段；跨部门需求落盘变 `[object Object]`（handoff 序列化）；任务自动分解期间界面零提示（进度可见性）。**

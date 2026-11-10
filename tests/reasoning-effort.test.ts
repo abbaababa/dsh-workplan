@@ -1,17 +1,21 @@
 /*
  * [2.2.0][T13/推理等级] 子 Agent 推理等级治理。
+ * [2.2.7][T5/五档扩展] 本文件由三档契约升级为五档契约（用户 2026-11-09 要求）。
  *
- * 用户强制规则原文：「禁止子agent继承主agent的推理等级，子agent必须根据自身
- * 任务的复杂度，自己使用推理等级为low、high或者是Max，其中，轻度复杂的任务
- * 使用low，中等复杂的任务使用high，非常复杂的任务使用Max。」
+ * 用户强制规则原文（五档版）：「禁止子agent继承主agent的推理等级，子agent必须
+ * 根据自身任务的复杂度，自己使用推理等级，其中，轻度复杂的任务必须使用 low，
+ * 中等复杂的任务必须使用 medium 或 high，非常复杂的任务必须使用 xhigh 或 max。
+ * 推理等级包括 low、medium、high、xhigh 或 max。」
  *
- * 本文件只验证 T13 新增契约：
- * 1. reasoningEffort 只接受 low / high / max；
- * 2. 非法值被拒绝且错误点名 reasoningEffort；
- * 3. 缺失时回落 high（中等默认）；
- * 4. 规划器提示词含三档映射与「禁止继承」；
- * 5. 计划消息序列化/解析往返保留该字段（回放兼容）；
- * 6. 部门子会话 agentOptions 携带子任务自己的档位，不继承主 Agent。
+ * 本文件验证的契约：
+ * 1. reasoningEffort 只接受 low / medium / high / xhigh / max 五档；
+ * 2. 非法值（含大小写/空格变体）被拒绝且错误点名 reasoningEffort、写明五档合法集；
+ * 3. 缺失时回落 high（中等默认，D1 决策保持）；
+ * 4. 规划器提示词含五档 OR 映射、五个示例、二选一消歧规则与「禁止继承」；
+ * 5. 旧三档（low/high/max）计划 JSON 全部原样校验通过——向后兼容零迁移；
+ * 6. 计划消息序列化/解析往返保留该字段（回放兼容）；
+ * 7. 部门子会话 agentOptions 携带子任务自己的档位，不继承主 Agent（五档双向验证）；
+ * 8. replan replace/add 显式 medium/xhigh 不丢失、非法值入口即拒。
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -56,7 +60,7 @@ function planWith(subtasks: any[]) {
       deliverable: '可复现的测试结果',
       successCriteria: ['每个断言都有输出'],
       constraints: ['不修改既有测试'],
-      knownFacts: ['用户要求 low / high / max 三档'],
+      knownFacts: ['用户要求 low / medium / high / xhigh / max 五档'],
       unknowns: ['宿主运行时实际生效值待集成环境验证'],
       assumptions: ['校验层与派发层复用同一字段'],
     },
@@ -73,7 +77,7 @@ function planWith(subtasks: any[]) {
       {
         id: 'S1',
         name: '单阶段',
-        goal: '覆盖三档、非法值与缺省',
+        goal: '覆盖五档、非法值与缺省',
         rationale: '最小计划即可验证字段',
         checkpoint: '断言全部通过',
         subtasks,
@@ -93,7 +97,11 @@ function planWith(subtasks: any[]) {
   }
 }
 
-test('reasoningEffort 只接受 low / high / max，且原样保留', () => {
+test('reasoningEffort 白名单恰为五档 low / medium / high / xhigh / max，且原样保留', () => {
+  // A1①：事实源常量本身必须是五档、顺序固定（唯一白名单，禁止漂移）。
+  assert.deepEqual([...REASONING_EFFORTS], ['low', 'medium', 'high', 'xhigh', 'max'],
+    '白名单必须恰为五档（用户 2026-11-09 要求：三档扩五档）')
+  // A1②：五档逐值遍历——每档都通过校验且不改写、不降级。
   for (const effort of REASONING_EFFORTS) {
     const result = validatePlan(planWith([subtask({ reasoningEffort: effort })]))
     assert.equal(result.ok, true, `${effort} 应通过校验：${JSON.stringify(result.errors)}`)
@@ -101,14 +109,20 @@ test('reasoningEffort 只接受 low / high / max，且原样保留', () => {
   }
 })
 
-test('非法 reasoningEffort 被拒绝且错误点名该字段（medium / off / 乱值）', () => {
-  for (const effort of ['medium', 'off', 'ultra', 'LOW', ' max']) {
+test('A3 非法 reasoningEffort 被拒绝且错误点名该字段并写明五档合法集', () => {
+  // 'foo'/'LOW'/'Medium' 为任务指定样本；其余覆盖乱值、大小写与空格变体。
+  for (const effort of ['foo', 'LOW', 'Medium', 'off', 'ultra', 'xhighX', ' MAX', '', 'max\n']) {
     const result = validatePlan(planWith([subtask({ reasoningEffort: effort })]))
     assert.equal(result.ok, false, `${JSON.stringify(effort)} 必须被拒绝`)
     const errors = (result.errors ?? []).join('\n')
     assert.match(errors, /reasoningEffort/, `错误必须点名 reasoningEffort：${errors}`)
-    assert.match(errors, /low \/ high \/ max/, `错误必须写明合法取值：${errors}`)
+    assert.match(errors, /low \/ medium \/ high \/ xhigh \/ max/, `错误必须写明五档合法取值：${errors}`)
   }
+  // 非法值绝不允许被静默改写后放行（拒绝语义，不是回落语义——回落只属于缺失路径）。
+  const result = validatePlan(planWith([subtask({ reasoningEffort: 'foo' })]))
+  assert.equal(result.ok, false)
+  assert.ok((result.errors ?? []).filter((e: any) => /reasoningEffort/.test(String(e))).length >= 1,
+    '拒绝错误必须点名 reasoningEffort 字段')
 })
 
 test('缺省回落 high（中等默认），绝不继承主 Agent 的等级', () => {
@@ -118,15 +132,61 @@ test('缺省回落 high（中等默认），绝不继承主 Agent 的等级', ()
   assert.equal(DEFAULT_REASONING_EFFORT, 'high')
 })
 
-test('规划器提示词包含三档映射、三个示例与「禁止继承」', () => {
+/*
+ * A2 向后兼容回归：旧三档体系（v2.2.0–v2.2.6）写出的计划必须零迁移继续可用。
+ * low/high/max 是五档集合的子集，校验、保留、序列化回放全部按原值通过；
+ * 显式 null/undefined 仍走缺失回落，不报错。
+ */
+test('A2 旧三档 plan JSON 回归：low/high/max 原值通过、序列化往返零迁移', () => {
+  const legacy = planWith([
+    subtask({ id: 'T1', title: '轻任务', reasoningEffort: 'low' }),
+    subtask({ id: 'T2', title: '中等任务', reasoningEffort: 'high' }),
+    subtask({ id: 'T3', title: '复杂任务', reasoningEffort: 'max' }),
+    subtask({ id: 'T4', title: '旧格式无该字段' }),
+  ])
+  const result = validatePlan(legacy)
+  assert.equal(result.ok, true, `旧三档计划必须继续通过校验：${JSON.stringify(result.errors)}`)
+  const efforts = result.plan!.stages[0].subtasks.map((item: any) => item.reasoningEffort)
+  assert.deepEqual(efforts, ['low', 'high', 'max', 'high'], '旧值原样保留；缺失字段按旧语义回落 high')
+
+  // 序列化/解析往返：模拟旧计划消息的回放路径（replay 兼容）。
+  const plan = {
+    ...result.plan!,
+    planId: 'wp-legacy3',
+    sessionId: 'session-legacy3',
+    createdTurn: 1,
+    createdAt: 1000,
+    sourceMessageIds: ['m1'],
+  }
+  const parsed = parseWorkplanMessage(buildPlanMessage(plan))
+  assert.ok(parsed, '旧三档计划消息必须能被解析')
+  const replayed = parsed.plan.stages[0].subtasks.map((item: any) => item.reasoningEffort)
+  assert.deepEqual(replayed, ['low', 'high', 'max', 'high'], '回放后档位不得变化')
+
+  // reasoningEffort: null 等价缺失（旧入口容错语义保持）。
+  const nulled = validatePlan(planWith([subtask({ reasoningEffort: null })]))
+  assert.equal(nulled.ok, true)
+  assert.equal(nulled.plan!.stages[0].subtasks[0].reasoningEffort, 'high')
+})
+
+test('规划器提示词包含五档 OR 映射、五个示例、消歧规则与「禁止继承」', () => {
   const prompt = buildPlannerPrompt('测试任务', '/tmp', '', {})
+  // 用户要求的映射原文逐字锁定：轻度=low／中等=medium或high／非常=xhigh或max。
   assert.match(prompt, /轻度复杂="low"/, '必须写明轻度=low')
-  assert.match(prompt, /中等复杂="high"/, '必须写明中等=high')
-  assert.match(prompt, /非常复杂="max"/, '必须写明非常复杂=max')
+  assert.match(prompt, /中等复杂="medium"或"high"/, '必须写明中等=medium或high')
+  assert.match(prompt, /非常复杂="xhigh"或"max"/, '必须写明非常复杂=xhigh或max')
+  // 五档各自示例，防止新档位无锚点导致 LLM 输出抖动。
   assert.match(prompt, /整理并校对一份已有清单="low"/, '缺少低档示例')
+  assert.match(prompt, /补充单个工具函数并补齐单元测试="medium"/, '缺少 medium 示例')
   assert.match(prompt, /独立实现一个模块并补齐测试="high"/, '缺少中档示例')
+  assert.match(prompt, /跨多个模块排查根因并修复="xhigh"/, '缺少 xhigh 示例')
   assert.match(prompt, /跨多个系统排查根因并给出架构级修复方案="max"/, '缺少高档示例')
+  // OR 语义消歧必须成文（D2 决策）：同等输入产生稳定档位。
+  assert.match(prompt, /优先选择较低档（medium 优先于 high，xhigh 优先于 max）/, '缺少二选一消歧规则')
+  // 白名单话术与禁止继承、缺省回落语义同步为五档。
+  assert.match(prompt, /只允许 low \/ medium \/ high \/ xhigh \/ max 五档/, '必须写明五档合法集')
   assert.match(prompt, /禁止沿用\/继承主 Agent 的推理等级/, '必须明确禁止继承')
+  assert.match(prompt, /缺失时执行侧回落 "high"/, '必须写明缺省回落 high')
   assert.match(prompt, /"reasoningEffort": "high"/, 'JSON 示例必须包含该字段')
 })
 
@@ -146,20 +206,24 @@ test('计划消息序列化/解析往返保留 reasoningEffort（回放兼容）
   assert.equal(parsed.plan.stages[0].subtasks[0].reasoningEffort, 'max')
 })
 
-test('部门子会话档位只由子任务自身复杂度决定：主 Agent low/high/max 三档结果完全一致', async () => {
+test('部门子会话档位只由子任务自身复杂度决定：主 Agent 五档全试结果完全一致', async () => {
   const validated = validatePlan(planWith([
     subtask({ id: 'T1', title: '轻任务', reasoningEffort: 'low' }),
     subtask({ id: 'T2', title: '中等任务（显式）', reasoningEffort: 'high' }),
     subtask({ id: 'T3', title: '复杂任务', reasoningEffort: 'max' }),
     subtask({ id: 'T4', title: '中等任务（缺省）' }),
+    subtask({ id: 'T5', title: '中等任务（新档显式）', reasoningEffort: 'medium' }),
+    subtask({ id: 'T6', title: '复杂任务（新档显式）', reasoningEffort: 'xhigh' }),
   ]))
   assert.equal(validated.ok, true)
 
   /*
    * 每档主 Agent 都重新派发一次同一份计划，收集子会话 agentOptions 里的档位。
-   * 断言目标：三张表完全相同 = 子任务档位与主 Agent 档位无关（A1）；并且
-   * 主 Agent=max 时简单子任务仍是 low（A2 的组合）。若实现把
-   * modelSelection.reasoningEffort 接回子会话，low/high 两张表会跟着变。
+   * 断言目标：五张表完全相同 = 子任务档位与主 Agent 档位无关（A1）；并且
+   * 主 Agent=max 时简单子任务仍是 low、主 Agent=low 时复杂子任务仍是 max/xhigh。
+   * 若实现把 modelSelection.reasoningEffort 接回子会话，各表会跟着变。
+   * [2.2.7][T5] 主 Agent 表从三档扩为五档（含 medium/xhigh），新档位行 T5/T6
+   * 同样不得被继承改写。
    */
   const effortsOf = async (mainEffort: string) => {
     const plan = structuredClone(validated.plan!)
@@ -200,16 +264,22 @@ test('部门子会话档位只由子任务自身复杂度决定：主 Agent low/
     return Object.fromEntries(seen.map((item) => [item.id, item.effort]))
   }
 
-  const expected = { T1: 'low', T2: 'high', T3: 'max', T4: 'high' }
+  const expected = { T1: 'low', T2: 'high', T3: 'max', T4: 'high', T5: 'medium', T6: 'xhigh' }
   const low = await effortsOf('low')
+  const medium = await effortsOf('medium')
   const high = await effortsOf('high')
+  const xhigh = await effortsOf('xhigh')
   const max = await effortsOf('max')
 
   assert.deepEqual(low, expected, '主 Agent=low 时子任务档位必须只由自身复杂度决定')
+  assert.deepEqual(medium, expected, '主 Agent=medium 时子任务档位不得改变')
   assert.deepEqual(high, expected, '主 Agent=high 时子任务档位不得改变')
+  assert.deepEqual(xhigh, expected, '主 Agent=xhigh 时子任务档位不得改变')
   assert.deepEqual(max, expected, '主 Agent=max 时子任务档位不得改变')
   assert.equal(max.T1, 'low', 'A2：主 Agent=max + 简单子任务 → low')
   assert.equal(low.T3, 'max', '反向组合：主 Agent=low + 复杂子任务 → max')
+  assert.equal(low.T6, 'xhigh', '反向组合：主 Agent=low + 新档复杂子任务 → xhigh')
+  assert.equal(max.T5, 'medium', '主 Agent=max + 新档中等子任务 → medium（不继承抬高）')
   assert.equal(low.T4, 'high', '缺省档位回落 high（中等默认），不随主 Agent 变化')
 })
 
@@ -280,4 +350,36 @@ test('replan add 保留显式 reasoningEffort，缺失时经 readSubtasks 回落
   const all = revalidated.plan!.stages[0].subtasks
   assert.equal(all.find((item: any) => item.id === 'A1')?.reasoningEffort, 'low')
   assert.equal(all.find((item: any) => item.id === 'A2')?.reasoningEffort, 'high', '缺失档位必须回落 high')
+})
+
+/*
+ * [2.2.7][T5/五档] replan 入口的五档贯通与 G1 拒绝：
+ * T4 在 replan.ts 入口补了与 readSubtasks 同语义的白名单——medium/xhigh
+ * 显式值必须透传成功，非法值必须在入口即拒（而不是透传进计划后派发期静默回落）。
+ */
+test('replan 五档贯通：replace 显式 xhigh / add 显式 medium 透传，非法值入口拒绝', () => {
+  const plan = replanFixture('high')
+  const ok = planReplan(plan, [
+    { action: 'replace', subtaskId: 'T1', replacement: { title: '更重的任务', reasoningEffort: 'xhigh' } },
+    {
+      action: 'add',
+      subtaskId: 'A1',
+      newSubtask: { id: 'A1', title: '中等任务', objective: '补单个工具函数与测试', department: 'engineering', reasoningEffort: 'medium' },
+    },
+  ], REPLAN_OPTIONS)
+  assert.equal(ok.ok, true, `五档显式值必须通过 replan 入口：${JSON.stringify((ok as any).errors ?? (ok as any).message)}`)
+  const rows = (ok as any).payload.plan.stages.flatMap((stage: any) => stage.subtasks)
+  assert.equal(rows.find((item: any) => item.id === 'T1b')?.reasoningEffort, 'xhigh',
+    'replacement 里显式的 xhigh 不得被静默丢弃')
+  assert.equal(rows.find((item: any) => item.id === 'A1')?.reasoningEffort, 'medium',
+    'newSubtask 里显式的 medium 不得被静默丢弃')
+
+  for (const bad of ['foo', 'LOW', 'Medium', 'ultra']) {
+    const rejected = planReplan(plan, [
+      { action: 'replace', subtaskId: 'T1', replacement: { title: '非法档位', reasoningEffort: bad } },
+    ], { ...REPLAN_OPTIONS, reason: `非法档位拒绝用例 ${bad}` })
+    assert.notEqual(rejected.ok, true, `${JSON.stringify(bad)} 必须在 replan 入口即拒`)
+    assert.match(JSON.stringify(rejected), /low \/ medium \/ high \/ xhigh \/ max/,
+      `拒绝理由必须点名五档合法集：${JSON.stringify(rejected).slice(0, 300)}`)
+  }
 })

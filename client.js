@@ -1674,7 +1674,12 @@ window.__ModuleLoader__.load({
             const instructionOverdue = item?.instructionOverdue === true;
             const tone = closure === 'replanned' ? 'idle' : toneOfStatus(status);
             const pct = clampPct(item?.progress ?? 0);
-            const effort = typeof subtask?.reasoningEffort === 'string' && ['low', 'high', 'max'].includes(subtask.reasoningEffort)
+            /*
+             * [2.2.7][T2/五档] UI Pill 白名单：与 plan.ts 的 REASONING_EFFORTS
+             * （low / medium / high / xhigh / max）逐值同步。浏览器包无法 import
+             * 宿主常量，此处为唯二事实源之一——漏改会让新档位在任务卡片上静默消失。
+             */
+            const effort = typeof subtask?.reasoningEffort === 'string' && ['low', 'medium', 'high', 'xhigh', 'max'].includes(subtask.reasoningEffort)
                 ? subtask.reasoningEffort
                 : null;
             return h('div', { className: `dsh-wp-subtask dsh-wp-tone-${tone}` }, h('div', { className: 'dsh-wp-subtask-head' }, h('div', { className: 'dsh-wp-subtask-title' }, `${workLabel(t, index)}：${subtask.title}`), closureLabel ? h(Pill, { tone: closureTone }, closureLabel) : null, instructionOverdue ? h(Pill, { tone: 'blocked' }, t('closureNoAck')) : null, h(Pill, { tone }, progressText(item, t))), h('div', { className: 'dsh-wp-subtask-meta' }, h('span', null, `${t('who')}：${deptName(t, subtask.department)} · ${subtask.role}`), effort ? h(Pill, { tone: 'idle' }, `${t('reasoningEffort')}：${effort}`) : null), h('div', { className: 'dsh-wp-subtask-body' }, h('p', null, h('strong', null, `${t('what')}：`), subtask.objective), h('div', null, h('strong', null, `${t('how')}：`), h(Bullets, { items: subtask.method })), h('div', null, h('strong', null, `${t('doneWhen')}：`), h(Bullets, { items: subtask.acceptance })), subtask.outputs?.length ? h('div', null, h('strong', null, `${t('willDeliver')}：`), h(Bullets, { items: subtask.outputs })) : null, subtask.dependsOn?.length ? h('p', { className: 'dsh-wp-muted' }, `${t('waitFor')}：先等前面的工作做完，才能开始这一步。`) : null), h(TimeNegotiation, { item, subtask, t }), status === 'in_progress' ? h(Progress, { value: pct, tone }) : null, status === 'in_progress' ? h('div', { className: 'dsh-wp-progress-meta' }, h('span', null, `${t('progressLabel')} ${pct}%`)) : null, 

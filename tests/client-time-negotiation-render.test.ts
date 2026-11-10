@@ -67,6 +67,29 @@ const sessionFixture = {
         title: '无协商字段的降级任务',
         objective: '验证字段缺失不报错',
       },
+      // [2.2.7][T5/五档] 新档位渲染哨兵：client.ts Pill 白名单若漏改 medium/xhigh，
+      // 这两个断言会立刻红灯（否则新档位在任务卡片上静默消失，无人发现）。
+      {
+        ...subtaskBase,
+        id: 'T3',
+        title: 'medium 档任务',
+        objective: '验证 medium 档位渲染',
+        reasoningEffort: 'medium',
+      },
+      {
+        ...subtaskBase,
+        id: 'T4',
+        title: 'xhigh 档任务',
+        objective: '验证 xhigh 档位渲染',
+        reasoningEffort: 'xhigh',
+      },
+      {
+        ...subtaskBase,
+        id: 'T5',
+        title: 'low 档任务',
+        objective: '验证 low 档位渲染（五档 Pill 全覆盖）',
+        reasoningEffort: 'low',
+      },
     ],
   }],
   statuses: [
@@ -95,6 +118,9 @@ const sessionFixture = {
       pendingAdjudication: true,
     },
     { subtaskId: 'T2', status: 'pending', closure: 'pending', progress: 0 },
+    { subtaskId: 'T3', status: 'pending', closure: 'pending', progress: 0 },
+    { subtaskId: 'T4', status: 'pending', closure: 'pending', progress: 0 },
+    { subtaskId: 'T5', status: 'pending', closure: 'pending', progress: 0 },
   ],
   risks: [],
   verification: [],
@@ -193,6 +219,10 @@ test('A2：看板可见预估 / 协商上限 / 延期 / 开工预告 / 预警 / 
     '到点预警：剩余 120 秒',
     '预告通道：已观测到送达',
     '推理等级：max',
+    // [2.2.7][T5/五档] medium/xhigh 必须同样渲染出 Pill；client.ts 白名单漏改即红灯。
+    '推理等级：medium',
+    '推理等级：xhigh',
+    '推理等级：low',
     '待裁决：到点后按安全兜底结算',
   ]) {
     assert.ok(html.includes(expected), `看板必须出现「${expected}」；实际片段：${html.slice(0, 400)}`)

@@ -81,6 +81,7 @@ import {
   parseUpdateMessage,
   buildUpdateMessage,
   normaliseHandoffs,
+  mergeHandoffEntriesByUpdatedAt,
   needEntryText,
   openHandoffs,
   DEPARTMENTS,
@@ -170,7 +171,26 @@ function liveStatuses(statuses: any) {
  * `changeRequest.pending`（执行中收到、尚未重规划的变更）与 `reportPending`
  * （完成结果还没写进会话）只存在于 `record` 而不是 `statuses`，所以必须在
  * 这一层显式传入；`plan.ts` 的 `deliveryReadiness` 因此仍是纯函数。
+ *
+ * [2.2.9][T3][M4.1] `reportPending` 不再读 `record.reportPending` 可变标志。
+ * 事故实证（wp-215ed52f 症状②）：门禁读标志、看板读标志、消息冻结读标志，
+ * 而该标志在 finishRound/markReported/自愈/重建多处的写入时机互不同步，
+ * 判定结果随读取落在哪个时间窗口而翻转——「可交付↔未放行」来回震荡。
+ * 现在门禁、看板、stop-steer、消息冻结、自愈全部读同一个纯派生函数
+ * `deriveReportPending(record)`：事实只有 statuses（经 T2 单调闸的终态），
+ * 标志降级为审计镜像。blocked/pending 行不是 done，永不触发该阻塞。
  */
+export function deriveReportPending(record: any): boolean {
+  const statuses = Array.isArray(record?.statuses) ? record.statuses : []
+  /*
+   * [1.11.0] 只把「本轮完成、还没回报」算作待回报：`closure:'done'` 是
+   * 1.11.0 的显式中间态。旧日志的 done 行没有 closure（null），它本来就
+   * 已经通过结果消息回报过，若用 `!== 'reported'` 判定，升级后每一份
+   * 1.10.6 的历史计划都会被判成「未回报」而永久不可交付。
+   */
+  return statuses.some((item: any) => item?.status === 'done' && item?.closure === 'done')
+}
+
 function readinessOf(record: any, snapshot?: any) {
   const snap = snapshot ?? derivePlanSnapshot(
     record?.plan ? blockCancelledDependents(record.plan, record?.statuses) : record?.statuses,
@@ -179,7 +199,7 @@ function readinessOf(record: any, snapshot?: any) {
   return deliveryReadiness(snap, {
     phase: record?.phase,
     changePending: record?.changeRequest?.status === 'pending',
-    reportPending: record?.reportPending === true,
+    reportPending: deriveReportPending(record),
     /*
      * 计划定义的验收标准是交付门的另一半：状态行只回答「子 Agent 说通过
      * 了几条」，这里回答「计划要求的几条有没有被逐条回应」。
@@ -219,13 +239,97 @@ export const PLANNER_HARD_MULTIPLIER = 3
  *
  * 用户规则（AGENTS.md 第 12 条）只说过「子 Agent 不得继承主 Agent 的等级」，
  * 规划器同样是主 Agent 派出的子调用：任务里明确授权「规划器停止继承」。规划
- * 本身属于「跨多个系统梳理根因并给出方案」——按同一条三档规则属非常复杂 →
- * max。`DSH_WORKPLAN_PLANNER_REASONING_EFFORT` 仍可显式覆盖（用户为降本/提速
+ * 本身属于「跨多个系统梳理根因并给出方案」——按五档规则（轻度=low／中等=
+ * medium或high／非常复杂=xhigh或max）属非常复杂 → 默认取 max（五档内的最高
+ * 档；xhigh 留给显式覆盖）。`DSH_WORKPLAN_PLANNER_REASONING_EFFORT` 仍可显式
+ * 覆盖（用户为降本/提速
  * 主动选择低档时有效），未设或非法时才用本默认值；**绝不读取
  * modelSelection.reasoningEffort**。旧行为（plannerEffort || 主 Agent 档位）会
  * 让主 Agent 的 low/high 直接决定拆解质量，与「子 Agent 自决档位」同源、同错。
  */
 export const DEFAULT_PLANNER_REASONING_EFFORT = 'max'
+
+/*
+ * [2.2.7] 推理档位兼容性钳制（用户 2026-11-09 报告的 PLANNER_LLM_ERROR 根因修复）。
+ *
+ * 宿主 dsh-llm 会在发起网络请求之前，把请求的 reasoningEffort 与该模型声明的
+ * `reasoning.efforts` 清单逐一比对，不在清单内即抛 UNSUPPORTED_REASONING_EFFORT
+ * （本地失败、重试不会自愈）。规划器默认 max、子任务档位允许 low / medium /
+ * high / xhigh / max 五档——这些都假设主链路模型支持相应档位。一旦运行在
+ * qwen 这类只声明 low/medium/xhigh 的模型上，第一次规划调用就被宿主拒绝，
+ * 整个自动分解降级；
+ * 同一枚雷也埋在派发侧：计划里的 high/max/xhigh 行派给 qwen 子会话会同样即抛。
+ *
+ * 治本方案不是按模型名字猜档位（家族无穷、名单过时），而是在发送任何带档位的
+ * 请求前，用宿主公开能力面 `llm.resolveModelInfo` 读出目标模型**实际声明**的
+ * 档位清单，把请求档位钳制到清单内强度最接近的一档：
+ *  - 清单包含请求档位 ⇒ 原样发送（模型声明支持五档时，low/medium/high/xhigh/max
+ *    全部原样透传，不钳制）；
+ *  - 否则取「不高于请求档」里最高的支持档（max→xhigh、high→medium…）；
+ *    [2.2.7][T4/五档] 五档请求落在三档清单（low/high/max）上的降级序按强度表
+ *    逐级下探：max 原样、xhigh→high、high 原样、medium→low、low 原样；落在
+ *    qwen 型清单（low/medium/xhigh）上：max→xhigh、xhigh 原样、high→medium、
+ *    medium 原样、low 原样。降级序即 EFFORT_STRENGTH_ORDER 中「不高于请求档」
+ *    的最近支持档，任何合法五档值都不会被拒绝或清空；
+ *  - 全部支持档都强于请求档 ⇒ 取最弱支持档（宁可降质，不可失败）；
+ *  - 模型根本没有 reasoning 元数据（空清单）⇒ 不发送 reasoningEffort 字段，
+ *    与宿主 resolveCallWithInfo 的「reasoning===undefined 时任何档位都抛错」对齐；
+ *  - 能力查询不可用（宿主不暴露 / 查询抛错）⇒ 保持旧行为，绝不因钳制引入新故障。
+ */
+const EFFORT_STRENGTH_ORDER: readonly string[] = Object.freeze(
+  ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+)
+
+/** 请求档位 → 模型支持清单内的等效钳制档；空清单返回 undefined（= 不发送该字段）。 */
+export function clampEffortToSupported(effort: string, supported: readonly string[] | null | undefined): string | undefined {
+  if (!Array.isArray(supported) || supported.length === 0) return undefined
+  if (supported.includes(effort)) return effort
+  const rank = (id: string) => EFFORT_STRENGTH_ORDER.indexOf(id)
+  const ranked = [...supported].sort((a, b) => {
+    const ra = rank(a)
+    const rb = rank(b)
+    if (ra === rb) return 0
+    if (ra < 0) return 1
+    if (rb < 0) return -1
+    return ra - rb
+  })
+  const target = rank(effort)
+  if (target < 0) return ranked[ranked.length - 1]
+  const atOrBelow = ranked.filter((id) => rank(id) >= 0 && rank(id) <= target)
+  if (atOrBelow.length > 0) return atOrBelow[atOrBelow.length - 1]
+  return ranked[0]
+}
+
+const supportedEffortsCache = new Map<string, string[]>()
+
+/**
+ * 读取 provider/model 声明的推理档位清单。
+ * @returns 档位 id 数组（可为空数组 = 模型不支持任何档位）；null = 无从判定，调用方保持旧行为。
+ */
+export async function resolveSupportedEfforts(
+  llm: any,
+  provider?: string,
+  model?: string,
+  signal?: any,
+): Promise<string[] | null> {
+  if (!llm || typeof llm.resolveModelInfo !== 'function' || !provider || !model) return null
+  const key = `${provider}/${model}`
+  const hit = supportedEffortsCache.get(key)
+  if (hit) return hit
+  if (signal?.aborted) return null
+  try {
+    const info = await llm.resolveModelInfo(provider, model, signal)
+    const efforts = info?.reasoning?.efforts
+    const list = Array.isArray(efforts)
+      ? efforts.map((item: any) => String(item?.id ?? '')).filter((id: string) => id !== '')
+      : []
+    supportedEffortsCache.set(key, list)
+    return list
+  } catch {
+    // 查询失败 ⇒ 与「宿主不暴露该能力」同等处理：不钳制、不缓存、不阻断。
+    return null
+  }
+}
 /**
  * Absolute ceiling for one child execution.
  *
@@ -685,12 +789,14 @@ export async function runPlanner(ctx: any, options: any) {
    *  - DSH_WORKPLAN_PLANNER_MAX_TOKENS：给单次生成封顶。无界生成是「流满 900 秒
    *    撞绝对上限」的放大器——封顶后模型会正常 finish，截断可被抢救/回喂；
    *  - DSH_WORKPLAN_PLANNER_REASONING_EFFORT：规划专用推理档，只接受
-   *    low / high / max 三档。非法值不传给模型，回落默认档（见下）。
+   *    low / medium / high / xhigh / max 五档。非法值不传给模型，回落默认档（见下）。
    *
    * [2.2.0][T13b] 用户 2026-11-08 决策 5「规划器停止继承」：未设该旋钮时，规划器
    * 不再沿用主 Agent 的推理档，而是取 DEFAULT_PLANNER_REASONING_EFFORT（max）。
-   * 校验白名单复用 plan.ts 的 REASONING_EFFORTS：把 "ultra"/"medium" 这类非法值
-   * 原样发给模型，真实宿主会以 400 拒绝整次规划——环境变量写错不应该让整个
+   * 校验白名单复用 plan.ts 的 REASONING_EFFORTS（五档：low / medium / high /
+   * xhigh / max；[2.2.7][T4] 由三档扩五档，medium/xhigh 现为合法值）：把
+   * "ultra"/"minimal" 这类非法值原样发给模型，真实宿主会以 400 拒绝整次规划——
+   * 环境变量写错不应该让整个
    * 任务降级，所以非法值按「未设置」处理。
    */
   const plannerMaxTokens = normalisePlannerWindow(process.env.DSH_WORKPLAN_PLANNER_MAX_TOKENS, 0)
@@ -698,7 +804,31 @@ export async function runPlanner(ctx: any, options: any) {
   // 用户的成本预期，所以先归一化再进白名单。
   const plannerEffortRaw = String(process.env.DSH_WORKPLAN_PLANNER_REASONING_EFFORT ?? '').trim().toLowerCase()
   const plannerEffort = REASONING_EFFORTS.includes(plannerEffortRaw) ? plannerEffortRaw : ''
-  const effectivePlannerEffort = plannerEffort || DEFAULT_PLANNER_REASONING_EFFORT
+  const requestedPlannerEffort = plannerEffort || DEFAULT_PLANNER_REASONING_EFFORT
+  /*
+   * [2.2.7] 发送前按模型能力钳制档位：宿主对不支持的档位会在网络调用前直接
+   * 抛 UNSUPPORTED_REASONING_EFFORT，重试不自愈（终态），整次规划因此降级。
+   * 查询不可用时保持旧行为；查询到清单后请求档钳制到清单内等效档，空清单
+   * （模型无 reasoning 元数据）则不发送档位字段。'' 在这里表示「不发送」。
+   */
+  const plannerEffortSupport = await resolveSupportedEfforts(
+    ctx.llm,
+    modelSelection?.provider,
+    modelSelection?.model,
+    signal,
+  )
+  const effectivePlannerEffort = plannerEffortSupport === null
+    ? requestedPlannerEffort
+    : (clampEffortToSupported(requestedPlannerEffort, plannerEffortSupport) ?? '')
+  if (plannerEffortSupport !== null && effectivePlannerEffort !== requestedPlannerEffort) {
+    console.warn('[dsh-workplan] planner reasoning effort clamped for model compatibility:', JSON.stringify({
+      provider: modelSelection?.provider,
+      model: modelSelection?.model,
+      requested: requestedPlannerEffort,
+      effective: effectivePlannerEffort || '(omitted)',
+      supported: plannerEffortSupport,
+    }))
+  }
   const secs = (ms: number) => Math.max(1, Math.round(ms / 1000))
   let lastErrors: string[] = []
   /*
@@ -803,7 +933,8 @@ export async function runPlanner(ctx: any, options: any) {
       const stream = ctx.llm.stream({
         provider: modelSelection.provider,
         model: modelSelection.model,
-        reasoningEffort: effectivePlannerEffort,
+        // [2.2.7] '' = 模型无 reasoning 元数据，不发送档位字段（发送必被宿主拒绝）。
+        ...(effectivePlannerEffort ? { reasoningEffort: effectivePlannerEffort } : {}),
         ...(plannerMaxTokens > 0 ? { maxTokens: plannerMaxTokens } : {}),
         messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
         signal: controller.signal,
@@ -974,8 +1105,11 @@ export async function runPlanner(ctx: any, options: any) {
           // [2.2.0][T13b] 记录**实际发给模型**的档位：旧值记的是 modelSelection
           // （主 Agent 档位），规划器停止继承后它不再等于生效值，照抄会让事后
           // 复盘把「主 Agent=high」误读成「规划器=high」。
+          // [2.2.7] 钳制发生时同样记录实际发出值（'' = 未发送）。
           reasoningEffort: effectivePlannerEffort,
-          reasoningEffortSource: plannerEffort ? 'env' : 'default-max',
+          reasoningEffortSource: (plannerEffort ? 'env' : 'default-max')
+            + (plannerEffortSupport !== null && effectivePlannerEffort !== requestedPlannerEffort
+              ? `→clamped(${requestedPlannerEffort})` : ''),
           attempt,
           taskChars: typeof taskText === 'string' ? taskText.length : 0,
           promptChars,
@@ -1386,7 +1520,21 @@ export function budgetResetError(item: any, subtask: any, cwd: any, artifactExis
  * the session replay cannot disagree. This wrapper only adds the two things
  * that need the environment: the strict/legacy switch and the file check.
  */
-function settleFromOutput(record: any, subtask: any, output: any, guard: SubtaskGuard, options: any) {
+function settleFromOutput(
+  record: any,
+  subtask: any,
+  output: any,
+  guard: SubtaskGuard,
+  options: any,
+  /*
+   * [2.2.8][T7] 两个可选入参：`precomputedVerdict` 让调用方把已经裁决过的
+   * 结果直接传入（unparsable 门在结算前判定过一次，纯函数重算是浪费也是
+   * 双源）；`extraEvidence` 只在「解析失败重试耗尽、按实受阻」时传入——
+   * 它把 attempt 摘要/声明产物在盘上的事实随 blocked 行留档。
+   */
+  precomputedVerdict?: any,
+  extraEvidence?: { artifacts: any[]; missingArtifacts: string[] } | null,
+) {
   /*
    * [1.11.0] 已经升级的请示不能被收尾正文覆盖。
    *
@@ -1397,7 +1545,7 @@ function settleFromOutput(record: any, subtask: any, output: any, guard: Subtask
    */
   const current = record.statuses.find((item: any) => item?.subtaskId === subtask.id)
   if (current?.closure === 'escalated') return { status: 'blocked', escalated: true }
-  const verdict = adjudicateResult({
+  const verdict = precomputedVerdict ?? adjudicateResult({
     output,
     strict: options.strictEvidence !== false,
     /*
@@ -1412,6 +1560,26 @@ function settleFromOutput(record: any, subtask: any, output: any, guard: Subtask
   const checked = checkArtifacts(verdict.artifacts, options.cwd, options.artifactExists)
   const escalated = verdict.status === 'blocked'
     && typeof verdict.question === 'string' && verdict.question.trim() !== ''
+  /*
+   * [2.2.8][T7] 解析失败重试耗尽后的受阻，不得退化成「零产出失败」。
+   *
+   * T4 实证：子会话工作已完成、交付物已在盘上，只是结果块 JSON 写坏了；
+   * 旧账本只留一句「结果块 JSON 非法」，主 Agent 无从知道产物存在，只能
+   * 级联下游重做。现在把 attempt 摘要/声明产物中**确实在盘上**的清单随
+   * blocked 行留档，并在 error 文案里给出「用 dsh_workplan_update 复核改判」
+   * 的出口。语义不变：非法 JSON 依旧不计 done，这里只是把事实说全。
+   */
+  const landedRefs = (extraEvidence?.artifacts ?? [])
+    .filter((item: any) => item?.exists === true)
+    .map((item: any) => String(item?.ref ?? ''))
+    .filter((ref: string) => ref !== '')
+  const reviewNote = landedRefs.length > 0
+    ? `；本次回报声明的产物清单已随本行留档（已在盘上：${landedRefs.slice(0, 6).join('、')}）——产物已在盘上，`
+      + '请先用 dsh_workplan_update 复核改判，勿按零产出处理，也不要级联阻断下游'
+    : ''
+  const settleError = typeof verdict.error === 'string' && verdict.error !== ''
+    ? `${verdict.error}${reviewNote}`
+    : verdict.error
   /*
    * [2.0.0] 自我学习闭环的出口：完成且带复盘证据时，立刻写入永久记忆。
    *
@@ -1445,11 +1613,15 @@ function settleFromOutput(record: any, subtask: any, output: any, guard: Subtask
     progress: 100,
     finishedAt: Date.now(),
     summary: truncate(lessonNote ? `${output}\n[自我学习] ${lessonNote}` : output, 3000),
-    error: verdict.error,
+    error: settleError,
     verification: verdict.verification,
     acceptance: verdict.acceptance,
-    artifacts: checked.artifacts.length > 0 ? checked.artifacts : undefined,
-    missingArtifacts: checked.missingArtifacts.length > 0 ? checked.missingArtifacts : undefined,
+    artifacts: checked.artifacts.length > 0
+      ? checked.artifacts
+      : (extraEvidence && extraEvidence.artifacts.length > 0 ? extraEvidence.artifacts : undefined),
+    missingArtifacts: checked.missingArtifacts.length > 0
+      ? checked.missingArtifacts
+      : (extraEvidence && extraEvidence.missingArtifacts.length > 0 ? extraEvidence.missingArtifacts : undefined),
     needs: verdict.needs.length > 0 ? verdict.needs : undefined,
     /*
      * [1.11.0] 文本兜底：子会话拿不到 escalate 工具时，结果块里的
@@ -1486,7 +1658,7 @@ function settleFromOutput(record: any, subtask: any, output: any, guard: Subtask
           }),
   }, guard)
   if (verdict.status === 'blocked') {
-    recordSubtaskError(record, subtask.id, escalated ? `待指示：${verdict.question}` : (verdict.error ?? '未完成'), guard)
+    recordSubtaskError(record, subtask.id, escalated ? `待指示：${verdict.question}` : (settleError ?? '未完成'), guard)
   } else if (checked.missingArtifacts.length > 0) {
     recordSubtaskError(record, subtask.id, `声明产物缺失：${checked.missingArtifacts.join('、')}`, guard)
   }
@@ -1552,11 +1724,65 @@ export function shouldRetryAttempt(error: any, attempt: any, remainingMs: any, i
   if (code === 'CHILD_NOT_COMPLETED') {
     return Number(remainingMs) > Number(idleTimeoutMs)
   }
+  /*
+   * [2.2.8][T7] 结果块解析失败与 CHILD_NOT_COMPLETED 走同一道闸（用户 2026-11-09
+   * 报告 T4 事故：非法 JSON 一次即 blocked，并级联阻断下游；子会话其实已完成
+   * 工作，只差一个合法回报）。回喂重报要有意义，必须还剩超过一个空闲窗口的
+   * 预算；「最多两次」由函数开头的 attempt 上限统一把关，不会无限循环。
+   */
+  if (code === 'EVIDENCE_UNPARSABLE') {
+    return Number(remainingMs) > Number(idleTimeoutMs)
+  }
+  return true
+}
+
+/*
+ * [2.2.7] 执行中断即时通知（用户 2026-11-09 报告的第二个缺陷）。
+ *
+ * 缺陷现场：部门专家执行中被中断（子会话报错、重试、no-ack、预算耗尽）时，
+ * 主会话直到整轮结束才随结果消息一并交代——期间用户只看到进度不动，无法区分
+ * 「在慢慢做」与「已经失败」，只能干着急。既有即时通道只覆盖 done
+ * （emitSubtaskDoneNotice）与到点预警；中断类事件全走 record.errors（只有
+ * 主 Agent 下次读记录才可见）。
+ *
+ * 这里补上同构的「中断即报」：中断一发生就往主会话写一条纯文本 user/message，
+ * 文案固定三段——发生什么（含错误码与真因摘录）、系统正在怎么处理（重试/收束/
+ * 待裁决）、对用户意味着什么（不是任务失败终局）。频率纪律：每个子任务整轮
+ * 至多 INTERRUPT_NOTICE_CAP 条，写失败只留档到 record.errors，绝不影响执行。
+ * 消息不带 workplan 标记，回放解析器按未知消息跳过（与完成通知同一纪律）。
+ */
+const INTERRUPT_NOTICE_CAP = 3
+export function announceSubtaskInterrupt(
+  record: any,
+  session: any,
+  subtaskId: string,
+  text: string,
+): boolean {
+  if (!record || !session || typeof session.append !== 'function') return false
+  const row = Array.isArray(record.statuses)
+    ? record.statuses.find((item: any) => item?.subtaskId === subtaskId)
+    : null
+  const sent = Number(row?.interruptNoticeCount ?? 0)
+  if (sent >= INTERRUPT_NOTICE_CAP) return false
+  const notice = `【dsh-workplan·执行中断】${truncate(String(text ?? '').replace(/\s+/g, ' ').trim(), 400)}`
+  try {
+    appendUserMessage(session, notice)
+  } catch (error: any) {
+    record.errors = [...(record.errors ?? []), `${subtaskId} 中断通知写入失败：${truncate(String(error?.message ?? error), 200)}`].slice(-20)
+    return false
+  }
+  if (row) row.interruptNoticeCount = sent + 1
   return true
 }
 
 async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, options: any) {
   const { parentSignal, deadline, modelSelection, conversationContext = '', child, guard } = options
+  /*
+   * [2.2.7] 中断即报的目标会话：与 noticeChannel/finaliseNotice 同一取值链，
+   * 拿不到就安静跳过（通知是观测设施，不是交付物）。
+   */
+  const interruptSession = () => options.session ?? options.agent?.session
+    ?? findSession(ctx, String(record?.plan?.sessionId ?? ''))
   let lastError: any = null
   /*
    * [1.10.6] A retry that starts after a *ceiling* timeout is a second attempt
@@ -1751,6 +1977,34 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
         } catch {
           lessonsBrief = ''
         }
+        /*
+         * [2.2.7] 子会话档位同样要过模型能力这道闸：计划里的 low / medium /
+         * high / xhigh / max 五档值是规划器按通用五档规则写的（[2.2.7][T4]；旧
+         * 三档计划中的 low/high/max 属五档子集，回放零迁移），可子会话用的就是
+         * 主链路模型（modelSelection）。
+         * 若该模型不声明这些档（qwen 只声明 low/medium/xhigh），照发必被宿主
+         * 在请求前抛 UNSUPPORTED_REASONING_EFFORT——派发期即中断。查询不可用
+         * 时保持旧行为；查询成功后钳制到等效档，空清单则不发送该字段。
+         */
+        const requestedChildEffort = typeof subtask.reasoningEffort === 'string'
+          && REASONING_EFFORTS.includes(subtask.reasoningEffort)
+          ? subtask.reasoningEffort
+          : DEFAULT_REASONING_EFFORT
+        /*
+         * [2.2.7] 能力不可查询时保持同步路径：派发链上任何多余的 await 微任务都会
+         * 把 awaiting 通道写入推晚一个 tick（notice-channel 运行时集成用例即因此
+         * 断言失败）。只有真要向宿主查询时才引入这一次等待。
+         */
+        const effortQueryable = Boolean(
+          ctx.llm && typeof ctx.llm.resolveModelInfo === 'function'
+          && modelSelection?.provider && modelSelection?.model,
+        )
+        const childEffortSupport = effortQueryable
+          ? await resolveSupportedEfforts(ctx.llm, modelSelection.provider, modelSelection.model, parentSignal)
+          : null
+        const childEffort = childEffortSupport === null
+          ? requestedChildEffort
+          : (clampEffortToSupported(requestedChildEffort, childEffortSupport) ?? '')
         activation = await ctx.subagents.startActivation({
           provider: 'spawn',
           label: `${subtask.department}:${subtask.id} ${subtask.title}`.slice(0, 120),
@@ -1816,10 +2070,8 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
               ...(modelSelection?.provider && modelSelection?.model
                 ? { provider: modelSelection.provider, model: modelSelection.model }
                 : {}),
-              reasoningEffort: typeof subtask.reasoningEffort === 'string'
-                && REASONING_EFFORTS.includes(subtask.reasoningEffort)
-                ? subtask.reasoningEffort
-                : DEFAULT_REASONING_EFFORT,
+              // [2.2.7] '' = 模型无 reasoning 元数据 ⇒ 不发送，避免派发期即中断。
+              ...(childEffort ? { reasoningEffort: childEffort } : {}),
             },
             maxDepth: 1,
           },
@@ -1911,6 +2163,9 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
             summary: `未完成：${message}`,
           }, guard)
           recordSubtaskError(record, subtask.id, message, guard)
+          // [2.2.7] 中断即报：no-ack 是「根本没启动」，不是「做失败了」。
+          announceSubtaskInterrupt(record, interruptSession(), subtask.id,
+            `子任务 ${subtask.id}（${subtask.title}）${message}；性质：子会话疑似根本没启动，不是执行失败；处理：已中止该子会话并把本行置为受阻（blockedKind=no-ack），主会话可决定重新下发指示或放弃该行，其余子任务不受影响。`)
           if (!child.controller.signal.aborted) {
             child.controller.abort(new PlanError(message, 'CHILD_NO_ACK', { subtaskId: subtask.id }))
           }
@@ -2059,6 +2314,47 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
         }
         if (!output) throw new PlanError('子 Agent 没有返回文本结果', 'EMPTY_CHILD_OUTPUT')
         /*
+         * [2.2.8][T7] 结果块解析失败 = 与 CHILD_NOT_COMPLETED 同路径的有界回喂重试。
+         *
+         * T4 事故（用户 2026-11-09 报告）：子会话工作完成、交付物已在盘上，只是
+         * 结果块 JSON 写坏；旧实现在这里一次即判 blocked，并级联阻断下游——
+         * 侧栏（子会话实时活动态）与账本（结算态）出现十几分钟的可见错位。
+         * 现在结算前先用纯函数裁决一次（不写状态、不留双源）：
+         *  - unparsable 且还有回喂意义（`shouldRetryAttempt` 与 CHILD_NOT_COMPLETED
+         *    同一道闸；最多两次由 attempt 上限统一把关，不会无限循环）→ 抛
+         *    EVIDENCE_UNPARSABLE，由下方 catch 把解析器具体错误回喂同一子会话，
+         *    要求「修正结果块后重新回报，勿重做已完成工作」；
+         *  - 重试后仍 unparsable（或预算不再够一次回喂）→ 按实受阻，随行附上
+         *    attempt 摘要声明且确核在盘的产物清单，提示主 Agent 用
+         *    `dsh_workplan_update` 复核改判。
+         * 结算严格性不变：非法 JSON 依旧绝不计 done——只修恢复路径。
+         */
+        const settleRow = record.statuses.find((item: any) => item?.subtaskId === subtask.id)
+        const settleVerdict = settleRow?.closure === 'escalated'
+          ? null
+          : adjudicateResult({
+            output,
+            strict: options.strictEvidence !== false,
+            expectedAcceptance: Array.isArray(subtask?.acceptance) ? subtask.acceptance : [],
+          })
+        if (settleVerdict && settleVerdict.verification === 'unparsable') {
+          const unparsableLanded = probeInterruptedArtifacts(output, subtask, options.cwd, options.artifactExists)
+          const unparsableError = new PlanError(
+            `结果块无法解析，本次回报不能结算（工作本身不计失败）：${truncate(String(settleVerdict.error ?? ''), 600)}`
+              + (unparsableLanded.length > 0
+                ? `；上一次回报声明且已核到在盘的产物：${unparsableLanded.slice(0, 6).join('、')}——请勿重做已完成的工作，只修正结果块为合法 JSON 后重新完整回报`
+                : '；请修正结果块为合法 JSON（引号、逗号、括号成对，标记成对出现）后重新回报'),
+            'EVIDENCE_UNPARSABLE',
+            { subtaskId: subtask.id },
+          )
+          if (shouldRetryAttempt(unparsableError, attempt, deadline - Date.now(), idleTimeoutMs)) {
+            throw unparsableError
+          }
+          settleFromOutput(record, subtask, output, guard, options, settleVerdict,
+            probeInterruptedEvidence(output, subtask, options.cwd, options.artifactExists))
+          return
+        }
+        /*
          * [1.7.0] Evidence decides the verdict.
          *
          * The old rule was "not BLOCKED => done", so a child that reported
@@ -2067,7 +2363,7 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
          * is the single deterministic table; `settleFromOutput` adds the
          * environment-dependent artifact check.
          */
-        settleFromOutput(record, subtask, output, guard, options)
+        settleFromOutput(record, subtask, output, guard, options, settleVerdict ?? undefined)
         return
       } catch (error: any) {
         lastError = error
@@ -2095,6 +2391,9 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
             `${subtask.id}: 第 ${attempt} 次执行失败（${lastFailure.code}），已带上失败原因重试`,
           ].slice(-20)
           writeSubtaskStatus(record, subtask.id, { progress: 15 }, guard)
+          // [2.2.7] 中断即报：用户当下就知道「谁被打断、为什么、系统正在怎么处理」。
+          announceSubtaskInterrupt(record, interruptSession(), subtask.id,
+            `子任务 ${subtask.id}（${subtask.title}）第 ${attempt} 次执行被打断（${lastFailure.code}：${truncate(lastFailure.message, 140)}）；处理：插件已把失败原因回喂同一子会话并自动重试（第 ${attempt + 1} 次），任务整体仍在推进，这不是最终失败。`)
           continue
         }
         /* [1.10.3] CHILD_TIMEOUT 现在也会在预算充足时重试，所以「预算不足未重试」这条说明对它同样成立。 */
@@ -2125,7 +2424,7 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
       return interruptedFlag ? { interrupted: true } : undefined
     }
     const message = describeError(lastError ?? new Error('未知失败'))
-    writeSubtaskStatus(record, subtask.id, {
+    const finalBlocked = writeSubtaskStatus(record, subtask.id, {
       status: 'blocked',
       closure: 'blocked',
       blockedKind: 'failed',
@@ -2144,6 +2443,15 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
         : {}),
     }, guard)
     recordSubtaskError(record, subtask.id, message, guard)
+    // [2.2.7] 中断即报：重试耗尽/不可重试走到终点时立即说清本质原因与后续处置，
+    // 不等整轮结果消息。
+    if (finalBlocked && !guard.timedOut && !parentSignal.aborted) {
+      const landed = interruptedEvidence?.artifacts?.length
+        ? `已核到 ${interruptedEvidence.artifacts.length} 个产物在盘上：${interruptedEvidence.artifacts.slice(0, 3).join('、')}`
+        : '子会话未留下已核实的在盘产物'
+      announceSubtaskInterrupt(record, interruptSession(), subtask.id,
+        `子任务 ${subtask.id}（${subtask.title}）已受阻：${truncate(message, 160)}；产物线索：${landed}；处理：本行不再自动重试，整轮结果会如实列为未完成，由主会话据实决定续跑/改判/向你说明——期间其余子任务继续执行。`)
+    }
     return interruptedFlag ? { interrupted: true } : undefined
   } catch (error) {
     const message = describeError(error)
@@ -2166,6 +2474,9 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
       // The status list itself is unusable; the outer dispatcher records the error.
     }
     recordSubtaskError(record, subtask.id, message, guard)
+    // [2.2.7] 中断即报：执行链路自身出异常同样不能对用户沉默。
+    announceSubtaskInterrupt(record, interruptSession(), subtask.id,
+      `子任务 ${subtask.id}（${subtask.title}）执行过程发生未预期异常：${truncate(message, 160)}；处理：本行已置为受阻并如实留档，主会话将在结果消息后据实决定续跑/改判，不会伪造完成。`)
   } finally {
     /*
      * [2.2.0][T3/O-2a] 结算点唯一的通道收束入口（成功/受阻/待指示/中断都走这里）。
@@ -2659,7 +2970,15 @@ export function buildRoundResult(record: any, sessionId: any, limits: any) {
      * `deliveryReady` 门禁读同一组输入（否则「结果说完成、present 被拒」）。
      */
     changePending: record.changeRequest?.status === 'pending',
-    reportPending: record.reportPending === true,
+    /*
+     * [2.2.9][T3][M5] 冻结值与载荷同源：finishRound 已保证先 markReported
+     * 再 build，这里若仍读 `record.reportPending` 可变标志，标志可能停在
+     * 上一次失败的旧值，导致结果消息文本（plan.ts buildResultSummary 判
+     * 「证据未通过（reportPending）」）与同一消息内 statuses 的门禁判定互相
+     * 矛盾——正是震荡观感在消息侧的残留。改读派生函数后，冻结的 S3 恒等于
+     * 载荷 statuses 的事实，摘要、指令与 present 门禁读到同一结论。
+     */
+    reportPending: deriveReportPending(record),
   })
 }
 
@@ -3285,7 +3604,8 @@ function serialisePlan(record: any, session: any) {
      */
     planRevision: Number(record.planRevision ?? 0),
     changeRequest: record.changeRequest ?? null,
-    reportPending: record.reportPending === true,
+    // [2.2.9][T3][M4.1] 看板观测与门禁同源（纯派生），不再读可变标志。
+    reportPending: deriveReportPending(record),
     /*
      * Liveness and resume bookkeeping. Without these the dashboard could not
      * tell a slow-but-alive child from a wedged one, and the model could not
@@ -3592,14 +3912,60 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
        * `dsh_workplan_update` used to live only in the live cache, so a refresh
        * reverted the dashboard to the child's original verdict. The durable
        * `workplan-update` message is small and append-only, so replay is just
-       * "apply it when its turn comes"; a lower revision never overwrites a
-       * newer one (see `applyResultStatuses`).
+       * "apply it when its turn comes". [2.2.9][T2][mono-gate] used to claim a
+       * protection that only existed on the result-message path
+       * (`applyResultStatuses`): a durable update with a lower revision could
+       * still overwrite a newer settled row. The gate below now enforces it —
+       * a strictly-lower revision never overwrites; equal revision passes
+       * (dedup for the same write lives in `appliedUpdates`).
        */
       const update = parseUpdateMessage(event.data)
       if (update && typeof update.planId === 'string' && typeof update.subtaskId === 'string') {
         const snap = snapshots.get(update.planId)
         if (snap) {
           try {
+            /*
+             * [2.2.9][T2][mono-gate] 结算事件写入单调性闸（M1，症状①主闸）。
+             *
+             * 事故形状（wp-215ed52f T5 实证）：结算 rev16 已落 durable 结果消息，
+             * 主 Agent 基于落后的 live 快照做 handoff 答复，追加了 rev9/10 的
+             * workplan-update（seq 更晚）。回放按 seq 升序，后到的旧事件无条件
+             * 覆盖先落盘的新结算——「后到即覆盖」与「revision 单调、已结算内容
+             * 不可回退」的业务不变量正面冲突。
+             *
+             * 闸语义（与 plan.ts applyResultStatuses 的 result 族闸对齐）：
+             *  - evRev < rowRev → 回退事件：拒绝整事件语义（含 3936 一带的直写
+             *    白名单与 extendMs 合成，防止旧事件的状态性字段漏进新行），只有
+             *    handoffs 走逐项单调合并（M2：答复是字段级增量，新登记永远合法、
+             *    answered/closed 终态永不回退）；
+             *  - 仍必须 appliedUpdates.set：否则同一次改判的 tool/result 配对
+             *    记录（patch 不带 rev，applyStatus 强算 current+1）会绕过本闸从
+             *    第二通道把旧内容灌回；
+             *  - evRev === rowRev → 前向通过（等 rev 补写是合法场景；同一条写入
+             *    的重复应用由既有 appliedUpdates/1.8.11 去重通道拦截）；
+             *  - evRev 为 null（旧格式无 revision 字段 / 非整数）→ 不猜、放行，
+             *    向后兼容（applyStatus 尾部按 current+1 单调抬号）。
+             */
+            const gateRow = snap.statuses.find((item: any) => item?.subtaskId === update.subtaskId)
+            const rowRev = Number(gateRow?.revision ?? 0)
+            const evRev = Number.isInteger(update.revision) ? Number(update.revision) : null
+            if (gateRow && evRev !== null && evRev < rowRev) {
+              if (Array.isArray(update.handoffs)) {
+                const merged = mergeHandoffEntriesByUpdatedAt(gateRow.handoffs, update.handoffs)
+                if (merged.changed) gateRow.handoffs = merged.value
+              }
+              console.warn(
+                '[dsh-workplan] monotonicity gate skipped a stale replayed update: '
+                + `${String(update.planId)}/${String(update.subtaskId)} `
+                + `(event rev ${evRev} < row rev ${rowRev}); row content kept, `
+                + 'handoff entries merged monotonically',
+              )
+              appliedUpdates.set(updateKey(update.planId, update.subtaskId), {
+                seq: Number(event.seq ?? 0),
+                status: String(update.status ?? ''),
+              })
+              continue
+            }
             snap.statuses = applyStatus(snap.statuses, update.subtaskId, {
               /*
                * handoff 的 durable 记录携带的是状态快照，不是一次状态迁移。
@@ -3633,6 +3999,31 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
               timeoutMs: update.timeoutMs,
               updatedBy: 'agent',
             })
+            /*
+             * [2.2.9][T3][M4] 回放侧人工改判的回报闭环——与 live 路径（改判
+             * 工具在 durable 落盘成功后 markReported）配成同一条不变量：
+             * durable 的 workplan-update 携带显式 status:'done' 时，这条消息
+             * 本身就是主 Agent 亲笔写进会话日志的「完成已回报」证据。旧日志
+             * 嵌的是 closure:'done'（2.2.9 之前的口径），回放在此一并升级为
+             * reported；report.ref 指向这条 durable 消息的 seq——引用真实存在、
+             * 可复核。不升 handoffs 快照消息（它们的 status 未被应用，handoff
+             * 记录不是一次回报），子结算行的回报仍须来自结果消息或 pre-step
+             * 自愈（M4.2）。live 与重建由此在同一份日志上逐行同判，
+             * 「可交付↔门禁未放行」的震荡失去立足点。
+             */
+            if (update.status === 'done' && update.handoffs === undefined) {
+              const healedRow = snap.statuses.find((item: any) => item?.subtaskId === update.subtaskId)
+              if (healedRow?.status === 'done' && healedRow?.closure === 'done') {
+                healedRow.closure = 'reported'
+                healedRow.reportedAt = Number(update.at) || Date.now()
+                healedRow.report = {
+                  state: 'sent',
+                  at: Number(update.at) || Date.now(),
+                  ref: `${String(update.planId)}:replay:${String(Number(event.seq ?? 0))}`,
+                  turn: null,
+                }
+              }
+            }
             /*
              * [2.2.0][T4/O-3b][E] 柔性时长协商新字段回放（E 项，runtime.ts 2931 一带）。
              *
@@ -3676,7 +4067,13 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
             console.warn(
               '[dsh-workplan] 回放忽略一条不合法的历史改判：'
               + `${String(update?.planId ?? '')}/${String(update?.subtaskId ?? '')}：`
-              + `${error instanceof Error ? error.message : String(error)}`,
+              + /*
+                 * [2.2.9][T3][M4.3] 可诊断化：旧快照携带的 closure/revision 与被保留
+                 * 的行现状一并带出，「改判丢失」不再只有一句 error.message。
+                 */
+                `event rev=${String(update?.revision ?? 'none')} closure=${String(update?.closure ?? 'none')} `
+                + `vs row rev=${String(snap.statuses.find((item: any) => item?.subtaskId === update?.subtaskId)?.revision ?? 'none')}：`
+                + `${error instanceof Error ? error.message : String(error)}`,
             )
           }
         }
@@ -3864,13 +4261,19 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
     planRevision: chosen.planRevision,
     changeRequest: chosen.changeRequest,
     /*
-     * [1.11.0] 只把「本轮完成、还没回报」算作待回报：`closure:'done'` 是
-     * 1.11.0 的显式中间态。旧日志的 done 行没有 closure（null），它本来就
-     * 已经通过结果消息回报过，若用 `!== 'reported'` 判定，升级后每一份
-     * 1.10.6 的历史计划都会被判成「未回报」而永久不可交付。
+     * [2.2.9][T3][M4.2] 重建记录必须带 `resultWritten`。
+     *
+     * 事故实证（wp-215ed52f 症状②第三拍）：pre-step 回报自愈的条件是
+     * `reportPending && resultWritten`，而重建对象从不携带该字段（恒
+     * undefined）→ 条件永不成立 → 重启后派生出的「未回报」态永远无法
+     * 自愈，只能靠幂等复核+人工改判收敛——这正是「震荡三次」的机制解释。
+     * durable 会话里存在本轮结果消息（resultSeen）就是「已写入」的事实，
+     * 用它补齐后自愈在重建态可达：重启 → reportPending 派生 true →
+     * pre-step 幂等 markReported → 门禁一次收敛。
      */
-    reportPending: statuses.some((item: any) =>
-      item?.status === 'done' && item?.closure === 'done'),
+    resultWritten: resultSeen,
+    // [2.2.9][T3][M4.1] 派生口径与门禁/看板/冻结单源（deriveReportPending）。
+    reportPending: deriveReportPending({ statuses }),
   }
 }
 
@@ -4194,14 +4597,20 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       /*
        * [1.11.0] 回报自愈（契约 §7.3 B4）：上一轮结果消息已写入，但回报标记
        * 写失败/进程中断时，下一步 pre-step 幂等补齐，不重复追加上下文。
+       *
+       * [2.2.9][T3][M4.1/M4.2] 判定改读派生谓词 `deriveReportPending`：live
+       * 记录的标志只是审计镜像，自愈若读镜像，镜像过期时该自愈的不自愈、
+       * 不该自愈的白跑一遍。配合重建对象补上的 `resultWritten`（M4.2，
+       * 此前该字段在重建态恒 undefined、条件永不成立，自愈对重启后的会话
+       * 形同虚设——「震荡三次靠人工收敛」的第三拍），重启 → 派生 true →
+       * 首个 pre-step 幂等 markReported → 门禁一次收敛，无需人工改判。
        */
       const session = payload.agent?.session
       const known = session ? state.records.get(session.id) : null
-      if (known?.plan && known.reportPending === true && known.resultWritten === true) {
+      if (known?.plan && deriveReportPending(known) && known.resultWritten === true) {
         const changed = markReported(known, session, `${known.plan.planId}:${known.dispatchedAt ?? 0}`)
         if (changed > 0) {
-          known.reportPending = (known.statuses ?? []).some((item: any) =>
-            item?.status === 'done' && item?.closure === 'done')
+          known.reportPending = deriveReportPending(known)
         }
       }
       return await maybePlan(ctx, state, payload, downstream, { ...options, limits })
@@ -4696,6 +5105,19 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         instruction: writtenRow?.instruction,
         instructionSeq: writtenRow?.instructionSeq,
       }))
+      /*
+       * [2.2.9][T3][M4] 人工改判的这条 durable update 消息本身就是「完成已
+       * 回报」的会话证据（主 Agent 亲笔写进会话日志），落盘成功后立即闭环
+       * closure done→reported，否则派生闸会把改判行当成未回报而永久拦死
+       * ——改判→present 是主 Agent 的正常工作流（wp-215ed52f T5/R1-1 实证）。
+       * append 失败时不进此支：行留在 closure:'done'，门禁 fail-closed，
+       * 绝不留下无证据的已回报（与 finishRound 同一铁律）。回放侧对
+       * status:'done' 的改判消息做同样的升级（见 reconstructFromSession），
+       * live 与重建在同一份日志上逐行同判——W2 分叉就此封死。
+       */
+      if (status === 'done') {
+        markReported(record, session, `${record.plan.planId}:${record.dispatchedAt ?? 0}`, subtaskId)
+      }
     } catch (error) {
       pushRecordError(record, error)
     }
@@ -5354,14 +5776,19 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
        * 绝不留下没有证据的 reported。
        */
       const before = (record.statuses ?? []).map((item: any) => ({ ...item }))
-      const needReport = before.filter((item: any) => item?.status === 'done' && item?.closure !== 'reported').length
-      // ^ 本轮结算：done 且未到 reported 的行（含旧日志的 null）都算待回报。
-      const reported = markReported(record, session, ref)
+      markReported(record, session, ref)
       const resultMessage = buildRoundResult(record, session.id, limits)
       try {
         appendUserMessage(session, resultMessage)
         record.resultWritten = true
-        record.reportPending = needReport > 0 && reported < needReport
+        /*
+         * [2.2.9][T3][M4] 标志自此只是审计镜像，一律按派生函数回填。
+         * 旧公式 `needReport > 0 && reported < needReport` 自带第三套口径
+         * （把旧日志 closure=null 的行也算待回报），与门禁/重建/自愈使用的
+         * 严格 `closure==='done'` 判据并存——多套判据互不一致正是震荡的
+         * 温床。收敛后镜像与 statuses 事实恒等，任何读取方都对得上。
+         */
+        record.reportPending = deriveReportPending(record)
       } catch (error) {
         // 消息没写成功 ⇒ 回报没有证据：把状态回滚成写之前的快照。
         record.statuses = before
@@ -5373,10 +5800,11 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
          */
         pushRecordError(record, `写入结果消息失败：${error instanceof Error ? error.message : String(error)}`)
         /*
-         * [1.11.0] 写失败时不能假装回报过。保留 reportPending，让下一次
-         * pre-step 或下一轮 finishRound 幂等补齐（契约 §7.3 B4）。
+         * [1.11.0] 写失败时不能假装回报过。回滚后镜像同步为回滚事实
+         * （done 行回到 closure:'done' ⇒ 派生 true），交下一次 pre-step
+         * 自愈或下一轮 finishRound 幂等补齐（契约 §7.3 B4）。
          */
-        record.reportPending = true
+        record.reportPending = deriveReportPending(record)
       }
     } else {
       /*
@@ -5386,8 +5814,9 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       const pending = (record.statuses ?? []).some((item: any) =>
         item?.status === 'done' && item?.closure !== 'reported')
       if (pending) {
-        const changed = markReported(record, session, ref)
-        if (changed > 0) record.reportPending = false
+        markReported(record, session, ref)
+        // [2.2.9][T3][M4] 镜像按派生回填：部分标记失败时不谎报「已回报」。
+        record.reportPending = deriveReportPending(record)
       }
     }
     /*
@@ -5782,6 +6211,10 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         escalationSeq: revision,
         revision,
       }))
+      // [2.2.7] 中断即报：请示同样要让用户当下看到「有人卡在哪、等什么决定」，
+      // 结构化 update 消息是给回放/主 Agent 的，这条纯文本是给用户的。
+      announceSubtaskInterrupt(record, parent, row.subtaskId,
+        `子任务 ${row.subtaskId} 执行中请求指示：${truncate(question, 160)}；性质：等待主会话拍板，不是执行失败；处理：主会话答复后用 dsh_workplan_instruct 下发决定，该行将恢复执行。`)
     } catch (error) {
       pushRecordError(record, error)
     }
@@ -6792,7 +7225,8 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
           statuses: snapshot.statuses,
           attempt: book.count,
           changePending: record.changeRequest?.status === 'pending',
-          reportPending: record.reportPending === true,
+          // [2.2.9][T3][M4.1] 强制收尾提示与门禁同源（纯派生）。
+          reportPending: deriveReportPending(record),
         }),
         {
           kind: 'workplan-continue',

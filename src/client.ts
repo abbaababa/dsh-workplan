@@ -1733,7 +1733,12 @@ window.__ModuleLoader__.load({
       const instructionOverdue = item?.instructionOverdue === true
       const tone = closure === 'replanned' ? 'idle' : toneOfStatus(status)
       const pct = clampPct(item?.progress ?? 0)
-      const effort = typeof subtask?.reasoningEffort === 'string' && ['low', 'high', 'max'].includes(subtask.reasoningEffort)
+      /*
+       * [2.2.7][T2/五档] UI Pill 白名单：与 plan.ts 的 REASONING_EFFORTS
+       * （low / medium / high / xhigh / max）逐值同步。浏览器包无法 import
+       * 宿主常量，此处为唯二事实源之一——漏改会让新档位在任务卡片上静默消失。
+       */
+      const effort = typeof subtask?.reasoningEffort === 'string' && ['low', 'medium', 'high', 'xhigh', 'max'].includes(subtask.reasoningEffort)
         ? subtask.reasoningEffort
         : null
       return h('div', { className: `dsh-wp-subtask dsh-wp-tone-${tone}` },

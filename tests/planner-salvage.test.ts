@@ -390,4 +390,30 @@ test('规划器停止继承：主 Agent low/high/max 一律得默认 max；旋�
   const invalidKnob = await run('low', 'ultra')
   assert.equal(invalidKnob.effort, 'max', '非法旋钮值不得发给模型，必须回落 max')
   assert.equal(invalidKnob.telemetry.reasoningEffortSource, 'default-max')
+
+  /*
+   * [2.2.7][T5/五档] 规划器旋钮五档化（D3 落地）：白名单由 plan.ts REASONING_EFFORTS
+   * 常量驱动，medium/xhigh 现为合法旋钮值；大小写归一（'MEDIUM'→medium）只在 env
+   * 路径做，非法变体仍须回落 max。fakeCtx 的 llm 不暴露 resolveModelInfo ⇒
+   * 钳制保持旧行为直发，断言即旋钮原值。
+   */
+  for (const knob of ['low', 'medium', 'high', 'xhigh', 'max']) {
+    const r = await run('max', knob)
+    assert.equal(r.effort, knob, `合法旋钮 ${knob} 必须原样透传给模型`)
+    assert.equal(r.telemetry.reasoningEffortSource, 'env', `旋钮 ${knob} 的来源标记必须是 env`)
+  }
+
+  const mediumCase = await run('max', 'MEDIUM')
+  assert.equal(mediumCase.effort, 'medium', '大写合法档不得被大小写打成非法值')
+  const xhighSpaced = await run('max', ' xhigh ')
+  assert.equal(xhighSpaced.effort, 'xhigh', '前后空白的合法档必须 trim 后命中白名单')
+
+  for (const bad of ['foo', 'xhighX', 'medium-high', 'MAX']) {
+    const r = await run('low', bad)
+    // 'MAX' 归一后是合法 max；其余非法回落默认 max——两者都不许把乱值发给模型。
+    assert.ok(['max'].includes(r.effort), `非法/边界旋钮 ${bad} 不得原样发给模型：${r.effort}`)
+    if (bad !== 'MAX') {
+      assert.equal(r.telemetry.reasoningEffortSource, 'default-max', `旋钮 ${bad} 非法必须标为默认档`)
+    }
+  }
 })

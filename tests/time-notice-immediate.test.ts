@@ -229,6 +229,11 @@ test('A4：子任务全部未完成时不存在「已完成」措辞的通知', 
     [],
     '待实现（O-1a/A4）：子任务全部未完成时，不得出现任何「已完成」措辞的即时通知（方案 §1 ① A4）',
   )
-  const completionNotices = noticeTexts(session).filter((text) => /T[12]/.test(text))
+  const completionNotices = noticeTexts(session).filter((text) => /T[12]/.test(text) && !text.includes('【dsh-workplan·执行中断】'))
   assert.deepEqual(completionNotices, [], 'A4：没有任何子任务完成，就不应有任何子任务完成通知')
+  // [2.2.7] 中断即报：受阻/失败的通知必须存在且如实交代原因与处理（这正是 A4 的镜像要求：
+  // 不谎报完成，但必须如实报告中断）。
+  const interruptNotices = noticeTexts(session).filter((text) => text.includes('【dsh-workplan·执行中断】'))
+  assert.ok(interruptNotices.length > 0, '全部失败时用户必须即时收到中断通知，不得沉默等整轮')
+  assert.ok(interruptNotices.every((text) => !/已完成/.test(text)), '中断通知不得出现「已完成」措辞')
 })

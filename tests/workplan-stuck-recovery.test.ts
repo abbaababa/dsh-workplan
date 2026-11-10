@@ -355,7 +355,10 @@ test('a stalled child blocks only itself, then a re-dispatch resumes the plan', 
   assert.equal(record.phase, 'done')
   assert.equal(record.resumeCount, 1)
   assert.ok(record.errors.some((line: string) => /第 1 次续跑/.test(line)))
-  assert.equal(session.events.length, 2, 'each dispatch writes one durable result message')
+  // [2.2.7] 中断即报新增【dsh-workplan·执行中断】纯文本通知（stalled 子任务会触发）；
+  // 本断言只数「轮级结果消息」：排除中断通知后，两次派发仍各写 1 条。
+  const resultOnly = (ev: any) => !String(ev.data?.content?.[0]?.text ?? '').includes('【dsh-workplan·执行中断】')
+  assert.equal(session.events.filter(resultOnly).length, 2, 'each dispatch writes one durable result message')
 })
 
 test('re-dispatching a blocked plan with no resume budget left fails loudly', async () => {
