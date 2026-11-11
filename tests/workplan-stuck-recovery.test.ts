@@ -357,7 +357,12 @@ test('a stalled child blocks only itself, then a re-dispatch resumes the plan', 
   assert.ok(record.errors.some((line: string) => /第 1 次续跑/.test(line)))
   // [2.2.7] 中断即报新增【dsh-workplan·执行中断】纯文本通知（stalled 子任务会触发）；
   // 本断言只数「轮级结果消息」：排除中断通知后，两次派发仍各写 1 条。
-  const resultOnly = (ev: any) => !String(ev.data?.content?.[0]?.text ?? '').includes('【dsh-workplan·执行中断】')
+  // [2.3.10][T2] 派发前预告【派发预告】是用户要求1新增的会话 notice（同一 planId
+  // 幂等只发一次），不是轮级结果消息——按本断言本意一并排除。
+  const resultOnly = (ev: any) => {
+    const text = String(ev.data?.content?.[0]?.text ?? '')
+    return !text.includes('【dsh-workplan·执行中断】') && !text.includes('【派发预告】') && !text.includes('【规划预告】')
+  }
   assert.equal(session.events.filter(resultOnly).length, 2, 'each dispatch writes one durable result message')
 })
 

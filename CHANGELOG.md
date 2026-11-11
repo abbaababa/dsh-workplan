@@ -1,3 +1,15 @@
+## 2.5.0 — 2026-11-11
+
+- **部门负责人再分配权限根因修复（用户要求 1）**：2.3.9 已交付 `dsh_workplan_delegate` 工具，但二级任务书 `buildChildPrompt` 的执行要求仍写着「不要派生新的 Agent」「你没有派发权限」——负责人同时收到「必须再分配」（llmRulesBrief）与「没有派发权限」（执行要求）两套矛盾指令，普遍不敢行使再分配。本版把禁令改写为精确边界：负责人**拥有本部门内再分配权限**（dsh_workplan_delegate，先 review 后 dispatch），禁令只针对主计划派发、重启/安装与第四层派生；并新增「本部门再分配权限与推理等级配置」授权段。规划器提示词同步改写（旧「子任务由子 Agent 独立执行：它们没有派发权限」→ 负责人牵头 + 部门内再分配权限）。
+- **负责人配置整体推理等级并全程贯穿（用户要求 2）**：`consolidation.taskReasoningEffort` 新字段——负责人按本任务复杂度配置整体等级，经五档白名单校验（非法拒绝 `DELEGATE_TASK_EFFORT_INVALID`）与模型家族集合钳制留痕后，写入状态行 `effortOverride`（applyStatus 消毒 + durable workplan-update 回放，刷新/重启不丢；尝试重置不清除——它是任务级配置不是尝试痕迹）。派发链每次激活（首发/重试/续跑）经新纯函数 `resolveTaskEffort` 单一判据读档：effortOverride 优先于规划器档位，缺失才回落默认。下级未单独配档时继承整体等级（旧默认无条件取家族最高档，简单任务烧最高档的问题一并修复；整体也未配置则回落 low）。
+- **分解更简单、多人承担（用户要求 3）**：规划器提示词新增硬规则——每个子任务单一目标、单一主产物、可独立验收，执行细节下沉到部门内分工；负责人任务书与 delegate 工具描述要求每位下级只承担一项简单工作，expert 与 member 各至少 1 名、最多 6 人共同承担。
+- **版本统一 2.5.0（最终定版，含版本统一说明）**：原「2.5.1」仅为版本标签改动、无任何功能差异，按用户最终指令定版 2.5.0 并入本条目，不再单独设节。版本号逐处统一为 2.5.0：package.json / package-lock.json×2（顶层 version 与 packages[""].version）/ src/host.ts meta / lib/ 编译产物（lib/host.js 等，由 npm run build 再生）/ tests/fixtures/tool-surface.json / README 三语徽章与安装行（三语徽章此前滞留 2.3.9，一并修正）/ 版本回归断言（tests/version-sync.test.ts 一致性断言、tests/workplan-250-head-delegation.test.ts 要求5 版本断言）。本轮按用户要求全程禁用插件执行，重新启用需用户手工重启 dsh web。
+- 新增 `tests/workplan-250-head-delegation.test.ts` 回归；既有字段与校验原样，旧计划零迁移。生效需 `npm run build` 后由用户手工重启 dsh web（宿主侧无热加载）。
+
+## 2.3.10 — 2026-11-11
+
+- **分配前会话内耗时预告（用户要求1，T2 最小机制补丁）**：此前耗时预告只有专家开工后的 timeNotice 上报，规划前与派发前会话内零输出。本版在三个落点追加机制（均为追加式 notice/提示词，不改任何 schema 与工具参数/输出）：P1 `runtime.ts maybePlan` 在 runPlanner 之前经唯一合规写入器 `appendUserMessage` 发【规划预告】——预估口径=单次规划窗口（normalisePlannerWindow 同源解析，含配置/环境变量覆盖）一半向上取整、至少 1 分钟，默认窗口 300s → 约 3 分钟，文案带窗口/重试口径与 O-5b「仅供参考，非承诺」标注；P2 `runtime.ts dispatchTool` 在通过全部拒绝闸门后、启动任何子 Agent 之前发【派发预告】——复用 `estimatePlanMinutes` 下界估算（estimateMinutes+并发度），按 planId 幂等守卫（重复派发/续跑/join 在途回合不刷屏，重规划新 planId 自然重新预告）；P3 `host.ts PROMPT_SECTION` 追加主 Agent 硬规则「调用 dsh_workplan_dispatch 前必须先在会话中告知用户预估耗时（含数值与单位分钟、非承诺标注）」。文案纯函数 `planningEstimateMinutes` / `buildPlanningPreAnnouncement` / `buildDispatchPreAnnouncement` 落 `plan.ts`，新增 `tests/preannounce-2-3-10.test.ts` 6 例回归；`workplan-stuck-recovery` 的轮级结果消息计数按该用例本意排除新增预告通知。estimateMinutes / reasoningEffort 等既有字段与校验原样，旧计划零迁移。生效需 `npm run build` 后由用户手工重启 dsh web（宿主侧无热加载）。
+
 ## 2.3.9 — 2026-11-11
 
 - **LLM 家族检测 + 推理等级事前约束（用户要求 1/2）**：新增单一事实源 `src/llm-rules.ts`——模型 ID 去空白转小写后以 `qwen` 前缀判定家族；qwen 系合法推理等级集合 `{low, medium, xhigh}`、非 qwen 系 `{low, high, max}`，并按任务复杂度映射（轻度=low；中等 qwen=medium/非qwen=high；非常复杂 qwen=xhigh/非qwen=max）。约束在**发送前**生效：规划器默认档取当前家族合法集最高档、派发侧子任务档位先按家族静态集收窄、再与宿主声明档位取交集钳制，两道闸各自 `console.warn` 留痕（model/family/requested/corrected/allowed/reason）。`plan.ts` 校验、`replan.ts` 入口、`client.ts` 渲染口径同源消费；五档仍为存储全集，旧计划/他模型计划回放零迁移。越界档不中断派发，按强度序自动降级并留痕（报错轨 `validateReasoningEffort` + 修正轨 `correctEffortForModel`）。

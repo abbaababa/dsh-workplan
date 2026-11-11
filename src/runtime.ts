@@ -13,7 +13,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 
 import {
@@ -39,6 +39,9 @@ import {
   createPlannerProgressReporter,
   buildDegradedMessage,
   buildPlanMessage,
+  // [2.3.10][T2] 用户要求1：规划前/派发前会话内耗时预告文案（plan.ts 纯函数）。
+  buildPlanningPreAnnouncement,
+  buildDispatchPreAnnouncement,
   buildPlannerPrompt,
   buildResultMessage,
   buildStopSteerText,
@@ -103,6 +106,7 @@ import {
   correctEffortForModel,
   highestEffortOf,
   planDelegations,
+  resolveTaskEffort,
 } from './llm-rules.js'
 import { phaseGateFromErrors, phaseSummaryLine, validatePhaseEvidence } from './three-phase.js'
 import {
@@ -2044,10 +2048,17 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
          * 在请求前抛 UNSUPPORTED_REASONING_EFFORT——派发期即中断。查询不可用
          * 时保持旧行为；查询成功后钳制到等效档，空清单则不发送该字段。
          */
-        const requestedChildEffort = typeof subtask.reasoningEffort === 'string'
-          && REASONING_EFFORTS.includes(subtask.reasoningEffort)
-          ? subtask.reasoningEffort
-          : DEFAULT_REASONING_EFFORT
+        /*
+         * [2.5.0] 用户要求 2「全程应用」的执行点：每次激活（首发/重试/续跑）
+         * 都经 resolveTaskEffort 单一判据读档——负责人通过 delegate review
+         * 配置的整体等级（状态行 effortOverride，durable 回放不丢）优先于
+         * 规划器写死的 subtask.reasoningEffort；两者缺失才回落默认档。
+         */
+        const effortRow = record.statuses.find((item: any) => item?.subtaskId === subtask.id)
+        const requestedChildEffort = resolveTaskEffort({
+          override: effortRow?.effortOverride,
+          planned: subtask.reasoningEffort,
+        })
         /*
          * [2.3.9][T3/llm-rules] 用户强制要求 1/2 的执行点：派发前对每个子任务的
          * reasoningEffort 做模型家族等级集合校验。越界档不中断派发（A3 修正轨），
@@ -2146,6 +2157,7 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
                   requested: childStaticCorrection ? requestedChildEffort : null,
                   correctionReason: childStaticCorrection?.reason ?? null,
                   tier: 'department',
+                  taskEffort: typeof effortRow?.effortOverride === 'string' ? effortRow.effortOverride : null,
                 }),
               }),
             }],
@@ -2822,6 +2834,71 @@ export function mergePreservedArtifacts(artifacts: any, preservedRefs: any) {
     seen.add(ref)
   }
   return list.slice(-40)
+}
+
+/**
+ * [2.5.0][R4] 第三层叶子「已完成产物在盘」探测：delegate 下级重派（重试/续跑）
+ * 前先核盘它上次按任务书约定写下的结算备份（buildDelegateePrompt：
+ * reports/wp-member-<成员名>-<任务代号>.json），随重试任务书附给新叶子。
+ * 只读目录、不改任何判定；目录不存在/读取失败返回空清单（绝不编造产物）。
+ * listDir 可注入，纯逻辑可脱离真实文件系统回归。
+ */
+export function probeDelegateLandedArtifacts(cwd: any, member: any, listDir: any = readdirSync) {
+  const name = String(member ?? '').trim()
+  if (!name || typeof cwd !== 'string' || !cwd) return []
+  const prefix = `wp-member-${name}-`
+  let entries: any[] = []
+  try {
+    entries = listDir(join(cwd, 'reports'))
+  } catch {
+    return []
+  }
+  return (Array.isArray(entries) ? entries : [])
+    .map((entry: any) => String(entry ?? ''))
+    .filter((file: string) => file.startsWith(prefix) && file.endsWith('.json'))
+    .slice(0, 6)
+    .map((file: string) => `reports/${file}`)
+}
+
+/**
+ * [2.5.0][R4] 第三层叶子重试/续跑简报（根因修复）：旧实现 delegate 重派时给
+ * 叶子一张全新任务书——上一次尝试的状态、失败原因、已回报结论与在盘产物
+ * 全部丢失，叶子只能整步重跑（违反用户要求 4「禁止丢弃已完成部分」，与
+ * 第二层 buildTakeoverBrief/结果块回喂同一语义在第三层的落点）。现在重派
+ * 时把本简报经 buildDelegateePrompt.extraContext 附进任务书：上次尝试状态/
+ * 错误/摘要 + 已核实在盘产物清单 + 负责人梳理思路 + 「请勿重做已完成的工作」
+ * 硬约束。纯函数，可脱离宿主回归。prior 为空（首发）返回 ''。
+ */
+export function buildDelegateRetryBrief(prior: any, landedRefs: any, approach?: any) {
+  if (!prior || typeof prior !== 'object') return ''
+  const refs = (Array.isArray(landedRefs) ? landedRefs : [])
+    .map((item: any) => String(item ?? '').trim())
+    .filter(Boolean)
+    .slice(0, 6)
+  const status = String(prior.status ?? '')
+  const lines = [
+    `【重试/续跑简报——禁止丢弃已完成部分】这不是你的首次尝试：上一次尝试的状态为 ${status || '未知'}。`,
+  ]
+  if (typeof prior.error === 'string' && prior.error.trim()) {
+    lines.push(`- 上次失败原因：${truncate(prior.error.trim(), 300)}`)
+  }
+  if (typeof prior.summary === 'string' && prior.summary.trim()) {
+    lines.push(`- 上次已回报的结论（含已完成工作）：${truncate(prior.summary.trim(), 300)}`)
+  }
+  if (refs.length > 0) {
+    lines.push(`- 已核实在盘的已完成产物：${refs.join('、')}`)
+  }
+  const approachLines = (Array.isArray(approach) ? approach : [])
+    .map((item: any) => String(item ?? '').trim())
+    .filter(Boolean)
+    .slice(0, 6)
+  if (approachLines.length > 0) {
+    lines.push(`- 部门负责人的梳理思路（供参考）：${approachLines.join('；')}`)
+  }
+  lines.push(status === 'done'
+    ? '- 硬约束：上次尝试已完成——先核对上述产物与结论，只补缺口；请勿重做已完成的工作，禁止删除或覆盖既有产物。'
+    : '- 硬约束：请勿重做已完成的工作——以上述在盘产物与结论为基础，只继续补齐未完成部分；禁止删除或覆盖既有产物、禁止整步重跑。')
+  return lines.join('\n')
 }
 
 /**
@@ -4340,6 +4417,17 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
               // [2.2.0][T4/O-3b][E] 回放白名单（T3b TODO#2）：O-3b/O-2c 留档字段随
               // update 记录回放；timeoutMs 有 applyStatus 分支，走 patch 即可。
               timeoutMs: update.timeoutMs,
+              /*
+               * [2.5.0][G1] 整体任务等级与第三层梳理/台账必须随 durable
+               * workplan-update 回放：写入侧（plan.ts buildUpdateMessage）已携带
+               * effortOverride/consolidation/delegates，消费端 patch 此前漏传，
+               * 刷新/重启后整体等级丢失（resolveTaskEffort 回落旧档）、梳理登记
+               * 与第三层台账同丢。三字段在 applyStatus 均有路由分支，undefined
+               * 保留旧值——旧日志零迁移，与 live 侧同一口径。
+               */
+              effortOverride: update.effortOverride,
+              consolidation: update.consolidation,
+              delegates: update.delegates,
               updatedBy: 'agent',
             })
             /*
@@ -7057,6 +7145,8 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
           status: written?.status ?? row.status,
           ...(patch.consolidation === undefined ? {} : { consolidation: written?.consolidation }),
           ...(patch.delegates === undefined ? {} : { delegates: written?.delegates }),
+          // [2.5.0] 整体任务等级随 durable workplan-update 回放，重启不丢。
+          ...(patch.effortOverride === undefined ? {} : { effortOverride: written?.effortOverride }),
           revision: written?.revision ?? revision,
         }))
       } catch (error) {
@@ -7073,6 +7163,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         subtaskId,
         action,
         consolidation: row.consolidation ?? null,
+        effortOverride: row.effortOverride ?? null,
         delegates,
         hint: !row.consolidation
           ? '尚未提交梳理产物：先调用 action="review"（用户要求 4 的硬门禁）。'
@@ -7092,7 +7183,9 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
           error: 'review 必须携带 consolidation：{ problemAnalysis[], constraints[]?, unknowns[]?, approach[]?, assignments[{member, role:"expert"|"member", task, reasoningEffort}] }——用户要求 4 的「全面、全盘、深入梳理」产物 + 分工表（至少 1 名顶尖专家 + 1 名组员）。',
         }
       }
-      const preview = planDelegations({ consolidation: input, model })
+      // [2.5.0][R2×R4] 重新 review 未再配整体等级时，继承行上已持久化的
+      // effortOverride（重置不清除的任务级配置），全程贯穿不丢。
+      const preview = planDelegations({ consolidation: input, model, taskEffortFallback: row.effortOverride })
       if (!preview.ok) {
         return {
           ok: false,
@@ -7109,8 +7202,13 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
           unknowns: input.unknowns,
           approach: input.approach,
           assignments: input.assignments,
+          // [2.5.0] 整体任务等级随梳理产物留档，dispatch 读回时同口径消费。
+          ...(preview.taskEffort ? { taskReasoningEffort: preview.taskEffort } : {}),
           submittedAt: Date.now(),
         },
+        // [2.5.0] 用户要求 2：负责人配置的整体等级写入状态行，本任务每次
+        // 派发/重试/续跑优先读它（resolveTaskEffort），全程生效、durable 回放。
+        ...(preview.taskEffort ? { effortOverride: preview.taskEffort } : {}),
       })
       return {
         ok: true,
@@ -7120,14 +7218,19 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         consolidation: written?.consolidation ?? null,
         members: preview.members,
         clamped: preview.clamped,
+        taskEffort: preview.taskEffort,
+        ...(preview.taskEffortClamped ? { taskEffortClamped: preview.taskEffortClamped } : {}),
         model: model ?? '（未知，未施加静态等级约束）',
-        hint: '梳理产物已登记（durable，刷新后门禁依然生效）。现在可调用 action="dispatch" 正式派发；每位下级的推理等级已按当前模型家族合法集合钳制（clamped 列出越界修正与原因，留痕可审计）。',
+        hint: '梳理产物已登记（durable，刷新后门禁依然生效）。现在可调用 action="dispatch" 正式派发；每位下级的推理等级已按当前模型家族合法集合钳制（clamped 列出越界修正与原因，留痕可审计）。'
+          + (preview.taskEffort ? `整体任务等级已配置为 ${preview.taskEffort}，本任务重试/续跑与未单独配档的下级全程沿用。` : '未配置整体任务等级（consolidation.taskReasoningEffort 可选）：下级未配档时回落 low。'),
       }
     }
 
     // action === 'dispatch'
     const consolidation = isRecord(row.consolidation) ? row.consolidation : null
-    const delegationPlan = planDelegations({ consolidation, model })
+    // [2.5.0][R2×R4] dispatch 读回梳理产物时，整体等级缺失同样回落行上
+    // effortOverride（durable 回放/重置后依然全程贯穿）。
+    const delegationPlan = planDelegations({ consolidation, model, taskEffortFallback: row.effortOverride })
     if (!delegationPlan.ok) {
       return {
         ok: false,
@@ -7154,6 +7257,14 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         ? parentSession.header.cwd
         : undefined)
     const delegates: any[] = []
+    /*
+     * [2.5.0][R4] 重试/续跑不丢已完成部分（第三层落点）：重派时 row.delegates
+     * 仍是上一次尝试的台账——为每位下级附上次状态/失败原因/已回报结论与已核实
+     * 在盘产物（buildDelegateRetryBrief），经 extraContext 写进新任务书。
+     * 旧实现这里直接发全新任务书，叶子失败后重派只能整步重跑。
+     */
+    const priorDelegates = Array.isArray(row.delegates) ? row.delegates : []
+    const consolidationApproach = Array.isArray((row.consolidation as any)?.approach) ? (row.consolidation as any).approach : []
     for (const assignment of delegationPlan.members) {
       const rulesBrief = buildLlmRulesBrief({
         model,
@@ -7164,6 +7275,10 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         memberName: assignment.member,
         memberRole: assignment.role,
       })
+      const prior = priorDelegates.find((item: any) => item?.member === assignment.member) ?? null
+      const retryBrief = prior
+        ? buildDelegateRetryBrief(prior, probeDelegateLandedArtifacts(cwd, assignment.member), consolidationApproach)
+        : ''
       const promptText = buildDelegateePrompt({
         departmentLabel,
         leaderSubtaskId: subtaskId,
@@ -7172,6 +7287,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         rulesBrief,
         cwd: cwd ?? '',
         leadSessionId: childSession.id,
+        ...(retryBrief ? { extraContext: retryBrief } : {}),
       })
       let childId: string | null = null
       let memberStatus = 'running'
@@ -7256,6 +7372,8 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       action,
       delegates: written?.delegates ?? delegates,
       clamped: delegationPlan.clamped,
+      taskEffort: delegationPlan.taskEffort,
+      effortOverride: written?.effortOverride ?? row.effortOverride ?? null,
       ...(rejected.length ? { rejected: rejected.map((item) => ({ member: item.member, error: item.error })) } : {}),
       hint: '第三层已派发（一层下级、叶子层，第四层会被硬拒）。每位专家/组员的完成结论会送回本会话（delivery=caller）；收齐后由你汇总核验，再写最终结果块。用 action="status" 查看进度。',
     }
@@ -7348,6 +7466,18 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
           ? '不要再次派发。被取代不等于完成：如需交付，请按覆盖链核对承接计划的证据；承接计划未就绪时不得调用 present。'
           : '不要再次派发。如需继续这项工作，请向用户确认后重新生成计划；或由主 Agent 直接接手剩余项，并在答复中说明这是直接执行而非派发。',
       }
+    }
+    /*
+     * [2.3.10][T2] 用户要求1（P2）：派发前会话内预告执行耗时。落点=已通过
+     * 全部拒绝闸门（NO_PLAN / PLAN_ID_MISMATCH / 终态）、尚未启动任何子 Agent。
+     * 幂等守卫：同一 planId 只预告一次——dispatch 工具契约是重复调用幂等，
+     * 续跑/重复派发/join 在途回合都不得重复刷屏；重规划换新 planId 时自然
+     * 重新预告。只追加 notice，不改派发语义与任何返回体。
+     */
+    if (record.preAnnouncedPlanId !== record.plan.planId) {
+      record.preAnnouncedPlanId = record.plan.planId
+      const preAnnouncement = buildDispatchPreAnnouncement(record.plan)
+      if (preAnnouncement) appendUserMessage(session, preAnnouncement)
     }
     /*
      * [1.7.0] Two dispatch modes.
@@ -8796,6 +8926,16 @@ async function maybePlan(ctx: any, state: any, payload: any, downstream: any, op
     createdTurn: payload.turn,
   }
   state.records.set(session.id, planningRecord)
+  /*
+   * [2.3.10][T2] 用户要求1（P1）：规划前会话内预告规划耗时。此前该时点只有
+   * 侧栏占位卡、无会话输出（T1 E6）；现在在 runPlanner 之前经唯一合规写入器
+   * appendUserMessage 发一条【规划预告】。预估与 runPlanner 同源：同一个
+   * normalisePlannerWindow 解析出的实际窗口（含配置/环境变量覆盖）。
+   */
+  appendUserMessage(session, buildPlanningPreAnnouncement(
+    normalisePlannerWindow(options?.limits?.plannerTimeoutMs ?? options?.plannerTimeoutMs, PLANNER_TIMEOUT_MS),
+    PLANNER_MAX_ATTEMPTS,
+  ))
   /*
    * [2.2.5][T5] 进度回调落点（T1 P-6 / T3 §3 C2/C3、§4 频率规则）：
    * 通道 A = 占位卡片 errors 区追加重试摘要（≤2 行，保底通道）；通道 B =

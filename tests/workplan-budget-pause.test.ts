@@ -214,12 +214,14 @@ test('paused 阶段能从结果消息回放出来（刷新后不退回“正在�
 
 test('规划器被要求：不得把只有主 Agent 能做的动作写进子任务', () => {
   const prompt = buildPlannerPrompt('修复卡住', '/tmp/work', '')
-  assert.match(prompt, /没有派发权限/)
+  // [2.5.0] 用户要求 1：负责人拥有本部门内再分配权限；禁令精确到「主计划派发」。
+  assert.match(prompt, /没有主计划派发权限/)
+  assert.match(prompt, /再分配权限/)
   assert.match(prompt, /只有主 Agent 才能执行/)
   assert.match(prompt, /10 分钟内完成/)
 })
 
-test('子 Agent 提示明确说明没有派发权限、不能重启服务', () => {
+test('子 Agent 提示明确说明没有主计划派发权限、不能重启服务，但拥有本部门再分配权限', () => {
   const plan = makePlan()
   const prompt = buildChildPrompt({
     plan,
@@ -228,7 +230,10 @@ test('子 Agent 提示明确说明没有派发权限、不能重启服务', () =
     dependencyResults: [],
     cwd: '/tmp/work',
   })
-  assert.match(prompt, /没有派发权限/)
+  // [2.5.0] 根因修复：旧断言 /没有派发权限/ 锁定的是与 delegate 授权矛盾的
+  // 旧文案；新契约=主计划派发禁令 + 本部门再分配授权并存。
+  assert.match(prompt, /没有主计划派发权限/)
+  assert.match(prompt, /本部门再分配权限/)
   /*
    * [1.11.0] P-01 把「不要等待或空转」改成了「先上报、再等待指示」。
    *

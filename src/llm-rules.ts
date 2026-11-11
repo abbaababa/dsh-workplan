@@ -18,6 +18,7 @@
 import {
   allowedEffortsForModel,
   classifyModelFamily,
+  DEFAULT_REASONING_EFFORT,
   defuseSessionReferenceText,
   effortForComplexity,
   EVIDENCE_MARKER_BEGIN,
@@ -142,6 +143,8 @@ export interface LlmRulesBriefInfo {
   tier?: 'department' | 'delegate'
   memberName?: string
   memberRole?: 'expert' | 'member'
+  /** [2.5.0] 负责人已配置的整体任务等级（effortOverride），有则告知全程生效。 */
+  taskEffort?: string | null
 }
 
 export function buildLlmRulesBrief(info: LlmRulesBriefInfo = {}): string {
@@ -161,10 +164,13 @@ export function buildLlmRulesBrief(info: LlmRulesBriefInfo = {}): string {
         ? `；请求档 \`${info.requested}\` 越出当前模型家族等级集合，已按规则自动钳制修正${info.correctionReason ? `（${info.correctionReason}）` : ''}。`
         : '。'))
   }
+  if (info.taskEffort) {
+    lines.push(`- 部门负责人已为本任务配置整体推理等级 \`${info.taskEffort}\`（effortOverride）：本任务每次派发/重试/续跑与全体下级默认档全程沿用该等级，不得中途丢弃或覆盖。`)
+  }
   if (info.tier === 'delegate') {
     lines.push(`- 你是部门第三层执行者（${info.memberRole === 'expert' ? '本部门相关领域全球顶尖专家' : '本部门组员'}${info.memberName ? `：${info.memberName}` : ''}）。你的等级由部门负责人按你分到任务的复杂度配置并经平台按上述等级集合强制约束；越界档会被钳制并留痕。必须确保自身任务完成品质非常高的前提下，完美、超高效率地执行。`)
   } else {
-    lines.push('- 部门负责人（本任务书的直接接收者）强制流程（用户要求 4/5）：接到任务后必须先全面、全盘、深入梳理与研究，再用 dsh_workplan_delegate(action="review") 提交梳理产物（问题梳理 + 分工表 + 每位专家/组员的推理等级配置）；梳理产物未提交前，dsh_workplan_delegate(action="dispatch") 会被平台拒绝（硬门禁）。梳理完成后再把任务合理分配给本部门相关领域全球顶尖专家与本部门组员；每位下级必须按自己分到任务的复杂度配置相应推理等级（轻度=low；qwen 中等=medium、非 qwen 中等=high；qwen 非常复杂=xhigh、非 qwen 非常复杂=max），全程应用；平台会按上述等级集合自动钳制越界档并留痕，等级在其任务全生命周期生效且不可被覆盖。第三层为叶子层：任何第四层派发一律被拒绝。')
+    lines.push('- 部门负责人（本任务书的直接接收者）强制流程（用户要求 1/2/3，2.5.0 强化）：你拥有本部门内的再分配权限——接到任务后必须先全面、全盘、深入梳理与研究，再用 dsh_workplan_delegate(action="review") 提交梳理产物（问题梳理 + 分工表 + 每位专家/组员的推理等级配置），并在 consolidation.taskReasoningEffort 里按本任务复杂度配置整体推理等级（配置后本任务重试/续跑与全体下级默认档全程生效）；梳理产物未提交前，dsh_workplan_delegate(action="dispatch") 会被平台拒绝（硬门禁）。梳理完成后必须把任务拆得更简单——每位下级只承担单一目标、单一主产物、可独立验收的一项工作——再合理分配给本部门多名相关领域全球顶尖专家与本部门组员（expert 与 member 各至少 1 名，最多 6 人）；每位下级必须按自己分到任务的复杂度配置相应推理等级（轻度=low；qwen 中等=medium、非 qwen 中等=high；qwen 非常复杂=xhigh、非 qwen 非常复杂=max），未单独配置时继承整体等级，全程应用；平台会按上述等级集合自动钳制越界档并留痕，等级在其任务全生命周期生效且不可被覆盖。第三层为叶子层：任何第四层派发一律被拒绝。')
   }
   return lines.join('\n')
 }
@@ -185,6 +191,12 @@ export interface ConsolidationInput {
   unknowns?: unknown
   approach?: unknown
   assignments?: unknown
+  /**
+   * [2.5.0] 用户要求 2：部门负责人为「整个任务」配置的整体推理等级。
+   * 配置后全程生效——本任务每次派发/重试/续跑都优先读它（状态行
+   * effortOverride），下级未单独配置档位时也继承它。缺失=不覆盖。
+   */
+  taskReasoningEffort?: unknown
 }
 
 export interface DelegationAssignment {
@@ -202,12 +214,17 @@ export interface DelegationPlan {
   error?: string
   members: DelegationAssignment[]
   clamped: Array<{ member: string; requested: string; corrected: string; reason: string }>
+  /** [2.5.0] 负责人配置的整体任务等级（已按模型家族钳制）；null=未配置。 */
+  taskEffort: string | null
+  /** [2.5.0] 整体任务等级的越界钳制留痕；null=未配置或未越界。 */
+  taskEffortClamped: { requested: string; corrected: string; reason: string } | null
   consolidation?: {
     problemAnalysis: string[]
     constraints: string[]
     unknowns: string[]
     approach: string[]
     assignments: number
+    taskReasoningEffort?: string | null
   }
 }
 
@@ -230,8 +247,15 @@ function readTrimmedStrings(value: unknown, limit: number): string[] {
 export function planDelegations(input: {
   consolidation?: ConsolidationInput | null
   model?: string | null
+  /**
+   * [2.5.0][R2×R4] 状态行已持久化的整体等级（effortOverride）回落源：
+   * 梳理产物未带 taskReasoningEffort 时（尝试重置清掉 consolidation 后重新
+   * review、或旧梳理产物回放）继承它——整体等级是任务级配置，重试/续跑
+   * 全程不丢；两者都缺失才回落 low。
+   */
+  taskEffortFallback?: unknown
 }): DelegationPlan {
-  const empty = { ok: false as const, code: 'DELEGATE_CONSOLIDATION_MISSING', members: [], clamped: [] }
+  const empty = { ok: false as const, code: 'DELEGATE_CONSOLIDATION_MISSING', members: [], clamped: [], taskEffort: null, taskEffortClamped: null }
   const consolidation = input?.consolidation
   if (!consolidation || typeof consolidation !== 'object') {
     return { ...empty, error: '尚未提交「全面梳理」产物：先用 dsh_workplan_delegate(action="review") 提交问题梳理与分工表，派发才会放行（用户要求 4 的硬门禁）。' }
@@ -245,6 +269,34 @@ export function planDelegations(input: {
     return { ...empty, code: 'DELEGATE_CONSOLIDATION_INCOMPLETE', error: '梳理产物不完整：分工表 assignments 至少 1 条（member/role/task/reasoningEffort 四项齐全）。' }
   }
   const allowed = allowedEffortsForModel(input.model ?? null)
+  /*
+   * [2.5.0] 用户要求 2：负责人为整个任务配置的整体推理等级。
+   * 非法值（不在五档存储全集内）走 A3 报错轨明确拒绝；越出当前模型家族
+   * 合法集合走 A3 修正轨自动钳制并留痕——与下级档位同一判据，绝不中断派发。
+   */
+  /*
+   * [2.5.0][R2×R4] 梳理产物未带整体等级时回落状态行已持久化的 effortOverride
+   * （taskEffortFallback）：尝试重置会清掉 consolidation 但保留 effortOverride，
+   * 重新 review/旧梳理回放时整体等级不得因此丢失（全程贯穿）。
+   */
+  const rawTaskEffort = consolidation.taskReasoningEffort !== undefined && consolidation.taskReasoningEffort !== null
+    ? consolidation.taskReasoningEffort
+    : input.taskEffortFallback
+  if (rawTaskEffort !== undefined && rawTaskEffort !== null
+    && !(typeof rawTaskEffort === 'string' && REASONING_EFFORTS.includes(rawTaskEffort))) {
+    return {
+      ...empty,
+      code: 'DELEGATE_TASK_EFFORT_INVALID',
+      error: `taskReasoningEffort "${String(rawTaskEffort)}" 非法：必须是 low / medium / high / xhigh / max 之一（负责人为整个任务配置的整体推理等级；缺失=不覆盖）。`,
+    }
+  }
+  let taskEffort: string | null = typeof rawTaskEffort === 'string' ? rawTaskEffort : null
+  let taskEffortClamped: DelegationPlan['taskEffortClamped'] = null
+  if (taskEffort !== null && allowed !== null && !allowed.includes(taskEffort)) {
+    const correction = correctEffortForModel(taskEffort, input.model ?? null)
+    taskEffortClamped = { requested: taskEffort, corrected: correction.effort, reason: correction.reason ?? '' }
+    taskEffort = correction.effort
+  }
   const members: DelegationAssignment[] = []
   const clamped: DelegationPlan['clamped'] = []
   let experts = 0
@@ -260,12 +312,20 @@ export function planDelegations(input: {
         code: 'DELEGATE_ASSIGNMENT_INVALID',
         members: [],
         clamped: [],
+        taskEffort: null,
+        taskEffortClamped: null,
         error: `分工表第 ${index + 1} 条不完整：member（姓名/代号）、role（expert|member）、task（分到的任务）三者都必须非空。`,
       }
     }
+    /*
+     * [2.5.0] 用户要求 2/3：下级未单独配置档位时，继承负责人为整个任务
+     * 配置的整体等级（taskEffort）；负责人也没配置时回落 low——简单任务
+     * 用低档，不再无条件取家族最高档（旧默认会让简单任务烧最高档）。
+     * 显式配置的档位仍优先，越界钳制规则不变。
+     */
     const requested = REASONING_EFFORTS.includes(item.reasoningEffort)
       ? String(item.reasoningEffort)
-      : (allowed === null ? 'low' : (highestEffortOf(allowed) ?? 'low'))
+      : (taskEffort ?? 'low')
     const outOfSet = allowed !== null && !allowed.includes(requested)
     const correction = outOfSet ? correctEffortForModel(requested, input.model ?? null) : null
     const effort = correction ? correction.effort : requested
@@ -288,6 +348,8 @@ export function planDelegations(input: {
       code: 'DELEGATE_ROLE_MIX_REQUIRED',
       members: [],
       clamped: [],
+      taskEffort: null,
+      taskEffortClamped: null,
       error: '分工表必须同时覆盖「本部门相关领域全球顶尖专家」与「本部门组员」（各至少 1 名，用户要求 4）：当前 expert=' + experts + '、member=' + regular + '。',
     }
   }
@@ -295,14 +357,30 @@ export function planDelegations(input: {
     ok: true,
     members,
     clamped,
+    taskEffort,
+    taskEffortClamped,
     consolidation: {
       problemAnalysis,
       constraints: readTrimmedStrings(consolidation.constraints, 12),
       unknowns: readTrimmedStrings(consolidation.unknowns, 12),
       approach: readTrimmedStrings(consolidation.approach, 12),
       assignments: members.length,
+      taskReasoningEffort: taskEffort,
     },
   }
+}
+
+/**
+ * [2.5.0] 用户要求 2 的执行侧单一判据：子任务每次激活（首发/重试/续跑）
+ * 读取推理等级的唯一入口。负责人配置的整体等级（状态行 effortOverride）
+ * 优先于规划器写死的 subtask.reasoningEffort；两者都缺失/非法时回落
+ * DEFAULT_REASONING_EFFORT。纯函数，派发链与测试同口径消费——「全程应用」
+ * 不可能在某一环悄悄回落。
+ */
+export function resolveTaskEffort(input: { override?: unknown; planned?: unknown }): string {
+  if (typeof input.override === 'string' && REASONING_EFFORTS.includes(input.override)) return input.override
+  if (typeof input.planned === 'string' && REASONING_EFFORTS.includes(input.planned)) return input.planned
+  return DEFAULT_REASONING_EFFORT
 }
 
 /**

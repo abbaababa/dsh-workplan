@@ -85,6 +85,12 @@ export const PROMPT_ORDER = 40
 
 const PROMPT_SECTION = [
   '本会话已启用自动任务分解。系统会在每个新用户任务的第一个模型步骤前生成计划，并先把计划显示在对话里；收到【任务分解】后，必须先调用 dsh_workplan_dispatch（默认 wait 等结果；预计较久时用 mode:"async" 先开跑），再做任何其他工具调用或回答。',
+  /*
+   * [2.3.10][T2] 用户要求1（P3）提示词双保险：插件已在规划前/派发前自动发送
+   * 【规划预告】/【派发预告】（runtime.ts maybePlan / dispatchTool）；这里把
+   * 「分配前必须先告知用户预估耗时」写成主 Agent 硬规则，防止模型省略或吞掉。
+   */
+  '分配任务前必须先告知预估耗时：调用 dsh_workplan_dispatch 前，必须先在会话中告知用户本次分配的预估耗时（含明确数值与单位分钟，标注「仅供参考，非承诺」）。插件在规划前与派发前自动发送的【规划预告】/【派发预告】即该告知的组成部分，不得省略、不得吞掉；主 Agent 自己的答复也应向用户转述预估时间。',
   '如果当前是 plan 模式：不要调用 dsh_workplan_dispatch；先把计划展示给用户，等待用户审阅并退出 plan 模式后，再调用 dsh_workplan_dispatch 执行。',
   '纯问候、寒暄、致谢、告别、简单确认（如「你好」「谢谢」「好的」「再见」）不生成计划，也不启动子 Agent；直接自然、简短地回答。只有包含实际目标、问题或交付物的消息才进行分解。',
   '单独的「继续」「接着」「然后呢」「下一步」等没有新增任务内容的追问，不生成计划；由主 Agent 结合会话上下文继续，或先询问用户要延续哪件事。',
@@ -795,9 +801,11 @@ function createDelegateTool(runtime: any) {
   return {
     name: 'dsh_workplan_delegate',
     description:
-      '部门负责人专用的第三层派发（用户要求 4/5）：先 action="review" 提交全面梳理产物'
-      + '（问题梳理 + 分工表：每位下级的 member/role/task/reasoningEffort，至少 1 名 expert 顶尖专家 + 1 名 member 组员），'
+      '部门负责人专用的第三层派发（用户要求 1/2/3）：你拥有本部门内再分配权限。先 action="review" 提交全面梳理产物'
+      + '（问题梳理 + 分工表：每位下级的 member/role/task/reasoningEffort，至少 1 名 expert 顶尖专家 + 1 名 member 组员，最多 6 人；'
+      + '并可用 consolidation.taskReasoningEffort 为整个任务配置整体推理等级，配置后本任务重试/续跑与未单独配档的下级全程沿用），'
       + '再 action="dispatch" 把任务派给本部门相关领域全球顶尖专家与本部门组员（固定一层下级、叶子层，第四层一律被拒）。'
+      + '分配必须更简单：每位下级只承担单一目标、单一主产物、可独立验收的一项工作。'
       + 'review 未提交前 dispatch 被硬门禁拒绝。每位下级的推理等级必须按其任务复杂度配置'
       + '（轻度=low；qwen 中等=medium、非 qwen 中等=high；qwen 非常复杂=xhigh、非 qwen 非常复杂=max），'
       + '平台按当前模型家族合法集合自动钳制越界档并留痕，等级在其任务全生命周期生效。'
@@ -822,9 +830,14 @@ function createDelegateTool(runtime: any) {
             constraints: { type: 'array', items: { type: 'string' }, description: '约束条件。' },
             unknowns: { type: 'array', items: { type: 'string' }, description: '未知或待确认项。' },
             approach: { type: 'array', items: { type: 'string' }, description: '可执行思路：每步做什么、产出什么、如何证明。' },
+            taskReasoningEffort: {
+              type: 'string',
+              enum: ['low', 'medium', 'high', 'xhigh', 'max'],
+              description: '可选：负责人为整个任务配置的整体推理等级（按本任务复杂度：轻度=low；qwen 中等=medium、非 qwen 中等=high；qwen 非常复杂=xhigh、非 qwen 非常复杂=max）。配置后本任务每次派发/重试/续跑全程沿用，未单独配档的下级继承该档；越界档被平台钳制并留痕。',
+            },
             assignments: {
               type: 'array',
-              description: '分工表：至少 1 名 expert（全球顶尖专家）+ 1 名 member（部门组员），最多 6 人。',
+              description: '分工表：至少 1 名 expert（全球顶尖专家）+ 1 名 member（部门组员），最多 6 人。每位下级只承担单一目标、单一主产物、可独立验收的一项简单工作。',
               items: {
                 type: 'object',
                 properties: {
@@ -834,7 +847,7 @@ function createDelegateTool(runtime: any) {
                   reasoningEffort: {
                     type: 'string',
                     enum: ['low', 'medium', 'high', 'xhigh', 'max'],
-                    description: '按该任务复杂度配置：轻度=low；比较复杂的任务 qwen 系=medium、非 qwen 系=high；非常复杂的任务 qwen 系=xhigh、非 qwen 系=max。越界档会被平台钳制并留痕。',
+                    description: '按该任务复杂度配置：轻度=low；比较复杂的任务 qwen 系=medium、非 qwen 系=high；非常复杂的任务 qwen 系=xhigh、非 qwen 系=max。缺失时继承负责人配置的整体任务等级（taskReasoningEffort），整体也未配置则回落 low。越界档会被平台钳制并留痕。',
                   },
                 },
                 required: ['member', 'role', 'task'],
@@ -1721,7 +1734,7 @@ export function apply(ctx: any, config: WorkplanConfig = {}) {
 
 export const meta = {
   name,
-  version: '2.3.9',
+  version: '2.5.0',
   promptOrder: PROMPT_ORDER,
   routes: ['/dsh-workplan/plans', '/dsh-workplan/vendor/chart.umd.js'],
 }
