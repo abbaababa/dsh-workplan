@@ -31,6 +31,7 @@ import {
   MIN_CHILD_TIMEOUT_MS,
   MAX_CHILD_TIMEOUT_MS,
 } from '../src/runtime.js'
+import { MAIN_DEEP_THINK_FIXTURE } from './helpers/main-deep-think.js'
 
 const eventLoopAnchor = setInterval(() => {}, 1_000)
 const dropEventLoopAnchor = setTimeout(() => clearInterval(eventLoopAnchor), 60_000)
@@ -223,7 +224,7 @@ test('O-3b/C3：协商上限 = clamp(预告分钟 × 2.0, MIN_CHILD_TIMEOUT_MS, 
       idleTimeoutMs: 30_000,
       strictEvidence: false,
     })
-    await runtime.dispatchTool({ session, options: {} }, { mode: 'async' }, new AbortController().signal)
+    await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
     const snapshot: any = await runtime.statusTool({ session }, {})
     const row = (snapshot?.statuses ?? []).find((item: any) => item.subtaskId === 'T1')
     assert.ok(
@@ -325,7 +326,7 @@ async function dispatchAndReadDeadline(subtask: any, sessionId: string) {
     idleTimeoutMs: 30_000,
     strictEvidence: false,
   })
-  await runtime.dispatchTool({ session, options: {} }, { mode: 'async' }, new AbortController().signal)
+  await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
   const snapshot: any = await runtime.statusTool({ session }, {})
   const row = (snapshot?.statuses ?? []).find((item: any) => item.subtaskId === 'T1')
   const offset = Number(row?.deadlineAt) - Number(row?.startedAt)

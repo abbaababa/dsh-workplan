@@ -30,6 +30,7 @@ import {
   normaliseIdleTimeout,
 } from '../src/runtime.js'
 import { createProgressWatchdog, describeError, pickTimeoutReason } from '../src/watchdog.js'
+import { MAIN_DEEP_THINK_FIXTURE } from './helpers/main-deep-think.js'
 
 /*
  * The idle and hard timeout timers under test are unref'd on purpose: a
@@ -336,7 +337,7 @@ test('a stalled child blocks only itself, then a re-dispatch resumes the plan', 
   runtime.state.records.set(session.id, record)
   const agent = { session, options: {} }
 
-  const blocked = await runtime.dispatchTool(agent, {}, new AbortController().signal)
+  const blocked = await runtime.dispatchTool(agent, { deepThink: MAIN_DEEP_THINK_FIXTURE,}, new AbortController().signal)
   assert.equal(blocked.ok, true)
   const blockedStats = derivePlanSnapshot(record.statuses).stats
   assert.equal(blockedStats.blocked, 2, 'T1 stalls and its dependent T2 must be blocked with it')
@@ -349,7 +350,7 @@ test('a stalled child blocks only itself, then a re-dispatch resumes the plan', 
   // Second dispatch must actually run again instead of silently doing nothing.
   const resumed = await (async () => {
     ctx.subagents.startActivation = () => doneChild('续跑完成')
-    return runtime.dispatchTool(agent, {}, new AbortController().signal)
+    return runtime.dispatchTool(agent, { deepThink: MAIN_DEEP_THINK_FIXTURE,}, new AbortController().signal)
   })()
   assert.equal(resumed.ok, true)
   assert.equal(derivePlanSnapshot(record.statuses).stats.done, 2)
@@ -360,9 +361,11 @@ test('a stalled child blocks only itself, then a re-dispatch resumes the plan', 
   // 本断言只数「轮级结果消息」：排除中断通知后，两次派发仍各写 1 条。
   // [2.3.10][T2] 派发前预告【派发预告】是用户要求1新增的会话 notice（同一 planId
   // 幂等只发一次），不是轮级结果消息——按本断言本意一并排除。
+  // [2.5.2] 主 Agent 两轮深度思考登记【两轮深度思考已登记】是首次派发门禁的
+  // 计划级 notice（同一计划只登记一次），同样不是轮级结果消息——按本意排除。
   const resultOnly = (ev: any) => {
     const text = String(ev.data?.content?.[0]?.text ?? '')
-    return !text.includes('【dsh-workplan·执行中断】') && !text.includes('【派发预告】') && !text.includes('【规划预告】')
+    return !text.includes('【dsh-workplan·执行中断】') && !text.includes('【派发预告】') && !text.includes('【规划预告】') && !text.includes('【两轮深度思考已登记】')
   }
   assert.equal(session.events.filter(resultOnly).length, 2, 'each dispatch writes one durable result message')
 })
@@ -378,7 +381,7 @@ test('re-dispatching a blocked plan with no resume budget left fails loudly', as
   const runtime = createWorkplanRuntime(ctx)
   runtime.state.records.set(session.id, record)
 
-  const result = await runtime.dispatchTool({ session, options: {} }, {}, new AbortController().signal)
+  const result = await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE,}, new AbortController().signal)
   assert.equal(result.ok, false)
   assert.match(String(result.error), /续跑次数已用尽/)
   assert.match(String(result.hint), /直接完成/)
@@ -397,7 +400,7 @@ test('cancel stops a running dispatch instead of being refused', async () => {
   })
   runtime.state.records.set(session.id, record)
 
-  const running = runtime.dispatchTool({ session, options: {} }, {}, new AbortController().signal)
+  const running = runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE,}, new AbortController().signal)
   await new Promise((resolve) => setTimeout(resolve, 50))
   assert.ok(record.dispatchPromise, 'the dispatch should still be in flight')
 
@@ -423,7 +426,7 @@ test('a dispatch promise that never settles cannot answer "already running" fore
   const runtime = createWorkplanRuntime(ctx, { totalTimeoutMs: 60000 })
   runtime.state.records.set(session.id, record)
 
-  const result = await runtime.dispatchTool({ session, options: {} }, {}, new AbortController().signal)
+  const result = await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE,}, new AbortController().signal)
   assert.equal(result.ok, false)
   assert.equal(result.stale, true)
   assert.match(String(result.error), /判定为已卡住/)

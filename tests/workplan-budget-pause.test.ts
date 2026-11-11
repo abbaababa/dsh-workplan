@@ -29,6 +29,7 @@ import {
   parseResultMessage,
 } from '../src/plan.js'
 import { buildRoundResult, createWorkplanRuntime, dispatchPlan, reconstructFromSession } from '../src/runtime.js'
+import { MAIN_DEEP_THINK_FIXTURE } from './helpers/main-deep-think.js'
 
 /*
  * A dispatch round's budget timer is unref'd in the runtime on purpose: a
@@ -385,7 +386,7 @@ test('重启后没有内存记录时，派发会从会话存档重建计划而�
   seedLeaderSelfEffort(session, plan)
   const ctx = makeCtx(() => quickChild('重启后续跑完成'))
   const runtime = createWorkplanRuntime(ctx, { totalTimeoutMs: 60000, maxResumes: 4, strictEvidence: false })
-  const result: any = await runtime.dispatchTool({ session }, { planId: plan.planId }, new AbortController().signal)
+  const result: any = await runtime.dispatchTool({ session }, { deepThink: MAIN_DEEP_THINK_FIXTURE, planId: plan.planId }, new AbortController().signal)
   assert.equal(result?.ok, true)
   assert.equal(result?.stats?.done, 2, 'the rebuilt record must run the plan instead of answering NO_PLAN')
 
@@ -457,7 +458,7 @@ test('重启后仍能派发重启前暂停的旧计划：重建按 planId 精确
 
   const ctx = makeCtx(() => quickChild('旧计划续跑完成'))
   const runtime = createWorkplanRuntime(ctx, { totalTimeoutMs: 60000, maxResumes: 4, strictEvidence: false })
-  const result: any = await runtime.dispatchTool({ session }, { planId: 'wp-old' }, new AbortController().signal)
+  const result: any = await runtime.dispatchTool({ session }, { deepThink: MAIN_DEEP_THINK_FIXTURE, planId: 'wp-old' }, new AbortController().signal)
   assert.equal(result?.ok, true)
   assert.equal(result?.planId, 'wp-old', 'dispatching the old paused plan must target that plan, not the newest one')
   assert.equal(result?.stats?.done, 2, 'the pending subtask must run and finish')
@@ -498,11 +499,11 @@ test('内存里是另一份计划时，按 planId 派发旧计划照样重建并
   const ctx = makeCtx(() => quickChild('派发完成'))
   const runtime = createWorkplanRuntime(ctx, { totalTimeoutMs: 60000, maxResumes: 4, strictEvidence: false })
 
-  const first: any = await runtime.dispatchTool({ session }, { planId: 'wp-mem-b' }, new AbortController().signal)
+  const first: any = await runtime.dispatchTool({ session }, { deepThink: MAIN_DEEP_THINK_FIXTURE, planId: 'wp-mem-b' }, new AbortController().signal)
   assert.equal(first?.planId, 'wp-mem-b', 'the newest plan dispatches first and fills memory')
   assert.equal(first?.stats?.done, 2)
 
-  const olderRun: any = await runtime.dispatchTool({ session }, { planId: 'wp-mem-a' }, new AbortController().signal)
+  const olderRun: any = await runtime.dispatchTool({ session }, { deepThink: MAIN_DEEP_THINK_FIXTURE, planId: 'wp-mem-a' }, new AbortController().signal)
   assert.equal(olderRun?.ok, true)
   assert.equal(olderRun?.planId, 'wp-mem-a', 'memory holding another plan must not lock the old one out')
   assert.equal(olderRun?.stats?.done, 2, 'the old plan must resume and finish its pending subtask')

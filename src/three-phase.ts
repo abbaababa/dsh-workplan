@@ -377,3 +377,79 @@ export function threePhasePromptLines(): string[] {
     '  - 结果块里的 phases 是必填项：缺任一阶段、内容为空、或验证未全部通过，插件都会判为未完成，不能用 done 收尾。',
   ]
 }
+
+/**
+ * [2.5.1] 主 Agent 两轮深度思考协议（用户 2026-11-11 补充要求）。
+ *
+ * 用户要求：插件底层机制必须确保主 Agent 自己也做到同一协议——执行自己的
+ * 任务时，先全面、全盘、深入梳理、研究、思考自己的任务（第一轮），再基于
+ * 第一轮完成好的所有结果，再全面、全盘、深入地开展梳理、研究和思考，理清
+ * 自己的思路，理清自己该具体如何一步步执行、达到最终完美完成自己任务的
+ * 方法、流程和步骤（第二轮），最后基于第二轮理清楚的所有方法、流程、步骤
+ * 开始具体的执行工作。
+ *
+ * 机制落点：主 Agent 的「执行」从派发开始，因此 dsh_workplan_dispatch 首次
+ * 派发必须随附 deepThink 产物（本模块校验，与执行者层同一字数下限），未交
+ * 或不合格硬拒（MAIN_DEEP_THINK_MISSING / MAIN_DEEP_THINK_INCOMPLETE）；
+ * 合格后登记到计划记录并 durable 持久化，续跑/重试/重启回放读档放行。
+ * 提示词（PROMPT_SECTION）与工具 schema 同步告知，代码守住边界——与部门
+ * 层「提示词说服模型，门禁不可绕过」同一设计哲学。
+ */
+export type MainDeepThink = {
+  /** 第一轮 · 任务深研：全面、全盘、深入梳理、研究、思考自己的任务的结果。 */
+  problemAnalysis: string[]
+  /** 第二轮 · 基于第一轮全部结果理清的方法、流程、步骤。 */
+  approach: string[]
+  /** 第二轮依据：第二轮如何基于第一轮完成好的所有结果（逐条对应）。 */
+  approachBasis: string[]
+}
+
+export type MainDeepThinkValidation = {
+  ok: boolean
+  code?: 'MAIN_DEEP_THINK_MISSING' | 'MAIN_DEEP_THINK_INCOMPLETE'
+  error?: string
+  deepThink: MainDeepThink | null
+}
+
+/**
+ * 主 Agent 两轮思考产物校验（派发硬门禁的唯一判据，与结算门禁同一口径：
+ * 第一轮 ≥40 字、第二轮方法流程步骤 ≥40 字、第二轮依据 ≥20 字）。
+ * 纯函数：dispatchTool 与测试同口径消费，门禁不能被提示词绕过。
+ */
+export function validateMainDeepThink(value: any): MainDeepThinkValidation {
+  if (!isRecord(value)) {
+    return {
+      ok: false,
+      code: 'MAIN_DEEP_THINK_MISSING',
+      error: '主 Agent 两轮深度思考产物缺失：执行自己的任务必须先全面、全盘、深入梳理、研究、思考自己的任务（第一轮），再基于第一轮完成好的所有结果再全面、全盘、深入地开展梳理、研究和思考，理清具体一步步执行、完美完成任务的方法、流程和步骤（第二轮），最后才按此执行。请在 dsh_workplan_dispatch 随附 deepThink={ problemAnalysis[]（第一轮任务深研）, approach[]（第二轮方法流程步骤）, approachBasis[]（第二轮基于第一轮全部结果的依据对应） }。',
+      deepThink: null,
+    }
+  }
+  const errors: string[] = []
+  const problemAnalysis = readTextList(value.problemAnalysis, 'deepThink.problemAnalysis', errors, { required: true, minItems: 1 })
+  const approach = readTextList(value.approach, 'deepThink.approach', errors, { required: true, minItems: 1 })
+  const approachBasis = readTextList(value.approachBasis, 'deepThink.approachBasis', errors, { required: true, minItems: 1 })
+  if (problemAnalysis.length > 0 && totalChars(problemAnalysis) < MIN_PLANNING_PROBLEM_CHARS) {
+    errors.push(`deepThink.problemAnalysis 太薄（合计 ${totalChars(problemAnalysis)} 字，至少 ${MIN_PLANNING_PROBLEM_CHARS} 字）：第一轮要全面、全盘、深入梳理、研究、思考自己的任务，写清目标与验收、现状、约束、未知、主要矛盾与边界`)
+  }
+  if (approach.length > 0 && totalChars(approach) < MIN_PLANNING_APPROACH_CHARS) {
+    errors.push(`deepThink.approach 太薄（合计 ${totalChars(approach)} 字，至少 ${MIN_PLANNING_APPROACH_CHARS} 字）：第二轮要基于第一轮全部结果理清具体一步步执行、完美完成任务的方法、流程和步骤，而不是一句目标`)
+  }
+  if (approachBasis.length > 0 && totalChars(approachBasis) < MIN_PLANNING_BASIS_CHARS) {
+    errors.push(`deepThink.approachBasis 太薄（合计 ${totalChars(approachBasis)} 字，至少 ${MIN_PLANNING_BASIS_CHARS} 字）：要写清第二轮的方法、流程、步骤如何基于第一轮完成好的所有结果`)
+  }
+  if (errors.length > 0) {
+    return { ok: false, code: 'MAIN_DEEP_THINK_INCOMPLETE', error: errors.join('；'), deepThink: null }
+  }
+  return { ok: true, deepThink: { problemAnalysis, approach, approachBasis } }
+}
+
+/**
+ * 回放侧消毒（G1 教训：写入与消费双侧同一判据）：durable 日志里的主 Agent
+ * 两轮产物重新过一遍校验，非法/被篡改 ⇒ null（门禁要求重新提交），合法 ⇒
+ * 归一化后的产物。旧日志无该字段 ⇒ undefined 进、null 出，零迁移不报错。
+ */
+export function sanitizeMainDeepThink(value: any): MainDeepThink | null {
+  const check = validateMainDeepThink(value)
+  return check.ok ? check.deepThink : null
+}

@@ -29,6 +29,7 @@ import assert from 'node:assert/strict'
 import { createUpdateTool } from '../src/host.js'
 import { buildPlanMessage, parseResultMessage } from '../src/plan.js'
 import { createWorkplanRuntime } from '../src/runtime.js'
+import { MAIN_DEEP_THINK_FIXTURE } from './helpers/main-deep-think.js'
 
 const eventLoopAnchor = setInterval(() => {}, 1_000)
 const dropEventLoopAnchor = setTimeout(() => clearInterval(eventLoopAnchor), 60_000)
@@ -145,7 +146,7 @@ test('O-4c：dsh_workplan_update schema 显式声明 extendMs 与 timeNotice（D
 
 test('O-4c/O-4d：运行中仅凭 extendMs 放宽（不需 force），deadlineAt += extendMs、计时重置、不被原截止点杀死（D2），并记入 timeJournal（D3）', async () => {
   const { session, runtime, gate, hasStarted } = makeRuntime({}, { childTimeoutMs: 1_200 })
-  await runtime.dispatchTool({ session, options: {} }, { mode: 'async' }, new AbortController().signal)
+  await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
   assert.ok(await waitFor(hasStarted), 'T1 应已派发')
   const before = await rowOf(runtime, session)
   let res: any
@@ -183,7 +184,7 @@ test('O-4c/O-4d：运行中仅凭 extendMs 放宽（不需 force），deadlineAt
 test('O-4c/D4：累计延期超封顶（初始协商上限 × 1）被拒并转「请主 Agent 裁决」', async () => {
   // 初始协商上限 = 2000ms（显式 timeoutMs 与全局 childTimeoutMs 同值，两条取值路径一致）。
   const { session, runtime, gate, hasStarted } = makeRuntime({ timeoutMs: 2_000 }, { childTimeoutMs: 2_000 })
-  await runtime.dispatchTool({ session, options: {} }, { mode: 'async' }, new AbortController().signal)
+  await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
   assert.ok(await waitFor(hasStarted), 'T1 应已派发')
   let first: any
   try {

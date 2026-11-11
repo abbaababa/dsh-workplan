@@ -25,6 +25,7 @@ import {
   buildPlanMessage,
 } from '../src/plan.js'
 import { createWorkplanRuntime, shouldRetryAttempt } from '../src/runtime.js'
+import { MAIN_DEEP_THINK_FIXTURE } from './helpers/main-deep-think.js'
 
 process.env.DSH_WORKPLAN_LESSONS_FILE = join(
   tmpdir(),
@@ -195,7 +196,7 @@ test('A2：盘上备份合法 → 单次激活即采纳结算，不回喂不重�
   }))
   const { session, runtime, prompts } = makeRuntime([proseOnly()], cwd)
   const signal = new AbortController().signal
-  const result: any = await runtime.dispatchTool({ session, options: {} }, {}, signal)
+  const result: any = await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE,}, signal)
   const row = rowOf(result)
   assert.equal(prompts.length, 1, '备份可采纳时不得回喂第二次')
   assert.equal(row?.status, 'done', '备份结算：已完成的工作不被误判缺失')
@@ -205,7 +206,7 @@ test('A3：无备份 → 回喂「只补交结果块、勿重做」，补交后�
   const cwd = mkdtempSync(join(tmpdir(), 'dsh-wp-t9-'))
   const { session, runtime, prompts } = makeRuntime([proseOnly(), compliantOutput()], cwd)
   const signal = new AbortController().signal
-  const result: any = await runtime.dispatchTool({ session, options: {} }, {}, signal)
+  const result: any = await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE,}, signal)
   const row = rowOf(result)
   assert.equal(prompts.length, 2, '缺失触发一次有界回喂')
   assert.match(prompts[1], /结果块缺失/, '回喂文案点名缺失')
@@ -218,7 +219,7 @@ test('A4：回喂耗尽仍缺失 → 按实 blocked，缺失永不计 done', asy
   const cwd = mkdtempSync(join(tmpdir(), 'dsh-wp-t9-'))
   const { session, runtime, prompts } = makeRuntime([proseOnly(), proseOnly(), proseOnly()], cwd)
   const signal = new AbortController().signal
-  const result: any = await runtime.dispatchTool({ session, options: {} }, {}, signal)
+  const result: any = await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE,}, signal)
   const row = rowOf(result)
   assert.equal(row?.status, 'blocked', '重试耗尽按实受阻')
   assert.notEqual(row?.verification, 'structured', '缺失永不计 done/structured')

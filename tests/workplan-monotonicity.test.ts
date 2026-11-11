@@ -48,6 +48,7 @@ import {
   reconstructFromSession,
   shouldRetryAttempt,
 } from '../src/runtime.js'
+import { MAIN_DEEP_THINK_FIXTURE } from './helpers/main-deep-think.js'
 
 // 本文件不得往用户的永久教训记忆里写测试数据。
 process.env.DSH_WORKPLAN_LESSONS_FILE = join(
@@ -567,7 +568,7 @@ test('G5-X1 T7 有界重试结算后，低 rev 旧事件被闸拒绝：重试行
     totalTimeoutMs: 60_000, idleTimeoutMs: 30_000, childTimeoutMs: 20_000, maxResumes: 4, autoResume: false,
   })
   const { value: dispatch, warns: dispatchWarns } = await captureWarns(
-    () => runtime.dispatchTool({ session, options: {} }, {}, new AbortController().signal),
+    () => runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE,}, new AbortController().signal),
   )
   const liveRow = rowOf(dispatch.statuses, 'T1')
   // T7 行为不回归：第一轮非法 → 回喂 → 第二轮合法 → done+structured（A4 交叉面）。

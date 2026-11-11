@@ -1756,6 +1756,79 @@ export function createPlannerProgressReporter(options: {
   }
 }
 
+/*
+ * [2.5.2] 规划期间心跳（用户 2026-11-11 报告：本会话 turn 1 规划 12.5 分钟
+ * 全程零会话输出，用户以为死机并手动中断，turn/end reason=interrupted）。
+ *
+ * 根因：runPlanner 的失败重试回报器（createPlannerProgressReporter）只在
+ * 「失败且会退避重试」时发通知；一次**持续流式输出但很慢**的尝试（推理
+ * chunk 不断重置 idle 窗口，最长可达绝对上限 900s）既不失败也不触发 idle，
+ * 于是【规划预告】之后整段静默，用户无法区分「正在生成」与「卡死」。
+ *
+ * 心跳与失败重试正交：只要规划还在跑，就按固定间隔在会话里发一条「仍在
+ * 生成、已用时多久、不是卡死」的可见通知。纯函数 + 依赖注入工厂，便于脱离
+ * 宿主运行态做单元回归；写入仍走唯一合规写入器 appendUserMessage
+ * （user/message，surfaceOp:'append'，形状校验），不新增任何事件类型、不
+ * 触碰 system/message，故不会引入会话日志损坏；调用方在 finally 里 stop，
+ * 绝不残留定时器（吸取 2.2.8/2.2.9 计时器收束教训）。
+ */
+export function planningHeartbeatIntervalMs(value: any) {
+  const ms = Number(value)
+  return Number.isFinite(ms) && ms >= 5000 ? Math.round(ms) : 45000
+}
+
+export function buildPlanningHeartbeat(elapsedMs: any, attempt: any, maxAttempts: any) {
+  const totalSecs = Math.max(0, Math.round(Number(elapsedMs) / 1000))
+  const mins = Math.floor(totalSecs / 60)
+  const secs = totalSecs % 60
+  const elapsed = mins > 0 ? `${mins} 分 ${secs} 秒` : `${secs} 秒`
+  const total = Math.max(1, Number(maxAttempts) || 1)
+  const current = Math.min(total, Math.max(1, Number(attempt) || 1))
+  const attemptPart = current > 1 ? `（第 ${current}/${total} 次尝试）` : ''
+  return `【规划进行中】任务分解仍在生成，已用时 ${elapsed}${attemptPart}，正在等待模型返回，不是卡死。完成后会立即显示【任务分解】；若失败会自动重试并另行提示。（进度心跳，仅供参考）`
+}
+
+export function createPlanningHeartbeat(options: {
+  signal?: any
+  appendNotice: (text: string) => void
+  intervalMs?: number
+  startedAt: number
+  getAttempt?: () => number
+  maxAttempts: number
+  maxNotices?: number
+  now?: () => number
+  setTimer?: (fn: () => void, ms: number) => any
+  clearTimer?: (handle: any) => void
+}) {
+  const interval = planningHeartbeatIntervalMs(options.intervalMs)
+  // 上限只是防失控的保险丝；真正的收束是调用方 finally 里的 stop()。
+  const maxNotices = Math.max(1, Number(options.maxNotices) || 40)
+  const now = options.now ?? (() => Date.now())
+  const setTimer = options.setTimer ?? ((fn: () => void, ms: number) => setInterval(fn, ms))
+  const clearTimer = options.clearTimer ?? ((handle: any) => clearInterval(handle))
+  let handle: any = null
+  let notices = 0
+  const stop = () => {
+    if (handle !== null) {
+      clearTimer(handle)
+      handle = null
+    }
+  }
+  const tick = () => {
+    if (options.signal?.aborted) { stop(); return }
+    if (notices >= maxNotices) { stop(); return }
+    notices += 1
+    const attempt = options.getAttempt ? options.getAttempt() : 1
+    options.appendNotice(buildPlanningHeartbeat(now() - options.startedAt, attempt, options.maxAttempts))
+  }
+  const start = () => {
+    if (handle !== null) return
+    if (options.signal?.aborted) return
+    handle = setTimer(tick, interval)
+  }
+  return { start, stop }
+}
+
 export function buildPlanSummary(plan: any) {
   const total = flattenSubtasks(plan).length
   const primary = plan.contradictions.primary.statement
@@ -3504,6 +3577,11 @@ export function buildUpdateMessage(update: any) {
      * 第三层的数据源，同理。
      */
     ...(update.consolidation === undefined ? {} : { consolidation: update.consolidation }),
+    // [2.5.1] 主 Agent 两轮深度思考产物（计划级，subtaskId=null）随 durable
+    // workplan-update 回放：写入侧 dispatchTool 门禁登记，消费侧 reconstruct
+    // 消毒抬升，刷新/重启后续跑读档放行（G1：写入与消费双侧接线）。
+    ...(update.mainDeepThink === undefined ? {} : { mainDeepThink: update.mainDeepThink }),
+    ...(update.mainDeepThinkPlanId === undefined ? {} : { mainDeepThinkPlanId: update.mainDeepThinkPlanId }),
     ...(update.delegates === undefined ? {} : { delegates: update.delegates }),
     ...(update.delegateSelfEfforts === undefined ? {} : { delegateSelfEfforts: update.delegateSelfEfforts }),
     // [2.5.0] 负责人配置的整体任务等级（用户要求 2「全程应用」）同样随
@@ -3511,6 +3589,22 @@ export function buildUpdateMessage(update: any) {
     ...(update.effortOverride === undefined ? {} : { effortOverride: update.effortOverride }),
     ...(update.revision === undefined ? {} : { revision: update.revision }),
     at: update.at ?? Date.now(),
+  }
+  /*
+   * [2.5.1] 主 Agent 两轮深度思考产物登记（计划级，subtaskId=null）不是
+   * 状态改判：专属文案，避免渲染成「【状态改判】null → undefined」误导会话。
+   * 载荷与回放口径不变（workplan-update + mainDeepThink/mainDeepThinkPlanId）。
+   */
+  if (update.mainDeepThink !== undefined && update.subtaskId == null) {
+    const summary = truncate('【两轮深度思考已登记】主 Agent 已完成第一轮任务深研与第二轮方法、流程、步骤（含依据），后续执行按此进行；续跑/重启自动读档，无需重复提交。', 300)
+    const lines = [
+      summary,
+      '',
+      UPDATE_MARKER_BEGIN,
+      JSON.stringify(payload),
+      UPDATE_MARKER_END,
+    ]
+    return makeUserMessage(lines.join('\n'), { kind: 'workplan-update', form: 'notice', summary })
   }
   const summary = truncate(`【状态改判】${update.subtaskId} → ${update.status}`, 300)
   const lines = [

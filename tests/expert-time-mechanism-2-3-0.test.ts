@@ -32,6 +32,7 @@ import {
   mergePreservedArtifacts,
   TAKEOVER_AFTER_TIMEOUTS,
 } from '../src/runtime.js'
+import { MAIN_DEEP_THINK_FIXTURE } from './helpers/main-deep-think.js'
 
 const eventLoopAnchor = setInterval(() => {}, 1_000)
 const dropEventLoopAnchor = setTimeout(() => clearInterval(eventLoopAnchor), 60_000)
@@ -149,7 +150,7 @@ test('A1 预估上报→告知用户：timeNotice 落档后主会话出现「专
 
 test('A2 放宽→告知专家：延期成功后插件把最新执行时限与「保证质量、高效率执行」投递给专家，childNotified=true', async () => {
   const { session, runtime, gate, sent, hasStarted } = makeRuntime({ childTimeoutMs: 3_000 })
-  await runtime.dispatchTool({ session, options: {} }, { mode: 'async' }, new AbortController().signal)
+  await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
   assert.ok(await waitFor(hasStarted, 5_000), 'T1 应已派发')
   const res: any = await runtime.updateStatus({ session }, { subtaskId: 'T1', extendMs: 2_000, reason: '第 1 次超时预警，按机制放宽' })
   assert.equal(res?.ok, true, '运行中 extendMs 放宽应放行')
@@ -169,7 +170,7 @@ test('A2 放宽→告知专家：延期成功后插件把最新执行时限与�
 test('A3+A4 二次超时接手：第 2 次到点 takeoverRequired=true、已完成产物只读登记并跳过续跑重派', async () => {
   writeFileSync(join(workRoot, 'T1_report.md'), '# 专家已完成部分\n')
   const { session, runtime, gate, hasStarted } = makeRuntime({ childTimeoutMs: 1_000, totalTimeoutMs: 400_000 })
-  await runtime.dispatchTool({ session, options: {} }, { mode: 'async' }, new AbortController().signal)
+  await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
   assert.ok(await waitFor(hasStarted, 5_000), 'T1 应已派发')
   // 两次协商上限先后到点（首次 + 自动重试第二次），每次 fire() 给行 timeoutCount+1。
   let row: any = null

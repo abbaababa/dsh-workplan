@@ -40,6 +40,7 @@ import {
 } from '../src/plan.js'
 import { createWorkplanRuntime, reconstructFromSession } from '../src/runtime.js'
 import { computeMappingDigest } from '../src/supersede-digest.js'
+import { MAIN_DEEP_THINK_FIXTURE } from './helpers/main-deep-think.js'
 
 const SESSION_ID = 'session-d1e7bc05-fd0c-4dc0-acd0-f42c391bd443'
 const CANCELLED_PLAN = 'wp-bea31753-ec5f-4d97-89b6-c673308113e3'
@@ -181,7 +182,7 @@ test('W5-2 事故同构：取消后被取消计划成为 live，present 放行�
     '未点名的终态计划不挡门：同会话的 8/8 计划必须可交付')
 
   // dispatch 的终态拒绝是设计保留的语义，不是死锁：调用方拿到明确码值。
-  const dispatch = await runtime.dispatchTool({ session }, { planId: CANCELLED_PLAN }, undefined)
+  const dispatch = await runtime.dispatchTool({ session }, { deepThink: MAIN_DEEP_THINK_FIXTURE, planId: CANCELLED_PLAN }, undefined)
   assert.equal(dispatch.ok, false)
   assert.equal(dispatch.code, 'PLAN_CANCELLED')
   assert.equal(dispatch.remaining, 8)
@@ -217,7 +218,7 @@ test('W5-3 生产写路径：新写信封与 1.8.19 真实信封同一 schema，
   // 冷启动 runtime：只有日志，没有内存状态。
   const cold = runtimeFor()
   assert.equal(cold.presentDenialVerdict({ session }), undefined, '重启后取消不得复活成永久挡门项')
-  const dispatch = await cold.dispatchTool({ session }, { planId: CANCELLED_PLAN }, undefined)
+  const dispatch = await cold.dispatchTool({ session }, { deepThink: MAIN_DEEP_THINK_FIXTURE, planId: CANCELLED_PLAN }, undefined)
   assert.equal(dispatch.code, 'PLAN_CANCELLED')
   const coldRecord = reconstructFromSession(session, CANCELLED_PLAN)
   assert.ok(coldRecord)
@@ -240,7 +241,7 @@ test('W5-4 D2 未放宽：本回合点名的 cancelled 仍硬拦 present 并 ste
   assert.match(verdict.message, /已取消，但只完成 0\/8/)
   assert.match(verdict.message, /未完成：剩余 N 项/)
 
-  const dispatch = await runtime.dispatchTool({ session }, { planId: CANCELLED_PLAN }, undefined)
+  const dispatch = await runtime.dispatchTool({ session }, { deepThink: MAIN_DEEP_THINK_FIXTURE, planId: CANCELLED_PLAN }, undefined)
   assert.equal(dispatch.code, 'PLAN_CANCELLED')
 
   const steered: any[] = []

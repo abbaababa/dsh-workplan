@@ -22,6 +22,7 @@ import assert from 'node:assert/strict'
 
 import { buildPlanMessage, messageText, parseResultMessage, parseUpdateMessage, parseWorkplanMessage } from '../src/plan.js'
 import { createWorkplanRuntime, reconstructFromSession } from '../src/runtime.js'
+import { MAIN_DEEP_THINK_FIXTURE } from './helpers/main-deep-think.js'
 
 const eventLoopAnchor = setInterval(() => {}, 1_000)
 const dropEventLoopAnchor = setTimeout(() => clearInterval(eventLoopAnchor), 60_000)
@@ -164,7 +165,7 @@ function roundEnded(session: any) {
 
 test('A1：单子任务完成到主会话出现专属即时通知 ≤ 5 秒，且先于轮级批量结果消息', async () => {
   const { session, runtime, gates } = makeRuntime()
-  await runtime.dispatchTool({ session, options: {} }, { mode: 'async' }, new AbortController().signal)
+  await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
   assert.ok(await waitFor(() => gates.length >= 1), 'T1 应已派发')
   // T2 依赖 T1 且被假子会话吊住：T1 结算时整轮必然还没结束。
   gates[0].release(completed('T1 已完成全部验收'))
@@ -190,7 +191,7 @@ test('A1：单子任务完成到主会话出现专属即时通知 ≤ 5 秒，�
 
 test('A2：同一子任务重复结算/回放不重报（幂等，重启/刷新后回放一致）', async () => {
   const { session, runtime, gates } = makeRuntime()
-  await runtime.dispatchTool({ session, options: {} }, { mode: 'async' }, new AbortController().signal)
+  await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
   await waitFor(() => gates.length >= 1)
   gates[0].release(completed('T1 已完成'))
   await waitFor(() => gates.length >= 2, 10_000)
@@ -226,7 +227,7 @@ test('A4：子任务全部未完成时不存在「已完成」措辞的通知', 
     maxResumes: 4,
     strictEvidence: false,
   })
-  await runtime.dispatchTool({ session, options: {} }, { mode: 'async' }, new AbortController().signal)
+  await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
   assert.ok(await waitFor(() => roundEnded(session), 15_000), '全部失败后本轮应收束并写轮级结果消息')
   const claimed = noticeTexts(session).filter((text) => /已完成/.test(text))
   assert.deepEqual(

@@ -17,7 +17,7 @@ TOE 对外暴露 **2 类接口**：9 个 Agent 工具（宿主注入给模型调
 
 | # | 工具 | 调用者 | 用途（一句话） | 关键参数 | 失败/拒绝行为 |
 |---|---|---|---|---|---|
-| 1 | `dsh_workplan_dispatch` | 主 Agent | 派发计划执行 | `planId?`, `mode: wait/async` | 无计划/重复派发幂等返回；`complete:false` 表示未完成，必须续跑 |
+| 1 | `dsh_workplan_dispatch` | 主 Agent | 派发计划执行（2.5.2 起首次派发强制主 Agent 两轮深度思考协议） | `planId?`, `mode: wait/async`, `deepThink{problemAnalysis, approach, approachBasis}`（首次派发必填） | 无计划/重复派发幂等返回；首次派发未交/不合格两轮思考产物硬拒 `MAIN_DEEP_THINK_MISSING` / `MAIN_DEEP_THINK_INCOMPLETE`（不启动子 Agent），登记后 durable 持久化、续跑/重启回放读档放行，重规划新计划须重新提交；`complete:false` 表示未完成，必须续跑 |
 | 2 | `dsh_workplan_status` | 主 Agent（只读） | 查看各子任务实时状态 | `planId?` | 只读，无副作用 |
 | 3 | `dsh_workplan_update` | 主 Agent | 回写子任务状态/证据/验收 | `subtaskId`, `status`, `verification`, `acceptance[]` | done 需 structured+pass，否则 `deliveryReady=false`；执行中改判需 `force` |
 | 4 | `dsh_workplan_replan` | 主 Agent | 需求变更时重规划 | `reason`, `changes[]` | 执行中调用返回 `REPLAN_PLAN_RUNNING`，变更不丢 |

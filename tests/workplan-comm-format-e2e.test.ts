@@ -24,6 +24,7 @@ import {
   buildPlanMessage,
 } from '../src/plan.js'
 import { createWorkplanRuntime } from '../src/runtime.js'
+import { MAIN_DEEP_THINK_FIXTURE } from './helpers/main-deep-think.js'
 
 // 本次端到端验证不得往用户的永久教训记忆里写测试数据。
 process.env.DSH_WORKPLAN_LESSONS_FILE = join(
@@ -176,7 +177,7 @@ test('端到端：不合规结果被退回且不计完成，修正后同一子�
   const signal = new AbortController().signal
 
   /* ---------- 第 1 轮：不合规 → 退回 ---------- */
-  const first: any = await runtime.dispatchTool({ session, options: {} }, {}, signal)
+  const first: any = await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE,}, signal)
   const rejected = rowOf(first)
 
   assert.equal(first.ok, true, '派发本身应成功返回，而不是抛错')
@@ -197,7 +198,7 @@ test('端到端：不合规结果被退回且不计完成，修正后同一子�
   assert.match(prompts[0], /提交前自查（强制）/, '派发提示词必须要求提交前自查')
 
   /* ---------- 第 2 轮：合规 → 通过 ---------- */
-  const second: any = await runtime.dispatchTool({ session, options: {} }, {}, signal)
+  const second: any = await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE,}, signal)
   const passed = rowOf(second)
 
   assert.equal(second.ok, true)
@@ -225,7 +226,7 @@ test('端到端：不合规结果被退回且不计完成，修正后同一子�
 
 test('端到端：合规结果一次通过，不被门禁误拦', async () => {
   const { session, runtime } = makeRuntime([compliantOutput()])
-  const out: any = await runtime.dispatchTool({ session, options: {} }, {}, new AbortController().signal)
+  const out: any = await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE,}, new AbortController().signal)
   const row = rowOf(out)
   assert.equal(row.status, 'done')
   assert.equal(row.blockedKind, null)

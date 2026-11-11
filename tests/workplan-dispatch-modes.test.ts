@@ -17,6 +17,7 @@ import assert from 'node:assert/strict'
 
 import { buildPlanMessage, parseResultMessage } from '../src/plan.js'
 import { createWorkplanRuntime } from '../src/runtime.js'
+import { MAIN_DEEP_THINK_FIXTURE } from './helpers/main-deep-think.js'
 
 const eventLoopAnchor = setInterval(() => {}, 1_000)
 const dropEventLoopAnchor = setTimeout(() => clearInterval(eventLoopAnchor), 60_000)
@@ -111,7 +112,7 @@ test('async 派发在 1s 内返回 running，结果稍后以结果消息落盘',
   const gate = deferred()
   const { session, runtime } = makeRuntime(gate.promise)
   const started = Date.now()
-  const out: any = await runtime.dispatchTool({ session, options: {} }, { mode: 'async' }, new AbortController().signal)
+  const out: any = await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
 
   assert.equal(out.ok, true)
   assert.equal(out.mode, 'async')
@@ -128,7 +129,7 @@ test('async 派发在 1s 内返回 running，结果稍后以结果消息落盘',
   assert.equal(live.statuses[0].status, 'in_progress')
 
   // A second async dispatch is idempotent but still informative.
-  const again: any = await runtime.dispatchTool({ session, options: {} }, { mode: 'async' }, new AbortController().signal)
+  const again: any = await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
   assert.equal(again.alreadyRunning, true)
   assert.equal(again.running, true)
   assert.equal(again.statuses[0].status, 'in_progress')
@@ -153,9 +154,9 @@ test('async 派发在 1s 内返回 running，结果稍后以结果消息落盘',
 test('运行中的 wait 派发会 join 并返回完整结果，而不是空的 alreadyRunning', async () => {
   const gate = deferred()
   const { session, runtime } = makeRuntime(gate.promise)
-  await runtime.dispatchTool({ session, options: {} }, { mode: 'async' }, new AbortController().signal)
+  await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
 
-  const joinedPromise = runtime.dispatchTool({ session, options: {} }, {}, new AbortController().signal)
+  const joinedPromise = runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE,}, new AbortController().signal)
   gate.release(completed('完成'))
   const joined: any = await joinedPromise
 
@@ -192,7 +193,7 @@ test('重启后 status 工具可以从会话记录重建计划并读到完成项
   const first = createWorkplanRuntime(ctx, { totalTimeoutMs: 60_000, strictEvidence: false })
   session.append('user/message', buildPlanMessage(makePlan()))
   seedLeaderSelfEffort(session, makePlan())
-  const out: any = await first.dispatchTool({ session, options: {} }, {}, new AbortController().signal)
+  const out: any = await first.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE,}, new AbortController().signal)
   assert.equal(out.stats.done, 1)
 
   // A fresh runtime has no in-memory record: the session log must be enough.
@@ -247,7 +248,7 @@ test('结果消息写入失败会登记到 errors，而不是只打日志', asyn
     return originalAppend(type, data)
   }
   setTimeout(() => gate.release(completed()), 0)
-  const out: any = await runtime.dispatchTool({ session, options: {} }, {}, new AbortController().signal)
+  const out: any = await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE,}, new AbortController().signal)
   const record: any = runtime.state.records.get(session.id)
   assert.ok(record, '派发必须建立记录')
   assert.ok(

@@ -25,6 +25,7 @@ import {
   parseEvidenceBlock,
 } from '../src/plan.js'
 import { createWorkplanRuntime, shouldRetryAttempt } from '../src/runtime.js'
+import { MAIN_DEEP_THINK_FIXTURE } from './helpers/main-deep-think.js'
 
 // 本文件不得往用户的永久教训记忆里写测试数据。
 process.env.DSH_WORKPLAN_LESSONS_FILE = join(
@@ -206,7 +207,7 @@ test('e2e A1/A2：非法块 → 自动回喂重报 → 修正后正常结算 don
   const { session, runtime, prompts } = makeRuntime([malformedOutput('第一轮'), compliantOutput()], cwd)
   const signal = new AbortController().signal
 
-  const result: any = await runtime.dispatchTool({ session, options: {} }, {}, signal)
+  const result: any = await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE,}, signal)
   const row = rowOf(result)
 
   assert.equal(result.ok, true, '派发本身应成功返回而不是抛错')
@@ -243,7 +244,7 @@ test('e2e A2：重试后仍非法才 blocked，记录附在盘产物清单与 ds
   )
   const signal = new AbortController().signal
 
-  const result: any = await runtime.dispatchTool({ session, options: {} }, {}, signal)
+  const result: any = await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE,}, signal)
   const row = rowOf(result)
 
   assert.equal(prompts.length, 2, '有界：最多两次激活，第二次仍非法即收束，绝不无限回喂')
