@@ -93,6 +93,16 @@ window.__ModuleLoader__.load({
                     "closed": "无需动作"
                 },
                 "handoffs": "跨部门需求",
+                "delegates": "第三层（专家/组员）",
+                "delegateExpert": "专家",
+                "delegateMember": "组员",
+                "delegateStatus": {
+                    "running": "执行中",
+                    "done": "已完成",
+                    "failed": "失败",
+                    "timeout": "超时",
+                    "rejected": "派发被拒"
+                },
                 "dept": {
                     "engineering": "工程研发",
                     "research": "研究分析",
@@ -310,6 +320,16 @@ window.__ModuleLoader__.load({
                     "closed": "No action"
                 },
                 "handoffs": "Cross-team needs",
+                "delegates": "Third tier (experts/members)",
+                "delegateExpert": "expert",
+                "delegateMember": "member",
+                "delegateStatus": {
+                    "running": "running",
+                    "done": "done",
+                    "failed": "failed",
+                    "timeout": "timeout",
+                    "rejected": "rejected"
+                },
                 "dept": {
                     "engineering": "Engineering",
                     "research": "Research",
@@ -1678,6 +1698,11 @@ window.__ModuleLoader__.load({
              * [2.2.7][T2/五档] UI Pill 白名单：与 plan.ts 的 REASONING_EFFORTS
              * （low / medium / high / xhigh / max）逐值同步。浏览器包无法 import
              * 宿主常量，此处为唯二事实源之一——漏改会让新档位在任务卡片上静默消失。
+             * [2.3.9][T3] 模型家族收窄口径：qwen 系仅 low/medium/xhigh、其余仅
+             * low/high/max 的**事前约束**发生在规划校验（validatePlan allowedEfforts）
+             * 与派发入口（runtime 静态收窄+qwen-rule 留痕）；计划字段本身是存储全集
+             * 五档（旧计划/他模型计划可在本会话回放展示），故 Pill 继续按五档显示、
+             * 不得按家族删档——家族合法性以发送前的收窄/拒绝为准，不靠 UI 过滤兜底。
              */
             const effort = typeof subtask?.reasoningEffort === 'string' && ['low', 'medium', 'high', 'xhigh', 'max'].includes(subtask.reasoningEffort)
                 ? subtask.reasoningEffort
@@ -1693,6 +1718,21 @@ window.__ModuleLoader__.load({
                     + `${handoff?.department ? ` → ${deptName(t, handoff.department)}` : ''}`
                     + `｜${handoffStatusText(t, handoff?.status)}`
                     + `${handoff?.response ? `：${String(handoff.response)}` : ''}`))))
+                : null, 
+            /*
+             * [2.3.9][T4b] 第三层派发看板（用户要求 4/5）：部门负责人分配给
+             * 顶尖专家/组员的每位下级、其推理等级（含越界钳制留痕）与实时状态
+             * 必须对用户与主 Agent 可见，否则「第三层派给了谁、跑没跑完」只存在
+             * 负责人子会话里。数据源 = 状态行 delegates（applyStatus 消毒 +
+             * durable workplan-update 回放，刷新/重启不丢），客户端不推导状态。
+             */
+            Array.isArray(item?.delegates) && item.delegates.length
+                ? h('div', { className: 'dsh-wp-subtask-body' }, h('div', null, h('strong', null, `${t('delegates')}：`)), h('ul', { className: 'dsh-wp-muted' }, item.delegates.map((member, memberIndex) => h('li', { key: `${String(member?.childId ?? member?.member ?? '')}-${memberIndex}` }, `└ ${String(member?.member ?? '?')}`
+                    + `（${member?.role === 'expert' ? t('delegateExpert') : t('delegateMember')}）`
+                    + `｜${t('reasoningEffort')}：${String(member?.effort ?? '?')}`
+                    + (member?.requested && member.requested !== member.effort ? `（越界钳制自 ${String(member.requested)}）` : '')
+                    + `｜${t(`delegateStatus.${String(member?.status ?? 'running')}`)}`
+                    + (member?.summary ? `：${String(member.summary)}` : '')))))
                 : null, status !== 'blocked' && item?.summary ? h('p', { className: 'dsh-wp-muted' }, `${t('summary')}：${plainError(item.summary)}`) : null, 
             /*
              * [1.10.0] R-02：「卡住原因」只属于没做完的行。

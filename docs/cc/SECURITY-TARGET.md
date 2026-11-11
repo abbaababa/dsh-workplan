@@ -75,6 +75,7 @@
 | `dsh_workplan_handoff` | 模型工具 | 双向 | 跨部门需求处置；仅根会话可用 |
 | `dsh_workplan_verify` | 模型工具 | 双向 | 子 Agent 在阶段三提交三阶段证据做核验；阶段一/二返回 `PHASE_GATE` |
 | `dsh_workplan_lessons` | 模型工具 | 读出 | 只读查看永久教训记忆（list/search/stats）；不写计划状态 |
+| `dsh_workplan_delegate` | 模型工具 | 双向 | 部门负责人第三层派发（2.3.9）：`review` 登记梳理产物与分工表，`dispatch` 派生一层下级子会话；仅计划内部门负责人子会话可用，梳理未登记则派发被拒，下级为叶子层（第四层由宿主 `maxDepth` 硬拒） |
 
 （1.9–2.0 新增 7 个工具（含 1.13.0 的三阶段核验与 2.0.1 的教训记忆）与取代/重规划能力；接口参数与失败行为完整枚举见 `docs/cc/ADV-FSP-FUNCTIONAL-SPEC.md`。）
 

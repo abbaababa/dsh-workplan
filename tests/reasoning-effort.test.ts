@@ -264,7 +264,14 @@ test('部门子会话档位只由子任务自身复杂度决定：主 Agent 五�
     return Object.fromEntries(seen.map((item) => [item.id, item.effort]))
   }
 
-  const expected = { T1: 'low', T2: 'high', T3: 'max', T4: 'high', T5: 'medium', T6: 'xhigh' }
+  /*
+   * [2.3.9][T3] 期望表更新：派发前新增模型家族静态闸（用户强制要求 1/2）。
+   * 本夹具 modelSelection.model='test'（非 qwen 家族）⇒ 等级集合收窄为
+   * {low, high, max}，故 T5 medium→low、T6 xhigh→high（自动降级修正，
+   * console.warn 留痕，A3 修正轨）；T3 max 仍在集合内原样。防继承契约
+   * 不变：五张主 Agent 表仍必须完全相同。
+   */
+  const expected = { T1: 'low', T2: 'high', T3: 'max', T4: 'high', T5: 'low', T6: 'high' }
   const low = await effortsOf('low')
   const medium = await effortsOf('medium')
   const high = await effortsOf('high')
@@ -277,9 +284,9 @@ test('部门子会话档位只由子任务自身复杂度决定：主 Agent 五�
   assert.deepEqual(xhigh, expected, '主 Agent=xhigh 时子任务档位不得改变')
   assert.deepEqual(max, expected, '主 Agent=max 时子任务档位不得改变')
   assert.equal(max.T1, 'low', 'A2：主 Agent=max + 简单子任务 → low')
-  assert.equal(low.T3, 'max', '反向组合：主 Agent=low + 复杂子任务 → max')
-  assert.equal(low.T6, 'xhigh', '反向组合：主 Agent=low + 新档复杂子任务 → xhigh')
-  assert.equal(max.T5, 'medium', '主 Agent=max + 新档中等子任务 → medium（不继承抬高）')
+  assert.equal(low.T3, 'max', '反向组合：主 Agent=low + 复杂子任务 → max（非 qwen 家族集合内原样）')
+  assert.equal(low.T6, 'high', '[2.3.9] 非 qwen 家族静态闸：xhigh 越界 ⇒ 降级 high（要求 2）')
+  assert.equal(max.T5, 'low', '[2.3.9] 非 qwen 家族静态闸：medium 越界 ⇒ 降级 low；且绝不随主 Agent 抬高')
   assert.equal(low.T4, 'high', '缺省档位回落 high（中等默认），不随主 Agent 变化')
 })
 

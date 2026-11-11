@@ -1,0 +1,91 @@
+##### src/runtime.ts :: 'salvagePartialPlan(' -> 3 hits
+--- at 747 ---
+  745  * 静默交出残缺计划比降级更危险。
+  746  */
+  747 function salvagePartialPlan(text: any, guardOptions: any) {
+  748   if (typeof text !== 'string') return null
+  749   const trimmed = text.trimEnd()
+  750   if (!trimmed.endsWith('}')) return null
+  751   try {
+--- at 1019 ---
+ 1017          * 通不过才按原判定中止，失败现场由 finally 的遥测留档。
+ 1018          */
+ 1019         const salvaged = salvagePartialPlan(sink.text, {
+ 1020           taskText,
+ 1021           conversationContext,
+ 1022           sourceMessageIds,
+ 1023           strict: contextGuardStrict(),
+--- at 1038 ---
+ 1036        */
+ 1037       if (error instanceof PlanError && error.code === 'PLANNER_INCOMPLETE' && !signal.aborted) {
+ 1038         const salvaged = salvagePartialPlan(sink.text, {
+ 1039           taskText,
+ 1040           conversationContext,
+ 1041           sourceMessageIds,
+ 1042           strict: contextGuardStrict(),
+##### src/runtime.ts :: 'validatePlan(raw)' -> 1 hits
+--- at 753 ---
+  750   if (!trimmed.endsWith('}')) return null
+  751   try {
+  752     const raw = extractJson(trimmed)
+  753     const validated = validatePlan(raw)
+  754     if (!validated.ok) return null
+  755     const guard = validatePlanContext(validated.plan, guardOptions)
+  756     if (!guard.ok) return null
+##### src/replan.ts :: 'replanFieldError(raw' -> 2 hits
+--- at 240 ---
+  238  * 载荷，这些计划再也回灌不了 validatePlan，却能被真实派发。
+  239  */
+  240 function replanFieldError(raw: any): string | null {
+  241   const list = (key: string, max: number, itemMax: number, required = false): string | null => {
+  242     const value = raw?.[key]
+--- at 417 ---
+  415       return fail(REPLAN_CODES.INVALID_SUBTASK, `newSubtask.department 不是合法部门：${String(raw.department)}`)
+  416     }
+  417     const fieldError = replanFieldError(raw)
+  418     if (fieldError) return fail(REPLAN_CODES.INVALID_SUBTASK, `newSubtask 字段不合规：${fieldError}`)
+  419     const goal = typeof raw.objective === 'string' ? raw.objective.trim() : ''
+##### src/replan.ts :: 'function replanFieldError' -> 1 hits
+--- at 240 ---
+  238  * 载荷，这些计划再也回灌不了 validatePlan，却能被真实派发。
+  239  */
+  240 function replanFieldError(raw: any): string | null {
+  241   const list = (key: string, max: number, itemMax: number, required = false): string | null => {
+  242     const value = raw?.[key]
+  243     if (value === undefined) return required ? `${key} 不能为空` : null
+  244     if (!Array.isArray(value)) return `${key} 必须是数组`
+##### src/replan.ts :: 'effortError' -> 2 hits
+--- at 269 ---
+  267    */
+  268   const effort = raw?.reasoningEffort
+  269   const effortError = effort === undefined || effort === null
+  270     ? null
+  271     : typeof effort !== 'string' || !REASONING_EFFORTS.includes(effort)
+  272       ? 'reasoningEffort 必须是 low / medium / high / xhigh / max 之一（缺失合法：replace 继承旧行、add 派发期回落；非法值拒绝，不改写）'
+  273       : null
+  274   return list('dependsOn', 12, 16)
+  275     ?? list('method', 12, 800)
+--- at 283 ---
+  281     ?? one('objective', 2000)
+  282     ?? one('risk', 1000)
+  283     ?? effortError
+  284 }
+  285 
+  286 export function planReplan(plan: any, changes: any, options: any = {}): ReplanResult {
+  287   const planId = String(options.planId ?? plan?.planId ?? '')
+  288   const reason = truncate(String(options.reason ?? '').trim(), MAX_REPLAN_REASON_CHARS)
+  289   const revision = Number(options.revision)
+##### src/client.ts :: "['low', 'medium', 'high', 'xhigh', 'max'].includes" -> 1 hits
+--- at 1741 ---
+ 1733       const instructionOverdue = item?.instructionOverdue === true
+ 1734       const tone = closure === 'replanned' ? 'idle' : toneOfStatus(status)
+ 1735       const pct = clampPct(item?.progress ?? 0)
+ 1736       /*
+ 1737        * [2.2.7][T2/五档] UI Pill 白名单：与 plan.ts 的 REASONING_EFFORTS
+ 1738        * （low / medium / high / xhigh / max）逐值同步。浏览器包无法 import
+ 1739        * 宿主常量，此处为唯二事实源之一——漏改会让新档位在任务卡片上静默消失。
+ 1740        */
+ 1741       const effort = typeof subtask?.reasoningEffort === 'string' && ['low', 'medium', 'high', 'xhigh', 'max'].includes(subtask.reasoningEffort)
+ 1742         ? subtask.reasoningEffort
+ 1743         : null
+ 1744       return h('div', { className: `dsh-wp-subtask dsh-wp-tone-${tone}` },

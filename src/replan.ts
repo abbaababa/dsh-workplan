@@ -237,7 +237,7 @@ function mergeReplacement(old: any, replacement: any, id: string, reason: string
  * （T4 D-T4-03）。修复前 add 接受 14 条依赖、200 条 inputs 与 16 万字符
  * 载荷，这些计划再也回灌不了 validatePlan，却能被真实派发。
  */
-function replanFieldError(raw: any): string | null {
+function replanFieldError(raw: any, allowedEfforts?: readonly string[] | null): string | null {
   const list = (key: string, max: number, itemMax: number, required = false): string | null => {
     const value = raw?.[key]
     if (value === undefined) return required ? `${key} 不能为空` : null
@@ -260,6 +260,10 @@ function replanFieldError(raw: any): string | null {
   }
   /*
    * [2.2.7][T4/五档+G1] reasoningEffort 入口白名单（replace/add 两路共用本函数）：
+   * [2.3.9][T3/同步点] 此处按 REASONING_EFFORTS **存储全集五档**校验是刻意决策：
+   * 重规划的输入可能来自回放/他模型计划，删档会破坏零迁移契约；模型家族收窄
+   * 统一发生在派发入口（runtime.ts 静态收窄 + qwen-rule/non-qwen-rule 留痕）与
+   * 规划校验（validatePlan options.allowedEfforts），口径见 plan.ts L214-231 注释。
    * 与 plan.ts readSubtasks 语义对齐——缺失/显式 null 合法（replace 继承旧行、
    * add 留给派发期回落 high），非缺失值必须是 REASONING_EFFORTS 五档之一
    * （low / medium / high / xhigh / max），非法值拒绝、不改写。补上此校验前，
@@ -269,8 +273,15 @@ function replanFieldError(raw: any): string | null {
   const effortError = effort === undefined || effort === null
     ? null
     : typeof effort !== 'string' || !REASONING_EFFORTS.includes(effort)
-      ? 'reasoningEffort 必须是 low / medium / high / xhigh / max 之一（缺失合法：replace 继承旧行、add 派发期回落；非法值拒绝，不改写）'
-      : null
+      ? 'reasoningEffort 必须是 low / medium / high / xhigh / max 之一（缺失合法：replace 继承旧行、add 派发期回落；非法值拒绝，不改写；传入模型家族集合时进一步收窄为该集合）'
+      /*
+       * [2.3.9][T3] 模型感知收窄口径（用户要求 1/2；与 plan.ts validatePlan、
+       * runtime 派发侧同一真源）：调用方传入当前模型家族等级集合时，五档合规
+       * 但家族越界的档位（如 qwen 系的 high/max）同样拒绝并点名集合，不改写。
+       */
+      : Array.isArray(allowedEfforts) && allowedEfforts.length > 0 && !allowedEfforts.includes(effort)
+        ? `reasoningEffort "${effort}" 不在当前模型家族的推理等级集合 {${allowedEfforts.join(' / ')}} 内（qwen 系仅 low / medium / xhigh；非 qwen 系仅 low / high / max），必须改用集合内档位`
+        : null
   return list('dependsOn', 12, 16)
     ?? list('method', 12, 800)
     ?? list('inputs', 12, 800)
@@ -360,7 +371,7 @@ export function planReplan(plan: any, changes: any, options: any = {}): ReplanRe
     if (replacement.department !== undefined && replanDepartment(replacement.department) === null) {
       return fail(REPLAN_CODES.INVALID_REPLACEMENT, `replacement.department 不是合法部门：${String(replacement.department)}`)
     }
-    const replacementError = replanFieldError(replacement)
+    const replacementError = replanFieldError(replacement, options?.allowedEfforts)
     if (replacementError) return fail(REPLAN_CODES.INVALID_REPLACEMENT, `replacement 字段不合规：${replacementError}`)
     const requestedId = typeof replacement.id === 'string' ? replacement.id.trim() : ''
     if (requestedId && (requestedId === subtaskId || orderMap(next).has(requestedId))) {
@@ -414,7 +425,7 @@ export function planReplan(plan: any, changes: any, options: any = {}): ReplanRe
     if (department === null) {
       return fail(REPLAN_CODES.INVALID_SUBTASK, `newSubtask.department 不是合法部门：${String(raw.department)}`)
     }
-    const fieldError = replanFieldError(raw)
+    const fieldError = replanFieldError(raw, options?.allowedEfforts)
     if (fieldError) return fail(REPLAN_CODES.INVALID_SUBTASK, `newSubtask 字段不合规：${fieldError}`)
     const goal = typeof raw.objective === 'string' ? raw.objective.trim() : ''
     const title = typeof raw.title === 'string' ? raw.title.trim() : ''

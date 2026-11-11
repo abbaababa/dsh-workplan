@@ -28,6 +28,7 @@ TOE 对外暴露 **2 类接口**：9 个 Agent 工具（宿主注入给模型调
 | 9 | `dsh_workplan_handoff` | 主 Agent（仅根会话） | 处置跨部门需求 | `action: list/assign/resolve/close` | 非根会话拒绝 |
 | 10 | `dsh_workplan_verify` | 子 Agent（阶段三） | 核验三阶段证据与验收覆盖 | `phases`（planning/execution/verification） | 阶段一/二返回 `PHASE_GATE`；证据缺口返回 `VERIFICATION_INCOMPLETE`；核验通过不等于完成 |
 | 11 | `dsh_workplan_lessons` | 根会话 / 子 Agent（只读） | 查看永久教训记忆（`list` / `search` / `stats`） | `action`、`department`、`query`、`limit` | 只读，不写计划状态、不提供写入动作；记忆只能由阶段三复盘通过后的完成判定写入 |
+| 12 | `dsh_workplan_delegate` | 部门负责人子 Agent（2.3.9） | 第三层派发：先提交「全面梳理」产物，再把任务分给本部门顶尖专家与组员 | `action: review/dispatch/status`、`consolidation{problemAnalysis, assignments[]}` | 非部门负责人子会话（根会话 / 第三层叶子）拒绝；`review` 未登记时 `dispatch` 返回 `DELEGATE_CONSOLIDATION_MISSING`；分工表缺 expert 或 member 返回 `DELEGATE_ROLE_MIX_REQUIRED`；越界推理等级按模型家族集合钳制并留痕；下级子会话 `maxDepth:2`，第四层由宿主深度上限硬拒 |
 
 ### 1.2 HTTP 路由（1 个）／ HTTP route
 

@@ -211,6 +211,75 @@ export const LIKELIHOODS = Object.freeze(['low', 'medium', 'high'])
 export const REASONING_EFFORTS = Object.freeze(['low', 'medium', 'high', 'xhigh', 'max'])
 export const DEFAULT_REASONING_EFFORT = 'high'
 
+/*
+ * [2.3.9][T3] LLM 家族静态规则（用户 2026-11-10 强制要求 1/2，主 Agent 权威口径）。
+ *
+ * 单一事实源：家族判定与等级集合只在本处定义；runtime（派发/规划入口）、
+ * replan（校验）、client（UI Pill）一律从这里取数，禁止第二份表。
+ *
+ * 用户规则原文：
+ *  1. 字母 qwen 开头的模型，推理等级只包括 low、medium、xhigh——轻度任务
+ *     使用 low，比较复杂的任务使用 medium，非常复杂的任务使用 xhigh。
+ *  2. 非 qwen 开头的其他大模型，推理等级只包括 low、high、max——轻度任务
+ *     使用 low，比较复杂的任务使用 high，非常复杂的任务使用 max。
+ *
+ * 与存储全集的关系（不得删档）：REASONING_EFFORTS 五档仍是**存储全集**（计划
+ * JSON、序列化回放、旧计划的合法域）；本表是**执行前约束**——派发/规划发送
+ * 前按当前模型家族收窄，再与宿主能力清单取交集钳制（两段各自留痕）。
+ * 模型名缺失 ⇒ classifyModelFamily 返回 null ⇒ 不施加静态约束，保持旧行为
+ * （与 [2.2.7]「无从判定⇒不阻断」同风格，防凭空收紧误伤五档全支持模型）。
+ */
+export type ModelFamily = 'qwen' | 'other'
+export const QWEN_MODEL_EFFORTS: readonly string[] = Object.freeze(['low', 'medium', 'xhigh'])
+export const OTHER_MODEL_EFFORTS: readonly string[] = Object.freeze(['low', 'high', 'max'])
+
+/** 判定模型家族：qwen 开头（trim+小写）→ 'qwen'；其余非空 → 'other'；空/缺失 → null（不约束）。 */
+export function classifyModelFamily(modelId?: string | null): ModelFamily | null {
+  const normalized = String(modelId ?? '').trim().toLowerCase()
+  if (!normalized) return null
+  return normalized.startsWith('qwen') ? 'qwen' : 'other'
+}
+
+/** 家族 → 允许等级集合（用户要求 1/2 硬白名单）；未知家族 → null = 不施加约束。 */
+export function effortsForModelFamily(family?: ModelFamily | null): readonly string[] | null {
+  if (family === 'qwen') return QWEN_MODEL_EFFORTS
+  if (family === 'other') return OTHER_MODEL_EFFORTS
+  return null
+}
+
+/** 一步式：按模型 id 得到等级集合；模型名缺失返回 null（不约束）。 */
+export function allowedEffortsForModel(modelId?: string | null): readonly string[] | null {
+  return effortsForModelFamily(classifyModelFamily(modelId))
+}
+
+/**
+ * 复杂度 → 档位映射表（要求 1/2 的「轻度/比较复杂/非常复杂」数值化；
+ * 部门负责人与专家/组员选档的官方依据，要求 5）。
+ */
+export type TaskComplexity = 'light' | 'moderate' | 'heavy'
+export const COMPLEXITY_EFFORT_BY_FAMILY: Readonly<Record<ModelFamily, Record<TaskComplexity, string>>> =
+  Object.freeze({
+    qwen: Object.freeze({ light: 'low', moderate: 'medium', heavy: 'xhigh' }),
+    other: Object.freeze({ light: 'low', moderate: 'high', heavy: 'max' }),
+  })
+
+/** 按家族+复杂度取应使用档位；家族未知返回 null。 */
+export function effortForComplexity(family: ModelFamily | null, complexity: TaskComplexity): string | null {
+  if (!family) return null
+  return COMPLEXITY_EFFORT_BY_FAMILY[family][complexity]
+}
+
+/** 集合内最高档（强度序与 runtime EFFORT_STRENGTH_ORDER 同源）；空集合返回 null。 */
+export function highestEffortOf(levels: readonly string[] | null): string | null {
+  if (!levels || levels.length === 0) return null
+  const order = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+  let best: string | null = null
+  for (const id of levels) {
+    if (best === null || order.indexOf(id) > order.indexOf(best)) best = id
+  }
+  return best
+}
+
 export const DEPARTMENTS = Object.freeze({
   engineering: { zh: '工程研发', en: 'Engineering' },
   research: { zh: '研究分析', en: 'Research' },
@@ -1023,10 +1092,13 @@ function checkPlanGraph(plan: any, errors: string[]) {
 /**
  * Validate an untrusted planner object. Never throws for malformed input.
  *
- * @param {unknown} raw
- * @returns {{ok: true, plan: object} | {ok: false, errors: string[]}}
+ * [2.3.9][T3] options.allowedEfforts：当前模型家族的等级集合（真源
+ * allowedEffortsForModel）。传入时，规划器**显式写出**的集合外档位直接拒绝并
+ * 点名（事前约束，要求 1/2；缺失/回落的 high 不在此列——派发侧静态收窄会带
+ * qwen-rule 留痕降级，向后兼容旧回放零迁移）。null/未传 ⇒ 不施加（回放、旧
+ * 调用零行为变化）。REASONING_EFFORTS 五档仍是存储全集，不得删档。
  */
-export function validatePlan(raw: any) {
+export function validatePlan(raw: any, options?: { allowedEfforts?: readonly string[] | null }) {
   if (!isRecord(raw)) {
     return { ok: false, errors: ['计划必须是 JSON 对象'] }
   }
@@ -1042,6 +1114,31 @@ export function validatePlan(raw: any) {
     risks: readRisks(raw.risks, errors),
     verification: readVerification(raw.verification, errors),
     practiceLoop: readPracticeLoop(raw.practiceLoop, errors),
+  }
+  const allowedEfforts = options && options.allowedEfforts ? options.allowedEfforts : null
+  if (allowedEfforts !== null && Array.isArray(raw.stages)) {
+    /*
+     * [2.3.9][T3/llm-rules] 模型感知的校验收窄（用户要求 1/2，主 Agent 口径）：
+     * 五档仍是存储全集（不得删档），但调用方传入当前模型家族等级集合时，
+     * 规划器**显式写出**的集合外档位拒绝并点名字段——错误经重试回路回喂
+     * 规划器自纠，属于事前约束而非派发后静默钳制。缺失档位不在此拦（由
+     * readSubtasks 回落 high、派发侧静态收窄带 qwen-rule 留痕降级）；未传
+     * options 的调用（回放/旧路径）零行为变化。
+     */
+    for (let stageIndex = 0; stageIndex < raw.stages.length; stageIndex += 1) {
+      const stage = raw.stages[stageIndex]
+      if (!isRecord(stage) || !Array.isArray(stage.subtasks)) continue
+      for (let subtaskIndex = 0; subtaskIndex < stage.subtasks.length; subtaskIndex += 1) {
+        const subtask = stage.subtasks[subtaskIndex]
+        if (!isRecord(subtask)) continue
+        const effort = subtask.reasoningEffort
+        if (effort !== undefined && effort !== null
+          && !(typeof effort === 'string' && allowedEfforts.includes(effort))) {
+          push(errors, `stages[${stageIndex}].subtasks[${subtaskIndex}].reasoningEffort`,
+            `"${String(effort)}" 不在当前模型家族的推理等级集合 {${allowedEfforts.join(' / ')}} 内（qwen 系仅 low / medium / xhigh；非 qwen 系仅 low / high / max），必须改用集合内档位或删除该字段`)
+        }
+      }
+    }
   }
   checkPlanGraph(plan, errors)
   if (errors.length > 0) return { ok: false, errors }
@@ -3347,6 +3444,14 @@ export function buildUpdateMessage(update: any) {
      * deriveSubtaskTimeoutMs。
      */
     ...(update.timeoutMs === undefined ? {} : { timeoutMs: update.timeoutMs }),
+    /*
+     * [2.3.9][T4b] 梳理门禁与第三层分工必须随 durable workplan-update 回放：
+     * 刷新后门禁判据（consolidation）若只剩内存一份，重启的负责人可以不经
+     * 梳理直接 dispatch，硬门禁就只是「本进程内的礼貌」。delegates 是看板
+     * 第三层的数据源，同理。
+     */
+    ...(update.consolidation === undefined ? {} : { consolidation: update.consolidation }),
+    ...(update.delegates === undefined ? {} : { delegates: update.delegates }),
     ...(update.revision === undefined ? {} : { revision: update.revision }),
     at: update.at ?? Date.now(),
   }
@@ -3828,6 +3933,61 @@ export function applyStatus(statuses: any, subtaskId: any, patch: any) {
       .map((item: any) => ({ id: item.id, reason: truncate(String(item.reason ?? ''), 300) }))
   }
   /*
+   * [2.3.9][T4b] 第三层派发的留档字段（用户要求 4/5：负责人「先全面梳理、
+   * 再分配」的硬门禁产物 + 顶尖专家/组员的分工与实时状态）。
+   *
+   * `consolidation` 是梳理门禁的唯一判据：没有它，delegateTool 的 dispatch
+   * 动作必须被拒（A4）。`delegates` 是看板第三层的渲染数据源（A3），其
+   * requested/corrected 对就是等级钳制的留痕（A5）。两者只写同一条状态行、
+   * 走同一个 durable workplan-update 回放，刷新/重启后门禁与看板不失效。
+   */
+  if (patch.consolidation !== undefined) {
+    if (patch.consolidation === null) next.consolidation = null
+    else if (isRecord(patch.consolidation)) {
+      const briefStrings = (value: any, limit: number, itemMax: number) => (Array.isArray(value) ? value : [])
+        .map((entry: any) => truncate(String(entry ?? '').trim(), itemMax))
+        .filter(Boolean)
+        .slice(0, limit)
+      next.consolidation = {
+        problemAnalysis: briefStrings(patch.consolidation.problemAnalysis, 12, 500),
+        constraints: briefStrings(patch.consolidation.constraints, 12, 300),
+        unknowns: briefStrings(patch.consolidation.unknowns, 12, 300),
+        approach: briefStrings(patch.consolidation.approach, 12, 500),
+        assignments: (Array.isArray(patch.consolidation.assignments) ? patch.consolidation.assignments : [])
+          .slice(0, 6)
+          .map((item: any) => ({
+            member: truncate(String(item?.member ?? ''), 80),
+            role: item?.role === 'expert' ? 'expert' : 'member',
+            task: truncate(String(item?.task ?? ''), 800),
+            reasoningEffort: REASONING_EFFORTS.includes(item?.reasoningEffort) ? item.reasoningEffort : 'low',
+            ...(item?.requested && item.requested !== item.reasoningEffort
+              ? { requested: String(item.requested) }
+              : {}),
+          })),
+        submittedAt: numberOrNull(patch.consolidation.submittedAt) ?? Date.now(),
+      }
+    } else {
+      throw new PlanError('consolidation 必须是对象或 null', 'INVALID_CONSOLIDATION')
+    }
+  }
+  if (patch.delegates !== undefined) {
+    next.delegates = (Array.isArray(patch.delegates) ? patch.delegates : [])
+      .slice(0, 6)
+      .map((item: any) => ({
+        member: truncate(String(item?.member ?? ''), 80),
+        role: item?.role === 'expert' ? 'expert' : 'member',
+        task: truncate(String(item?.task ?? ''), 300),
+        effort: REASONING_EFFORTS.includes(item?.effort) ? item.effort : 'low',
+        ...(item?.requested && item.requested !== item.effort ? { requested: String(item.requested) } : {}),
+        childId: typeof item?.childId === 'string' ? truncate(item.childId, 200) : null,
+        status: ['running', 'done', 'failed', 'timeout', 'rejected'].includes(item?.status) ? item.status : 'running',
+        summary: typeof item?.summary === 'string' ? truncate(item.summary, 300) : '',
+        error: typeof item?.error === 'string' ? truncate(item.error, 300) : null,
+        startedAt: numberOrNull(item?.startedAt),
+        finishedAt: numberOrNull(item?.finishedAt),
+      }))
+  }
+  /*
    * [1.7.0] Monotonic revision + author.
    *
    * Every write bumps the revision, so a stale page (or an older replay entry)
@@ -3948,6 +4108,13 @@ export function applyStatus(statuses: any, subtaskId: any, patch: any) {
     if (patch.blockedBy === undefined) next.blockedBy = undefined
     // [1.10.6] A conflict belongs to one attempt; a reset starts a new one.
     if (patch.artifactConflict === undefined) next.artifactConflict = undefined
+    /*
+     * [2.3.9][T4b] 第三层痕迹属于上一次尝试：重置后新负责人必须重新梳理、
+     * 旧专家/组员的子会话也已随上一attempt终止——留着它们会让新行「看起来
+     * 已梳理/已在派」，门禁（consolidation）与看板（delegates）双双失真。
+     */
+    if (patch.consolidation === undefined) next.consolidation = undefined
+    if (patch.delegates === undefined) next.delegates = undefined
   }
   if (patch.status === 'in_progress') {
     if (next.startedAt === null) next.startedAt = Date.now()
@@ -4951,6 +5118,13 @@ export function buildChildPrompt({
    */
   leadAgentId = '',
   leadAgentIdSource = 'none',
+  /*
+   * [2.3.9][T4b] 用户强制要求 3：分配任务时必须把要求 1/2 全文告知相关部门。
+   * 注入唯一事实源在 llm-rules.ts（buildLlmRulesBrief，tier='department'）；
+   * 由派发调用点传入（plan.ts 不能反向 import llm-rules.ts，会造成循环依赖）。
+   * 空串 = 旧调用方（旧测试/旧路径）零变化；新派发链恒传非空。
+   */
+  llmRulesBrief = '',
 }: any) {
   const noticeTarget = readLeadAgentId(leadAgentId)
   const noticeCall = leadNoticeCallForm(noticeTarget)
@@ -5096,6 +5270,7 @@ export function buildChildPrompt({
     `全局任务：${understanding.originalRequest ?? '（未记录）'}`,
     `最终交付物：${understanding.deliverable ?? '（未记录）'}`,
     ...anchorBlock,
+    ...(llmRulesBrief ? ['', String(llmRulesBrief), ''] : []),
     `主要矛盾：${contradiction}`,
     `当前阶段：${stageName}（${stageGoal}）`,
     `工作目录：${cwd || '（未知）'}`,

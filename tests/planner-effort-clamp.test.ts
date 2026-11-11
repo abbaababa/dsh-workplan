@@ -188,7 +188,7 @@ async function withGuardOff<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-test('runPlanner：qwen 类模型上默认 max 被钳制为 xhigh 并成功出计划（修复前此处整体降级）', async () => {
+test('runPlanner：qwen 类模型上默认档随家族收窄为 xhigh 并成功出计划（2.2.7 钳制 + 2.3.9 家族默认档）', async () => {
   await withGuardOff(async () => {
     const seen: any[] = []
     const telemetry: any = {}
@@ -206,9 +206,46 @@ test('runPlanner：qwen 类模型上默认 max 被钳制为 xhigh 并成功出�
     })
     assert.ok(plan, '计划必须正常返回，而不是降级')
     assert.equal(seen.length, 1)
-    assert.equal(seen[0].reasoningEffort, 'xhigh', '发给模型的必须是钳制后的等效档，而不是 max')
+    assert.equal(seen[0].reasoningEffort, 'xhigh', '发给模型的必须是家族合法集内最高档，而不是 max')
     assert.equal(telemetry.reasoningEffort, 'xhigh', '遥测必须记录实际发出值')
-    assert.match(String(telemetry.reasoningEffortSource), /clamped\(max\)/, '遥测必须能看出发生过钳制及原请求档')
+    /*
+     * [2.3.9][T3] 语义演进：qwen 家族默认档直接取合法集最高档 xhigh（用户要求 1），
+     * 不再产生「请求 max → 钳到 xhigh」的钳制轨迹；来源标记必须能看出默认档
+     * 已按家族收窄。强制钳制轨迹的用例改由 env 覆盖 max 触发（下一条用例）。
+     */
+    assert.equal(telemetry.reasoningEffortSource, 'default-xhigh',
+      '遥测必须显示规划器默认档已按 qwen 家族收窄为 xhigh（要求 1）')
+  })
+})
+
+test('runPlanner：env 显式 max 落在 qwen 家族上 ⇒ 静态闸修正为 xhigh 且遥测留痕（2.3.9 修正轨）', async () => {
+  await withGuardOff(async () => {
+    const seen: any[] = []
+    const telemetry: any = {}
+    const stamp = Date.now()
+    const previous = process.env.DSH_WORKPLAN_PLANNER_REASONING_EFFORT
+    process.env.DSH_WORKPLAN_PLANNER_REASONING_EFFORT = 'max'
+    try {
+      const plan = await runPlanner(plannerCtx('qwen-clamp', seen), {
+        taskText: '把静态修正用例跑通',
+        cwd: '/tmp',
+        sessionId: `session-static-${stamp}`,
+        modelSelection: { provider: `qw-${stamp}`, model: 'qwen-static-rc-${stamp}', reasoningEffort: 'low' },
+        signal: new AbortController().signal,
+        conversationContext: '',
+        budget: {},
+        sourceMessageIds: [],
+        telemetry,
+      })
+      assert.ok(plan)
+      assert.equal(seen[0].reasoningEffort, 'xhigh', 'env 越界档必须被家族静态闸降为集合内最高档')
+      assert.match(String(telemetry.reasoningEffortSource), /env/, '来源标记必须显示 env 覆盖')
+      assert.match(String(telemetry.reasoningEffortSource), /qwen-rule:max→xhigh/,
+        '遥测必须能看出发生过静态修正及原请求档（A3 留痕契约）')
+    } finally {
+      if (previous === undefined) delete process.env.DSH_WORKPLAN_PLANNER_REASONING_EFFORT
+      else process.env.DSH_WORKPLAN_PLANNER_REASONING_EFFORT = previous
+    }
   })
 })
 

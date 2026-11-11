@@ -356,12 +356,12 @@ test('规划器停止继承：主 Agent low/high/max 一律得默认 max；旋�
     yield { type: 'text-delta', text: '{}' }
     yield { type: 'finish', reason: { kind: 'stop' } }
   }
-  const run = async (mainEffort: string | undefined, envValue: string | undefined) => {
+  const run = async (mainEffort: string | undefined, envValue: string | undefined, model = 'fake-model') => {
     const seen: any[] = []
     const telemetry: any = {}
     await withEnv('DSH_WORKPLAN_PLANNER_REASONING_EFFORT', envValue, async () => {
       const { options } = runOptions({
-        modelSelection: { provider: 'fake-provider', model: 'fake-model', reasoningEffort: mainEffort },
+        modelSelection: { provider: 'fake-provider', model, reasoningEffort: mainEffort },
       })
       await assert.rejects(() => runPlanner(fakeCtx(quickFail, seen), { ...options, telemetry }))
     })
@@ -395,17 +395,33 @@ test('规划器停止继承：主 Agent low/high/max 一律得默认 max；旋�
    * [2.2.7][T5/五档] 规划器旋钮五档化（D3 落地）：白名单由 plan.ts REASONING_EFFORTS
    * 常量驱动，medium/xhigh 现为合法旋钮值；大小写归一（'MEDIUM'→medium）只在 env
    * 路径做，非法变体仍须回落 max。fakeCtx 的 llm 不暴露 resolveModelInfo ⇒
-   * 钳制保持旧行为直发，断言即旋钮原值。
+   * 能力钳制保持旧行为直发。
+   * [2.3.9][T3/llm-rules] 契约更新（用户强制要求 1/2）：五档仍是白名单/存储全集
+   * （env 合法值不因此报错、来源标记仍是 env），但**实际发送**须过模型家族静态闸
+   * ——fake-model 判 'other' ⇒ {low,high,max}：medium→low、xhigh→high（修正轨自动
+   * 降级 + 遥测留痕，不中断）；对照 qwen-fake ⇒ {low,medium,xhigh}：high→medium、
+   * max→xhigh。大小写/trim 两用例改在 qwen 家族上验证原意（合法集内原样透传）。
    */
+  const expectedForOther: Record<string, string> = { low: 'low', medium: 'low', high: 'high', xhigh: 'high', max: 'max' }
   for (const knob of ['low', 'medium', 'high', 'xhigh', 'max']) {
     const r = await run('max', knob)
-    assert.equal(r.effort, knob, `合法旋钮 ${knob} 必须原样透传给模型`)
-    assert.equal(r.telemetry.reasoningEffortSource, 'env', `旋钮 ${knob} 的来源标记必须是 env`)
+    assert.equal(r.effort, expectedForOther[knob], `非 qwen 家族旋钮 ${knob} 必须按 {low,high,max} 收窄后发送`)
+    assert.ok(String(r.telemetry.reasoningEffortSource).startsWith('env'), `旋钮 ${knob} 的来源标记必须是 env`)
+    if (expectedForOther[knob] !== knob) {
+      assert.match(String(r.telemetry.reasoningEffortSource), /non-qwen-rule:/, `被修正的旋钮 ${knob} 遥测必须带修正留痕`)
+    }
   }
 
-  const mediumCase = await run('max', 'MEDIUM')
+  const expectedForQwen: Record<string, string> = { low: 'low', medium: 'medium', high: 'medium', xhigh: 'xhigh', max: 'xhigh' }
+  for (const knob of ['low', 'medium', 'high', 'xhigh', 'max']) {
+    const r = await run('max', knob, 'qwen-fake')
+    assert.equal(r.effort, expectedForQwen[knob], `qwen 家族旋钮 ${knob} 必须按 {low,medium,xhigh} 收窄后发送`)
+    assert.ok(String(r.telemetry.reasoningEffortSource).startsWith('env'), `qwen 旋钮 ${knob} 的来源标记必须是 env`)
+  }
+
+  const mediumCase = await run('max', 'MEDIUM', 'qwen-fake')
   assert.equal(mediumCase.effort, 'medium', '大写合法档不得被大小写打成非法值')
-  const xhighSpaced = await run('max', ' xhigh ')
+  const xhighSpaced = await run('max', ' xhigh ', 'qwen-fake')
   assert.equal(xhighSpaced.effort, 'xhigh', '前后空白的合法档必须 trim 后命中白名单')
 
   for (const bad of ['foo', 'xhighX', 'medium-high', 'MAX']) {

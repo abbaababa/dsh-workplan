@@ -1,0 +1,30 @@
+/*
+ * [2.2.7] 推理档位兼容性钳制（用户 2026-11-09 报告的 PLANNER_LLM_ERROR 根因）。
+ *
+ * 事故现场：主链路 provider=qw / model=qwen3.8-flash，规划器默认档 max 不在该
+ * 模型声明的 reasoning.efforts 清单（low/medium/xhigh）内，宿主 dsh-llm 在网络
+ * 调用前直接抛 UNSUPPORTED_REASONING_EFFORT；该码不在可重试清单里 → 终态 → 唯一
+ * 一次尝试即降级，整个自动分解还没开始就结束。同一枚雷在派发侧：计划里的
+ * high/max 行派给 qwen 子会话会同样即抛（专家执行期中断的根因之一）。
+ *
+ * 契约：
+ *  1. clampEffortToSupported 纯函数：清单内原样、否则钳到「不高于请求档」里最高的
+ *     支持档；全部更强时取最弱支持档；空清单返回 undefined（= 不发送该字段）；
+ *  2. 宿主不暴露 resolveModelInfo（旧宿主/测试夹具）⇒ 行为与修复前逐字节一致；
+ *  3. 规划器实际发出的档位 = 钳制后档位，遥测记录实际值与 clamped 来源；
+ *  4. 派发侧子会话 agentOptions 同样钳制（max→xhigh、high→medium、low→low）；
+ *  5. 模型无 reasoning 元数据 ⇒ 不发送 reasoningEffort（发送必被宿主拒绝）。
+ */
+import test from 'node:test'
+import assert from 'node:assert/strict'
+
+import { clampEffortToSupported, dispatchPlan, resolveSupportedEfforts, runPlanner } from '../src/runtime.js'
+import { createStatuses, validatePlan } from '../src/plan.js'
+
+const QWEN_EFFORTS = [
+  { id: 'low', name: 'Low' },
+  { id: 'medium', name: 'Medium' },
+  { id: 'xhigh', name: 'Extra High' },
+]
+
+/* ---------- 1. 纯函数：钳制规则 ---------- */

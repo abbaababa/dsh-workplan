@@ -1,3 +1,11 @@
+## 2.3.9 — 2026-11-11
+
+- **LLM 家族检测 + 推理等级事前约束（用户要求 1/2）**：新增单一事实源 `src/llm-rules.ts`——模型 ID 去空白转小写后以 `qwen` 前缀判定家族；qwen 系合法推理等级集合 `{low, medium, xhigh}`、非 qwen 系 `{low, high, max}`，并按任务复杂度映射（轻度=low；中等 qwen=medium/非qwen=high；非常复杂 qwen=xhigh/非qwen=max）。约束在**发送前**生效：规划器默认档取当前家族合法集最高档、派发侧子任务档位先按家族静态集收窄、再与宿主声明档位取交集钳制，两道闸各自 `console.warn` 留痕（model/family/requested/corrected/allowed/reason）。`plan.ts` 校验、`replan.ts` 入口、`client.ts` 渲染口径同源消费；五档仍为存储全集，旧计划/他模型计划回放零迁移。越界档不中断派发，按强度序自动降级并留痕（报错轨 `validateReasoningEffort` + 修正轨 `correctEffortForModel`）。
+- **第三层派发工具 `dsh_workplan_delegate`（用户要求 3/4/5）**：部门负责人子会话专用。`review` 先提交「全面、全盘、深入梳理」产物 + 分工表（problemAnalysis/constraints/unknowns/approach + 每位下级 member/role/task/reasoningEffort），`dispatch` 才放行——未登记梳理产物硬门禁拒绝（`DELEGATE_CONSOLIDATION_MISSING`），分工表必须同时含 ≥1 名顶尖专家（expert）与 ≥1 名组员（member）（`DELEGATE_ROLE_MIX_REQUIRED`）。每位下级按任务复杂度配置推理等级，经家族合法集钳制并留痕，随 spawn `agentOptions` 全程生效。层级边界：仅计划内部门负责人子会话可调用（根会话 `NOT_LEADER_SESSION`、第三层叶子 `NO_PLAN`/`NO_SUBTASK`），下级 spawn `maxDepth:2`，第四层由宿主绝对深度上限硬拒。要求 1/2 全文经 `buildLlmRulesBrief` 单一事实源注入部门层与专家/组员层任务书，杜绝两处漂移。
+- **看板三层可见**：`client.ts` 任务卡片渲染「主 Agent → 部门 → 专家/组员」第三层台账（每位下级角色、推理等级含越界钳制留痕、实时状态），数据源为状态行 `delegates`，经 `applyStatus` 消毒 + durable `workplan-update` 回放，刷新/重启不丢。梳理门禁判据 `consolidation` 同样持久化回放。
+- **工具面与安全文档同步**：新增第 12 个模型工具 `dsh_workplan_delegate`，`tests/fixtures/tool-surface.json` 与 `docs/cc`（ADV-FSP 功能规范 / AVA 攻击面 AS-13 / SECURITY-TARGET）同一变更内刷新。
+- 注：2.3.3–2.3.8 未单独发布（按用户要求版本号直跳 2.3.9）。
+
 ## 2.3.2 — 2026-11-10
 
 - **D1 用户附件全链路可见**（修复「规划器/子 Agent 看不见用户图片」盲区，commit 8b48796）：`messageText` 把 image/file/document 块渲染为含 attachment-id 的标注行，任务文本→锚点→派发提示→回放上下文同源覆盖；接收方以 attachment-id 直读附件，不再请示往返。全量回归 718/0/0。

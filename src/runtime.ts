@@ -91,6 +91,19 @@ import {
 } from './plan.js'
 import type { PresentDenialVerdict, PresentDenyCode } from './plan.js'
 import { auditClarifyNeed, compactUnderstandingAudit, validatePlanContext } from './understanding.js'
+// [2.3.9][T3] LLM 家族检测 + 推理等级静态约束（用户强制要求 1/2；详见 llm-rules.ts 头注释）。
+// [2.3.9][T4b] 追加第三层派发纯逻辑核：buildLlmRulesBrief（要求 1/2 全文告知注入，
+// 部门层与专家/组员层共用同一事实源）、planDelegations（负责人「先全面梳理再分配」
+// 硬门禁 + 分工表校验 + 等级钳制）、buildDelegateePrompt（第三层任务书）。
+import {
+  allowedEffortsForModel,
+  buildDelegateePrompt,
+  buildLlmRulesBrief,
+  classifyModelFamily,
+  correctEffortForModel,
+  highestEffortOf,
+  planDelegations,
+} from './llm-rules.js'
 import { phaseGateFromErrors, phaseSummaryLine, validatePhaseEvidence } from './three-phase.js'
 import {
   lessonStats,
@@ -804,11 +817,40 @@ export async function runPlanner(ctx: any, options: any) {
   // 用户的成本预期，所以先归一化再进白名单。
   const plannerEffortRaw = String(process.env.DSH_WORKPLAN_PLANNER_REASONING_EFFORT ?? '').trim().toLowerCase()
   const plannerEffort = REASONING_EFFORTS.includes(plannerEffortRaw) ? plannerEffortRaw : ''
-  const requestedPlannerEffort = plannerEffort || DEFAULT_PLANNER_REASONING_EFFORT
+  /*
+   * [2.3.9][T3/llm-rules] 用户强制要求 1/2（分配前先检测模型家族）：qwen 开头
+   * 模型只允许 low / medium / xhigh，其余模型只允许 low / high / max。
+   * 默认档随家族取「合法集内最高档」（qwen⇒xhigh、非 qwen⇒max）；env 显式
+   * 覆盖仍优先，覆盖值同样过静态收窄。静态约束先于宿主能力钳制执行（两道闸：
+   * 静态表权威，能力面在其上继续交集钳制，均留痕，与 U7 裁决一致）。模型名
+   * 缺失⇒不施加静态约束并用原默认档，保持 [2.2.7]「无从判定⇒不阻断」旧行为。
+   */
+  const plannerStaticAllowed = allowedEffortsForModel(modelSelection?.model)
+  const plannerFamilyDefault = highestEffortOf(plannerStaticAllowed) ?? DEFAULT_PLANNER_REASONING_EFFORT
+  const requestedPlannerEffort = plannerEffort || plannerFamilyDefault
+  const plannerEffortOriginLabel = plannerEffort ? 'env' : `default-${plannerFamilyDefault}`
+  const plannerStaticCorrection = plannerStaticAllowed && !plannerStaticAllowed.includes(requestedPlannerEffort)
+    ? correctEffortForModel(requestedPlannerEffort, modelSelection?.model)
+    : null
+  const staticRulePlannerEffort = plannerStaticCorrection ? plannerStaticCorrection.effort : requestedPlannerEffort
+  const plannerStaticTrace = plannerStaticCorrection
+    ? `→${classifyModelFamily(modelSelection?.model) === 'qwen' ? 'qwen-rule' : 'non-qwen-rule'}:${plannerStaticCorrection.requested}→${plannerStaticCorrection.effort}`
+    : ''
+  if (plannerStaticCorrection) {
+    console.warn('[dsh-workplan] planner reasoning effort corrected by LLM family rules:', JSON.stringify({
+      provider: modelSelection?.provider,
+      model: modelSelection?.model,
+      family: classifyModelFamily(modelSelection?.model),
+      requested: requestedPlannerEffort,
+      corrected: plannerStaticCorrection.effort,
+      allowed: plannerStaticAllowed,
+      reason: plannerStaticCorrection.reason,
+    }))
+  }
   /*
    * [2.2.7] 发送前按模型能力钳制档位：宿主对不支持的档位会在网络调用前直接
    * 抛 UNSUPPORTED_REASONING_EFFORT，重试不自愈（终态），整次规划因此降级。
-   * 查询不可用时保持旧行为；查询到清单后请求档钳制到清单内等效档，空清单
+   * 查询不可用时保持旧行为；查询成功后请求档钳制到清单内等效档，空清单
    * （模型无 reasoning 元数据）则不发送档位字段。'' 在这里表示「不发送」。
    */
   const plannerEffortSupport = await resolveSupportedEfforts(
@@ -818,13 +860,13 @@ export async function runPlanner(ctx: any, options: any) {
     signal,
   )
   const effectivePlannerEffort = plannerEffortSupport === null
-    ? requestedPlannerEffort
-    : (clampEffortToSupported(requestedPlannerEffort, plannerEffortSupport) ?? '')
-  if (plannerEffortSupport !== null && effectivePlannerEffort !== requestedPlannerEffort) {
+    ? staticRulePlannerEffort
+    : (clampEffortToSupported(staticRulePlannerEffort, plannerEffortSupport) ?? '')
+  if (plannerEffortSupport !== null && effectivePlannerEffort !== staticRulePlannerEffort) {
     console.warn('[dsh-workplan] planner reasoning effort clamped for model compatibility:', JSON.stringify({
       provider: modelSelection?.provider,
       model: modelSelection?.model,
-      requested: requestedPlannerEffort,
+      requested: staticRulePlannerEffort,
       effective: effectivePlannerEffort || '(omitted)',
       supported: plannerEffortSupport,
     }))
@@ -943,7 +985,9 @@ export async function runPlanner(ctx: any, options: any) {
       const text = await collectStream(stream, onChunk, sink)
       lastText = text
       const raw = extractJson(text)
-      const validated = validatePlan(raw)
+      // [2.3.9][T3] 事前约束：规划器显式写出集合外档位 → validatePlan 拒绝并点名，
+      // 经重试回路回喂自纠（用户要求 1/2；模型名缺失⇒null⇒不施加）。
+      const validated = validatePlan(raw, { allowedEfforts: allowedEffortsForModel(modelSelection.model) })
       if (validated.ok) {
         /*
          * [1.12.0] Structure alone is not understanding. Run the three-stage
@@ -1109,9 +1153,10 @@ export async function runPlanner(ctx: any, options: any) {
           // 复盘把「主 Agent=high」误读成「规划器=high」。
           // [2.2.7] 钳制发生时同样记录实际发出值（'' = 未发送）。
           reasoningEffort: effectivePlannerEffort,
-          reasoningEffortSource: (plannerEffort ? 'env' : 'default-max')
-            + (plannerEffortSupport !== null && effectivePlannerEffort !== requestedPlannerEffort
-              ? `→clamped(${requestedPlannerEffort})` : ''),
+          reasoningEffortSource: plannerEffortOriginLabel
+            + plannerStaticTrace
+            + (plannerEffortSupport !== null && effectivePlannerEffort !== staticRulePlannerEffort
+              ? `→clamped(${staticRulePlannerEffort})` : ''),
           attempt,
           taskChars: typeof taskText === 'string' ? taskText.length : 0,
           promptChars,
@@ -2004,6 +2049,30 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
           ? subtask.reasoningEffort
           : DEFAULT_REASONING_EFFORT
         /*
+         * [2.3.9][T3/llm-rules] 用户强制要求 1/2 的执行点：派发前对每个子任务的
+         * reasoningEffort 做模型家族等级集合校验。越界档不中断派发（A3 修正轨），
+         * 按强度序自动降级并 console.warn 留痕；随后 [2.2.7] 宿主能力钳制作为
+         * 第二道闸继续生效（静态表权威 + 能力面交集）。模型名缺失⇒不施加静态
+         * 约束，保持旧行为。
+         */
+        const childStaticAllowed = allowedEffortsForModel(modelSelection?.model)
+        const childStaticCorrection = childStaticAllowed && !childStaticAllowed.includes(requestedChildEffort)
+          ? correctEffortForModel(requestedChildEffort, modelSelection?.model)
+          : null
+        const staticRuleChildEffort = childStaticCorrection ? childStaticCorrection.effort : requestedChildEffort
+        if (childStaticCorrection) {
+          console.warn('[dsh-workplan] child reasoning effort corrected by LLM family rules:', JSON.stringify({
+            subtaskId: subtask.id,
+            provider: modelSelection?.provider,
+            model: modelSelection?.model,
+            family: classifyModelFamily(modelSelection?.model),
+            requested: requestedChildEffort,
+            corrected: childStaticCorrection.effort,
+            allowed: childStaticAllowed,
+            reason: childStaticCorrection.reason,
+          }))
+        }
+        /*
          * [2.2.7] 能力不可查询时保持同步路径：派发链上任何多余的 await 微任务都会
          * 把 awaiting 通道写入推晚一个 tick（notice-channel 运行时集成用例即因此
          * 断言失败）。只有真要向宿主查询时才引入这一次等待。
@@ -2016,8 +2085,8 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
           ? await resolveSupportedEfforts(ctx.llm, modelSelection.provider, modelSelection.model, parentSignal)
           : null
         const childEffort = childEffortSupport === null
-          ? requestedChildEffort
-          : (clampEffortToSupported(requestedChildEffort, childEffortSupport) ?? '')
+          ? staticRuleChildEffort
+          : (clampEffortToSupported(staticRuleChildEffort, childEffortSupport) ?? '')
         activation = await ctx.subagents.startActivation({
           provider: 'spawn',
           label: `${subtask.department}:${subtask.id} ${subtask.title}`.slice(0, 120),
@@ -2063,6 +2132,21 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
                  */
                 previousFailure: lastFailure ?? null,
                 lessonsBrief,
+                /*
+                 * [2.3.9][T4b] 用户强制要求 3：分配任务时必须把要求 1/2 的
+                 * **全部内容**告知相关部门。注入文本由 llm-rules.ts 的
+                 * buildLlmRulesBrief 单一事实源生成（tier='department'）：
+                 * 要求 1/2 原文 + 本会话模型与家族判定 + 本子任务已配置/钳制后
+                 * 的推理等级 + 部门负责人「先全面梳理、再用 dsh_workplan_delegate
+                 * 分配给顶尖专家与组员」的强制流程告知。
+                 */
+                llmRulesBrief: buildLlmRulesBrief({
+                  model: modelSelection?.model ?? null,
+                  effort: staticRuleChildEffort || null,
+                  requested: childStaticCorrection ? requestedChildEffort : null,
+                  correctionReason: childStaticCorrection?.reason ?? null,
+                  tier: 'department',
+                }),
               }),
             }],
             parent: options.agent,
@@ -2086,7 +2170,16 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
               // [2.2.7] '' = 模型无 reasoning 元数据 ⇒ 不发送，避免派发期即中断。
               ...(childEffort ? { reasoningEffort: childEffort } : {}),
             },
-            maxDepth: 1,
+            /*
+             * [2.3.9][T4b] 三层派发深度（用户强制要求 4/5）：主 Agent(0) →
+             * 部门负责人子会话(1) → 顶尖专家/组员子会话(2)。maxDepth 是宿主
+             * resolveChildDepth 的**绝对深度上限**（child-agent.d.ts:24-29），
+             * 部门层放行到 2 才能让负责人经 dsh_workplan_delegate 派生第三层；
+             * 第三层成员派生时同样传 2 ⇒ 任何第四层（深度 3）被宿主抛
+             * SubagentDepthError 硬拒，delegateTool 服务端另有一道「只有部门
+             * 负责人行可调用」的校验——提示词说服模型，代码守住边界。
+             */
+            maxDepth: 2,
           },
           signal: child.controller.signal,
           delivery: 'caller',
@@ -6884,6 +6977,290 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     }
   }
 
+  /**
+   * [2.3.9][T4b] 第三层派发（用户强制要求 4/5）：部门负责人专用工具。
+   *
+   * 层级模型：主 Agent(根会话, depth 0) → 部门负责人子会话(depth 1) →
+   * 顶尖专家/组员子会话(depth 2, 叶子层)。三道硬边界：
+   *  1. 调用者必须是计划内某行的部门负责人子会话（childId 反查行）；
+   *     根会话被拒（用 dsh_workplan_dispatch），第三层成员也被拒——
+   *     其父会话是部门会话、没有计划记录，NO_PLAN/NO_SUBTASK 即叶子层禁令；
+   *  2. 梳理门禁：dispatch 前必须先 review 提交「全面梳理产物 + 分工表」
+   *     （planDelegations 唯一判据，durable 回放后依然生效）；
+   *  3. 深度：成员 spawn 传 maxDepth:2，第四层(depth 3)由宿主
+   *     SubagentDepthError 硬拒（resolveChildDepth 绝对上限）。
+   *
+   * 每位下级的推理等级按其任务复杂度由负责人配置，经 planDelegations 按
+   * 当前模型家族合法集合（qwen→low/medium/xhigh；非qwen→low/high/max）
+   * 钳制并留痕（delegates[].requested/effort 对），随 spawn 的 agentOptions
+   * 下发且全生命周期生效（要求 5）。
+   */
+  async function delegateTool(agent: any, args: any, signal?: any) {
+    const childSession = agent?.session
+    if (!childSession?.id) {
+      return { ok: false, code: 'NO_SESSION', error: '只能在会话内使用第三层派发' }
+    }
+    const parentId = childSession.header?.parentSession
+    if (!parentId) {
+      return {
+        ok: false,
+        code: 'NOT_LEADER_SESSION',
+        error: '只有「部门负责人子会话」可以使用 dsh_workplan_delegate：根会话请用 dsh_workplan_dispatch 派发主计划；第三层专家/组员是叶子层，不得再派发（用户要求 4：只有一层下级）。',
+      }
+    }
+    let record = state.records.get(parentId)
+    if (!record?.plan) {
+      const parent = (ctx as any).sessions?.get?.(parentId)
+      if (parent) {
+        try {
+          record = reconstructFromSession(parent)
+        } catch (error) {
+          pushRecordError({ errors: [] } as any, error)
+        }
+      }
+    }
+    if (!record?.plan) {
+      return {
+        ok: false,
+        code: 'NO_PLAN',
+        error: '父会话没有可关联的计划。若你是第三层专家/组员（叶子层）：不得再派发，完成自身任务后把结论回报部门负责人即可。',
+      }
+    }
+    const row = (record.statuses ?? []).find((item: any) => item?.childId === childSession.id)
+    if (!row) {
+      return {
+        ok: false,
+        code: 'NO_SUBTASK',
+        error: '计划里找不到与本子会话关联的子任务行（childId 未登记）；第三层派发只能由计划内的部门负责人子会话发起。',
+      }
+    }
+    if (row.status === 'done') {
+      return { ok: false, code: 'ALREADY_DONE', subtaskId: row.subtaskId, error: '该子任务已完成，不能再派发第三层。' }
+    }
+    const action = ['review', 'dispatch', 'status'].includes(args?.action) ? String(args.action) : ''
+    if (!action) {
+      return { ok: false, code: 'INVALID_ACTION', error: 'action 必须是 review（提交全面梳理产物）/ dispatch（派发给顶尖专家与组员）/ status（查看梳理与下级进度）' }
+    }
+    const subtaskId = String(row.subtaskId)
+    const modelSelection = resolveModelSelection(ctx, { agent })
+    const model = typeof modelSelection?.model === 'string' && modelSelection.model.trim() ? modelSelection.model.trim() : null
+    const parentSession = (ctx as any).sessions?.get?.(parentId)
+    const persist = (patch: any) => {
+      const revision = Number(row.revision ?? 0) + 1
+      record.statuses = applyStatus(record.statuses, subtaskId, { ...patch, revision, updatedBy: 'child' })
+      record.updatedAt = Date.now()
+      try {
+        const written = record.statuses.find((item: any) => item?.subtaskId === subtaskId)
+        appendUserMessage(parentSession, buildUpdateMessage({
+          planId: record.plan.planId,
+          subtaskId,
+          status: written?.status ?? row.status,
+          ...(patch.consolidation === undefined ? {} : { consolidation: written?.consolidation }),
+          ...(patch.delegates === undefined ? {} : { delegates: written?.delegates }),
+          revision: written?.revision ?? revision,
+        }))
+      } catch (error) {
+        pushRecordError(record, error)
+      }
+      return record.statuses.find((item: any) => item?.subtaskId === subtaskId)
+    }
+
+    if (action === 'status') {
+      const delegates = Array.isArray(row.delegates) ? row.delegates : []
+      return {
+        ok: true,
+        planId: record.plan.planId,
+        subtaskId,
+        action,
+        consolidation: row.consolidation ?? null,
+        delegates,
+        hint: !row.consolidation
+          ? '尚未提交梳理产物：先调用 action="review"（用户要求 4 的硬门禁）。'
+          : delegates.length === 0
+            ? '梳理产物已登记，可调用 action="dispatch" 正式派发给顶尖专家与组员。'
+            : '第三层已派发；各下级结论会送回本会话，收齐后汇总核验，再写最终结果块。',
+      }
+    }
+
+    if (action === 'review') {
+      const input = isRecord(args?.consolidation) ? args.consolidation : null
+      if (!input) {
+        return {
+          ok: false,
+          code: 'MISSING_CONSOLIDATION',
+          subtaskId,
+          error: 'review 必须携带 consolidation：{ problemAnalysis[], constraints[]?, unknowns[]?, approach[]?, assignments[{member, role:"expert"|"member", task, reasoningEffort}] }——用户要求 4 的「全面、全盘、深入梳理」产物 + 分工表（至少 1 名顶尖专家 + 1 名组员）。',
+        }
+      }
+      const preview = planDelegations({ consolidation: input, model })
+      if (!preview.ok) {
+        return {
+          ok: false,
+          code: preview.code ?? 'DELEGATE_CONSOLIDATION_INVALID',
+          subtaskId,
+          error: preview.error,
+          hint: '修正梳理产物后重新 action="review"；未登记前 action="dispatch" 会持续被硬门禁拒绝。',
+        }
+      }
+      const written = persist({
+        consolidation: {
+          problemAnalysis: input.problemAnalysis,
+          constraints: input.constraints,
+          unknowns: input.unknowns,
+          approach: input.approach,
+          assignments: input.assignments,
+          submittedAt: Date.now(),
+        },
+      })
+      return {
+        ok: true,
+        planId: record.plan.planId,
+        subtaskId,
+        action,
+        consolidation: written?.consolidation ?? null,
+        members: preview.members,
+        clamped: preview.clamped,
+        model: model ?? '（未知，未施加静态等级约束）',
+        hint: '梳理产物已登记（durable，刷新后门禁依然生效）。现在可调用 action="dispatch" 正式派发；每位下级的推理等级已按当前模型家族合法集合钳制（clamped 列出越界修正与原因，留痕可审计）。',
+      }
+    }
+
+    // action === 'dispatch'
+    const consolidation = isRecord(row.consolidation) ? row.consolidation : null
+    const delegationPlan = planDelegations({ consolidation, model })
+    if (!delegationPlan.ok) {
+      return {
+        ok: false,
+        code: delegationPlan.code ?? 'DELEGATE_CONSOLIDATION_MISSING',
+        subtaskId,
+        error: delegationPlan.error,
+      }
+    }
+    if (Array.isArray(row.delegates) && row.delegates.some((item: any) => item?.status === 'running')) {
+      return {
+        ok: false,
+        code: 'DELEGATE_ALREADY_RUNNING',
+        subtaskId,
+        error: '第三层已在派发中（仍有下级 running）：不要重复派发。用 action="status" 查看进度；如需补派新成员，先等当前下级结算。',
+        delegates: row.delegates,
+      }
+    }
+    const departmentLabel = DEPARTMENTS[row.department as keyof typeof DEPARTMENTS]?.zh ?? String(row.department ?? '部门')
+    // cwd 与 dispatchTool 同源（session.header.cwd，7465 行同款）：优先负责人
+    // 子会话自己的工作目录，缺失回退根会话；都没有则交给宿主按 parent 推导。
+    const cwd = typeof childSession.header?.cwd === 'string' && childSession.header.cwd
+      ? childSession.header.cwd
+      : (typeof parentSession?.header?.cwd === 'string' && parentSession.header.cwd
+        ? parentSession.header.cwd
+        : undefined)
+    const delegates: any[] = []
+    for (const assignment of delegationPlan.members) {
+      const rulesBrief = buildLlmRulesBrief({
+        model,
+        effort: assignment.effort,
+        requested: assignment.requested ?? null,
+        correctionReason: assignment.correctionReason ?? null,
+        tier: 'delegate',
+        memberName: assignment.member,
+        memberRole: assignment.role,
+      })
+      const promptText = buildDelegateePrompt({
+        departmentLabel,
+        leaderSubtaskId: subtaskId,
+        leaderSubtaskTitle: String(row.title ?? ''),
+        member: assignment,
+        rulesBrief,
+        cwd: cwd ?? '',
+        leadSessionId: childSession.id,
+      })
+      let childId: string | null = null
+      let memberStatus = 'running'
+      let memberError: string | null = null
+      try {
+        const activation = await ctx.subagents.startActivation({
+          provider: 'spawn',
+          label: `${row.department}:${subtaskId}→${assignment.member}`.slice(0, 120),
+          request: {
+            prompt: [{ type: 'text', text: promptText }],
+            parent: agent,
+            cwd,
+            agentOptions: {
+              ...(modelSelection?.provider && modelSelection?.model
+                ? { provider: modelSelection.provider, model: modelSelection.model }
+                : {}),
+              // 要求 5：等级随任务复杂度配置并全程应用；'' = 模型无 reasoning 元数据 ⇒ 不发送。
+              ...(assignment.effort ? { reasoningEffort: assignment.effort } : {}),
+            },
+            // 成员在 depth 2；任何第四层（depth 3）被宿主绝对深度上限硬拒。
+            maxDepth: 2,
+          },
+          signal,
+          delivery: 'caller',
+        })
+        childId = typeof activation?.childId === 'string' ? activation.childId : null
+        if (activation && typeof activation.result?.then === 'function') {
+          const settledChildId = childId
+          activation.result.then((outcome: any) => {
+            try {
+              const completed = outcome?.stopReason === 'completed'
+              const current = (record.statuses ?? []).find((item: any) => item?.subtaskId === subtaskId)
+              const list = (Array.isArray(current?.delegates) ? current.delegates : [])
+                .map((item: any) => (item?.childId === settledChildId
+                  ? {
+                      ...item,
+                      status: completed ? 'done' : 'failed',
+                      summary: truncate(resultText(outcome), 300),
+                      error: completed ? null : truncate(String(outcome?.diagnostic ?? `子会话结束状态 ${outcome?.stopReason}`), 300),
+                      finishedAt: Date.now(),
+                    }
+                  : item))
+              const revision = Number(current?.revision ?? 0) + 1
+              record.statuses = applyStatus(record.statuses, subtaskId, { delegates: list, revision, updatedBy: 'child' })
+              record.updatedAt = Date.now()
+              appendUserMessage(parentSession, buildUpdateMessage({
+                planId: record.plan.planId,
+                subtaskId,
+                status: current?.status ?? row.status,
+                delegates: list,
+                revision,
+              }))
+            } catch {
+              // 结算留痕失败不影响主链路：看板下次刷新按内存行渲染。
+            }
+          }).catch(() => {})
+        }
+      } catch (error: any) {
+        memberStatus = 'rejected'
+        memberError = truncate(String(error?.message ?? error), 300)
+      }
+      delegates.push({
+        member: assignment.member,
+        role: assignment.role,
+        task: assignment.task,
+        effort: assignment.effort,
+        ...(assignment.requested && assignment.requested !== assignment.effort ? { requested: assignment.requested } : {}),
+        childId,
+        status: memberStatus,
+        summary: '',
+        error: memberError,
+        startedAt: Date.now(),
+        finishedAt: null,
+      })
+    }
+    const written = persist({ delegates })
+    const rejected = delegates.filter((item) => item.status === 'rejected')
+    return {
+      ok: rejected.length < delegates.length,
+      planId: record.plan.planId,
+      subtaskId,
+      action,
+      delegates: written?.delegates ?? delegates,
+      clamped: delegationPlan.clamped,
+      ...(rejected.length ? { rejected: rejected.map((item) => ({ member: item.member, error: item.error })) } : {}),
+      hint: '第三层已派发（一层下级、叶子层，第四层会被硬拒）。每位专家/组员的完成结论会送回本会话（delivery=caller）；收齐后由你汇总核验，再写最终结果块。用 action="status" 查看进度。',
+    }
+  }
+
   async function dispatchTool(agent: any, args: any, signal: any) {
     const session = agent?.session
     if (!session) throw new PlanError('只能在会话内派发计划', 'NO_SESSION')
@@ -8163,6 +8540,8 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     statusTool,
     followupTool,
     escalateTool,
+    // [2.3.9][T4b] 第三层派发（部门负责人专用）：review 梳理门禁 → dispatch 专家/组员。
+    delegateTool,
     verifyTool: verifySubtask,
     lessonsTool,
     instructTool,

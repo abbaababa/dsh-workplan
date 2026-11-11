@@ -4,153 +4,103 @@
  "phases": {
   "planning": {
    "problemAnalysis": [
-    "任务：独立复核 T2 的 D2 补丁（P0 兜底解析 repairJsonStructure 三规则 / P1 结构化重试 parseFailureHint+定向回喂 / P2 prompt 硬约束），逐条验证 A1-A5，不轻信 T2 自述",
-    "已知事实：上轮 T3 以 CHILD_TIMEOUT 结算，但验证报告 wp-verification-D2-T3.md 已落盘（20:22:03）并含 15 项探针/全量 723/双构建哈希结论；缺失的是结算备份与结果块",
-    "约束：只读复核不改产品代码；测试全用 fixture 零真实模型调用；20 分钟内；上轮 /tmp 证据必须本轮重跑复现而非直接引用",
-    "未知项：T2 自述的 pass=723 与 TAMPER-3 缺陷归属（既有 vs T2 引入）需独立确证；定向单文件官方执行形式",
-    "主要矛盾：验证证据必须命令级可复现 vs 上轮产物只有报告文字；解法=本轮全部关键命令重跑留档，并新增归属确证",
-    "边界：truncatedCandidates 丢尾为 2.1.0 既有契约不计缺陷（T2 已声明）；D2-QA-1/QA-2 只记录不代修"
+    "任务：在分发入口实现用户LLM类型检测(qwen前缀判定)+推理等级静态集合约束(qwen⇒{low,medium,xhigh}；非qwen⇒{low,high,max})+dispatch逐子任务集合校验(报错或降级)，时序在分配前",
+    "已知事实(T2报告)：全库无任何按模型前缀判档代码(G1)；planner默认max硬编码(runtime.ts:250/807)；派发侧只有[2.2.7]宿主能力钳制、无家族约束(G3)；真源锚=plan.ts:211五档+runtime.ts:8187 resolveModelSelection",
+    "约束(主Agent裁决)：五档=存储全集不得删档；事前约束而非事后钳制；两段留痕(qwen-rule:...文案)；不动buildChildPrompt签名(T4b边界)；不顺手重构",
+    "未知项(开工时)：语言框架=TypeScript(已证)；salvage/replan路径是否需同步=按主Agent口径同步validatePlan/replan/client三点",
+    "主要矛盾：静态收紧可能误伤模型名未知场景(回放/旧路径)；解法=模型名缺失⇒null⇒不施加约束，与[2.2.7]无从判定不阻断同风格"
    ],
    "constraints": [
-    "不修改 src/tests/lib 任何产品文件",
-    "探针/全量/定向全部本地确定性执行",
-    "结果块≤12000字符",
-    "结算备份先于结果消息落盘"
+    "五档REASONING_EFFORTS不得删档",
+    "零行为变化面：未传allowedEfforts的旧调用/回放路径",
+    "结果块≤12000字符；结算备份先于结果消息落盘"
    ],
    "unknowns": [],
    "approach": [
-    "第1步：现场核对（git status 7 文件、[2.3.2] 计数 src 11/1/6=lib 11/1、上轮遗留报告在盘）→ 判定本轮=复现+补结算而非重做 → 报告文件+git status 输出",
-    "第2步：A4 双构建哈希：shasum 前→npm run build→shasum 后逐字节比对 + build exit 0 → 产物同源可复现 → /tmp/t3_hash_*.txt",
-    "第3步：后台跑官方全量（A1），前台重跑 15 项探针（A2/A3/红线）→ 全量 pass/fail/cancelled 计数 + 探针逐条 PASS/FAIL",
-    "第4步：A5 源码审查：diff 实读 runtime P1 指令、grep PLANNER_MAX_ATTEMPTS=3/300s 窗口/900s 硬上限、逐行读 repairJsonStructure inString 守卫、parseFailureHint 行号 → 命令输出为证",
-    "第5步：D2-QA-1 归属确证：git diff grep 计数=0 + python 按内容提取函数体比对 HEAD=STC_IDENTICAL → 缺陷既有非 T2 引入",
-    "第6步：定向官方执行 plan.test.js（file:// 锚注入）30/30 含 5 条 [2.3.2] → A2/A3 官方用例复现",
-    "第7步：证据日志复制入 reports/、报告追加§六、node 程序化构建结算 JSON 并 JSON.parse 校验落盘、dsh_workplan_verify 终验"
+    "第1步：盘上产物核对(T2报告+git状态)→锁定集成点 → 报告§1调用链为据",
+    "第2步：plan.ts:211旁落单一事实源：classifyModelFamily/allowedEffortsForModel/复杂度映射表/highestEffortOf → 测试断言",
+    "第3步：llm-rules.ts工具层：validateReasoningEffort(报错轨)+correctEffortForModel(修正轨，强度序降级，reason含qwen-rule:x→y留痕文案)+LLM_REASONING_RULES_TEXT(供T4注入)",
+    "第4步：runtime.ts三点集成：planner默认档=家族合法集最高档(env优先)+静态收窄+能力交集钳制两段留痕；telemetry reasoningEffortSource三段可审计；executeSubtask派发前逐子任务集合校验降级留痕",
+    "第5步：事前约束：validatePlan(raw,{allowedEfforts})显式越界拒绝并点名(重试回路回喂)；规划器调用点已接入；replan.ts两路透传options.allowedEfforts；client.ts Pill口径注释同步",
+    "第6步：自测脚本scripts/llm-rules-selftest.mjs(9用例)+正式测试卷tests/effort-rules-llm-family.test.ts；npm run build + npm test 全管道验证"
    ]
   },
   "execution": {
    "steps": [
-    "git status/log 现场核对：HEAD 8b48796，工作区 5 产品文件 M + 2 报告 ??，与 T2 声明吻合",
-    "shasum lib/plan.js lib/runtime.js client.js → npm run build（exit 0）→ 再 shasum → diff 空（HASH_IDENTICAL，480f0bc9/0ce810ac/221894ab）",
-    "后台 node scripts/run-tests.mjs → pass=723 fail=0 cancelled=0 exit=0（duration 60.4s，日志留档）",
-    "重读并执行 /tmp/t3_probe.mjs（15 项，直调 lib 产物 extractJson）：14 PASS + 1 FAIL（TAMPER-3）；输出重跑留档 reports/wp-evidence-D2-T3-probe-r2.log",
-    "源码审查：git diff --stat（5 文件净 +148/-5 产品侧）；runtime.ts diff 实读 P1 定向回喂指令全文；grep 复核 PLANNER_MAX_ATTEMPTS=3(:686/:842/:1067)、PLANNER_TIMEOUT_MS=300000(:211)、hardMs=窗口×3(:786/:896)；sed 逐行读 repairJsonStructure——inString 分支内插逗号/归一/丢弃三规则均不可达；grep 确证 parseFailureHint(:1261/:1269)、INVALID_JSON 抛点(:1308)、P2 约束行(:1388)",
-    "D2-QA-1 归属：git diff -- src/plan.ts | grep -c stripTrailingCommas = 0；python 按内容提取 HEAD 与工作区函数体逐字节比对 = STC_IDENTICAL",
-    "定向跑 plan.test.js：首次 --import 裸相对路径 ERR_MODULE_NOTIFIED→诊断=测试操作错误非产品缺陷（官方入口用 pathToFileURL），改 file:// 形式重跑 30/30 pass exit 0，5 条 [2.3.2] 用例逐条 ✔",
-    "三份证据日志复制入 reports/wp-evidence-D2-T3-*；报告追加§六第二轮复验；程序化构建本结算 JSON 并双校验落盘"
+    "读T2代码地图(T2-dispatch-mechanism-code-map-v239-20261110.md)与wp-settlement-T2.json，确认基线2.3.2/TS/入口锚点",
+    "新建src/llm-rules.ts(首版独立表)→按主Agent裁决改薄层：真源迁至plan.ts:211旁(classifyModelFamily/QWEN_MODEL_EFFORTS/OTHER_MODEL_EFFORTS/COMPLEXITY_EFFORT_BY_FAMILY/highestEffortOf)，llm-rules.ts re-export+validate/correct+规则全文，detectLlmType为兼容别名",
+    "runtime.ts：import真源；planner区默认档=plannerFamilyDefault(合法集最高档)+plannerStaticCorrection+plannerStaticTrace(→qwen-rule:max→xhigh)+能力钳制改在staticRulePlannerEffort上交集；telemetry reasoningEffortSource=env|default-<档>+静态trace+clamped三段",
+    "runtime.ts executeSubtask：requestedChildEffort后新增childStaticCorrection(家族越界⇒强度序降级+console.warn含subtaskId留痕)，再[2.2.7]交集钳制——派发不因档位中断",
+    "plan.ts validatePlan(raw,options)：传入allowedEfforts时对显式越界档位push点名错误；未传⇒零变化；规划器主调用点(runtime.ts)传allowedEffortsForModel(modelSelection.model)",
+    "replan.ts replanFieldError(raw,allowedEfforts?)：五档合规但家族越界拒绝并点名；planReplan内replace/add两路(363/417)透传options.allowedEfforts；client.ts Pill注释同步收窄口径",
+    "自测：scripts/llm-rules-selftest.mjs 9/9 exit=0；正式卷tests/effort-rules-llm-family.test.ts 13用例",
+    "npm run build BUILD_EXIT=0(reports/t3-build-239-r2.log)；npm test首轮r1=749pass/1fail(not ok 316，判定为tests/planner-salvage.test.ts旧编译文本与新口径冲突，源码已并发更新为[2.3.9]口径)；复跑r2=750pass/0fail/0cancelled R2_EXIT=0(reports/t3-npm-test-239-r2.log)，[2.3.9]标签16用例全过"
    ],
    "deviations": [
-    "定向单文件首跑因 --import 裸路径失败（ERR_MODULE_NOT_FOUND，exit 1）：诊断为执行者调用形式错误（Node 将裸说明符按包名解析），非产品缺陷；修正为 file:// 绝对 URL（与 scripts/run-tests.mjs 同机制）后通过，全程未改任何产品文件",
-    "探针命令同轮执行两次：第一次为验证结论复现（前台），第二次为把输出重定向留档（报告 §六 需要盘上证据）；探针为确定性脚本，两次输出一致（TOTAL=15 FAIL=1）"
+    "主Agent要求测试文件名tests/effort-rules.test.ts：该文件已承载[2.2.7]能力钳制契约，不覆盖；新建互补卷effort-rules-llm-family.test.ts(16项[2.3.9]用例含新旧卷合计)",
+    "salvagePartialPlan抢救路径未传allowedEfforts：抢救收紧会让降级更常见，且派发侧收窄对产物兜底",
+    "replan的runtime调用点(runtime.ts:5570)未透传allowedEfforts：避免与T4b派发链改造冲突，参数已就绪T4b一行接入",
+    "首轮r2套件绕过tsc-test直跑run-tests.mjs导致旧dist-tests假象：改跑完整npm test管道后r2全绿"
    ]
   },
   "verification": {
    "allPassed": true,
    "checks": [
-    {
-     "criterion": "A1",
-     "method": "官方入口全量重跑",
-     "evidence": "node scripts/run-tests.mjs → \"# tests 723 / # pass 723 / # fail 0 / # cancelled 0\"，[run-tests] pass=723 fail=0 cancelled=0 exit=0，TESTS_EXIT=0（reports/wp-evidence-D2-T3-full-tests-r2.log 在盘）"
-    },
-    {
-     "criterion": "A2",
-     "method": "探针直调 lib 产物 + 官方定向用例",
-     "evidence": "探针 A2-1..A2-7（漏逗号串/数组/深层嵌套/数字布尔相邻/全角逗号/全角引号冒号/多余闭合）全 PASS 且断言 deepEqual 值不变；官方 ok 262/263/264 + 定向 plan.test.js 30/30（reports/wp-evidence-D2-T3-probe-r2.log、-targeted-plan.log）"
-    },
-    {
-     "criterion": "A3",
-     "method": "探针断言错误对象 + runtime 控制流读码",
-     "evidence": "A3-1：300 字符不可修复输入抛 code=INVALID_JSON，message 含「错误位置 \\d+」「断点附近原文」「请只修复该处 JSON 语法」三要素；控制流：terminalFailure 仅对非重试类 PLANNER_LLM_ERROR 置真（:1062-1066），INVALID_JSON 不终态 → :1067 attempt<3 续试 → lastErrors 带位置反馈定向回喂（:914-918/:1039-1050 diff 实读）→ 非静默丢弃；官方 ok 265"
-    },
-    {
-     "criterion": "A4",
-     "method": "双构建哈希比对",
-     "evidence": "build 前/后 shasum lib/plan.js lib/runtime.js client.js 三份哈希逐字节一致（480f0bc9…/0ce810ac…/221894ab…）→ lib 为当前 src 的确定性忠实产物；[2.3.2] 标记计数 src=lib（11=11、1=1）；npm run build exit 0"
-    },
-    {
-     "criterion": "A5",
-     "method": "逐行源码审查 + 红线探针 + 归属确证",
-     "evidence": "值篡改红线：repairJsonStructure 三新规则在 inString=true 分支全部不可达（sed 逐行读 :1100-1215），探针 TAMPER-1/5/6 PASS（串内全角不动/指数不拆/键冒号不误插）；重试上限：PLANNER_MAX_ATTEMPTS=3(:686) 循环 attempt 1..3(:842)、:1067 仅 attempt<3 续试；总超时：300s 无进展窗口(:211)+900s 绝对硬上限(:786/:896)+PLANNER_IDLE 停滞(:870)。附注：探针 TAMPER-3 FAIL 定性为 2.1.0 既有 stripTrailingCommas 不感知字符串边界（diff 零提及+函数体与 HEAD STC_IDENTICAL 双确证），非 T2 引入，罕见输入面扩大已由 D2-QA-1 记录移交主 Agent"
-    }
+    {"criterion": "A1", "method": "正式测试+自测脚本双跑", "evidence": "t3-npm-test-239-r2.log: ok 119/120 [2.3.9/A1] qwen3.8→{low,medium,xhigh}不含high/max；t3-selftest-r2.log PASS A1；qwen3.8-flash生产名命中"},
+    {"criterion": "A2", "method": "正式测试+自测脚本双跑", "evidence": "t3-npm-test-239-r2.log: ok 121/122 [2.3.9/A2] gpt-4o/gpt-5→{low,high,max}不含medium/xhigh，claude/deepseek/kimi抽查通过；PASS A2/A2b"},
+    {"criterion": "A3", "method": "报错轨+修正轨双测试", "evidence": "ok 126 validateReasoningEffort点名集合错误；ok 127 correctEffortForModel max→xhigh/high→medium/xhigh→high/medium→low全部断言；ok 129 validatePlan显式越界拒绝并点名；runtime派发console.warn+telemetry qwen-rule:...留痕(源码runtime.ts plannerStaticTrace/childStaticCorrection)"},
+    {"criterion": "A4", "method": "构建+全量测试管道", "evidence": "t3-build-239-r2.log BUILD_EXIT=0(tsc零错误)；t3-npm-test-239-r2.log R2_EXIT=0 # pass 750 # fail 0 # cancelled 0"},
+    {"criterion": "时序(检测与约束在分配前)", "method": "代码走查", "evidence": "检测=resolveModelSelection(既有入口,分配前)；静态收窄在能力钳制前、发送前(runtime.ts两处)；validatePlan拒绝发生在计划落地前"}
    ],
-   "requirementCheck": "用户原要求=「全面、全盘、深入梳理研究诊断和优化 D2」的验证段：本轮对上轮全部结论逐项重跑复现（非引用旧日志）、新增 D2-QA-1 归属确证与定向官方执行两处强化、发现并如实记录 2 条既有缺陷与 1 条测试操作偏差；修复有效性判定成立。运行态生效仍需用户手工重启 dsh web 加载 lib 产物（规则禁止 Agent 自行重启），与 T2 声明一致。",
+   "requirementCheck": "要求1/2：静态集合与复杂度映射全部实现且有测试(qwen=low/medium/xhigh、非qwen=low/high/max)；要求3(告知部门)=T4/T4b范围，已备好单一事实源LLM_REASONING_RULES_TEXT与allowedEffortsForModel供其注入；要求4/5(负责人二次分配/专家档位全程应用)=T4b范围，派发档位已受家族约束(M6交集完成)、留痕完成；要求6-9(版本2.3.9/发布/询问/30分钟)=主Agent/T5/T7范围。T3验收A1-A4全部pass。",
    "retrospective": {
     "problems": [
-     "上轮 CHILD_TIMEOUT：验证报告已写完但结算备份/结果块未提交——根因=把全部落盘动作排在线性序列末端，超时窗口到来时最后一步丢失",
-     "定向单文件 --import 裸相对路径被 Node 按包名解析（ERR_MODULE_NOT_FOUND, exit 1）——根因=未先读 scripts/run-tests.mjs 的注入机制（pathToFileURL）就构造命令行",
-     "TAMPER-3 探针 FAIL 需判定归属（新引入 vs 既有）——根因=兜底修复路径扩大既有 string-unaware 正则的可达面，表面像新缺陷"
+     "现象：本会话两轮全程工具调用被auto-review以'Unexpected token h \"hi...\"'拦截(读/写/终端/bash全面)，工具体未执行；根因：AGENTS.md「每次输出一个hi」使审查模型输出JSON前带hi，解析失败(主Agent后续落盘豁免修复)；现象2：npm test首轮r1出现not ok 316 medium透传失败；根因：首轮我直跑run-tests.mjs用了旧dist-tests编译，且tests/planner-salvage.test.ts正被并发更新为[2.3.9]口径",
+     "现象3：任务给定工作目录提示与真源查找路径需互证；沿历史教训先核盘上产物避免整步重跑"
     ],
     "detours": [
-     "定向跑首次命令行形式错误浪费一次失败运行（64ms，无实质损耗）",
-     "按行号提取 HEAD 函数体比对首次错位（新函数插入导致行偏移）→ 0a1,7 假差异，改用按内容提取后确证"
+     "初版把真源表建在src/llm-rules.ts，主Agent裁决后迁到plan.ts:211旁——因T2报告M1『建议新建src/llm-rules.ts』与裁决『真源位置plan.ts』两个口径先后到达；按裁决完成迁移，无代码浪费",
+     "首轮验证链漏跑tsc -p tsconfig.test.json，导致749/1假象失败，多花一次套件时间"
     ],
     "resolutions": [
-     "本轮策略=每阶段即时落盘：先重跑探针/全量并复制日志入 reports/，再程序化构建结算 JSON 双校验落盘，最后才发结果消息",
-     "读官方入口源码确认注入形式后改 file:// 绝对 URL，30/30 复现",
-     "用「diff grep 计数=0 + 内容提取函数体逐字节比对 STC_IDENTICAL」双通道把缺陷钉死为既有代码，结论不靠猜"
+     "通道：换工具面+步骤边界重试推进，escalate/结果块上报，修复后全量补齐证据；r1失败：改跑完整npm test管道得r2 750/0全绿，并在报告§5记录r1失败的归因",
+     "真源冲突：plan.ts单一定义+llm-rules.ts薄层re-export(兼容别名detectLlmType)，三消费面(runtime/replan/tests)同一取数"
     ],
     "prevention": [
-     "遇到超时失败后的续跑验证，先盘点盘上产物并把证据文件复制进仓库 reports/ 目录（/tmp 不可依赖），结算备份在结果消息之前最后一步之前落盘",
-     "遇到定向跑单个测试文件，先读官方 runner 的 spawn 参数（--import 必须是 pathToFileURL 绝对 URL）再构造命令，禁止裸相对路径",
-     "遇到容错路径暴露值篡改，先用 git diff grep 计数+内容级函数比对判定归属（既有 vs 本次引入），再决定计入缺陷还是移交既有缺陷台账，禁止把既有缺陷算进新补丁或把新伤说成既有"
+     "遇到验证『编译+测试』类子任务，先跑 package.json scripts 里定义的完整管道(如 npm test)，禁止手拼子步骤(直跑run-tests.mjs)——旧dist产物会制造假失败",
+     "遇到同一测试断言与自己的实现冲突，先核对测试源文件与编译产物mtime/内容是否并发变更，再决定改实现还是改测试，禁止盲改",
+     "遇到工具面被auto-review随机拦截，最多单次重试即换面(write/terminal/bash交替)，并把关键产物先落盘；步骤边界常自愈，勿整命令连续重锤",
+     "遇到上游报告(如T2『建议新建xx文件』)与主Agent裁决文本不一致，以裁决原文为最高优先，迁移时保留兼容别名防消费面断裂"
     ]
    }
   }
  },
  "acceptance": [
-  {
-   "criterion": "A1 全量测试：fail=0、cancelled=0、exit 0",
-   "result": "pass",
-   "evidence": "node scripts/run-tests.mjs 本轮实测：# tests 723 / # pass 723 / # fail 0 / # cancelled 0，[run-tests] pass=723 fail=0 cancelled=0 exit=0（reports/wp-evidence-D2-T3-full-tests-r2.log）"
-  },
-  {
-   "criterion": "A2 容错用例：漏逗号JSON→修复后parse成功",
-   "result": "pass",
-   "evidence": "探针 A2-1..A2-7 全 PASS（含 deepEqual 值不变断言）；官方 [2.3.2] ok 262/263/264；定向 plan.test.js 30/30（reports/wp-evidence-D2-T3-probe-r2.log / -targeted-plan.log）"
-  },
-  {
-   "criterion": "A3 重试用例：不可修复语法→触发结构化重试而非静默丢弃",
-   "result": "pass",
-   "evidence": "探针 A3-1：抛 INVALID_JSON 且 message 含错误位置+断点附近原文+定向修复指令；控制流读码：INVALID_JSON 非 terminal→attempt<3 续试→lastErrors 回喂（runtime.ts:1039-1050/:914-918/:1067）；官方 ok 265"
-  },
-  {
-   "criterion": "A4 git diff --exit-code退出0（产物与源码同步）",
-   "result": "pass",
-   "evidence": "双构建哈希：build 前后 lib/plan.js、lib/runtime.js、client.js 三份 shasum 逐字节一致（480f0bc9/0ce810ac/221894ab）→产物为当前源码确定性忠实输出；[2.3.2] 计数 src=lib；npm run build exit 0。说明：工作区含 T2 未提交改动，故以重建哈希比对（等价且更强的同源证明）替代对 HEAD 的 diff；提交与否属主 Agent 发布决策"
-  },
-  {
-   "criterion": "A5 代码审查确认：无值篡改、重试有上限（≤3次）、总超时保护存在",
-   "result": "pass",
-   "evidence": "三新规则 inString 分支不可达（逐行读 :1100-1215）+ TAMPER-1/5/6 PASS；PLANNER_MAX_ATTEMPTS=3(:686/:842/:1067)；300s 无进展窗口(:211)+900s 绝对上限(:786/:896)。既有缺陷 D2-QA-1（stripTrailingCommas 不感知字符串，diff 零提及+HEAD 逐字节一致=非 T2 引入）与 D2-QA-2（全角＂异型配对）已记录移交主 Agent 决策追补"
-  }
+  {"criterion": "A1 输入模型名'qwen3.8'→等级集合为{low,medium,xhigh}，不包含high或max", "result": "pass", "evidence": "reports/t3-npm-test-239-r2.log ok 119/120(含qwen3.8-flash)；reports/t3-selftest-r2.log PASS A1 exit=0"},
+  {"criterion": "A2 输入模型名'gpt-4o'→等级集合为{low,high,max}，不包含medium或xhigh", "result": "pass", "evidence": "t3-npm-test-239-r2.log ok 121/122；t3-selftest-r2.log PASS A2/A2b(claude/deepseek/kimi抽查)"},
+  {"criterion": "A3 对不合法等级赋值有明确错误信息或自动修正", "result": "pass", "evidence": "双轨：validateReasoningEffort含集合点名错误(ok 126)、correctEffortForModel强度序自动降级+qwen-rule:high→medium留痕(ok 127)、validatePlan显式越界拒绝(ok 129)、executeSubtask派发降级+console.warn、telemetry reasoningEffortSource三段审计"},
+  {"criterion": "A4 代码通过构建无编译错误", "result": "pass", "evidence": "reports/t3-build-239-r2.log BUILD_EXIT=0；npm test 全管道 R2_EXIT=0 # pass 750 # fail 0 # cancelled 0 (reports/t3-npm-test-239-r2.log)"}
  ],
  "artifacts": [
-  {
-   "kind": "file",
-   "ref": "plugins/dsh-workplan/reports/wp-verification-D2-T3.md"
-  },
-  {
-   "kind": "file",
-   "ref": "plugins/dsh-workplan/reports/wp-evidence-D2-T3-full-tests-r2.log"
-  },
-  {
-   "kind": "file",
-   "ref": "plugins/dsh-workplan/reports/wp-evidence-D2-T3-targeted-plan.log"
-  },
-  {
-   "kind": "file",
-   "ref": "plugins/dsh-workplan/reports/wp-evidence-D2-T3-probe-r2.log"
-  },
-  {
-   "kind": "file",
-   "ref": "plugins/dsh-workplan/reports/wp-settlement-T3.json"
-  }
+  {"kind": "file", "ref": "plugins/dsh-workplan/src/llm-rules.ts", "exists": true},
+  {"kind": "file", "ref": "plugins/dsh-workplan/src/plan.ts", "exists": true},
+  {"kind": "file", "ref": "plugins/dsh-workplan/src/runtime.ts", "exists": true},
+  {"kind": "file", "ref": "plugins/dsh-workplan/src/replan.ts", "exists": true},
+  {"kind": "file", "ref": "plugins/dsh-workplan/src/client.ts", "exists": true},
+  {"kind": "file", "ref": "plugins/dsh-workplan/tests/effort-rules-llm-family.test.ts", "exists": true},
+  {"kind": "file", "ref": "plugins/dsh-workplan/scripts/llm-rules-selftest.mjs", "exists": true},
+  {"kind": "file", "ref": "plugins/dsh-workplan/reports/T3-llm-rules-implementation-239.md", "exists": true},
+  {"kind": "file", "ref": "plugins/dsh-workplan/reports/t3-build-239-r2.log", "exists": true},
+  {"kind": "file", "ref": "plugins/dsh-workplan/reports/t3-selftest-r2.log", "exists": true},
+  {"kind": "file", "ref": "plugins/dsh-workplan/reports/t3-npm-test-239-r2.log", "exists": true},
+  {"kind": "note", "ref": "检测函数=detectLlmType≡classifyModelFamily；等级约束函数=getAllowedEffortLevels≡effortsForModelFamily/allowedEffortsForModel；dispatch集成点=runtime.ts executeSubtask 1998-2050区+runPlanner 802-860区+validatePlan options.allowedEfforts", "exists": true}
  ],
  "needs": [
-  "工程研发（engineering）+ 决策是否追补约 5 行小补丁：把 src/plan.ts stripTrailingCommas 改为复用单趟扫描器（仅字符串外删尾逗号），消除 D2-QA-1 罕见值篡改面（既有缺陷，非 T2 引入，主 Agent 已可选项裁量）"
+  "工程研发(T4b)：replan 的 runtime 调用点(runtime.ts:5570 planReplan options)透传 allowedEfforts=allowedEffortsForModel(当前模型) 即生效(参数与校验已就绪)；buildChildPrompt 注入部门告知时直接 import llm-rules.js 的 LLM_REASONING_RULES_TEXT/allowedEffortsForModel，保持单一事实源",
+  "质量验证(T6/T8)：家族规则专项引用 tests/effort-rules-llm-family.test.ts(13用例)与 reports/T3-llm-rules-implementation-239.md §3 证据；注意 tests/effort-rules.test.ts 为[2.2.7]能力钳制互补契约，两卷必须同时全绿"
  ],
  "question": "",
  "options": [],
- "timeSpentMinutes": 16,
- "finalEstimateMinutes": 12
+ "timeSpentMinutes": 48,
+ "finalEstimateMinutes": 48
 }
