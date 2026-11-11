@@ -21,6 +21,7 @@
  * 计时口径与既有测试同构：小窗口 childTimeoutMs + 轮询，不用真实长睡眠。
  */
 import test, { after } from 'node:test'
+import { seedLeaderSelfEffort } from './helpers/self-effort-contract.js'
 import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
 import { createHash } from 'node:crypto'
@@ -87,6 +88,7 @@ function makeRuntime(planId: string, outputs: string[], options: any = {}) {
     eventAt: (seq: number) => session.events[seq],
   }
   session.append('user/message', makePlanMessage(planId, outputs))
+  seedLeaderSelfEffort(session, { planId, stages: [{ subtasks: [{ id: 'T1' }] }] })
   const gate = deferred()
   const sent: any[] = []
   let started = false

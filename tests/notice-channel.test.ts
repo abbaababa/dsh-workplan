@@ -19,6 +19,7 @@
  * 插件运行时状态行」的契约成立。
  */
 import test from 'node:test'
+import { selfEffortStatuses, seedLeaderSelfEffort } from './helpers/self-effort-contract.js'
 import assert from 'node:assert/strict'
 
 import {
@@ -326,7 +327,7 @@ test('formatNoticeChannelLog：失败日志四项齐全（目标/调用方/时�
 
 test('applyStatus：noticeChannel 走单点校验；合法条目落行，非法条目抛错且不污染原行', () => {
   const plan = planWith(baseSubtask())
-  let statuses = createStatuses(plan)
+  let statuses = selfEffortStatuses(plan)
   const entry = createNoticeChannel({ target: LEAD_ID, targetSource: 'agent.id', caller: CHILD_ID, at: 1000 })
 
   statuses = applyStatus(statuses, 'T1', { noticeChannel: entry })
@@ -379,6 +380,7 @@ function makePlanMessage(subtask: any, sessionId = LEAD_ID) {
 test('运行时集成：派发写 awaiting（真实 target/caller），转达消息落父会话后结算为 observed', async () => {
   const session = fakeSession([])
   session.append('user/message', makePlanMessage(baseSubtask()))
+  seedLeaderSelfEffort(session, { planId: 'wp-notice-channel', stages: [{ subtasks: [{ id: 'T1' }] }] })
   assert.equal(parseWorkplanMessage(session.events[0].data)?.planId, 'wp-notice-channel')
 
   const gate = deferred()

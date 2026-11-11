@@ -197,6 +197,9 @@ async function dispatchLegacyHost(model: string, efforts: readonly string[]) {
     phase: 'planning',
     updatedAt: Date.now(),
   }
+  // [2.5.0][自配档] 先配置后开工：本用例考察 phase-1 激活时的家族静态闸，
+  // 预登记各行自配档（=原规划档）；未登记时一律 phase-0 low 启动（另见 workplan-250-self-effort）。
+  record.statuses.forEach((row: any, i: number) => { row.effortOverride = efforts[i] })
   await dispatchPlan(legacyCtx(seen), record, {
     agent: {},
     signal: new AbortController().signal,

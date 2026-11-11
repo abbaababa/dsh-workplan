@@ -214,7 +214,8 @@ test('R2×R4 端到端：重置清掉 consolidation 后重新 review/dispatch—
     assert.equal(dispatch.ok, true, JSON.stringify(dispatch))
     assert.equal(dispatch.effortOverride, 'xhigh')
     for (const child of spawned) {
-      assert.equal(child.request.request.agentOptions.reasoningEffort, 'xhigh', '重试/续跑激活的叶子必须沿用整体等级')
+      // [2.5.0][自配档] 叶子未自配 ⇒ phase-0 low 启动；整体等级 effortOverride 仍全程贯穿（负责人层）。
+      assert.equal(child.request.request.agentOptions.reasoningEffort, 'low', '叶子 phase-0 一律 low 启动，等待 self_effort 自配')
     }
   } finally {
     rmSync(cwd, { recursive: true, force: true })

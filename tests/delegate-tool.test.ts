@@ -254,7 +254,7 @@ test('delegateTool：dispatch 为每位下级派生第三层子会话——等�
     assert.match(promptText, /不得派生任何第四层/, '叶子层禁令必须写进任务书')
   }
   const expertSpawn = subagents.spawned.find((s: any) => s.request.request.prompt[0].text.includes('Expert-A'))
-  assert.equal(expertSpawn.request.request.agentOptions.reasoningEffort, 'xhigh', '专家等级=梳理分工表配置值（要求 5 全程应用）')
+  assert.equal(expertSpawn.request.request.agentOptions.reasoningEffort, 'low', '[2.5.0][自配档] 先配置后开工：叶子 phase-0 一律 low 启动，分工表档降为建议，self_effort 登记后才以自配档接续')
 
   // 台账落档
   const row = record.statuses[0]

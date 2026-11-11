@@ -1,4 +1,5 @@
 import test from 'node:test'
+import { selfEffortStatuses } from './helpers/self-effort-contract.js'
 import assert from 'node:assert/strict'
 
 import {
@@ -508,7 +509,7 @@ test('dispatch runs real DAG subtasks and does not hit the loop guard', async ()
   const plan = validated.plan!
   const record: any = {
     plan,
-    statuses: createStatuses(plan),
+    statuses: selfEffortStatuses(plan),
     errors: [],
     phase: 'planning',
     updatedAt: Date.now(),

@@ -12,6 +12,7 @@
  *    and never claims completion for work that is still running.
  */
 import test, { after } from 'node:test'
+import { seedLeaderSelfEffort } from './helpers/self-effort-contract.js'
 import assert from 'node:assert/strict'
 
 import { buildPlanMessage, parseResultMessage } from '../src/plan.js'
@@ -79,6 +80,7 @@ function completed(text = '完成') {
 
 function makeRuntime(child: Promise<any>, session = makeSession()) {
   session.append('user/message', buildPlanMessage(makePlan()))
+  seedLeaderSelfEffort(session, makePlan())
   const ctx = {
     logger: { warn() {} },
     subagents: {
@@ -189,6 +191,7 @@ test('重启后 status 工具可以从会话记录重建计划并读到完成项
   }
   const first = createWorkplanRuntime(ctx, { totalTimeoutMs: 60_000, strictEvidence: false })
   session.append('user/message', buildPlanMessage(makePlan()))
+  seedLeaderSelfEffort(session, makePlan())
   const out: any = await first.dispatchTool({ session, options: {} }, {}, new AbortController().signal)
   assert.equal(out.stats.done, 1)
 

@@ -12,6 +12,7 @@
  * dashboard to the child's original result.
  */
 import test, { after } from 'node:test'
+import { seedLeaderSelfEffort } from './helpers/self-effort-contract.js'
 import assert from 'node:assert/strict'
 
 import { buildPlanMessage, parseResultMessage } from '../src/plan.js'
@@ -80,6 +81,7 @@ function completed(text = '完成') {
 function makeRuntime(child: Promise<any>) {
   const session = makeSession()
   session.append('user/message', buildPlanMessage(makePlan()))
+  seedLeaderSelfEffort(session, makePlan())
   const ctx = {
     logger: { warn() {} },
     subagents: {

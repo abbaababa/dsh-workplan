@@ -13,6 +13,7 @@
  * 2.1.1 修复前这里是断的（resetBlockedStatuses 先清掉了 blockedKind/error）。
  */
 import test from 'node:test'
+import { seedLeaderSelfEffort } from './helpers/self-effort-contract.js'
 import assert from 'node:assert/strict'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -138,6 +139,7 @@ function makeRuntime(outputs: string[]) {
   const prompts: string[] = []
   const session = makeSession()
   session.append('user/message', buildPlanMessage(makePlan()))
+  seedLeaderSelfEffort(session, makePlan())
   const ctx = {
     logger: { warn() {} },
     subagents: {

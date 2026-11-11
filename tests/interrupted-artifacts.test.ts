@@ -45,7 +45,7 @@ function makeRecord(plan: any): any {
     planId: plan.planId,
     title: plan.title,
     phase: 'pending',
-    statuses: createStatuses(plan),
+    statuses: createStatuses(plan).map((row: any) => ({ ...row, effortOverride: (plan.stages ?? []).flatMap((s: any) => s.subtasks ?? []).find((t: any) => t.id === row.subtaskId)?.reasoningEffort ?? 'low' })), // [2.5.0][自配档] 预登记自配档=规划档：本组用例考察 phase-1 正式执行（未登记则 phase-0 low）
     errors: [],
     degraded: false,
     createdAt: plan.createdAt,

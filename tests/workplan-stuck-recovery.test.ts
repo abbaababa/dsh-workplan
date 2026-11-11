@@ -11,6 +11,7 @@
  *  - `[object Object]` replaced the real failure text in user-visible errors.
  */
 import test, { after } from 'node:test'
+import { selfEffortStatuses } from './helpers/self-effort-contract.js'
 import assert from 'node:assert/strict'
 
 import {
@@ -70,7 +71,7 @@ function makePlan() {
 }
 
 function makeRecord(plan: any): any {
-  const statuses = createStatuses(plan)
+  const statuses = selfEffortStatuses(plan)
   return {
     plan,
     planId: plan.planId,

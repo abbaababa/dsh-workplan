@@ -16,6 +16,7 @@
  * 重试会把「停摆」换成「重复产出」，只加产物核对则永远不会重试。
  */
 import test, { after } from 'node:test'
+import { selfEffortStatuses } from './helpers/self-effort-contract.js'
 import assert from 'node:assert/strict'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -66,7 +67,7 @@ function makeRecord(plan: any): any {
     planId: plan.planId,
     title: plan.title,
     phase: 'pending',
-    statuses: createStatuses(plan),
+    statuses: selfEffortStatuses(plan),
     errors: [],
     degraded: false,
     createdAt: plan.createdAt,

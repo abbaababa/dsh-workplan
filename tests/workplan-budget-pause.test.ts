@@ -15,6 +15,7 @@
  *    sub-agents, and every child prompt repeats that limit.
  */
 import test, { after } from 'node:test'
+import { selfEffortStatuses, seedLeaderSelfEffort } from './helpers/self-effort-contract.js'
 import assert from 'node:assert/strict'
 
 import {
@@ -59,7 +60,7 @@ function makePlan(stageCount = 2) {
 }
 
 function makeRecord(plan: any): any {
-  const statuses = createStatuses(plan)
+  const statuses = selfEffortStatuses(plan)
   return {
     plan,
     planId: plan.planId,
@@ -202,6 +203,7 @@ test('paused 阶段能从结果消息回放出来（刷新后不退回“正在�
   session.append('user/message', {
     content: [{ type: 'text', text: `<!-- DSH-WORKPLAN:BEGIN -->\n${JSON.stringify({ kind: 'workplan', version: 1, planId: plan.planId, sessionId: 'session-budget', plan })}\n<!-- DSH-WORKPLAN:END -->` }],
   })
+  seedLeaderSelfEffort(session, plan)
   session.append('user/message', {
     content: [{ type: 'text', text: `<!-- DSH-WORKPLAN-RESULT:BEGIN -->\n${JSON.stringify(resultPayload)}\n<!-- DSH-WORKPLAN-RESULT:END -->` }],
   })
@@ -278,6 +280,7 @@ test('结果消息自带阶段，刷新后能原样回放暂停', () => {
   session.append('user/message', {
     content: [{ type: 'text', text: `<!-- DSH-WORKPLAN:BEGIN -->\n${JSON.stringify({ kind: 'workplan', version: 1, planId: plan.planId, sessionId: 'session-budget', plan })}\n<!-- DSH-WORKPLAN:END -->` }],
   })
+  seedLeaderSelfEffort(session, plan)
   const statuses = [
     { subtaskId: 'T1', status: 'pending', progress: 10, error: '本轮预算用尽，等待续跑' },
     { subtaskId: 'T2', status: 'pending', progress: 0, error: '本轮预算用尽，等待续跑' },
@@ -344,6 +347,7 @@ test('新计划不继承上一份计划暂停阶段（同会话连续计划）',
   session.append('user/message', {
     content: [{ type: 'text', text: `<!-- DSH-WORKPLAN:BEGIN -->\n${JSON.stringify({ kind: 'workplan', version: 1, planId: first.planId, sessionId: 'session-budget', plan: first })}\n<!-- DSH-WORKPLAN:END -->` }],
   })
+  seedLeaderSelfEffort(session, first)
   const statuses = [
     { subtaskId: 'T1', status: 'pending', progress: 10, error: '本轮预算用尽，等待续跑' },
     { subtaskId: 'T2', status: 'pending', progress: 0, error: '本轮预算用尽，等待续跑' },
@@ -364,6 +368,7 @@ test('新计划不继承上一份计划暂停阶段（同会话连续计划）',
   session.append('user/message', {
     content: [{ type: 'text', text: `<!-- DSH-WORKPLAN:BEGIN -->\n${JSON.stringify({ kind: 'workplan', version: 1, planId: second.planId, sessionId: 'session-budget', plan: second })}\n<!-- DSH-WORKPLAN:END -->` }],
   })
+  seedLeaderSelfEffort(session, second)
 
   const replayed = reconstructFromSession(session)
   assert.ok(replayed)
@@ -377,6 +382,7 @@ test('重启后没有内存记录时，派发会从会话存档重建计划而�
   session.append('user/message', {
     content: [{ type: 'text', text: `<!-- DSH-WORKPLAN:BEGIN -->\n${JSON.stringify({ kind: 'workplan', version: 1, planId: plan.planId, sessionId: 'session-budget', plan })}\n<!-- DSH-WORKPLAN:END -->` }],
   })
+  seedLeaderSelfEffort(session, plan)
   const ctx = makeCtx(() => quickChild('重启后续跑完成'))
   const runtime = createWorkplanRuntime(ctx, { totalTimeoutMs: 60000, maxResumes: 4, strictEvidence: false })
   const result: any = await runtime.dispatchTool({ session }, { planId: plan.planId }, new AbortController().signal)
@@ -424,6 +430,7 @@ test('重启后仍能派发重启前暂停的旧计划：重建按 planId 精确
   session.append('user/message', {
     content: [{ type: 'text', text: wrap('plan', { kind: 'workplan', version: 1, planId: older.planId, sessionId: 'session-budget', plan: older }) }],
   })
+  seedLeaderSelfEffort(session, older)
   session.append('user/message', {
     content: [{ type: 'text', text: wrap('result', {
       kind: 'workplan-result',
@@ -441,6 +448,7 @@ test('重启后仍能派发重启前暂停的旧计划：重建按 planId 精确
   session.append('user/message', {
     content: [{ type: 'text', text: wrap('plan', { kind: 'workplan', version: 1, planId: newer.planId, sessionId: 'session-budget', plan: newer }) }],
   })
+  seedLeaderSelfEffort(session, newer)
 
   assert.equal(reconstructFromSession(session)?.plan?.planId, 'wp-new', 'default replay still means the newest plan')
   const rebuilt: any = reconstructFromSession(session, 'wp-old')
@@ -473,6 +481,7 @@ test('内存里是另一份计划时，按 planId 派发旧计划照样重建并
   session.append('user/message', {
     content: [{ type: 'text', text: wrap('plan', { kind: 'workplan', version: 1, planId: older.planId, sessionId: 'session-budget', plan: older }) }],
   })
+  seedLeaderSelfEffort(session, older)
   session.append('user/message', {
     content: [{ type: 'text', text: wrap('result', {
       kind: 'workplan-result', version: 1, planId: older.planId, sessionId: 'session-budget',
@@ -484,6 +493,7 @@ test('内存里是另一份计划时，按 planId 派发旧计划照样重建并
   session.append('user/message', {
     content: [{ type: 'text', text: wrap('plan', { kind: 'workplan', version: 1, planId: newer.planId, sessionId: 'session-budget', plan: newer }) }],
   })
+  seedLeaderSelfEffort(session, newer)
 
   const ctx = makeCtx(() => quickChild('派发完成'))
   const runtime = createWorkplanRuntime(ctx, { totalTimeoutMs: 60000, maxResumes: 4, strictEvidence: false })

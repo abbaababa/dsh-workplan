@@ -12,6 +12,7 @@
  *     自动重试」的通知，第二次成功后本行照常 done。
  */
 import test from 'node:test'
+import { selfEffortStatuses } from './helpers/self-effort-contract.js'
 import assert from 'node:assert/strict'
 
 import { announceSubtaskInterrupt, dispatchPlan } from '../src/runtime.js'
@@ -81,7 +82,7 @@ test('集成：子会话执行被中断 → 主会话即时收到「原因 + 处
   }
   const record: any = {
     plan: validated.plan,
-    statuses: createStatuses(validated.plan),
+    statuses: selfEffortStatuses(validated.plan),
     errors: [],
     phase: 'planning',
     updatedAt: Date.now(),

@@ -16,6 +16,7 @@
  *  5. 模型无 reasoning 元数据 ⇒ 不发送 reasoningEffort（发送必被宿主拒绝）。
  */
 import test from 'node:test'
+import { selfEffortStatuses } from './helpers/self-effort-contract.js'
 import assert from 'node:assert/strict'
 
 import { clampEffortToSupported, dispatchPlan, resolveSupportedEfforts, runPlanner } from '../src/runtime.js'
@@ -371,7 +372,7 @@ test('dispatchPlan：五档子任务派发到 qwen 类模型时按清单逐档�
   }
   const recordFive: any = {
     plan: validatedFive.plan,
-    statuses: createStatuses(validatedFive.plan),
+    statuses: selfEffortStatuses(validatedFive.plan),
     errors: [],
     phase: 'planning',
     updatedAt: Date.now(),
@@ -450,7 +451,7 @@ test('dispatchPlan：子任务 max/high/low 派发到 qwen 类模型时钳制为
   }
   const record: any = {
     plan: validated.plan,
-    statuses: createStatuses(validated.plan),
+    statuses: selfEffortStatuses(validated.plan),
     errors: [],
     phase: 'planning',
     updatedAt: Date.now(),

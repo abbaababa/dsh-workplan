@@ -1821,6 +1821,7 @@ window.__ModuleLoader__.load({
                 + `（${member?.role === 'expert' ? t('delegateExpert') : t('delegateMember')}）`
                 + `｜${t('reasoningEffort')}：${String(member?.effort ?? '?')}`
                 + (member?.requested && member.requested !== member.effort ? `（越界钳制自 ${String(member.requested)}）` : '')
+                + (member?.selfEffort ? `｜自配档 ${String(member.selfEffort)}${member?.selfEffortRequested && member.selfEffortRequested !== member.selfEffort ? `（钳制自 ${String(member.selfEffortRequested)}）` : ''}` : '｜自配档 待自配')
                 + `｜${t(`delegateStatus.${String(member?.status ?? 'running')}`)}`
                 + (member?.summary ? `：${String(member.summary)}` : ''),
               )),

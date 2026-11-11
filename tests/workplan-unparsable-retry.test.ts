@@ -11,6 +11,7 @@
  *  结算严格性不变：非法 JSON 永不计 done（两个 e2e 场景都断言这一点）。
  */
 import test from 'node:test'
+import { seedLeaderSelfEffort } from './helpers/self-effort-contract.js'
 import assert from 'node:assert/strict'
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -135,6 +136,7 @@ function makeRuntime(outputs: string[], cwd: string) {
   const prompts: string[] = []
   const session = makeSession(cwd)
   session.append('user/message', buildPlanMessage(makePlan()))
+  seedLeaderSelfEffort(session, makePlan())
   const ctx = {
     logger: { warn() {} },
     subagents: {

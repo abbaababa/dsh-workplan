@@ -40,6 +40,8 @@ import {
   buildDegradedMessage,
   buildPlanMessage,
   // [2.3.10][T2] 用户要求1：规划前/派发前会话内耗时预告文案（plan.ts 纯函数）。
+  buildPhaseZeroLeaderPrompt,
+  buildPhaseZeroContinuationHint,
   buildPlanningPreAnnouncement,
   buildDispatchPreAnnouncement,
   buildPlannerPrompt,
@@ -106,6 +108,7 @@ import {
   correctEffortForModel,
   highestEffortOf,
   planDelegations,
+  buildPhaseZeroDelegateePrompt,
   resolveTaskEffort,
 } from './llm-rules.js'
 import { phaseGateFromErrors, phaseSummaryLine, validatePhaseEvidence } from './three-phase.js'
@@ -1987,6 +1990,9 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
    * task's dependents); `interruptedEvidence` is what gets written into the
    * blocked status so the main Agent can re-adjudicate on facts.
    */
+  // [2.5.0][自配档] phase-0→phase-1 接续状态（本次尝试链内）。
+  let phaseZeroCompleted = false
+  let phaseZeroOutput = ''
   let interruptedFlag = false
   let interruptedEvidence: { artifacts: any[]; missingArtifacts: string[] } | null = null
   try {
@@ -2055,7 +2061,14 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
          * 规划器写死的 subtask.reasoningEffort；两者缺失才回落默认档。
          */
         const effortRow = record.statuses.find((item: any) => item?.subtaskId === subtask.id)
-        const requestedChildEffort = resolveTaskEffort({
+        /*
+         * [2.5.0][自配档] 先配置后开工（平台强制）：未登记自配整体档 ⇒ phase-0
+         * 以 low 启动（唯一职责=评估复杂度+经 review 提交自配）；已登记（含
+         * 重试/续跑/回放读回）⇒ phase-1 经 resolveTaskEffort 单一判据全程用自配档。
+         */
+        const selfEffortConfigured = typeof effortRow?.effortOverride === 'string' && effortRow.effortOverride.length > 0
+        const phaseZeroActivation = !phaseZeroCompleted && !selfEffortConfigured
+        const requestedChildEffort = phaseZeroActivation ? 'low' : resolveTaskEffort({
           override: effortRow?.effortOverride,
           planned: subtask.reasoningEffort,
         })
@@ -2104,7 +2117,12 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
           request: {
             prompt: [{
               type: 'text',
-              text: buildChildPrompt({
+              text: phaseZeroActivation ? buildPhaseZeroLeaderPrompt({
+                subtaskId: subtask.id,
+                title: subtask.title,
+                objective: subtask.objective,
+                departmentLabel: DEPARTMENTS[subtask.department as keyof typeof DEPARTMENTS]?.zh ?? String(subtask.department ?? '部门'),
+              }) : buildChildPrompt({
                 plan: record.plan,
                 subtask,
                 stage,
@@ -2151,6 +2169,7 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
                  * 的推理等级 + 部门负责人「先全面梳理、再用 dsh_workplan_delegate
                  * 分配给顶尖专家与组员」的强制流程告知。
                  */
+                phaseZeroContinuation: phaseZeroCompleted ? buildPhaseZeroContinuationHint(String(effortRow?.effortOverride ?? ''), phaseZeroOutput) : '',
                 llmRulesBrief: buildLlmRulesBrief({
                   model: modelSelection?.model ?? null,
                   effort: staticRuleChildEffort || null,
@@ -2403,6 +2422,26 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
           watchdog.stop()
         }
         if (guard.timedOut) return
+        /*
+         * [2.5.0][自配档] phase-0 结算分支：已登记自配 ⇒ 平台立即以自配档接续
+         * phase-1（不计失败、不耗重试预算）；未登记 ⇒ 明确 SELF_EFFORT_MISSING
+         * 回喂（有界重试），禁止静默以 low 档继续正式任务。
+         */
+        if (phaseZeroActivation) {
+          const configuredRow = record.statuses.find((item: any) => item?.subtaskId === subtask.id)
+          const configured = typeof configuredRow?.effortOverride === 'string' && configuredRow.effortOverride.length > 0
+          if (configured) {
+            phaseZeroCompleted = true
+            phaseZeroOutput = resultText(result)
+            attempt -= 1 // phase-0→phase-1 是接续不是重试：不消耗 attempt 预算
+            continue
+          }
+          throw new PlanError(
+            'phase-0 结束但未提交自配推理等级：先配置后开工是平台硬规则——请评估任务复杂度并经 dsh_workplan_delegate(action="review") 配置 consolidation.taskReasoningEffort，平台将以自配档接续',
+            'SELF_EFFORT_MISSING',
+            { subtaskId: subtask.id },
+          )
+        }
         const output = resultText(result)
         if (result.stopReason !== 'completed') {
           /*
@@ -4428,6 +4467,7 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
               effortOverride: update.effortOverride,
               consolidation: update.consolidation,
               delegates: update.delegates,
+              delegateSelfEfforts: update.delegateSelfEfforts,
               updatedBy: 'agent',
             })
             /*
@@ -7083,11 +7123,171 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
    * 钳制并留痕（delegates[].requested/effort 对），随 spawn 的 agentOptions
    * 下发且全生命周期生效（要求 5）。
    */
+  /**
+   * [2.5.0][自配档] 叶子自配推理等级（用户要求 2 新口径）：第三层专家/组员专用。
+   * 先配置后开工——phase-0 以 low 启动，叶子评估自己任务复杂度后经此提交自配档；
+   * 平台登记（五档白名单 + 家族钳制留痕 + delegates[].selfEffort + delegateSelfEfforts
+   * 持久化回放）后立即中断 phase-0 回合，并以自配档接续 phase-1。宿主契约：
+   * reasoningEffort 在子会话创建时解析（resolveChildAgentOptions），同会话换档不可行
+   * ⇒ 接续 = interruptByParent(continuable) + 新激活携带 phase-0 产物与完整任务书，
+   * childId 台账更新，旧结算回调按旧 childId 自动失配。接续失败重试 1 次仍败 ⇒
+   * 明确 SELF_EFFORT_CONTINUATION_FAILED，禁止静默降档。
+   */
+  async function selfEffortTool(agent: any, args: any, signal?: any) {
+    const childSession = agent?.session
+    if (!childSession?.id) return { ok: false, code: 'NO_SESSION', error: 'self_effort 只能在会话内使用' }
+    const leaderId = childSession.header?.parentSession
+    const leaderSession = leaderId ? (ctx as any).sessions?.get?.(leaderId) : null
+    const rootId = leaderSession?.header?.parentSession
+    if (!rootId) {
+      return { ok: false, code: 'SELF_EFFORT_NOT_LEAF', error: 'self_effort 仅限第三层专家/组员叶子会话调用（父会话必须是部门负责人会话）：负责人经 review 配置整体档，根会话用主计划派发。' }
+    }
+    let record = state.records.get(rootId)
+    if (!record?.plan) {
+      const rootSession = (ctx as any).sessions?.get?.(rootId)
+      if (rootSession) {
+        try { record = reconstructFromSession(rootSession) } catch (error) { pushRecordError({ errors: [] } as any, error) }
+      }
+    }
+    const row = (record?.statuses ?? []).find((item: any) => Array.isArray(item?.delegates) && item.delegates.some((d: any) => d?.childId === childSession.id))
+    if (!record?.plan || !row) {
+      return { ok: false, code: 'SELF_EFFORT_NOT_LEAF', error: '找不到与本子会话关联的第三层台账（childId 未登记）：self_effort 仅限部门负责人派出的专家/组员叶子会话调用。' }
+    }
+    const member = row.delegates.find((d: any) => d?.childId === childSession.id)
+    if (member.status === 'done') return { ok: false, code: 'ALREADY_DONE', error: '该成员已结算，不能再自配等级。' }
+    const FIVE = ['low', 'medium', 'high', 'xhigh', 'max']
+    const raw = args?.reasoningEffort
+    if (typeof raw !== 'string' || !FIVE.includes(raw)) {
+      return { ok: false, code: 'SELF_EFFORT_INVALID', error: `reasoningEffort "${String(raw)}" 非法：必须是 low / medium / high / xhigh / max 之一（按你自己任务复杂度自配：轻度=low；qwen 中等=medium、非 qwen 中等=high；qwen 非常复杂=xhigh、非 qwen 非常复杂=max）。` }
+    }
+    const rationale = String(args?.complexityRationale ?? '').trim()
+    if (!rationale) return { ok: false, code: 'SELF_EFFORT_RATIONALE_MISSING', error: 'complexityRationale 必填：写清你分到的单项任务为何是该复杂度档（事实/依赖/验证难度）。' }
+    const modelSelection = resolveModelSelection(ctx, { agent })
+    const model = typeof modelSelection?.model === 'string' && modelSelection.model.trim() ? modelSelection.model.trim() : null
+    const correction = correctEffortForModel(raw, model)
+    const selfEffort = correction.effort
+    if (correction.adjusted) {
+      console.warn('[dsh-workplan] delegate self-effort corrected by LLM family rules:', JSON.stringify({ member: member.member, model, requested: raw, corrected: selfEffort, reason: correction.reason }))
+    }
+    const subtaskId = String(row.subtaskId)
+    const rootSession = (ctx as any).sessions?.get?.(rootId)
+    const persistSelf = (patch: any) => {
+      const current = record.statuses.find((item: any) => item?.subtaskId === subtaskId)
+      const revision = Number(current?.revision ?? 0) + 1
+      record.statuses = applyStatus(record.statuses, subtaskId, { ...patch, revision, updatedBy: 'child' })
+      record.updatedAt = Date.now()
+      const written = record.statuses.find((item: any) => item?.subtaskId === subtaskId)
+      try {
+        appendUserMessage(rootSession, buildUpdateMessage({
+          planId: record.plan.planId,
+          subtaskId,
+          status: written?.status ?? row.status,
+          ...(patch.delegates === undefined ? {} : { delegates: written?.delegates }),
+          ...(patch.delegateSelfEfforts === undefined ? {} : { delegateSelfEfforts: written?.delegateSelfEfforts }),
+          revision: written?.revision ?? revision,
+        }))
+      } catch (error) { pushRecordError(record, error) }
+      return written
+    }
+    const currentRow = () => record.statuses.find((item: any) => item?.subtaskId === subtaskId)
+    const registerList = (currentRow()?.delegates ?? row.delegates)
+      .map((d: any) => (d?.childId === childSession.id
+        ? { ...d, selfEffort, ...(correction.adjusted ? { selfEffortRequested: raw } : {}), complexityRationale: truncate(rationale, 300), status: 'running', error: null }
+        : d))
+    const stash = { ...(currentRow()?.delegateSelfEfforts ?? {}), [member.member]: selfEffort }
+    persistSelf({ delegates: registerList, delegateSelfEfforts: stash })
+    // 接续：中断 phase-0（parent authority, continuable），尽力而为。
+    try {
+      if (typeof (ctx as any).subagents?.interruptByParent === 'function') {
+        (ctx as any).subagents.interruptByParent(childSession.id, leaderId, 'continuable')
+      }
+    } catch { /* 中断失败不阻断接续 */ }
+    const leaderAgent = (ctx as any).agents?.get?.(leaderId)
+    const departmentLabel = DEPARTMENTS[row.department as keyof typeof DEPARTMENTS]?.zh ?? String(row.department ?? '部门')
+    const fullTask = (Array.isArray(row.consolidation?.assignments) ? row.consolidation.assignments : [])
+      .find((a: any) => a?.member === member.member)?.task ?? member.task
+    const rulesBrief = buildLlmRulesBrief({ model, effort: selfEffort, requested: correction.adjusted ? raw : null, correctionReason: correction.reason ?? null, tier: 'delegate', memberName: member.member, memberRole: member.role })
+    const promptText = buildDelegateePrompt({
+      departmentLabel,
+      leaderSubtaskId: subtaskId,
+      leaderSubtaskTitle: String(row.title ?? ''),
+      member: { member: member.member, role: member.role, task: fullTask, effort: selfEffort },
+      rulesBrief,
+      cwd: typeof childSession.header?.cwd === 'string' ? childSession.header.cwd : '',
+      leadSessionId: leaderId,
+      extraContext: `【phase-0→phase-1 接续——继续勿重做】你已在 phase-0 完成复杂度评估并自配推理等级 \`${selfEffort}\`（依据：${truncate(rationale, 300)}${correction.adjusted ? `；请求档 ${raw} 越界已被平台钳制为 ${selfEffort}` : ''}）。平台已按你的自配档接续：直接执行正式任务，不要重新评估复杂度，不要重做 phase-0 已完成的工作。`,
+    })
+    let activation: any = null
+    let lastError: any = null
+    for (let i = 0; i < 2; i += 1) {
+      try {
+        activation = await ctx.subagents.startActivation({
+          provider: 'spawn',
+          label: `${row.department}:${subtaskId}→${member.member}(self:${selfEffort})`.slice(0, 120),
+          request: {
+            prompt: [{ type: 'text', text: promptText }],
+            parent: leaderAgent ?? agent,
+            cwd: typeof childSession.header?.cwd === 'string' && childSession.header.cwd ? childSession.header.cwd : undefined,
+            agentOptions: {
+              ...(modelSelection?.provider && modelSelection?.model ? { provider: modelSelection.provider, model: modelSelection.model } : {}),
+              reasoningEffort: selfEffort,
+            },
+            maxDepth: 2,
+          },
+          signal,
+          delivery: 'caller',
+        })
+        break
+      } catch (error) { lastError = error }
+    }
+    if (!activation) {
+      const message = `自配档已登记但接续失败（已重试 1 次）：${String(lastError?.message ?? lastError)}——禁止静默降档；该成员记为 failed，负责人可重派（自配档保留，重派直接以自配档接续）`
+      const failedList = (currentRow()?.delegates ?? [])
+        .map((d: any) => (d?.childId === childSession.id ? { ...d, status: 'failed', error: truncate(message, 300), finishedAt: Date.now() } : d))
+      persistSelf({ delegates: failedList })
+      return { ok: false, code: 'SELF_EFFORT_CONTINUATION_FAILED', subtaskId, member: member.member, selfEffort, error: message }
+    }
+    const newChildId = typeof activation.childId === 'string' ? activation.childId : null
+    const continuedList = (currentRow()?.delegates ?? [])
+      .map((d: any) => (d?.childId === childSession.id ? { ...d, childId: newChildId, status: 'running', startedAt: Date.now(), finishedAt: null, error: null } : d))
+    const written = persistSelf({ delegates: continuedList })
+    if (activation && typeof activation.result?.then === 'function') {
+      activation.result.then((outcome: any) => {
+        try {
+          const completed = outcome?.stopReason === 'completed'
+          const current = (record.statuses ?? []).find((item: any) => item?.subtaskId === subtaskId)
+          const list = (Array.isArray(current?.delegates) ? current.delegates : [])
+            .map((item: any) => (item?.childId === newChildId
+              ? { ...item, status: completed ? 'done' : 'failed', summary: truncate(resultText(outcome), 300), error: completed ? null : truncate(String(outcome?.diagnostic ?? `子会话结束状态 ${outcome?.stopReason}`), 300), finishedAt: Date.now() }
+              : item))
+          const revision = Number(current?.revision ?? 0) + 1
+          record.statuses = applyStatus(record.statuses, subtaskId, { delegates: list, revision, updatedBy: 'child' })
+          record.updatedAt = Date.now()
+          appendUserMessage(rootSession, buildUpdateMessage({ planId: record.plan.planId, subtaskId, status: current?.status ?? row.status, delegates: list, revision }))
+        } catch { /* 结算留痕失败不影响主链路 */ }
+      }).catch(() => {})
+    }
+    return {
+      ok: true,
+      planId: record.plan.planId,
+      subtaskId,
+      action: 'self_effort',
+      member: member.member,
+      selfEffort,
+      requested: raw,
+      ...(correction.adjusted ? { clamped: { requested: raw, corrected: selfEffort, reason: correction.reason } } : {}),
+      childId: newChildId,
+      delegates: written?.delegates ?? continuedList,
+      hint: `自配档 \`${selfEffort}\` 已登记并以该档接续 phase-1（继续勿重做）。请执行正式任务，完成后把结论回报部门负责人会话。`,
+    }
+  }
   async function delegateTool(agent: any, args: any, signal?: any) {
     const childSession = agent?.session
     if (!childSession?.id) {
       return { ok: false, code: 'NO_SESSION', error: '只能在会话内使用第三层派发' }
     }
+    // [2.5.0][自配档] self_effort 是叶子专属动作：先于负责人校验路由。
+    if (args?.action === 'self_effort') return selfEffortTool(agent, args, signal)
     const parentId = childSession.header?.parentSession
     if (!parentId) {
       return {
@@ -7210,6 +7410,14 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         // 派发/重试/续跑优先读它（resolveTaskEffort），全程生效、durable 回放。
         ...(preview.taskEffort ? { effortOverride: preview.taskEffort } : {}),
       })
+      // [2.5.0][自配档] 登记后立即中断 phase-0 回合（parent authority, continuable）；
+      // runSubtaskAttempt 检测到 effortOverride 即以自配档接续 phase-1。尽力而为：
+      // interrupt 不可用时 phase-0 自然结束，平台接续仍然成立。
+      try {
+        if (preview.taskEffort && typeof (ctx as any).subagents?.interruptByParent === 'function') {
+          (ctx as any).subagents.interruptByParent(childSession.id, parentId, 'continuable')
+        }
+      } catch { /* 中断失败不影响登记；接续由 runSubtaskAttempt 保证 */ }
       return {
         ok: true,
         planId: record.plan.planId,
@@ -7222,7 +7430,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         ...(preview.taskEffortClamped ? { taskEffortClamped: preview.taskEffortClamped } : {}),
         model: model ?? '（未知，未施加静态等级约束）',
         hint: '梳理产物已登记（durable，刷新后门禁依然生效）。现在可调用 action="dispatch" 正式派发；每位下级的推理等级已按当前模型家族合法集合钳制（clamped 列出越界修正与原因，留痕可审计）。'
-          + (preview.taskEffort ? `整体任务等级已配置为 ${preview.taskEffort}，本任务重试/续跑与未单独配档的下级全程沿用。` : '未配置整体任务等级（consolidation.taskReasoningEffort 可选）：下级未配档时回落 low。'),
+          + (preview.taskEffort ? `整体任务等级已配置为 ${preview.taskEffort}（负责人自配档），本任务重试/续跑全程沿用；下级以 self_effort 自配为权威。` : '未配置整体任务等级：负责人须按先配置后开工经 review 自配（consolidation.taskReasoningEffort）；下级经 self_effort 自配。'),
       }
     }
 
@@ -7279,7 +7487,22 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       const retryBrief = prior
         ? buildDelegateRetryBrief(prior, probeDelegateLandedArtifacts(cwd, assignment.member), consolidationApproach)
         : ''
-      const promptText = buildDelegateePrompt({
+      // [2.5.0][自配档] 先配置后开工：未登记自配档 ⇒ phase-0 以 low 启动（唯一
+      // 职责=self_effort）；已有自配档（含重置保留的 delegateSelfEfforts）⇒ 直接
+      // 以自配档接续 phase-1。分工表 effort 降为建议（台账保留供看板对照）。
+      const stashedSelf = (row.delegateSelfEfforts as any)?.[assignment.member]
+      const priorSelf = typeof stashedSelf === 'string' && stashedSelf ? stashedSelf
+        : (typeof prior?.selfEffort === 'string' && prior.selfEffort ? prior.selfEffort : '')
+      const leafPhaseZero = !priorSelf
+      const selfContinuation = priorSelf
+        ? `【自配档接续】你的自配推理等级 \`${priorSelf}\` 已登记生效（成员自配为权威）。继续勿重做：直接执行正式任务，不要重新评估复杂度。`
+        : ''
+      const promptText = leafPhaseZero ? buildPhaseZeroDelegateePrompt({
+        departmentLabel,
+        member: assignment,
+        cwd: cwd ?? '',
+        ...(retryBrief ? { extraContext: retryBrief } : {}),
+      }) : buildDelegateePrompt({
         departmentLabel,
         leaderSubtaskId: subtaskId,
         leaderSubtaskTitle: String(row.title ?? ''),
@@ -7287,7 +7510,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         rulesBrief,
         cwd: cwd ?? '',
         leadSessionId: childSession.id,
-        ...(retryBrief ? { extraContext: retryBrief } : {}),
+        ...(retryBrief || selfContinuation ? { extraContext: [selfContinuation, retryBrief].filter(Boolean).join('\n') } : {}),
       })
       let childId: string | null = null
       let memberStatus = 'running'
@@ -7304,8 +7527,8 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
               ...(modelSelection?.provider && modelSelection?.model
                 ? { provider: modelSelection.provider, model: modelSelection.model }
                 : {}),
-              // 要求 5：等级随任务复杂度配置并全程应用；'' = 模型无 reasoning 元数据 ⇒ 不发送。
-              ...(assignment.effort ? { reasoningEffort: assignment.effort } : {}),
+              // [2.5.0][自配档] phase-0 强制 low；phase-1 用成员自配档（权威）。
+              reasoningEffort: leafPhaseZero ? 'low' : priorSelf,
             },
             // 成员在 depth 2；任何第四层（depth 3）被宿主绝对深度上限硬拒。
             maxDepth: 2,

@@ -22,6 +22,7 @@
  * 说明符不被 Node 重映射到 .ts 而 ERR_MODULE_NOT_FOUND（NodeNext 编译约定，非本文件缺陷）。
  */
 import test from 'node:test'
+import { selfEffortStatuses, seedLeaderSelfEffort } from './helpers/self-effort-contract.js'
 import assert from 'node:assert/strict'
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -113,7 +114,7 @@ function makeCtx(session: any): any {
 
 /** 结算行：done + 指定 closure/rev（事故形状：closure reported、structured 证据）。 */
 function settledStatuses(plan: any, closure: string, rev: number, opts: any = {}) {
-  const statuses: any[] = createStatuses(plan)
+  const statuses: any[] = selfEffortStatuses(plan)
   for (const item of statuses) {
     item.status = 'done'
     item.closure = closure
@@ -398,7 +399,7 @@ test('G4-P2 人工改判 live 路径一次判定即放行、live/replay 同判�
   const runtime: any = createWorkplanRuntime(ctx, { version: 'fixture' })
   const record: any = {
     plan: plan2, planId: plan2.planId, title: plan2.title, phase: 'paused',
-    statuses: createStatuses(plan2), errors: [], degraded: false,
+    statuses: selfEffortStatuses(plan2), errors: [], degraded: false,
     createdAt: T0, updatedAt: Date.now(),
   }
   runtime.state.records.set(session.id, record)
@@ -538,6 +539,7 @@ test('G5-X1 T7 有界重试结算后，低 rev 旧事件被闸拒绝：重试行
   }
   const x1Plan = makeX1Plan()
   session.append('user/message', buildPlanMessage(x1Plan))
+  seedLeaderSelfEffort(session, x1Plan)
   const prompts: string[] = []
   const outputs = [malformedX1('第一轮'), compliantX1()]
   const ctx: any = {
@@ -605,7 +607,7 @@ test('G5-X2 严格性不降：非法 JSON 永不计 done；不带 rev 的前向�
   assert.equal(shouldRetryAttempt({ code: 'EVIDENCE_UNPARSABLE' }, 1, 60_000, 10_000), true, '有界重试闸原语义保持')
   assert.equal(shouldRetryAttempt({ code: 'EVIDENCE_UNPARSABLE' }, 2, 60_000, 10_000), false, '第二非法绝不无限回喂')
   // 库级口径：applyStatus 的前向/无 rev 写入恒被采纳（与 runtime.ts 调用点兼容表一致）。
-  let statuses = createStatuses(plan)
+  let statuses = selfEffortStatuses(plan)
   statuses = applyStatus(statuses, 'T1', {
     status: 'done', verification: 'structured',
     acceptance: [{ criterion: 'x', result: 'pass', evidence: 'y' }], revision: 16, updatedBy: 'agent',

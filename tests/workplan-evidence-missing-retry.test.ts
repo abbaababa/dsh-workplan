@@ -12,6 +12,7 @@
  *  A5 既有 unparsable / CHILD_NOT_COMPLETED 语义不回归（同闸单测逐字断言）。
  */
 import test from 'node:test'
+import { seedLeaderSelfEffort } from './helpers/self-effort-contract.js'
 import assert from 'node:assert/strict'
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -125,6 +126,7 @@ function makeRuntime(outputs: string[], cwd: string) {
   const prompts: string[] = []
   const session = makeSession(cwd)
   session.append('user/message', buildPlanMessage(makePlan()))
+  seedLeaderSelfEffort(session, makePlan())
   const ctx = {
     logger: { warn() {} },
     subagents: {

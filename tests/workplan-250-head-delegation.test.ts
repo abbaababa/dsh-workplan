@@ -186,7 +186,9 @@ test('要求2 端到端：review 配置整体等级 → 状态行 effortOverride
   assert.equal(dispatch.effortOverride, 'medium')
   assert.equal(spawned.length, 2)
   for (const child of spawned) {
-    assert.equal(child.request.request.agentOptions.reasoningEffort, 'medium')
+    // [2.5.0][自配档] 继承降为旧计划兼容：叶子 phase-0 一律 low 启动，自配经 self_effort 接续。
+    assert.equal(child.request.request.agentOptions.reasoningEffort, 'low')
+    assert.match(child.request.request.prompt[0].text, /self_effort/, 'phase-0 任务书必须写明自配义务')
   }
   const status = await runtime.delegateTool(leaderAgent, { action: 'status' })
   assert.equal(status.effortOverride, 'medium')

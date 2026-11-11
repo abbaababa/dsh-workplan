@@ -17,9 +17,10 @@
  * 轮询（waitFor，与既有测试同构）计时，全程可重复。
  */
 import test, { after } from 'node:test'
+import { seedLeaderSelfEffort } from './helpers/self-effort-contract.js'
 import assert from 'node:assert/strict'
 
-import { buildPlanMessage, messageText, parseResultMessage, parseWorkplanMessage } from '../src/plan.js'
+import { buildPlanMessage, messageText, parseResultMessage, parseUpdateMessage, parseWorkplanMessage } from '../src/plan.js'
 import { createWorkplanRuntime, reconstructFromSession } from '../src/runtime.js'
 
 const eventLoopAnchor = setInterval(() => {}, 1_000)
@@ -116,6 +117,8 @@ function noticeTexts(session: any): string[] {
     if (!text) continue
     if (parseWorkplanMessage(event.data)) continue
     if (parseResultMessage(event.data)) continue
+    // [2.5.0][自配档] durable 改判记录（含预登记自配档的 workplan-update）不是即时通知，不计入通知集。
+    if (parseUpdateMessage(event.data)) continue
     out.push(text)
   }
   return out
@@ -124,6 +127,7 @@ function noticeTexts(session: any): string[] {
 function makeRuntime() {
   const session = makeSession()
   session.append('user/message', buildPlanMessage(makePlan()))
+  seedLeaderSelfEffort(session, makePlan())
   const gates: Array<{ promise: Promise<any>; release: (v: any) => void; reject: (e: any) => void }> = []
   const ctx = {
     logger: { warn() {} },
@@ -209,6 +213,7 @@ test('A2：同一子任务重复结算/回放不重报（幂等，重启/刷新�
 test('A4：子任务全部未完成时不存在「已完成」措辞的通知', async () => {
   const session = makeSession()
   session.append('user/message', buildPlanMessage(makePlan()))
+  seedLeaderSelfEffort(session, makePlan())
   const ctx = {
     logger: { warn() {} },
     // 两个子任务（含自动重试的第二次尝试）全部失败：没有任何子任务完成。

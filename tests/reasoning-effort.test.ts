@@ -229,7 +229,7 @@ test('部门子会话档位只由子任务自身复杂度决定：主 Agent 五�
     const plan = structuredClone(validated.plan!)
     const record: any = {
       plan,
-      statuses: createStatuses(plan),
+      statuses: createStatuses(plan).map((row: any) => ({ ...row, effortOverride: (plan.stages ?? []).flatMap((s: any) => s.subtasks ?? []).find((t: any) => t.id === row.subtaskId)?.reasoningEffort })), // [2.5.0][自配档] 预登记自配档=规划档：本组用例考察 phase-1 正式执行（未登记则 phase-0 low）
       errors: [],
       phase: 'planning',
       updatedAt: Date.now(),

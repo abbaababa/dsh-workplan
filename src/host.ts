@@ -803,20 +803,30 @@ function createDelegateTool(runtime: any) {
     description:
       '部门负责人专用的第三层派发（用户要求 1/2/3）：你拥有本部门内再分配权限。先 action="review" 提交全面梳理产物'
       + '（问题梳理 + 分工表：每位下级的 member/role/task/reasoningEffort，至少 1 名 expert 顶尖专家 + 1 名 member 组员，最多 6 人；'
-      + '并可用 consolidation.taskReasoningEffort 为整个任务配置整体推理等级，配置后本任务重试/续跑与未单独配档的下级全程沿用），'
+      + '并可用 consolidation.taskReasoningEffort 为整个任务配置整体推理等级，配置后本任务重试/续跑全程沿用；下级档位以成员 self_effort 自配为权威（分工表档仅建议）），'
       + '再 action="dispatch" 把任务派给本部门相关领域全球顶尖专家与本部门组员（固定一层下级、叶子层，第四层一律被拒）。'
       + '分配必须更简单：每位下级只承担单一目标、单一主产物、可独立验收的一项工作。'
       + 'review 未提交前 dispatch 被硬门禁拒绝。每位下级的推理等级必须按其任务复杂度配置'
       + '（轻度=low；qwen 中等=medium、非 qwen 中等=high；qwen 非常复杂=xhigh、非 qwen 非常复杂=max），'
       + '平台按当前模型家族合法集合自动钳制越界档并留痕，等级在其任务全生命周期生效。'
-      + 'action="status" 查看梳理登记与下级进度。',
+      + 'action="status" 查看梳理登记与下级进度。第三层专家/组员叶子用 action="self_effort" 自配推理等级'
+      + '（先配置后开工：phase-0 以 low 启动，唯一职责=评估自身任务复杂度并提交 reasoningEffort+complexityRationale；登记后平台立即以自配档接续同一任务进入 phase-1，成员自配为权威、分工表档仅建议）。',
     parameters: {
       type: 'object',
       properties: {
         action: {
           type: 'string',
-          enum: ['review', 'dispatch', 'status'],
-          description: 'review=提交全面梳理产物与分工表；dispatch=正式派发给专家/组员；status=查看登记与进度。',
+          enum: ['review', 'dispatch', 'status', 'self_effort'],
+          description: 'review=提交全面梳理产物与分工表（负责人）；dispatch=正式派发给专家/组员（负责人）；status=查看登记与进度；self_effort=第三层专家/组员叶子自配推理等级（先配置后开工）。',
+        },
+        reasoningEffort: {
+          type: 'string',
+          enum: ['low', 'medium', 'high', 'xhigh', 'max'],
+          description: 'action="self_effort" 必填：叶子按自己分到的单项任务复杂度自配的推理等级（轻度=low；qwen 中等=medium、非 qwen 中等=high；qwen 非常复杂=xhigh、非 qwen 非常复杂=max）。成员自配为权威，越界档被平台钳制并留痕；登记后平台立即以自配档接续 phase-1。',
+        },
+        complexityRationale: {
+          type: 'string',
+          description: 'action="self_effort" 必填：复杂度依据（为什么你的单项任务是该档：事实/依赖/验证难度）。',
         },
         consolidation: {
           type: 'object',
@@ -833,7 +843,7 @@ function createDelegateTool(runtime: any) {
             taskReasoningEffort: {
               type: 'string',
               enum: ['low', 'medium', 'high', 'xhigh', 'max'],
-              description: '可选：负责人为整个任务配置的整体推理等级（按本任务复杂度：轻度=low；qwen 中等=medium、非 qwen 中等=high；qwen 非常复杂=xhigh、非 qwen 非常复杂=max）。配置后本任务每次派发/重试/续跑全程沿用，未单独配档的下级继承该档；越界档被平台钳制并留痕。',
+              description: '可选：负责人为整个任务配置的整体推理等级（按本任务复杂度：轻度=low；qwen 中等=medium、非 qwen 中等=high；qwen 非常复杂=xhigh、非 qwen 非常复杂=max）。负责人自配整体档：配置后本任务每次派发/重试/续跑全程沿用；下级以 self_effort 自配为权威；越界档被平台钳制并留痕。',
             },
             assignments: {
               type: 'array',
@@ -847,7 +857,7 @@ function createDelegateTool(runtime: any) {
                   reasoningEffort: {
                     type: 'string',
                     enum: ['low', 'medium', 'high', 'xhigh', 'max'],
-                    description: '按该任务复杂度配置：轻度=low；比较复杂的任务 qwen 系=medium、非 qwen 系=high；非常复杂的任务 qwen 系=xhigh、非 qwen 系=max。缺失时继承负责人配置的整体任务等级（taskReasoningEffort），整体也未配置则回落 low。越界档会被平台钳制并留痕。',
+                    description: '按该任务复杂度配置：轻度=low；比较复杂的任务 qwen 系=medium、非 qwen 系=high；非常复杂的任务 qwen 系=xhigh、非 qwen 系=max。建议档（成员自配为权威）：叶子 phase-0 一律 low 启动并经 self_effort 自配；越界档会被平台钳制并留痕。',
                   },
                 },
                 required: ['member', 'role', 'task'],
