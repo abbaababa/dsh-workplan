@@ -40,6 +40,9 @@ function phases(overrides: any = {}) {
       approach: [
         '先读现有写入路径确认入口 → 在入口加幂等键校验 → 用同一请求连发两次 → 核对只写一条记录 → 对照验收标准逐条留证。',
       ],
+      approachBasis: [
+        '第二轮的方法、流程、步骤基于第一轮完成好的全部结果：重复写入的现状与主要矛盾决定在入口加幂等键校验，不改数据库结构的约束决定不动存储层，验收标准决定连发两次并核对记录数的留证方式。',
+      ],
     },
     execution: { steps: ['读写入路径', '加幂等校验', '连发两次并核对记录数'], deviations: [] },
     verification: {
@@ -108,8 +111,11 @@ test('子 Agent 提示词包含三阶段顺序、禁止跳步与阶段三插件�
   })
   assert.match(prompt, /三阶段工作法/)
   assert.match(prompt, /阶段一 · 规划阶段/)
-  assert.match(prompt, /先全面、深入梳理要解决的问题/)
-  assert.match(prompt, /完整、可执行思路/)
+  // [2.5.1] 两轮深度思考协议：第一轮任务深研 + 第二轮基于第一轮全部结果理清方法、流程、步骤。
+  assert.match(prompt, /第一轮 · 任务深研：先全面、全盘、深入梳理、研究、思考自己的任务/)
+  assert.match(prompt, /基于刚才第一轮完成好的所有结果，再全面、全盘、深入地开展梳理、研究和思考/)
+  assert.match(prompt, /方法、流程和步骤/)
+  assert.match(prompt, /approachBasis/)
   assert.match(prompt, /阶段二 · 执行阶段/)
   assert.match(prompt, /阶段三 · 验证阶段/)
   assert.doesNotMatch(prompt, /插件禁用/, '2.0.2 起不得把「阶段一、二禁用插件」写成永久规则')

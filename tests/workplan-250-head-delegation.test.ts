@@ -39,6 +39,7 @@ function consolidation(overrides: any = {}) {
   return {
     problemAnalysis: ['现状：部门任务需要拆给专家与组员', '主要矛盾：质量与时间'],
     approach: ['专家做实现', '组员做证据'],
+    approachBasis: ["第二轮分工的方法、流程、步骤基于第一轮完成好的全部结果：质量与时间的主要矛盾决定专家承担核心实现、组员承担自测与证据，约束决定不改无关文件。"],
     assignments: assignments(),
     ...overrides,
   }
@@ -194,9 +195,9 @@ test('要求2 端到端：review 配置整体等级 → 状态行 effortOverride
   assert.equal(status.effortOverride, 'medium')
 })
 
-test('要求5：版本声明统一 2.5.0', () => {
+test('要求5：版本声明统一 2.5.1（2.5.0 断言随定版升级）', () => {
   const pkg = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8'))
-  assert.equal(pkg.version, '2.5.0')
+  assert.equal(pkg.version, '2.5.1')
   const fixture = JSON.parse(readFileSync(join(process.cwd(), 'tests/fixtures/tool-surface.json'), 'utf8'))
-  assert.equal(fixture.version, '2.5.0')
+  assert.equal(fixture.version, '2.5.1')
 })

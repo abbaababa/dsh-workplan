@@ -65,6 +65,7 @@ function phasesFixture() {
       constraints: ['只能使用离线样本'],
       unknowns: ['样本完整性待确认'],
       approach: ['先确认数据源与字段 → 写取数脚本 → 运行并记录行数与校验值 → 对照验收逐条留证。'],
+      approachBasis: ["第二轮的方法、流程、步骤基于第一轮完成好的全部结果：现状与主要矛盾决定先确认入口再最小改动，约束决定不改无关文件，验收标准决定每一步的留证方式。"],
     },
     execution: { steps: ['确认数据源', '运行取数脚本', '记录校验值'], deviations: [] },
     verification: {

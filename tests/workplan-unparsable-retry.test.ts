@@ -50,6 +50,9 @@ function phasesFixture() {
         '第 2 步：unparsable 且 shouldRetryAttempt 放行时抛 EVIDENCE_UNPARSABLE，由既有 catch 把解析器具体错误回喂同一子会话要求修正重报 → 证明：第二次激活提示词含「解析器报告」与在盘产物清单。',
         '第 3 步：重试仍失败才受阻，随行附在盘产物清单与 dsh_workplan_update 复核提示 → 证明：blocked 行 error 文案逐字可断言。',
       ],
+      approachBasis: [
+        '第二轮的方法、流程、步骤基于第一轮完成好的全部结果：非法 JSON 不得计 done 的约束决定预裁决不放行，CHILD_NOT_COMPLETED 语义不得回归的事实决定复用既有回喂通道，有界重试的边界决定第三步才受阻。',
+      ],
     },
     execution: { steps: ['读现有实现确认入口', '实现通道', '运行测试并记录输出'], deviations: [] },
     verification: {

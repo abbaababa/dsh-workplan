@@ -801,8 +801,11 @@ function createDelegateTool(runtime: any) {
   return {
     name: 'dsh_workplan_delegate',
     description:
-      '部门负责人专用的第三层派发（用户要求 1/2/3）：你拥有本部门内再分配权限。先 action="review" 提交全面梳理产物'
-      + '（问题梳理 + 分工表：每位下级的 member/role/task/reasoningEffort，至少 1 名 expert 顶尖专家 + 1 名 member 组员，最多 6 人；'
+      '部门负责人专用的第三层派发（用户要求 1/2/3）：你拥有本部门内再分配权限。执行自己的任务必须先走两轮深度思考：'
+      + '先全面、全盘、深入梳理、研究、思考自己的任务，再基于前一步完成好的所有结果再全面、全盘、深入地开展梳理、研究和思考，'
+      + '理清思路与具体一步步执行、完美完成任务的方法、流程和步骤，最后才基于这些方法、流程、步骤执行与再分配。'
+      + '先 action="review" 提交两轮深度思考产物'
+      + '（problemAnalysis=第一轮任务深研 + approach=第二轮方法流程步骤 + approachBasis=第二轮基于第一轮全部结果的依据 + 分工表：每位下级的 member/role/task/reasoningEffort，至少 1 名 expert 顶尖专家 + 1 名 member 组员，最多 6 人；'
       + '并可用 consolidation.taskReasoningEffort 为整个任务配置整体推理等级，配置后本任务重试/续跑全程沿用；下级档位以成员 self_effort 自配为权威（分工表档仅建议）），'
       + '再 action="dispatch" 把任务派给本部门相关领域全球顶尖专家与本部门组员（固定一层下级、叶子层，第四层一律被拒）。'
       + '分配必须更简单：每位下级只承担单一目标、单一主产物、可独立验收的一项工作。'
@@ -830,16 +833,17 @@ function createDelegateTool(runtime: any) {
         },
         consolidation: {
           type: 'object',
-          description: 'action="review" 必填：负责人「全面、全盘、深入梳理」的产物 + 第三层分工表。',
+          description: 'action="review" 必填：负责人执行自己任务时「两轮深度思考」的产物 + 第三层分工表。第一轮：全面、全盘、深入梳理、研究、思考自己的任务（problemAnalysis）；第二轮：基于第一轮完成好的所有结果，再全面、全盘、深入地开展梳理、研究和思考，理清思路与具体一步步执行、完美完成任务的方法、流程和步骤（approach），并写清第二轮基于第一轮全部结果的依据对应（approachBasis）。两轮产物未齐前 dispatch 被硬门禁拒绝。',
           properties: {
             problemAnalysis: {
               type: 'array',
               items: { type: 'string' },
-              description: '问题梳理（现状/事实/约束/未知/主要矛盾逐条写清），至少 1 条。',
+              description: '第一轮 · 任务深研：全面、全盘、深入梳理、研究、思考自己的任务（目标与验收/现状/事实/约束/未知/主要矛盾/边界逐条写清），至少 1 条。',
             },
             constraints: { type: 'array', items: { type: 'string' }, description: '约束条件。' },
             unknowns: { type: 'array', items: { type: 'string' }, description: '未知或待确认项。' },
-            approach: { type: 'array', items: { type: 'string' }, description: '可执行思路：每步做什么、产出什么、如何证明。' },
+            approach: { type: 'array', items: { type: 'string' }, description: '第二轮 · 方法流程步骤：基于第一轮全部结果，再全面、全盘、深入梳理、研究、思考后理清的具体一步步执行、完美完成任务的方法、流程和步骤（每步做什么、产出什么、如何证明），至少 1 条。' },
+            approachBasis: { type: 'array', items: { type: 'string' }, description: '第二轮依据（必填，至少 1 条）：第二轮如何基于第一轮完成好的所有结果——逐条写清第一轮的哪些事实/约束/矛盾决定了第二轮的哪些方法/流程/步骤。' },
             taskReasoningEffort: {
               type: 'string',
               enum: ['low', 'medium', 'high', 'xhigh', 'max'],
@@ -865,7 +869,7 @@ function createDelegateTool(runtime: any) {
               },
             },
           },
-          required: ['problemAnalysis', 'assignments'],
+          required: ['problemAnalysis', 'approach', 'approachBasis', 'assignments'],
           additionalProperties: false,
         },
       },
@@ -946,7 +950,7 @@ export function createVerifyTool(runtime: any) {
     description:
       '部门子 Agent 在第三阶段（验证阶段）使用的插件核验：提交 planning / execution / verification 三阶段证据，'
       + '插件逐项核验并返回 passed 或仍需补齐的 gaps。缺少 planning / execution 证据时返回 PHASE_GATE 与待补项；'
-      + '只有「问题梳理 + 可执行思路 + 实际执行步骤」齐全后，才会进入阶段三核验。'
+      + '只有「两轮深度思考产物（第一轮任务深研 problemAnalysis + 第二轮方法流程步骤 approach + 第二轮依据 approachBasis）+ 实际执行步骤」齐全后，才会进入阶段三核验。'
       + '核验通过不代表完成：最终仍要在结果块里写同一份 phases，由主计划按三阶段契约判定。',
     parameters: {
       type: 'object',
@@ -961,13 +965,15 @@ export function createVerifyTool(runtime: any) {
           properties: {
             planning: {
               type: 'object',
+              description: '阶段一 · 两轮深度思考：第一轮全面、全盘、深入梳理、研究、思考自己的任务；第二轮基于第一轮完成好的所有结果，再全面、全盘、深入地开展梳理、研究和思考，理清思路与具体一步步执行、完美完成任务的方法、流程和步骤，并写清第二轮基于第一轮全部结果的依据。',
               properties: {
-                problemAnalysis: { type: 'array', items: { type: 'string' }, description: '要解决的问题逐条梳理（现状/事实/约束/未知/主要矛盾/边界）' },
+                problemAnalysis: { type: 'array', items: { type: 'string' }, description: '第一轮 · 任务深研：全面、全盘、深入梳理、研究、思考自己的任务（目标与验收/现状/事实/约束/未知/主要矛盾/边界）' },
                 constraints: { type: 'array', items: { type: 'string' }, description: '约束条件' },
                 unknowns: { type: 'array', items: { type: 'string' }, description: '未知或待确认项' },
-                approach: { type: 'array', items: { type: 'string' }, description: '完整可执行的思路：每一步做什么、产出什么、如何证明' },
+                approach: { type: 'array', items: { type: 'string' }, description: '第二轮 · 方法流程步骤：基于第一轮全部结果理清的具体一步步执行、完美完成任务的方法、流程和步骤（每一步做什么、产出什么、如何证明）' },
+                approachBasis: { type: 'array', items: { type: 'string' }, description: '第二轮依据（必填）：第二轮如何基于第一轮完成好的所有结果——第一轮的哪些事实/约束/矛盾决定了第二轮的哪些方法/流程/步骤' },
               },
-              required: ['problemAnalysis', 'approach'],
+              required: ['problemAnalysis', 'approach', 'approachBasis'],
             },
             execution: {
               type: 'object',
@@ -1744,7 +1750,7 @@ export function apply(ctx: any, config: WorkplanConfig = {}) {
 
 export const meta = {
   name,
-  version: '2.5.0',
+  version: '2.5.1',
   promptOrder: PROMPT_ORDER,
   routes: ['/dsh-workplan/plans', '/dsh-workplan/vendor/chart.umd.js'],
 }

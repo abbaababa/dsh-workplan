@@ -1,3 +1,11 @@
+## 2.5.1 — 2026-11-11
+
+- **两轮深度思考协议（用户要求 1，底层机制升级）**：三阶段工作法的规划阶段升级为用户 2026-11-11 强制的「两轮深度思考」协议，部门负责人、部门里相关领域的全球顶尖专家、部门里组员三层执行者在执行自己的任务时同一口径：① 第一轮 · 任务深研——先全面、全盘、深入梳理、研究、思考自己的任务（→ phases.planning.problemAnalysis）；② 第二轮 · 理清方法流程步骤——基于刚才第一轮完成好的所有结果，再全面、全盘、深入地开展梳理、研究和思考，理清自己的思路，理清自己该具体如何一步步执行、达到最终完美完成自己任务的方法、流程和步骤（→ phases.planning.approach）；③ 执行——最后，基于刚才第二轮理清楚的所有方法、流程、步骤，开始具体的执行工作。三步顺序与依赖不可颠倒：第二轮必须消费第一轮的全部结果，执行必须消费第二轮的方法、流程、步骤。
+- **第二轮依据成为结构化必填证据（新增 approachBasis）**：「基于前一步完成好的所有结果」不再只是提示词——phases.planning.approachBasis（至少 1 条、合计 ≥20 字）要求逐条写清第一轮的哪些事实/约束/矛盾决定了第二轮的哪些方法/流程/步骤，两轮之间的依赖可审计；缺依据/依据太薄 ⇒ 规划阶段判未完成（PHASE_GATE 回喂待补项），不得记 done。THREE_PHASE_VERSION 1→2；problemAnalysis/approach 字段名保留、语义升级为两轮产物。在途旧结算证据缺 approachBasis 时按既有有界回喂通道要求补齐（强制口径，不是静默放行）。
+- **负责人再分配硬门禁同口径**：planDelegations 在角色配比校验之后新增两轮产物闸——approach（第二轮方法、流程、步骤）与 approachBasis（第二轮依据）各至少 1 条，缺一拒绝 DELEGATE_CONSOLIDATION_INCOMPLETE、dispatch 不放行；缺 problemAnalysis/assignments/角色配比的旧拒因顺序不变。dsh_workplan_delegate 工具 consolidation schema 同步新增 approachBasis 并把 approach/approachBasis 列为必填；applyStatus 消毒与 durable workplan-update 回放写入/消费双侧接线（approachBasis 刷新/重启不丢）。旧计划状态回放不报错（新字段缺省为空）；旧梳理产物缺第二轮依据时 dispatch 要求重新 review 补齐（协议强制口径）。
+- **三层任务书注入单一事实源**：threePhasePromptLines 重写为两轮深度思考协议（第一轮/第二轮/执行依赖 + approachBasis 自检），二级任务书（buildChildPrompt）与三级任务书（buildDelegateePrompt）共享同一注入；buildLlmRulesBrief 负责人 tier 改写为「执行自己的任务先两轮深度思考，再执行与再分配」，专家/组员 tier 新增协议全文；两份任务书的执行要求各新增一条两轮深度思考强制行。dsh_workplan_verify 工具 planning schema 同步新增 approachBasis 必填。
+- **版本统一 2.5.1（用户要求 3 定版）**：package.json / package-lock.json×2 / src/host.ts meta / tests/fixtures/tool-surface.json / README 三语徽章与安装行 / 版本回归断言（workplan-250-head-delegation 要求5 断言随定版升级）。新增 tests/workplan-251-deep-think.test.ts 回归；既有字段与校验原样保留。生效需 npm run build 后由用户手工重启 dsh web（宿主侧无热加载）。
+
 ## 2.5.0 — 2026-11-11
 
 - **部门负责人再分配权限根因修复（用户要求 1）**：2.3.9 已交付 `dsh_workplan_delegate` 工具，但二级任务书 `buildChildPrompt` 的执行要求仍写着「不要派生新的 Agent」「你没有派发权限」——负责人同时收到「必须再分配」（llmRulesBrief）与「没有派发权限」（执行要求）两套矛盾指令，普遍不敢行使再分配。本版把禁令改写为精确边界：负责人**拥有本部门内再分配权限**（dsh_workplan_delegate，先 review 后 dispatch），禁令只针对主计划派发、重启/安装与第四层派生；并新增「本部门再分配权限与推理等级配置」授权段。规划器提示词同步改写（旧「子任务由子 Agent 独立执行：它们没有派发权限」→ 负责人牵头 + 部门内再分配权限）。

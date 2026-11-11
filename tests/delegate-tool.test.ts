@@ -98,6 +98,7 @@ const goodConsolidation = (efforts: { expert: string; member: string }) => ({
   constraints: ['不得改动无关文件'],
   unknowns: [],
   approach: ['专家做核心实现', '组员做自测'],
+  approachBasis: ["第二轮分工的方法、流程、步骤基于第一轮完成好的全部结果：质量与时间的主要矛盾决定专家承担核心实现、组员承担自测与证据，约束决定不改无关文件。"],
   assignments: [
     { member: 'Expert-A', role: 'expert', task: '实现核心逻辑并自测', reasoningEffort: efforts.expert },
     { member: 'Member-B', role: 'member', task: '补充回归用例', reasoningEffort: efforts.member },
@@ -209,6 +210,8 @@ test('delegateTool：非 qwen 模型上 medium→low、xhigh→high 钳制；max
     action: 'review',
     consolidation: {
       problemAnalysis: ['梳理'],
+      approach: ['专家做复杂任务', '组员做轻度任务'],
+      approachBasis: ['第二轮分工基于第一轮梳理：任务复杂度差异决定专家承担复杂任务、组员承担轻度任务。'],
       assignments: [
         { member: 'E', role: 'expert', task: '复杂任务', reasoningEffort: 'max' },
         { member: 'M', role: 'member', task: '轻度任务', reasoningEffort: 'medium' },

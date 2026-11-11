@@ -168,9 +168,9 @@ export function buildLlmRulesBrief(info: LlmRulesBriefInfo = {}): string {
     lines.push(`- 部门负责人已为本任务配置整体推理等级 \`${info.taskEffort}\`（effortOverride，负责人自配档）：本任务每次派发/重试/续跑全程沿用该等级，不得中途丢弃或覆盖；下级自己的等级以 self_effort 自配为权威（分工表档仅建议）。`)
   }
   if (info.tier === 'delegate') {
-    lines.push(`- 你是部门第三层执行者（${info.memberRole === 'expert' ? '本部门相关领域全球顶尖专家' : '本部门组员'}${info.memberName ? `：${info.memberName}` : ''}）。分工表给你的档位仅为建议：你必须在 phase-0（low 档启动）经 dsh_workplan_delegate(action="self_effort") 按自己任务复杂度提交自配档（reasoningEffort+complexityRationale），平台登记后立即以自配档接续你执行正式任务；越界档会被钳制并留痕。必须确保自身任务完成品质非常高的前提下，完美、超高效率地执行。`)
+    lines.push(`- 你是部门第三层执行者（${info.memberRole === 'expert' ? '本部门相关领域全球顶尖专家' : '本部门组员'}${info.memberName ? `：${info.memberName}` : ''}）。执行自己的任务必须先走两轮深度思考（2.5.1 强制，详见三阶段工作法）：先全面、全盘、深入梳理、研究、思考自己的任务；再基于刚才前一步完成好的所有结果，再全面、全盘、深入地开展梳理、研究和思考，理清自己的思路，理清自己该具体如何一步步执行、达到最终完美完成自己任务的方法、流程和步骤；最后，基于刚才理清楚的所有方法、流程、步骤，开始具体的执行工作。分工表给你的档位仅为建议：你必须在 phase-0（low 档启动）经 dsh_workplan_delegate(action="self_effort") 按自己任务复杂度提交自配档（reasoningEffort+complexityRationale），平台登记后立即以自配档接续你执行正式任务；越界档会被钳制并留痕。必须确保自身任务完成品质非常高的前提下，完美、超高效率地执行。`)
   } else {
-    lines.push('- 部门负责人（本任务书的直接接收者）强制流程（用户要求 1/2/3，2.5.0 强化）：你拥有本部门内的再分配权限——接到任务后必须先全面、全盘、深入梳理与研究，再用 dsh_workplan_delegate(action="review") 提交梳理产物（问题梳理 + 分工表 + 每位专家/组员的推理等级配置），并在 consolidation.taskReasoningEffort 里按你接到任务的复杂度配置你自己的整体推理等级（先配置后开工：phase-0 以 low 启动，登记后平台立即以自配档接续本会话进入 phase-1，重试/续跑全程生效）；梳理产物未提交前，dsh_workplan_delegate(action="dispatch") 会被平台拒绝（硬门禁）。梳理完成后必须把任务拆得更简单——每位下级只承担单一目标、单一主产物、可独立验收的一项工作——再合理分配给本部门多名相关领域全球顶尖专家与本部门组员（expert 与 member 各至少 1 名，最多 6 人）；每位下级必须在 phase-0 经 dsh_workplan_delegate(action="self_effort") 按自己分到的单项任务复杂度自配推理等级（轻度=low；qwen 中等=medium、非 qwen 中等=high；qwen 非常复杂=xhigh、非 qwen 非常复杂=max），成员自配为权威（分工表 per-member 档仅建议），平台登记后以自配档接续下级会话，全程应用；平台会按上述等级集合自动钳制越界档并留痕，等级在其任务全生命周期生效且不可被覆盖。第三层为叶子层：任何第四层派发一律被拒绝。')
+    lines.push('- 部门负责人（本任务书的直接接收者）强制流程（用户要求 1/2/3，2.5.0 强化；2.5.1 两轮深度思考协议）：你拥有本部门内的再分配权限——执行自己的任务必须先走两轮深度思考：第一轮，先全面、全盘、深入梳理、研究、思考自己的任务；第二轮，基于刚才第一轮完成好的所有结果，再全面、全盘、深入地开展梳理、研究和思考，理清自己的思路，理清自己该具体如何一步步执行、达到最终完美完成自己任务的方法、流程和步骤；最后，基于第二轮理清楚的所有方法、流程、步骤，开始具体的执行与再分配。两轮思考产物经 dsh_workplan_delegate(action="review") 提交（problemAnalysis=第一轮任务深研 + approach=第二轮方法流程步骤 + approachBasis=第二轮基于第一轮全部结果的依据对应 + 分工表 + 每位专家/组员的推理等级配置），并在 consolidation.taskReasoningEffort 里按你接到任务的复杂度配置你自己的整体推理等级（先配置后开工：phase-0 以 low 启动，登记后平台立即以自配档接续本会话进入 phase-1，重试/续跑全程生效）；梳理产物未提交前，dsh_workplan_delegate(action="dispatch") 会被平台拒绝（硬门禁）。梳理完成后必须把任务拆得更简单——每位下级只承担单一目标、单一主产物、可独立验收的一项工作——再合理分配给本部门多名相关领域全球顶尖专家与本部门组员（expert 与 member 各至少 1 名，最多 6 人）；每位下级必须在 phase-0 经 dsh_workplan_delegate(action="self_effort") 按自己分到的单项任务复杂度自配推理等级（轻度=low；qwen 中等=medium、非 qwen 中等=high；qwen 非常复杂=xhigh、非 qwen 非常复杂=max），成员自配为权威（分工表 per-member 档仅建议），平台登记后以自配档接续下级会话，全程应用；平台会按上述等级集合自动钳制越界档并留痕，等级在其任务全生命周期生效且不可被覆盖。第三层为叶子层：任何第四层派发一律被拒绝。')
   }
   return lines.join('\n')
 }
@@ -190,6 +190,12 @@ export interface ConsolidationInput {
   constraints?: unknown
   unknowns?: unknown
   approach?: unknown
+  /**
+   * [2.5.1] 两轮深度思考协议：第二轮（方法、流程、步骤）必须基于第一轮
+   * （任务深研）完成好的所有结果。approachBasis 逐条写清两轮之间的依据对应，
+   * 是负责人再分配硬门禁的必填判据之一（与结算门禁同一口径）。
+   */
+  approachBasis?: unknown
   assignments?: unknown
   /**
    * [2.5.0] 用户要求 2：部门负责人为「整个任务」配置的整体推理等级。
@@ -223,6 +229,8 @@ export interface DelegationPlan {
     constraints: string[]
     unknowns: string[]
     approach: string[]
+    /** [2.5.1] 第二轮基于第一轮全部结果的依据对应（两轮深度思考协议必填）。 */
+    approachBasis: string[]
     assignments: number
     taskReasoningEffort?: string | null
   }
@@ -353,6 +361,33 @@ export function planDelegations(input: {
       error: '分工表必须同时覆盖「本部门相关领域全球顶尖专家」与「本部门组员」（各至少 1 名，用户要求 4）：当前 expert=' + experts + '、member=' + regular + '。',
     }
   }
+  /*
+   * [2.5.1] 两轮深度思考协议（用户 2026-11-11 强制要求）：负责人执行自己的
+   * 任务必须先完成两轮深度思考，才允许进入执行与再分配——
+   *   第一轮（problemAnalysis，上方已校验）：全面、全盘、深入梳理、研究、
+   *   思考自己的任务；
+   *   第二轮（approach）：基于第一轮完成好的所有结果，再全面、全盘、深入地
+   *   开展梳理、研究和思考，理清具体一步步执行、完美完成任务的方法、流程、
+   *   步骤；approachBasis 写清第二轮如何基于第一轮全部结果（依赖可审计）。
+   * 放在角色配比校验之后：缺 problemAnalysis/assignments/角色配比的旧拒因
+   * 顺序不变，两轮产物门禁是新增的最后一道闸。
+   */
+  const approach = readTrimmedStrings(consolidation.approach, 12)
+  if (approach.length === 0) {
+    return {
+      ...empty,
+      code: 'DELEGATE_CONSOLIDATION_INCOMPLETE',
+      error: '两轮深度思考未完成：approach 至少 1 条——第二轮必须基于第一轮完成好的所有结果，再全面、全盘、深入地开展梳理、研究和思考，理清自己该具体如何一步步执行、达到最终完美完成自己任务的方法、流程和步骤；未理清前不得进入执行与再分配。',
+    }
+  }
+  const approachBasis = readTrimmedStrings(consolidation.approachBasis, 12)
+  if (approachBasis.length === 0) {
+    return {
+      ...empty,
+      code: 'DELEGATE_CONSOLIDATION_INCOMPLETE',
+      error: '两轮深度思考未完成：approachBasis 至少 1 条——第二轮的方法、流程、步骤必须基于第一轮完成好的所有结果，逐条写清第一轮的哪些事实/约束/矛盾决定了第二轮的哪些方法/流程/步骤（依赖依据，不可省略）。',
+    }
+  }
   return {
     ok: true,
     members,
@@ -363,7 +398,8 @@ export function planDelegations(input: {
       problemAnalysis,
       constraints: readTrimmedStrings(consolidation.constraints, 12),
       unknowns: readTrimmedStrings(consolidation.unknowns, 12),
-      approach: readTrimmedStrings(consolidation.approach, 12),
+      approach,
+      approachBasis,
       assignments: members.length,
       taskReasoningEffort: taskEffort,
     },
@@ -412,6 +448,7 @@ export function buildDelegateePrompt(input: {
     input.rulesBrief,
     '',
     '执行要求（用户强制要求 5 原文口径）：',
+    '- 执行自己的任务必须先完成下方「三阶段工作法」的两轮深度思考（2.5.1 强制）：第一轮全面、全盘、深入梳理、研究、思考自己的任务；第二轮基于第一轮完成好的所有结果再全面、全盘、深入地开展梳理、研究和思考，理清具体一步步执行、完美完成任务的方法、流程和步骤（含依据 approachBasis）；两轮未完成并写全前禁止动手执行，执行必须严格基于第二轮的方法、流程、步骤。',
     '- 你的推理等级以自配为权威（分工表档仅建议）：phase-0（low 档启动）唯一职责是经 dsh_workplan_delegate(action="self_effort") 提交自配档；phase-1 以登记生效的自配档全程应用（规划、执行、验证、复盘全生命周期），不得自行换档。',
     '- 必须在确保自身任务完成品质非常高的前提下，完美、超高效率地执行；严禁低效执行与浪费 token。',
     '- 你是第三层叶子执行者：不得派生任何第四层 Agent/子会话；无法完成时在结论首行写 BLOCKED: 原因 并说明缺什么，不要空转。',

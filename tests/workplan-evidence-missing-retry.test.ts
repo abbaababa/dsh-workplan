@@ -38,6 +38,7 @@ function phasesFixture() {
       constraints: ['缺失永不计 done', '有界重试不无限循环'],
       unknowns: [],
       approach: ['第 1 步：补交完整结果块 → 产出结构化结算 → 证明：行状态 done 且 verification=structured'],
+      approachBasis: ["第二轮的方法、流程、步骤基于第一轮完成好的全部结果：现状与主要矛盾决定先确认入口再最小改动，约束决定不改无关文件，验收标准决定每一步的留证方式。"],
     },
     execution: { steps: ['补交结果块'], deviations: [] },
     verification: {

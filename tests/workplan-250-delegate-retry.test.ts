@@ -77,6 +77,7 @@ function makeRuntime(cwd: string) {
 const consolidation = (overrides: any = {}) => ({
   problemAnalysis: ['现状：部门任务需要拆给专家与组员'],
   approach: ['专家做核心实现', '组员做证据清单'],
+  approachBasis: ["第二轮分工的方法、流程、步骤基于第一轮完成好的全部结果：质量与时间的主要矛盾决定专家承担核心实现、组员承担自测与证据，约束决定不改无关文件。"],
   assignments: [
     { member: 'Expert-A', role: 'expert', task: '实现核心逻辑并自测' },
     { member: 'Member-B', role: 'member', task: '整理验收证据清单' },
@@ -246,6 +247,7 @@ test('R2/G1：刷新/重启回放后 effortOverride/consolidation/delegates 全�
     consolidation: {
       problemAnalysis: ['梳理：任务拆给专家与组员'],
       approach: ['专家做核心实现'],
+      approachBasis: ["第二轮分工的方法、流程、步骤基于第一轮完成好的全部结果：质量与时间的主要矛盾决定专家承担核心实现、组员承担自测与证据，约束决定不改无关文件。"],
       assignments: [
         { member: 'Expert-A', role: 'expert', task: '实现核心逻辑', reasoningEffort: 'xhigh' },
         { member: 'Member-B', role: 'member', task: '证据清单', reasoningEffort: 'low' },

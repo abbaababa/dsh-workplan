@@ -7380,7 +7380,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
           ok: false,
           code: 'MISSING_CONSOLIDATION',
           subtaskId,
-          error: 'review 必须携带 consolidation：{ problemAnalysis[], constraints[]?, unknowns[]?, approach[]?, assignments[{member, role:"expert"|"member", task, reasoningEffort}] }——用户要求 4 的「全面、全盘、深入梳理」产物 + 分工表（至少 1 名顶尖专家 + 1 名组员）。',
+          error: 'review 必须携带 consolidation：{ problemAnalysis[], constraints[]?, unknowns[]?, approach[], approachBasis[], assignments[{member, role:"expert"|"member", task, reasoningEffort}] }——两轮深度思考产物（第一轮全面、全盘、深入梳理研究思考自己的任务=problemAnalysis；第二轮基于第一轮全部结果理清方法、流程、步骤=approach，依据对应=approachBasis）+ 分工表（至少 1 名顶尖专家 + 1 名组员）。',
         }
       }
       // [2.5.0][R2×R4] 重新 review 未再配整体等级时，继承行上已持久化的
@@ -7401,6 +7401,8 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
           constraints: input.constraints,
           unknowns: input.unknowns,
           approach: input.approach,
+          // [2.5.1] 两轮深度思考协议：第二轮依据随梳理产物留档，dispatch 读回同口径。
+          approachBasis: input.approachBasis,
           assignments: input.assignments,
           // [2.5.0] 整体任务等级随梳理产物留档，dispatch 读回时同口径消费。
           ...(preview.taskEffort ? { taskReasoningEffort: preview.taskEffort } : {}),

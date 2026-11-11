@@ -55,7 +55,7 @@ export const COMM_FORMAT_SPEC = Object.freeze({
       description: '证据块必须是合法 JSON 对象，顶层必须含 status 字段，取值只能是 done / blocked / partial',
       rationale: 'status 是交付门禁的入口条件，缺失或非法则无法判定完成与否' }),
     Object.freeze({ id: 'F3', category: 'phases',
-      description: '必须包含三阶段证据：phases.planning（问题分析与可执行思路）、phases.execution（实际执行步骤）、phases.verification（逐项验证）',
+      description: '必须包含三阶段证据：phases.planning（两轮深度思考：第一轮任务深研 problemAnalysis + 第二轮方法流程步骤 approach + 第二轮依据 approachBasis）、phases.execution（实际执行步骤）、phases.verification（逐项验证）',
       rationale: '三阶段是质量闭环的基础，缺任一阶段等于跳过对应质控环节' }),
     Object.freeze({ id: 'F4', category: 'acceptance',
       description: '验收结果必须逐条回应计划的验收标准（A1、A2…），且每条 result=pass 必须附带具体证据（命令输出/文件路径/引用），禁止空证据 pass',

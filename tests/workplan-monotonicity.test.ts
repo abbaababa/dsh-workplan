@@ -477,6 +477,9 @@ function compliantX1() {
         '第 1 步：fake 子会话第一轮回非法块、第二轮回合法块 → 产出 prompts.length=2 与 done+structured 结算 → 证明：dispatch 结果行逐字段断言。',
         '第 2 步：把该结算固化为 durable 结果消息后注入 rev 更低的旧改判事件 → 产出单调闸拒绝日志（含两 rev 比较值）与不回退的行 → 证明：reconstruct 语义面断言。',
       ],
+      approachBasis: [
+        '第二轮的方法、流程、步骤基于第一轮完成好的全部结果：两条通道调用点已钉死的事实决定只验证共存不改实现，单调闸与回喂并存的主要矛盾决定先复刻 T7 夹具再注入低 rev 事件的步骤顺序。',
+      ],
     },
     execution: { steps: ['复刻 T7 夹具跑两轮激活', 'seed 结果消息', '注入低 rev 事件', '重建并逐字段核对'], deviations: [] },
     verification: {

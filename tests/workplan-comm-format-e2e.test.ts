@@ -42,6 +42,7 @@ function phasesFixture() {
       constraints: ['不得修改生产配置'],
       unknowns: ['对端限流阈值未确认'],
       approach: ['先读现有实现确认入口 → 写最小实现 → 跑测试 → 对照验收标准逐条记录证据。'],
+      approachBasis: ["第二轮的方法、流程、步骤基于第一轮完成好的全部结果：现状与主要矛盾决定先确认入口再最小改动，约束决定不改无关文件，验收标准决定每一步的留证方式。"],
     },
     execution: { steps: ['读源码确认入口', '实现通道', '运行测试并记录输出'], deviations: [] },
     verification: {

@@ -26,9 +26,9 @@ TOE 对外暴露 **2 类接口**：9 个 Agent 工具（宿主注入给模型调
 | 7 | `dsh_workplan_instruct` | 主 Agent | 向「待指示」子任务下发决定 | `subtaskId`, `instruction` | 仅接受 `closure=escalated` 的行 |
 | 8 | `dsh_workplan_escalate` | 子 Agent | 子任务遇阻上报请示 | `question`, `options?`, `needs?` | 调用后子任务置「待指示」 |
 | 9 | `dsh_workplan_handoff` | 主 Agent（仅根会话） | 处置跨部门需求 | `action: list/assign/resolve/close` | 非根会话拒绝 |
-| 10 | `dsh_workplan_verify` | 子 Agent（阶段三） | 核验三阶段证据与验收覆盖 | `phases`（planning/execution/verification） | 阶段一/二返回 `PHASE_GATE`；证据缺口返回 `VERIFICATION_INCOMPLETE`；核验通过不等于完成 |
+| 10 | `dsh_workplan_verify` | 子 Agent（阶段三） | 核验三阶段证据与验收覆盖（planning 为两轮深度思考产物，approachBasis 必填，2.5.1） | `phases`（planning/execution/verification） | 阶段一/二返回 `PHASE_GATE`；证据缺口返回 `VERIFICATION_INCOMPLETE`；核验通过不等于完成 |
 | 11 | `dsh_workplan_lessons` | 根会话 / 子 Agent（只读） | 查看永久教训记忆（`list` / `search` / `stats`） | `action`、`department`、`query`、`limit` | 只读，不写计划状态、不提供写入动作；记忆只能由阶段三复盘通过后的完成判定写入 |
-| 12 | `dsh_workplan_delegate` | 部门负责人子 Agent（2.3.9；2.5.0 强化） | 第三层派发：先提交「全面梳理」产物，再把任务拆成更简单的单项工作分给本部门多名顶尖专家与组员 | `action: review/dispatch/status/self_effort`、`consolidation{problemAnalysis, assignments[], taskReasoningEffort?}` | 非部门负责人子会话（根会话 / 第三层叶子）拒绝；`review` 未登记时 `dispatch` 返回 `DELEGATE_CONSOLIDATION_MISSING`；分工表缺 expert 或 member 返回 `DELEGATE_ROLE_MIX_REQUIRED`；越界推理等级按模型家族集合钳制并留痕；`taskReasoningEffort` 非法返回 `DELEGATE_TASK_EFFORT_INVALID`，合法则钳制后写入状态行 `effortOverride`（五档白名单消毒 + durable 回放 + 尝试重置不清除），派发链每次激活经 `resolveTaskEffort` 优先读它，下级档位以成员 self_effort 自配为权威（分工表档仅建议；继承仅旧计划回放兼容）；下级子会话 `maxDepth:2`，第四层由宿主深度上限硬拒 |
+| 12 | `dsh_workplan_delegate` | 部门负责人子 Agent（2.3.9；2.5.0 强化） | 第三层派发：先提交「两轮深度思考」产物（第一轮全面、全盘、深入梳理研究思考自己的任务，第二轮基于其全部结果理清方法、流程、步骤），再把任务拆成更简单的单项工作分给本部门多名顶尖专家与组员 | `action: review/dispatch/status/self_effort`、`consolidation{problemAnalysis, approach, approachBasis, assignments[], taskReasoningEffort?}` | 非部门负责人子会话（根会话 / 第三层叶子）拒绝；`review` 未登记时 `dispatch` 返回 `DELEGATE_CONSOLIDATION_MISSING`；两轮产物缺 approach/approachBasis 返回 `DELEGATE_CONSOLIDATION_INCOMPLETE`（2.5.1）；分工表缺 expert 或 member 返回 `DELEGATE_ROLE_MIX_REQUIRED`；越界推理等级按模型家族集合钳制并留痕；`taskReasoningEffort` 非法返回 `DELEGATE_TASK_EFFORT_INVALID`，合法则钳制后写入状态行 `effortOverride`（五档白名单消毒 + durable 回放 + 尝试重置不清除），派发链每次激活经 `resolveTaskEffort` 优先读它，下级档位以成员 self_effort 自配为权威（分工表档仅建议；继承仅旧计划回放兼容）；下级子会话 `maxDepth:2`，第四层由宿主深度上限硬拒 |
 
 ### 1.2 HTTP 路由（1 个）／ HTTP route
 
