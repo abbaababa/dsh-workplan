@@ -189,7 +189,7 @@ async function withGuardOff<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-test('runPlanner：qwen 类模型上默认档随家族收窄为 xhigh 并成功出计划（2.2.7 钳制 + 2.3.9 家族默认档）', async () => {
+test('runPlanner：qwen 类模型上默认档取家族中等档 medium 并成功出计划（2.2.7 钳制 + 2.5.2 中等默认档）', async () => {
   await withGuardOff(async () => {
     const seen: any[] = []
     const telemetry: any = {}
@@ -207,15 +207,16 @@ test('runPlanner：qwen 类模型上默认档随家族收窄为 xhigh 并成功�
     })
     assert.ok(plan, '计划必须正常返回，而不是降级')
     assert.equal(seen.length, 1)
-    assert.equal(seen[0].reasoningEffort, 'xhigh', '发给模型的必须是家族合法集内最高档，而不是 max')
-    assert.equal(telemetry.reasoningEffort, 'xhigh', '遥测必须记录实际发出值')
+    assert.equal(seen[0].reasoningEffort, 'medium', '发给模型的必须是家族合法集内中等档（2.5.2 治规划长时间静默）')
+    assert.equal(telemetry.reasoningEffort, 'medium', '遥测必须记录实际发出值')
     /*
-     * [2.3.9][T3] 语义演进：qwen 家族默认档直接取合法集最高档 xhigh（用户要求 1），
-     * 不再产生「请求 max → 钳到 xhigh」的钳制轨迹；来源标记必须能看出默认档
-     * 已按家族收窄。强制钳制轨迹的用例改由 env 覆盖 max 触发（下一条用例）。
+     * [2.5.2][stall-fix] 语义演进：qwen 家族默认档取合法集中等档 medium
+     * （旧最高档 xhigh 实测单次规划 12-13 分钟，用户报告「以为死机」）；
+     * 来源标记必须能看出默认档已按家族取中等档。强制钳制轨迹的用例仍由
+     * env 覆盖 max 触发（下一条用例）。
      */
-    assert.equal(telemetry.reasoningEffortSource, 'default-xhigh',
-      '遥测必须显示规划器默认档已按 qwen 家族收窄为 xhigh（要求 1）')
+    assert.equal(telemetry.reasoningEffortSource, 'default-medium',
+      '遥测必须显示规划器默认档已按 qwen 家族取中等档 medium（2.5.2）')
   })
 })
 
@@ -270,7 +271,7 @@ test('runPlanner：模型无 reasoning 元数据 ⇒ 不发送 reasoningEffort�
   })
 })
 
-test('runPlanner：宿主不暴露 resolveModelInfo（旧宿主兼容）⇒ 与修复前一致直发 max', async () => {
+test('runPlanner：宿主不暴露 resolveModelInfo（旧宿主兼容）⇒ 无能力查询直发家族默认档 high（2.5.2）', async () => {
   await withGuardOff(async () => {
     const seen: any[] = []
     const telemetry: any = {}
@@ -300,8 +301,8 @@ test('runPlanner：宿主不暴露 resolveModelInfo（旧宿主兼容）⇒ 与�
       telemetry,
     })
     assert.ok(plan)
-    assert.equal(seen[0].reasoningEffort, 'max')
-    assert.equal(telemetry.reasoningEffortSource, 'default-max', '未钳制时来源标记不得变化')
+    assert.equal(seen[0].reasoningEffort, 'high')
+    assert.equal(telemetry.reasoningEffortSource, 'default-high', '未钳制时来源标记不得变化')
   })
 })
 

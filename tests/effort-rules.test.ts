@@ -236,7 +236,10 @@ async function withGuardOff<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-test('A3c 规划器（旧宿主+qwen 命名模型）：默认 max 被静态闸修正为 xhigh 后发送', async () => {
+test('A3c 规划器（旧宿主+qwen 命名模型）：env 显式 max 被静态闸修正为 xhigh 后发送（2.5.2 默认档已改 medium）', async () => {
+  const previousEffort = process.env.DSH_WORKPLAN_PLANNER_REASONING_EFFORT
+  process.env.DSH_WORKPLAN_PLANNER_REASONING_EFFORT = 'max'
+  try {
   await withGuardOff(async () => {
     const seen: any[] = []
     const stamp = Date.now()
@@ -268,4 +271,8 @@ test('A3c 规划器（旧宿主+qwen 命名模型）：默认 max 被静态闸�
     assert.equal(seen[0]?.reasoningEffort, 'xhigh',
       'qwen 家族静态闸下规划器请求档 max 必须先降为合法集最高档 xhigh（独立于能力闸）')
   })
+  } finally {
+    if (previousEffort === undefined) delete process.env.DSH_WORKPLAN_PLANNER_REASONING_EFFORT
+    else process.env.DSH_WORKPLAN_PLANNER_REASONING_EFFORT = previousEffort
+  }
 })

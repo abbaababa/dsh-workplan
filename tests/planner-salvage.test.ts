@@ -298,7 +298,7 @@ test('抢救不绕过上下文闸：strict 下任务不符仍按原判定中止'
   assert.notEqual(telemetry.outcome, 'SALVAGED', 'strict 闸未通过时绝不能标成已抢救')
 })
 
-test('两个旋钮：MAX_TOKENS / REASONING_EFFORT 透传给模型调用；不设时规划器取默认 max（不继承主 Agent）', async () => {
+test('两个旋钮：MAX_TOKENS / REASONING_EFFORT 透传给模型调用；不设时规划器取家族默认档（不继承主 Agent；2.5.2 默认=中等档）', async () => {
   // 场景只吐 {} 就正常 finish：两次都过不了 validatePlan，最终 PLANNER_FAILED——
   // 本用例只关心 stream 收到了什么参数，不关心成败。
   const quickFail: Scenario = async function* (signal) {
@@ -314,11 +314,12 @@ test('两个旋钮：MAX_TOKENS / REASONING_EFFORT 透传给模型调用；不�
       await assert.rejects(() => runPlanner(fakeCtx(quickFail, seen), { ...options, telemetry }))
       assert.ok(seen.length >= 1, '至少调用一次模型')
       assert.equal(seen[0].maxTokens, undefined, '不设旋钮时不得擅自封顶')
-      // [2.2.0][T13b] 用户决策 5「规划器停止继承」：未设旋钮时取默认 max，
-      // 不得再等于 modelSelection.reasoningEffort（'high'）。
-      assert.equal(seen[0].reasoningEffort, 'max', '不设旋钮时规划器不得继承主 Agent 的 high，必须取默认 max')
-      assert.equal(telemetry.reasoningEffort, 'max', '遥测必须记录实际发给模型的档位')
-      assert.equal(telemetry.reasoningEffortSource, 'default-max', '遥测必须能区分默认档与显式旋钮')
+      // [2.2.0][T13b] 用户决策 5「规划器停止继承」；[2.5.2][stall-fix] 默认档
+      // 由 max 改为家族中等档（fake-model 非 qwen⇒high）：不继承的判据是来源
+      // 标记 default-high（而非继承主 Agent 档位），主 Agent=low/max 时值也不同。
+      assert.equal(seen[0].reasoningEffort, 'high', '不设旋钮时规划器不得继承主 Agent，必须取家族默认档 high')
+      assert.equal(telemetry.reasoningEffort, 'high', '遥测必须记录实际发给模型的档位')
+      assert.equal(telemetry.reasoningEffortSource, 'default-high', '遥测必须能区分默认档与显式旋钮')
     })
   })
 
@@ -350,7 +351,7 @@ test('两个旋钮：MAX_TOKENS / REASONING_EFFORT 透传给模型调用；不�
  * 全试一遍 + 旋钮合法/非法/缺省」全部钉住，任何把 modelSelection 重新接回规划
  * 路径的改动都会在这里红灯。
  */
-test('规划器停止继承：主 Agent low/high/max 一律得默认 max；旋钮合法值覆盖、非法值回落', async () => {
+test('规划器停止继承：主 Agent low/high/max 一律得家族默认 high；旋钮合法值覆盖、非法值回落（2.5.2）', async () => {
   const quickFail: Scenario = async function* (signal) {
     await waitOrAbort(5, signal)
     yield { type: 'text-delta', text: '{}' }
@@ -371,14 +372,14 @@ test('规划器停止继承：主 Agent low/high/max 一律得默认 max；旋�
 
   for (const main of ['low', 'high', 'max']) {
     const { effort, telemetry } = await run(main, undefined)
-    assert.equal(effort, 'max', `主 Agent=${main} 时规划器不得继承，必须取默认 max`)
-    assert.equal(telemetry.reasoningEffort, 'max', `主 Agent=${main} 时遥测必须记录实际生效的 max`)
-    assert.equal(telemetry.reasoningEffortSource, 'default-max')
+    assert.equal(effort, 'high', `主 Agent=${main} 时规划器不得继承，必须取家族默认 high`)
+    assert.equal(telemetry.reasoningEffort, 'high', `主 Agent=${main} 时遥测必须记录实际生效的 high`)
+    assert.equal(telemetry.reasoningEffortSource, 'default-high')
   }
 
   // 主 Agent 未指定档位时也不得变成 undefined（旧实现会把 undefined 透传给宿主→再次继承）。
   const undefinedMain = await run(undefined, undefined)
-  assert.equal(undefinedMain.effort, 'max', '主 Agent 未指定档位时规划器仍须显式取 max')
+  assert.equal(undefinedMain.effort, 'high', '主 Agent 未指定档位时规划器仍须显式取家族默认 high')
 
   const lowKnob = await run('max', 'low')
   assert.equal(lowKnob.effort, 'low', '合法旋钮值必须覆盖默认档（保留降本/提速出口）')
@@ -388,8 +389,8 @@ test('规划器停止继承：主 Agent low/high/max 一律得默认 max；旋�
   assert.equal(upperKnob.effort, 'low', '大小写不应把合法档位变成非法值并静默抬高成本')
 
   const invalidKnob = await run('low', 'ultra')
-  assert.equal(invalidKnob.effort, 'max', '非法旋钮值不得发给模型，必须回落 max')
-  assert.equal(invalidKnob.telemetry.reasoningEffortSource, 'default-max')
+  assert.equal(invalidKnob.effort, 'high', '非法旋钮值不得发给模型，必须回落家族默认 high')
+  assert.equal(invalidKnob.telemetry.reasoningEffortSource, 'default-high')
 
   /*
    * [2.2.7][T5/五档] 规划器旋钮五档化（D3 落地）：白名单由 plan.ts REASONING_EFFORTS
@@ -426,10 +427,10 @@ test('规划器停止继承：主 Agent low/high/max 一律得默认 max；旋�
 
   for (const bad of ['foo', 'xhighX', 'medium-high', 'MAX']) {
     const r = await run('low', bad)
-    // 'MAX' 归一后是合法 max；其余非法回落默认 max——两者都不许把乱值发给模型。
-    assert.ok(['max'].includes(r.effort), `非法/边界旋钮 ${bad} 不得原样发给模型：${r.effort}`)
+    // 'MAX' 归一后是合法 max（env 路径）；其余非法回落家族默认 high——都不许把乱值发给模型。
+    assert.ok(['max', 'high'].includes(r.effort), `非法/边界旋钮 ${bad} 不得原样发给模型：${r.effort}`)
     if (bad !== 'MAX') {
-      assert.equal(r.telemetry.reasoningEffortSource, 'default-max', `旋钮 ${bad} 非法必须标为默认档`)
+      assert.equal(r.telemetry.reasoningEffortSource, 'default-high', `旋钮 ${bad} 非法必须标为默认档`)
     }
   }
 })
