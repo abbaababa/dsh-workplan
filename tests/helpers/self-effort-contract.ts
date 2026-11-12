@@ -12,6 +12,7 @@
  *  - 被测主题是首次派发 ⇒ 模拟 phase-0 结果→phase-1 接续两段（见 workplan-250-self-effort）。
  */
 import { buildUpdateMessage, createStatuses } from '../../src/plan.js'
+import { MAIN_DEEP_THINK_FIXTURE } from './main-deep-think.js'
 
 /** createStatuses + 预登记负责人自配档（=规划档，缺失回落 low），模拟「已自配」直接进入 phase-1。 */
 export function selfEffortStatuses(plan: any): any[] {
@@ -50,16 +51,21 @@ export function withSelfEfforts(record: any): any {
   return record
 }
 
-/** 叶子台账预登记 delegates[].selfEffort + delegateSelfEfforts，模拟「已自配」。 */
+/** 叶子台账预登记 delegates[].selfEffort + delegateSelfEfforts，模拟「已自配」。
+ * [2.5.2] 同步预登记执行前两轮思考产物（delegates[].deepThink + delegateDeepThinks），
+ * 模拟「已自配+已思考」读档直接 phase-1；缺思考产物会被路由回 phase-0 补齐。 */
 export function withLeafSelfEfforts(record: any, effort = 'medium'): any {
   for (const row of Array.isArray(record?.statuses) ? record.statuses : []) {
     if (!Array.isArray(row?.delegates) || row.delegates.length === 0) continue
     const stash: Record<string, string> = { ...(row.delegateSelfEfforts ?? {}) }
+    const thinkStash: Record<string, any> = { ...(row.delegateDeepThinks ?? {}) }
     row.delegates = row.delegates.map((member: any) => {
       stash[member.member] = member.selfEffort ?? effort
-      return { ...member, selfEffort: member.selfEffort ?? effort }
+      thinkStash[member.member] = member.deepThink ?? MAIN_DEEP_THINK_FIXTURE
+      return { ...member, selfEffort: member.selfEffort ?? effort, deepThink: member.deepThink ?? MAIN_DEEP_THINK_FIXTURE }
     })
     row.delegateSelfEfforts = stash
+    row.delegateDeepThinks = thinkStash
   }
   return record
 }

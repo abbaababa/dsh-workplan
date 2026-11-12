@@ -4497,6 +4497,8 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
               consolidation: update.consolidation,
               delegates: update.delegates,
               delegateSelfEfforts: update.delegateSelfEfforts,
+              // [2.5.2] 叶子执行前两轮思考台账回放（applyStatus 同口径消毒）。
+              delegateDeepThinks: update.delegateDeepThinks,
               updatedBy: 'agent',
             })
             /*
@@ -7194,6 +7196,31 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     }
     const rationale = String(args?.complexityRationale ?? '').trim()
     if (!rationale) return { ok: false, code: 'SELF_EFFORT_RATIONALE_MISSING', error: 'complexityRationale 必填：写清你分到的单项任务为何是该复杂度档（事实/依赖/验证难度）。' }
+    /*
+     * [2.5.2] 叶子执行前两轮深度思考硬门禁（用户 2026-11-12 要求：四角色在
+     * 开始具体执行前都被机制强制先思考后执行，且全程少走弯路）。
+     *
+     * 此前专家/组员只有任务书注入 + 结算时 validatePhaseEvidence——思考产物
+     * 在「执行后」才被迫补齐，不满足「先思考后执行」。现在把 phase-0 提交
+     * 升级为原子对：self_effort 必须同时携带合格 deepThink（与主 Agent/负责人
+     * 同一 validateMainDeepThink 判据、同一 40/40/20 字口径），缺交/不合格
+     * 硬拒（DEEP_THINK_MISSING / DEEP_THINK_INCOMPLETE），不登记、不接续；
+     * 两者齐全才登记并以自配档接续 phase-1——正式执行只能发生在两轮思考
+     * 登记之后，且必须按第二轮理清的方法、流程、步骤执行（少走弯路）。
+     * 已登记自配档的旧叶子重派直接 phase-1（零迁移），其结算门禁仍验产物。
+     */
+    const leafDeepThinkCheck = validateMainDeepThink(args?.deepThink)
+    if (!leafDeepThinkCheck.ok) {
+      const missing = leafDeepThinkCheck.code === 'MAIN_DEEP_THINK_MISSING'
+      return {
+        ok: false,
+        code: missing ? 'DEEP_THINK_MISSING' : 'DEEP_THINK_INCOMPLETE',
+        subtaskId: String(row.subtaskId),
+        member: member.member,
+        error: `执行前两轮深度思考产物${missing ? '缺失' : '不合格'}：专家/组员开始执行自己的任务前，必须先全面、全盘、深入梳理、研究、思考自己的任务（第一轮），再基于第一轮完成好的所有结果再全面、全盘、深入地开展梳理、研究和思考，理清具体如何一步步以最高效率、少走弯路、完美完成自己任务的方法、流程和步骤（第二轮），最后才按此执行。请在 self_effort 一并携带 deepThink={ problemAnalysis[], approach[], approachBasis[] }。${leafDeepThinkCheck.error ?? ''}`,
+      }
+    }
+    const leafDeepThink = leafDeepThinkCheck.deepThink!
     const modelSelection = resolveModelSelection(ctx, { agent })
     const model = typeof modelSelection?.model === 'string' && modelSelection.model.trim() ? modelSelection.model.trim() : null
     const correction = correctEffortForModel(raw, model)
@@ -7216,6 +7243,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
           status: written?.status ?? row.status,
           ...(patch.delegates === undefined ? {} : { delegates: written?.delegates }),
           ...(patch.delegateSelfEfforts === undefined ? {} : { delegateSelfEfforts: written?.delegateSelfEfforts }),
+          ...(patch.delegateDeepThinks === undefined ? {} : { delegateDeepThinks: written?.delegateDeepThinks }),
           revision: written?.revision ?? revision,
         }))
       } catch (error) { pushRecordError(record, error) }
@@ -7224,10 +7252,13 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     const currentRow = () => record.statuses.find((item: any) => item?.subtaskId === subtaskId)
     const registerList = (currentRow()?.delegates ?? row.delegates)
       .map((d: any) => (d?.childId === childSession.id
-        ? { ...d, selfEffort, ...(correction.adjusted ? { selfEffortRequested: raw } : {}), complexityRationale: truncate(rationale, 300), status: 'running', error: null }
+        ? { ...d, selfEffort, ...(correction.adjusted ? { selfEffortRequested: raw } : {}), complexityRationale: truncate(rationale, 300), deepThink: leafDeepThink, status: 'running', error: null }
         : d))
     const stash = { ...(currentRow()?.delegateSelfEfforts ?? {}), [member.member]: selfEffort }
-    persistSelf({ delegates: registerList, delegateSelfEfforts: stash })
+    // [2.5.2] 两轮思考产物与自配档同为任务级配置：delegates[].deepThink +
+    // delegateDeepThinks 双通道落档，重置保留、durable 回放（G1 双侧接线）。
+    const deepThinkStash = { ...(currentRow()?.delegateDeepThinks ?? {}), [member.member]: leafDeepThink }
+    persistSelf({ delegates: registerList, delegateSelfEfforts: stash, delegateDeepThinks: deepThinkStash })
     // 接续：中断 phase-0（parent authority, continuable），尽力而为。
     try {
       if (typeof (ctx as any).subagents?.interruptByParent === 'function') {
@@ -7247,7 +7278,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       rulesBrief,
       cwd: typeof childSession.header?.cwd === 'string' ? childSession.header.cwd : '',
       leadSessionId: leaderId,
-      extraContext: `【phase-0→phase-1 接续——继续勿重做】你已在 phase-0 完成复杂度评估并自配推理等级 \`${selfEffort}\`（依据：${truncate(rationale, 300)}${correction.adjusted ? `；请求档 ${raw} 越界已被平台钳制为 ${selfEffort}` : ''}）。平台已按你的自配档接续：直接执行正式任务，不要重新评估复杂度，不要重做 phase-0 已完成的工作。`,
+      extraContext: `【phase-0→phase-1 接续——继续勿重做】你已在 phase-0 完成复杂度评估并自配推理等级 \`${selfEffort}\`（依据：${truncate(rationale, 300)}${correction.adjusted ? `；请求档 ${raw} 越界已被平台钳制为 ${selfEffort}` : ''}），并登记了执行前两轮深度思考产物。平台已按你的自配档接续：直接执行正式任务，不要重新评估复杂度，不要重做 phase-0 已完成的工作。正式执行必须严格按你第二轮理清的方法、流程、步骤进行（你的第二轮产物：${leafDeepThink.approach.join('；').slice(0, 300)}…），全程少走弯路：先查历史教训、先验证再动手、不重复试错。`,
     })
     let activation: any = null
     let lastError: any = null
@@ -7527,10 +7558,19 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       const stashedSelf = (row.delegateSelfEfforts as any)?.[assignment.member]
       const priorSelf = typeof stashedSelf === 'string' && stashedSelf ? stashedSelf
         : (typeof prior?.selfEffort === 'string' && prior.selfEffort ? prior.selfEffort : '')
-      const leafPhaseZero = !priorSelf
-      const selfContinuation = priorSelf
-        ? `【自配档接续】你的自配推理等级 \`${priorSelf}\` 已登记生效（成员自配为权威）。继续勿重做：直接执行正式任务，不要重新评估复杂度。`
-        : ''
+      /*
+       * [2.5.2] 执行前两轮思考读档：已登记思考产物（delegateDeepThinks 或
+       * delegates[].deepThink）⇒ 随接续提示词下发执行蓝图，直接 phase-1；
+       * 未登记（含旧计划遗留叶子）⇒ 仍走 phase-0 补齐思考+自配后才准执行。
+       */
+      const stashedThink = sanitizeMainDeepThink((row.delegateDeepThinks as any)?.[assignment.member])
+        ?? sanitizeMainDeepThink(prior?.deepThink)
+      const leafPhaseZero = !priorSelf || !stashedThink
+      const selfContinuation = priorSelf && stashedThink
+        ? `【自配档接续·两轮思考读档】你的自配推理等级 \`${priorSelf}\` 与执行前两轮深度思考产物均已登记生效（成员自配为权威）。继续勿重做：直接执行正式任务，不要重新评估复杂度、不要重复提交思考产物。正式执行必须严格按你第二轮理清的方法、流程、步骤进行（你的第一轮产物：${stashedThink.problemAnalysis.join('；').slice(0, 200)}…；你的第二轮产物：${stashedThink.approach.join('；').slice(0, 300)}…），全程少走弯路：先查历史教训、先验证再动手、不重复试错。`
+        : (priorSelf
+          ? `【自配档接续】你的自配推理等级 \`${priorSelf}\` 已登记生效（成员自配为权威）。继续勿重做：直接执行正式任务，不要重新评估复杂度。`
+          : '')
       const promptText = leafPhaseZero ? buildPhaseZeroDelegateePrompt({
         departmentLabel,
         member: assignment,

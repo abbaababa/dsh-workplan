@@ -16,6 +16,7 @@ import assert from 'node:assert/strict'
 import { createWorkplanRuntime, reconstructFromSession, dispatchPlan } from '../src/runtime.js'
 import { applyStatus, buildPlanMessage, buildUpdateMessage, createStatuses } from '../src/plan.js'
 import { planDelegations } from '../src/llm-rules.js'
+import { MAIN_DEEP_THINK_FIXTURE } from './helpers/main-deep-think.js'
 
 const QWEN = 'qwen3-max-preview'
 
@@ -97,7 +98,7 @@ test('自配档 e2e：叶子 self_effort 登记（钳制留痕）→ 平台以�
   const { runtime, record, rootSession, spawned, interrupts, leaderAgent } = makeRuntime()
   await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation() })
   await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
-  const r = await runtime.delegateTool(leafAgent('member-1'), { action: 'self_effort', reasoningEffort: 'max', complexityRationale: '跨模块根因排查，验证难度高' })
+  const r = await runtime.delegateTool(leafAgent('member-1'), { action: 'self_effort', reasoningEffort: 'max', complexityRationale: '跨模块根因排查，验证难度高', deepThink: MAIN_DEEP_THINK_FIXTURE })
   assert.equal(r.ok, true, JSON.stringify(r))
   assert.equal(r.selfEffort, 'xhigh', 'qwen 家族 max→xhigh 钳制')
   assert.equal(r.clamped.requested, 'max')
@@ -139,7 +140,7 @@ test('自配档：接续失败重试 1 次仍败 ⇒ SELF_EFFORT_CONTINUATION_FA
   const { runtime, record, spawned, spawnAttempts, leaderAgent } = makeRuntime({ failPhase1: true })
   await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation() })
   await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
-  const r = await runtime.delegateTool(leafAgent('member-1'), { action: 'self_effort', reasoningEffort: 'medium', complexityRationale: '中等复杂度' })
+  const r = await runtime.delegateTool(leafAgent('member-1'), { action: 'self_effort', reasoningEffort: 'medium', complexityRationale: '中等复杂度', deepThink: MAIN_DEEP_THINK_FIXTURE })
   assert.equal(r.ok, false)
   assert.equal(r.code, 'SELF_EFFORT_CONTINUATION_FAILED')
   assert.equal(spawnAttempts.count, 4, '必须恰好重试 1 次（2 次 phase-0 成功 + 2 次接续尝试失败）')
@@ -155,7 +156,7 @@ test('自配档：重置保留 delegateSelfEfforts；重派直接以自配档接
   const { runtime, record, spawned, leaderAgent } = makeRuntime()
   await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation() })
   await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
-  await runtime.delegateTool(leafAgent('member-1'), { action: 'self_effort', reasoningEffort: 'xhigh', complexityRationale: '非常复杂' })
+  await runtime.delegateTool(leafAgent('member-1'), { action: 'self_effort', reasoningEffort: 'xhigh', complexityRationale: '非常复杂', deepThink: MAIN_DEEP_THINK_FIXTURE })
   // 全部结算后重派：Expert-A 已自配 ⇒ phase-1 直连；Member-B 未自配 ⇒ 仍 phase-0。
   spawned[2].resolveResult({ stopReason: 'error', diagnostic: '中断' })
   spawned[1].resolveResult({ stopReason: 'error', diagnostic: '中断' })

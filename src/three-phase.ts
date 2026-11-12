@@ -358,7 +358,7 @@ export function threePhasePromptLines(): string[] {
     '三阶段工作法（用户强制要求；顺序不可颠倒，阶段一的两轮深度思考没有完成之前禁止动手执行）：',
     '【阶段一 · 规划阶段 = 两轮深度思考（部门负责人、全球顶尖专家、组员执行自己的任务时同一口径，顺序与依赖不可颠倒）】',
     '  第一轮 · 任务深研：先全面、全盘、深入梳理、研究、思考自己的任务——逐条写清任务目标与验收标准、现状与已知事实、约束条件、未知/待确认项、主要矛盾、工作边界与依赖，结果写入 phases.planning.problemAnalysis；',
-    '  第二轮 · 理清方法流程步骤：基于刚才第一轮完成好的所有结果，再全面、全盘、深入地开展梳理、研究和思考，理清自己的思路，理清自己该具体如何一步步执行、达到最终完美完成自己任务的方法、流程和步骤——每一步做什么、产出什么、依赖什么、风险与对策、如何证明做对了，结果写入 phases.planning.approach；同时把第二轮如何基于第一轮全部结果写入 phases.planning.approachBasis（逐条对应：第一轮的哪些事实/约束/矛盾决定了第二轮的哪些方法/流程/步骤）；',
+    '  第二轮 · 理清方法流程步骤：基于刚才第一轮完成好的所有结果，再全面、全盘、深入地开展梳理、研究和思考，理清自己的思路，理清自己该具体如何一步步以最高效率执行、确保完美完成自己任务的方法、流程和步骤——每一步做什么、产出什么、依赖什么、风险与对策、如何证明做对了，并写清全程如何少走弯路（先查历史教训记忆、先验证再动手、不重复同样的试错），结果写入 phases.planning.approach；同时把第二轮如何基于第一轮全部结果写入 phases.planning.approachBasis（逐条对应：第一轮的哪些事实/约束/矛盾决定了第二轮的哪些方法/流程/步骤）；',
     '  自检：任何一条验收标准或用户原要求没有落在第二轮的方法、流程、步骤上，就回到第一轮重做；两轮深度思考没有完成并写全（problemAnalysis + approach + approachBasis）之前，不得进入阶段二。',
     '【阶段二 · 执行阶段】',
     '  最后，基于刚才第二轮理清楚的所有方法、流程、步骤，开始具体的执行工作：严格按 phases.planning.approach 执行。出现新事实需要偏离时，必须记录偏离原因、证据与调整后的做法，不得静默改道。',
@@ -421,7 +421,7 @@ export function validateMainDeepThink(value: any): MainDeepThinkValidation {
     return {
       ok: false,
       code: 'MAIN_DEEP_THINK_MISSING',
-      error: '主 Agent 两轮深度思考产物缺失：执行自己的任务必须先全面、全盘、深入梳理、研究、思考自己的任务（第一轮），再基于第一轮完成好的所有结果再全面、全盘、深入地开展梳理、研究和思考，理清具体一步步执行、完美完成任务的方法、流程和步骤（第二轮），最后才按此执行。请在 dsh_workplan_dispatch 随附 deepThink={ problemAnalysis[]（第一轮任务深研）, approach[]（第二轮方法流程步骤）, approachBasis[]（第二轮基于第一轮全部结果的依据对应） }。',
+      error: '两轮深度思考产物缺失：执行自己的任务必须先全面、全盘、深入梳理、研究、思考自己的任务（第一轮），再基于第一轮完成好的所有结果再全面、全盘、深入地开展梳理、研究和思考，理清具体如何一步步以最高效率、少走弯路、完美完成任务的方法、流程和步骤（第二轮），最后才按此执行。请随相应工具调用提交 deepThink={ problemAnalysis[]（第一轮任务深研）, approach[]（第二轮方法流程步骤）, approachBasis[]（第二轮基于第一轮全部结果的依据对应） }（主 Agent 经 dsh_workplan_dispatch，专家/组员经 self_effort）。',
       deepThink: null,
     }
   }
@@ -433,7 +433,7 @@ export function validateMainDeepThink(value: any): MainDeepThinkValidation {
     errors.push(`deepThink.problemAnalysis 太薄（合计 ${totalChars(problemAnalysis)} 字，至少 ${MIN_PLANNING_PROBLEM_CHARS} 字）：第一轮要全面、全盘、深入梳理、研究、思考自己的任务，写清目标与验收、现状、约束、未知、主要矛盾与边界`)
   }
   if (approach.length > 0 && totalChars(approach) < MIN_PLANNING_APPROACH_CHARS) {
-    errors.push(`deepThink.approach 太薄（合计 ${totalChars(approach)} 字，至少 ${MIN_PLANNING_APPROACH_CHARS} 字）：第二轮要基于第一轮全部结果理清具体一步步执行、完美完成任务的方法、流程和步骤，而不是一句目标`)
+    errors.push(`deepThink.approach 太薄（合计 ${totalChars(approach)} 字，至少 ${MIN_PLANNING_APPROACH_CHARS} 字）：第二轮要基于第一轮全部结果理清具体一步步以最高效率、少走弯路、完美完成任务的方法、流程和步骤，而不是一句目标`)
   }
   if (approachBasis.length > 0 && totalChars(approachBasis) < MIN_PLANNING_BASIS_CHARS) {
     errors.push(`deepThink.approachBasis 太薄（合计 ${totalChars(approachBasis)} 字，至少 ${MIN_PLANNING_BASIS_CHARS} 字）：要写清第二轮的方法、流程、步骤如何基于第一轮完成好的所有结果`)

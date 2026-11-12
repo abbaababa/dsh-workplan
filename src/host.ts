@@ -90,7 +90,7 @@ const PROMPT_SECTION = [
    * 执行者已有结算/再分配双门禁，主 Agent 自己也必须做到同一协议——提示词
    * 告知 + dispatch 硬门禁（validateMainDeepThink）双保险，与部门层同一哲学。
    */
-  '主 Agent 两轮深度思考协议（2.5.1 强制，与部门负责人/顶尖专家/组员同一口径）：你执行自己的任务时，必须先全面、全盘、深入梳理、研究、思考自己的任务（第一轮：目标与验收、现状与事实、约束、未知、主要矛盾、边界）；接着基于刚才第一轮完成好的所有结果，再全面、全盘、深入地开展梳理、研究和思考，理清自己的思路，理清自己该具体如何一步步执行、达到最终完美完成自己任务的方法、流程和步骤（第二轮）；最后基于刚才第二轮理清楚的所有方法、流程、步骤，开始具体的执行工作。首次调用 dsh_workplan_dispatch 必须随附 deepThink={ problemAnalysis（第一轮任务深研）, approach（第二轮方法流程步骤）, approachBasis（第二轮基于第一轮全部结果的依据对应） }，未提交或不合格会被平台硬门禁拒绝（MAIN_DEEP_THINK_MISSING / MAIN_DEEP_THINK_INCOMPLETE）；登记后持久化，续跑/重试/重启回放自动读档，无需重复提交；重规划产生的新计划是新任务，必须重新两轮思考并提交。派发顺序、督战、验收与交付必须严格按第二轮理清的方法、流程、步骤执行，不得静默改道。',
+  '主 Agent 两轮深度思考协议（2.5.1 强制，与部门负责人/顶尖专家/组员同一口径；2.5.2 补齐叶子执行前硬门禁并强制少走弯路）：你执行自己的任务时，必须先全面、全盘、深入梳理、研究、思考自己的任务（第一轮：目标与验收、现状与事实、约束、未知、主要矛盾、边界）；接着基于刚才第一轮完成好的所有结果，再全面、全盘、深入地开展梳理、研究和思考，理清自己的思路，理清自己该具体如何一步步以最高效率执行、确保完美完成自己任务的方法、流程和步骤（第二轮，含全程如何少走弯路：先查历史教训、先验证再动手、不重复试错）；最后基于刚才第二轮理清楚的所有方法、流程、步骤，开始具体的执行工作。首次调用 dsh_workplan_dispatch 必须随附 deepThink={ problemAnalysis（第一轮任务深研）, approach（第二轮方法流程步骤）, approachBasis（第二轮基于第一轮全部结果的依据对应） }，未提交或不合格会被平台硬门禁拒绝（MAIN_DEEP_THINK_MISSING / MAIN_DEEP_THINK_INCOMPLETE）；登记后持久化，续跑/重试/重启回放自动读档，无需重复提交；重规划产生的新计划是新任务，必须重新两轮思考并提交。派发顺序、督战、验收与交付必须严格按第二轮理清的方法、流程、步骤执行，不得静默改道。四角色执行前门禁现已全覆盖：主 Agent 经 dispatch 门禁、负责人经 delegate review 门禁、专家/组员经 phase-0 self_effort+deepThink 门禁（DEEP_THINK_MISSING / DEEP_THINK_INCOMPLETE），未登记合格两轮思考产物一律不进入正式执行。',
   /*
    * [2.3.10][T2] 用户要求1（P3）提示词双保险：插件已在规划前/派发前自动发送
    * 【规划预告】/【派发预告】（runtime.ts maybePlan / dispatchTool）；这里把
@@ -818,15 +818,16 @@ function createDelegateTool(runtime: any) {
       + 'review 未提交前 dispatch 被硬门禁拒绝。每位下级的推理等级必须按其任务复杂度配置'
       + '（轻度=low；qwen 中等=medium、非 qwen 中等=high；qwen 非常复杂=xhigh、非 qwen 非常复杂=max），'
       + '平台按当前模型家族合法集合自动钳制越界档并留痕，等级在其任务全生命周期生效。'
-      + 'action="status" 查看梳理登记与下级进度。第三层专家/组员叶子用 action="self_effort" 自配推理等级'
-      + '（先配置后开工：phase-0 以 low 启动，唯一职责=评估自身任务复杂度并提交 reasoningEffort+complexityRationale；登记后平台立即以自配档接续同一任务进入 phase-1，成员自配为权威、分工表档仅建议）。',
+      + 'action="status" 查看梳理登记与下级进度。第三层专家/组员叶子用 action="self_effort" 自配推理等级并提交执行前两轮深度思考产物'
+      + '（先配置+先思考后开工：phase-0 以 low 启动，唯一职责=评估自身任务复杂度并提交 reasoningEffort+complexityRationale+deepThink{problemAnalysis,approach,approachBasis}；'
+      + '缺交/不合格 deepThink 硬拒 DEEP_THINK_MISSING/DEEP_THINK_INCOMPLETE、不接续；两项齐全登记后平台立即以自配档接续同一任务进入 phase-1，正式执行必须按第二轮方法流程步骤进行、全程少走弯路；成员自配为权威、分工表档仅建议）。',
     parameters: {
       type: 'object',
       properties: {
         action: {
           type: 'string',
           enum: ['review', 'dispatch', 'status', 'self_effort'],
-          description: 'review=提交全面梳理产物与分工表（负责人）；dispatch=正式派发给专家/组员（负责人）；status=查看登记与进度；self_effort=第三层专家/组员叶子自配推理等级（先配置后开工）。',
+          description: 'review=提交两轮深度思考产物与分工表（负责人）；dispatch=正式派发给专家/组员（负责人）；status=查看登记与进度；self_effort=第三层专家/组员叶子自配推理等级+提交执行前两轮深度思考产物 deepThink（先配置+先思考后开工，缺一硬拒不接续）。',
         },
         reasoningEffort: {
           type: 'string',
@@ -836,6 +837,17 @@ function createDelegateTool(runtime: any) {
         complexityRationale: {
           type: 'string',
           description: 'action="self_effort" 必填：复杂度依据（为什么你的单项任务是该档：事实/依赖/验证难度）。',
+        },
+        deepThink: {
+          type: 'object',
+          description: 'action="self_effort" 必填（2.5.2 执行前硬门禁）：专家/组员执行自己任务前的两轮深度思考产物。第一轮全面、全盘、深入梳理、研究、思考自己分到的任务；第二轮基于第一轮完成好的所有结果再全面、全盘、深入地开展梳理、研究和思考，理清具体如何一步步以最高效率、少走弯路、完美完成任务的方法、流程和步骤，并写清第二轮基于第一轮全部结果的依据。缺交/不合格硬拒（DEEP_THINK_MISSING / DEEP_THINK_INCOMPLETE），不登记、不接续正式执行；登记后持久化，重派读档放行。',
+          properties: {
+            problemAnalysis: { type: 'array', items: { type: 'string' }, description: '第一轮 · 任务深研（目标与验收/现状/事实/约束/未知/主要矛盾/边界），至少 1 条、合计 ≥40 字。' },
+            approach: { type: 'array', items: { type: 'string' }, description: '第二轮 · 方法流程步骤（含如何最高效率、少走弯路：先查历史教训、先验证再动手、不重复试错），至少 1 条、合计 ≥40 字。' },
+            approachBasis: { type: 'array', items: { type: 'string' }, description: '第二轮依据：第二轮如何基于第一轮完成好的所有结果（逐条对应），至少 1 条、合计 ≥20 字。' },
+          },
+          required: ['problemAnalysis', 'approach', 'approachBasis'],
+          additionalProperties: false,
         },
         consolidation: {
           type: 'object',
@@ -1399,7 +1411,7 @@ function createDispatchTool(runtime: any) {
       '派发当前会话尚未执行的任务分解计划。计划显示后必须先调用本工具；wait 会等到本轮结束，'
       + '把 durable 结果写入会话并返回每个子任务的状态/摘要。'
       + '【2.5.1 主 Agent 两轮深度思考协议】执行自己的任务必须先全面、全盘、深入梳理、研究、思考自己的任务（第一轮），'
-      + '再基于第一轮完成好的所有结果再全面、全盘、深入地开展梳理、研究和思考，理清思路与具体一步步执行、完美完成任务的方法、流程和步骤（第二轮），'
+      + '再基于第一轮完成好的所有结果再全面、全盘、深入地开展梳理、研究和思考，理清思路与具体一步步以最高效率、少走弯路、完美完成任务的方法、流程和步骤（第二轮），'
       + '最后才基于第二轮的方法、流程、步骤开始执行：首次派发必须随附 deepThink 产物，未提交或不合格被硬门禁拒绝'
       + '（MAIN_DEEP_THINK_MISSING / MAIN_DEEP_THINK_INCOMPLETE）；登记后持久化，续跑/重试/重启回放自动读档，无需重复提交；重规划的新计划须重新提交。'
       + '返回值里的 complete=false 表示计划还没做完（可能只是本轮预算用尽），此时必须再次派发续跑，'

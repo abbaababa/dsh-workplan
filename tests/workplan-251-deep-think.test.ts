@@ -109,7 +109,7 @@ test('协议文案：两轮深度思考的顺序、依赖与用户原文口径',
   const text = threePhasePromptLines().join('\n')
   assert.match(text, /第一轮 · 任务深研：先全面、全盘、深入梳理、研究、思考自己的任务/)
   assert.match(text, /基于刚才第一轮完成好的所有结果，再全面、全盘、深入地开展梳理、研究和思考/)
-  assert.match(text, /理清自己该具体如何一步步执行、达到最终完美完成自己任务的方法、流程和步骤/)
+  assert.match(text, /理清自己该具体如何一步步以最高效率执行、确保完美完成自己任务的方法、流程和步骤/)
   assert.match(text, /最后，基于刚才第二轮理清楚的所有方法、流程、步骤，开始具体的执行工作/)
   assert.match(text, /approachBasis/)
   assert.match(text, /禁止动手执行/)
