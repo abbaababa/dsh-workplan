@@ -1,0 +1,58 @@
+TAP version 13
+# Subtest: A1 关键沟通逐条可查：五类关键沟通全部入库且字段齐全
+ok 1 - A1 关键沟通逐条可查：五类关键沟通全部入库且字段齐全
+  ---
+  duration_ms: 1.29575
+  type: 'test'
+  ...
+# Subtest: A2 投递失败有错误原文留痕
+ok 2 - A2 投递失败有错误原文留痕
+  ---
+  duration_ms: 0.167375
+  type: 'test'
+  ...
+# Subtest: A3 进程重启后记录仍在：真实子进程重新读文件
+ok 3 - A3 进程重启后记录仍在：真实子进程重新读文件
+  ---
+  duration_ms: 65.998792
+  type: 'test'
+  ...
+# Subtest: A4 查询/回放：过滤、时间正序、limit、receipt 关联
+ok 4 - A4 查询/回放：过滤、时间正序、limit、receipt 关联
+  ---
+  duration_ms: 0.958875
+  type: 'test'
+  ...
+# Subtest: 边界：闲聊默认不入库（省 token），force 显式强制才入库
+ok 5 - 边界：闲聊默认不入库（省 token），force 显式强制才入库
+  ---
+  duration_ms: 0.205125
+  type: 'test'
+  ...
+# Subtest: 边界：单行损坏不拖垮整份留痕
+ok 6 - 边界：单行损坏不拖垮整份留痕
+  ---
+  duration_ms: 0.230292
+  type: 'test'
+  ...
+# Subtest: 边界：写入失败不抛出（旁路安全，绝不影响主流程）
+ok 7 - 边界：写入失败不抛出（旁路安全，绝不影响主流程）
+  ---
+  duration_ms: 0.096541
+  type: 'test'
+  ...
+# Subtest: 边界：摘要截断与 env 覆盖默认路径
+ok 8 - 边界：摘要截断与 env 覆盖默认路径
+  ---
+  duration_ms: 0.140208
+  type: 'test'
+  ...
+1..8
+# tests 8
+# suites 0
+# pass 8
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 147.935833

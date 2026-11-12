@@ -22,6 +22,8 @@ import { join } from 'node:path'
 import { buildDispatchHeartbeat, createPlanningHeartbeat, createStatuses } from '../src/plan.js'
 import { createWorkplanRuntime } from '../src/runtime.js'
 import { MAIN_DEEP_THINK_FIXTURE } from './helpers/main-deep-think.js'
+// [2.5.4][T4] 复杂档 ≥8 人分工表补充（D1/D2）：只补人数，断言意图零删改。
+import { gateMembers } from './helpers/delegate-consolidation.js'
 
 const QWEN = 'qwen3-max-preview'
 
@@ -70,12 +72,17 @@ function makeRuntime() {
 }
 
 const consolidation = (effort?: string) => ({
-  problemAnalysis: ['现状：任务拆给专家与组员', '主要矛盾：质量与时间'],
-  approach: ['专家做核心实现', '组员做证据'],
+  // [2.5.4][T3R1] 夹具适配：补足合计字数 ≥40/40/20（断言意图零改动）。
+  problemAnalysis: ['现状：任务拆给专家与组员；目标是保质保量完成；约束是不改无关文件；边界是只做分内工作。', '主要矛盾：质量与时间'],
+  approach: ['专家做核心实现：先确认入口再最小改动，并附聚焦单测自测', '组员做证据：逐条核对验收标准并落盘留证'],
   approachBasis: ['第二轮分工基于第一轮全部梳理结果：质量与时间矛盾决定专家做核心实现、组员做证据。'],
+  // [2.5.4][T4] 复杂声明档（xhigh/medium，含继承 effortOverride 的回落档）须 ≥8 人
+  // （D1/D2）：前两名保留原 Expert-A/Member-B，其余补通用组员；本文件用例只考察
+  // 中断/心跳/门禁语义，无派生数量断言，补人数不改断言意图。
   assignments: [
     { member: 'Expert-A', role: 'expert', task: '实现核心逻辑并自测', reasoningEffort: 'low' },
     { member: 'Member-B', role: 'member', task: '整理验收证据清单' },
+    ...gateMembers(8).slice(2),
   ],
   ...(effort ? { taskReasoningEffort: effort } : {}),
 })
@@ -211,7 +218,8 @@ test('冒烟：主 Agent deepThink 门禁与叶子 self_effort+deepThink 门禁�
   assert.equal(rejected.code, 'MAIN_DEEP_THINK_MISSING')
   assert.equal(spawned.length, 0)
   // 负责人 review 门禁：缺两轮产物仍被硬拒。
-  const badReview = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: { problemAnalysis: ['梳理'], assignments: consolidation().assignments } })
+  // [2.5.4][T3R1] 补足字数，使拒因仍落在被测的「缺两轮产物」（断言意图不变）。
+  const badReview = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: { problemAnalysis: ['现状：部门任务需要拆给专家与组员；目标是保质保量完成；约束是不改无关文件；主要矛盾是质量与时间。'], assignments: consolidation().assignments } })
   assert.equal(badReview.ok, false)
   assert.equal(badReview.code, 'DELEGATE_CONSOLIDATION_INCOMPLETE')
   // 叶子门禁：self_effort 缺 deepThink 仍被硬拒。

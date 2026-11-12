@@ -1,0 +1,398 @@
+{
+  "$comment": "T5 消息接口 v1 冻结契约夹具。唯一权威：_t5_channel_20261112/00-contract-v1.md（冻结人 agent-10）。7 种 kind 各 1 条合法样例 + 6 条非法样例；expect 标注预期校验结果。不得私改语义；变更须 T5 负责人重新冻结。",
+  "contractVersion": 1,
+  "cases": [
+    {
+      "name": "pass-dispatch-root-to-head",
+      "expect": "pass",
+      "message": {
+        "v": 1,
+        "ts": 1794488400000,
+        "planId": "wp-437e264b-77c4-4849-b088-f60a918e0cdc",
+        "subtaskId": "T5",
+        "id": "msg-mwdk2740-a1b2c3",
+        "kind": "dispatch",
+        "from": {
+          "sessionId": "sess-root-0001",
+          "role": "root"
+        },
+        "to": {
+          "sessionId": "sess-head-t5",
+          "role": "head"
+        },
+        "body": "T5 任务下发：实现负责人与下属双向沟通通道，接口契约以 00-contract-v1.md 为唯一权威。",
+        "data": {
+          "task": "实现双向沟通通道并冻结接口契约"
+        },
+        "delivery": {
+          "status": "sent",
+          "messageId": "msg-mwdk2740-a1b2c3",
+          "latencyMs": 42
+        }
+      }
+    },
+    {
+      "name": "pass-instruction-head-to-member",
+      "expect": "pass",
+      "message": {
+        "v": 1,
+        "ts": 1794488400000,
+        "planId": "wp-437e264b-77c4-4849-b088-f60a918e0cdc",
+        "subtaskId": "T5",
+        "id": "msg-mwdk2740-b2c3d4",
+        "kind": "instruction",
+        "from": {
+          "sessionId": "sess-head-t5",
+          "role": "head"
+        },
+        "to": {
+          "sessionId": "sess-member-contract",
+          "role": "member",
+          "member": "contract-member"
+        },
+        "body": "前序产物缺失已收悉：改按已冻结契约 v1 产出文档+夹具+测试，模块落地前测试可后跑。",
+        "data": {
+          "inReplyTo": "msg-mwdk2740-c3d4e5"
+        },
+        "delivery": {
+          "status": "sent",
+          "messageId": "msg-mwdk2740-b2c3d4",
+          "latencyMs": 37
+        }
+      }
+    },
+    {
+      "name": "pass-escalation-member-to-head",
+      "expect": "pass",
+      "message": {
+        "v": 1,
+        "ts": 1794488400000,
+        "planId": "wp-437e264b-77c4-4849-b088-f60a918e0cdc",
+        "subtaskId": "T5",
+        "id": "msg-mwdk2740-c3d4e5",
+        "kind": "escalation",
+        "from": {
+          "sessionId": "sess-member-contract",
+          "role": "member",
+          "member": "contract-member"
+        },
+        "to": {
+          "sessionId": "sess-head-t5",
+          "role": "head"
+        },
+        "body": "请示：channel-expert 补丁与 journal-member 留痕模块未在盘上找到，冻结基线如何确立？",
+        "data": {
+          "options": [
+            "等待前序产物落盘后续跑",
+            "提供产物路径/提交号供复核"
+          ],
+          "needs": [
+            "channel-expert 提供双向通道补丁落盘路径"
+          ]
+        },
+        "delivery": {
+          "status": "sent",
+          "messageId": "msg-mwdk2740-c3d4e5",
+          "latencyMs": 55
+        }
+      }
+    },
+    {
+      "name": "pass-estimate-expert-to-head",
+      "expect": "pass",
+      "message": {
+        "v": 1,
+        "ts": 1794488400000,
+        "planId": "wp-437e264b-77c4-4849-b088-f60a918e0cdc",
+        "subtaskId": "T5",
+        "id": "msg-mwdk2740-d4e5f6",
+        "kind": "estimate",
+        "from": {
+          "sessionId": "sess-expert-channel",
+          "role": "expert",
+          "member": "channel-expert"
+        },
+        "to": {
+          "sessionId": "sess-head-t5",
+          "role": "head"
+        },
+        "body": "开工预告：预计 6 分钟完成单一产物（仅供参考、非承诺）。",
+        "data": {
+          "declaredMinutes": 6,
+          "reason": "单一产物：冻结文档+契约夹具+契约测试"
+        },
+        "delivery": {
+          "status": "sent",
+          "messageId": "msg-mwdk2740-d4e5f6",
+          "latencyMs": 31
+        }
+      }
+    },
+    {
+      "name": "pass-completion-member-to-head",
+      "expect": "pass",
+      "message": {
+        "v": 1,
+        "ts": 1794488400000,
+        "planId": "wp-437e264b-77c4-4849-b088-f60a918e0cdc",
+        "subtaskId": "T5",
+        "id": "msg-mwdk2740-e5f6a7",
+        "kind": "completion",
+        "from": {
+          "sessionId": "sess-member-journal",
+          "role": "member",
+          "member": "journal-member"
+        },
+        "to": {
+          "sessionId": "sess-head-t5",
+          "role": "head"
+        },
+        "body": "留痕模块完成：src/dept-journal.ts 落地，导出与契约逐项一致。",
+        "data": {
+          "status": "done",
+          "acceptanceCount": 3,
+          "artifacts": [
+            "reports/wp-member-journal-member-T5.json"
+          ]
+        },
+        "delivery": {
+          "status": "sent",
+          "messageId": "msg-mwdk2740-e5f6a7",
+          "latencyMs": 28
+        }
+      }
+    },
+    {
+      "name": "pass-need-member-to-head-no-data",
+      "expect": "pass",
+      "message": {
+        "v": 1,
+        "ts": 1794488400000,
+        "planId": "wp-437e264b-77c4-4849-b088-f60a918e0cdc",
+        "subtaskId": "T5",
+        "id": "msg-mwdk2740-f6a7b8",
+        "kind": "need",
+        "from": {
+          "sessionId": "sess-member-journal",
+          "role": "member",
+          "member": "journal-member"
+        },
+        "to": {
+          "sessionId": "sess-head-t5",
+          "role": "head"
+        },
+        "body": "跨部门需求：请 channel-expert 告知路由接线完成时点，以便对齐留痕写入顺序。",
+        "delivery": {
+          "status": "sent",
+          "messageId": "msg-mwdk2740-f6a7b8",
+          "latencyMs": 24
+        }
+      }
+    },
+    {
+      "name": "pass-receipt-head-to-expert-failed-delivery",
+      "expect": "pass",
+      "message": {
+        "v": 1,
+        "ts": 1794488400000,
+        "planId": "wp-437e264b-77c4-4849-b088-f60a918e0cdc",
+        "subtaskId": "T5",
+        "id": "msg-mwdk2740-a7b8c9",
+        "kind": "receipt",
+        "from": {
+          "sessionId": "sess-head-t5",
+          "role": "head"
+        },
+        "to": {
+          "sessionId": "sess-expert-channel",
+          "role": "expert",
+          "member": "channel-expert"
+        },
+        "body": "回执：estimate 已观察。本条示例投递失败仍须留痕（D6：不静默丢弃）。",
+        "data": {
+          "forMessageId": "msg-mwdk2740-d4e5f6",
+          "observedAt": 1794488460000
+        },
+        "delivery": {
+          "status": "failed",
+          "code": "DELIVERY_FAILED",
+          "error": "示例：subagent 服务暂时不可用，失败投递仍留痕"
+        }
+      }
+    },
+    {
+      "name": "fail-unknown-kind",
+      "expect": "fail",
+      "why": "kind=notice 不在冻结 7 种集合内（fail-closed）",
+      "message": {
+        "v": 1,
+        "ts": 1794488400000,
+        "planId": "wp-437e264b-77c4-4849-b088-f60a918e0cdc",
+        "subtaskId": "T5",
+        "id": "msg-mwdk2740-b8c9d0",
+        "kind": "notice",
+        "from": {
+          "sessionId": "sess-root-0001",
+          "role": "root"
+        },
+        "to": {
+          "sessionId": "sess-head-t5",
+          "role": "head"
+        },
+        "body": "未知 kind 必须被拒绝。",
+        "delivery": {
+          "status": "sent",
+          "messageId": "msg-mwdk2740-b8c9d0",
+          "latencyMs": 10
+        }
+      }
+    },
+    {
+      "name": "fail-missing-body",
+      "expect": "fail",
+      "why": "缺必填字段 body",
+      "message": {
+        "v": 1,
+        "ts": 1794488400000,
+        "planId": "wp-437e264b-77c4-4849-b088-f60a918e0cdc",
+        "subtaskId": "T5",
+        "id": "msg-mwdk2740-c9d0e1",
+        "kind": "instruction",
+        "from": {
+          "sessionId": "sess-head-t5",
+          "role": "head"
+        },
+        "to": {
+          "sessionId": "sess-member-contract",
+          "role": "member",
+          "member": "contract-member"
+        },
+        "delivery": {
+          "status": "sent",
+          "messageId": "msg-mwdk2740-c9d0e1",
+          "latencyMs": 10
+        }
+      }
+    },
+    {
+      "name": "fail-invalid-ts-string",
+      "expect": "fail",
+      "why": "ts 必须是 number（epoch ms，>0 且 ≤8.64e15），字符串非法",
+      "message": {
+        "v": 1,
+        "ts": "1794488400000",
+        "planId": "wp-437e264b-77c4-4849-b088-f60a918e0cdc",
+        "subtaskId": "T5",
+        "id": "msg-mwdk2740-d0e1f2",
+        "kind": "escalation",
+        "from": {
+          "sessionId": "sess-member-contract",
+          "role": "member",
+          "member": "contract-member"
+        },
+        "to": {
+          "sessionId": "sess-head-t5",
+          "role": "head"
+        },
+        "body": "ts 类型非法必须被拒绝。",
+        "delivery": {
+          "status": "sent",
+          "messageId": "msg-mwdk2740-d0e1f2",
+          "latencyMs": 10
+        }
+      }
+    },
+    {
+      "name": "fail-invalid-role",
+      "expect": "fail",
+      "why": "role=leader 不在冻结 4 种集合内",
+      "message": {
+        "v": 1,
+        "ts": 1794488400000,
+        "planId": "wp-437e264b-77c4-4849-b088-f60a918e0cdc",
+        "subtaskId": "T5",
+        "id": "msg-mwdk2740-e1f2a3",
+        "kind": "estimate",
+        "from": {
+          "sessionId": "sess-expert-channel",
+          "role": "leader",
+          "member": "channel-expert"
+        },
+        "to": {
+          "sessionId": "sess-head-t5",
+          "role": "head"
+        },
+        "body": "非法 role 必须被拒绝。",
+        "data": {
+          "declaredMinutes": 6
+        },
+        "delivery": {
+          "status": "sent",
+          "messageId": "msg-mwdk2740-e1f2a3",
+          "latencyMs": 10
+        }
+      }
+    },
+    {
+      "name": "fail-wrong-version",
+      "expect": "fail",
+      "why": "v 必须为字面量 1，版本漂移必须被拒绝",
+      "message": {
+        "v": 2,
+        "ts": 1794488400000,
+        "planId": "wp-437e264b-77c4-4849-b088-f60a918e0cdc",
+        "subtaskId": "T5",
+        "id": "msg-mwdk2740-f2a3b4",
+        "kind": "completion",
+        "from": {
+          "sessionId": "sess-member-journal",
+          "role": "member",
+          "member": "journal-member"
+        },
+        "to": {
+          "sessionId": "sess-head-t5",
+          "role": "head"
+        },
+        "body": "版本漂移必须被拒绝。",
+        "data": {
+          "status": "done"
+        },
+        "delivery": {
+          "status": "sent",
+          "messageId": "msg-mwdk2740-f2a3b4",
+          "latencyMs": 10
+        }
+      }
+    },
+    {
+      "name": "fail-expert-endpoint-missing-member",
+      "expect": "fail",
+      "why": "expert/member 端点必填 member 名",
+      "message": {
+        "v": 1,
+        "ts": 1794488400000,
+        "planId": "wp-437e264b-77c4-4849-b088-f60a918e0cdc",
+        "subtaskId": "T5",
+        "id": "msg-mwdk2740-a3b4c5",
+        "kind": "estimate",
+        "from": {
+          "sessionId": "sess-expert-channel",
+          "role": "expert"
+        },
+        "to": {
+          "sessionId": "sess-head-t5",
+          "role": "head"
+        },
+        "body": "expert 端点缺 member 名必须被拒绝。",
+        "data": {
+          "declaredMinutes": 6
+        },
+        "delivery": {
+          "status": "sent",
+          "messageId": "msg-mwdk2740-a3b4c5",
+          "latencyMs": 10
+        }
+      }
+    }
+  ]
+}

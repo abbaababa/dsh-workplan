@@ -362,7 +362,7 @@ test('dispatchPlan：五档子任务派发到 qwen 类模型时按清单逐档�
     },
     subagents: {
       async startActivation(spec: any) {
-        seenFive.push(spec?.request?.agentOptions)
+        seenFive.push(spec?.agentOptions)
         return {
           childId: `child-five-${seenFive.length}`,
           result: Promise.resolve({ output: [{ type: 'text', text: '完成' }], stopReason: 'completed' }),
@@ -441,7 +441,7 @@ test('dispatchPlan：子任务 max/high/low 派发到 qwen 类模型时钳制为
     },
     subagents: {
       async startActivation(spec: any) {
-        seen.push(spec?.request?.agentOptions)
+        seen.push(spec?.agentOptions)
         return {
           childId: `child-${seen.length}`,
           result: Promise.resolve({ output: [{ type: 'text', text: '完成' }], stopReason: 'completed' }),

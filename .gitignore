@@ -16,3 +16,20 @@ _t1_guard_fix_20261104/
 _t2_ms2_evidence_20261104/
 _t3_release_20261104/
 _t7_release_20261104/
+
+# 2.5.4 定版（T7，2026-11-12，负责人裁决方案A）：四个取证目录含真实用户会话存档副本（约 11GB，隐私红线，永不提交）
+reports/_r3_fix_t3_20261112/
+reports/_r3_repro_forensics_20261112/
+reports/_r3_root_cause_t2_20261112/
+reports/_t2_r3_rca_20261112/
+# 二进制/缓存/会话存档通用排除（不影响 package-lock.json）
+__pycache__/
+*.pyc
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.zstd
+*.jsonl.zstd
+session.lock
+# 无斜杠版本：同时覆盖名为 node_modules 的仓库外符号链接（git 视符号链接为文件，带斜杠模式不匹配）
+node_modules

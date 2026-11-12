@@ -32,7 +32,14 @@ import {
   type ModelFamily,
   type TaskComplexity,
 } from './plan.js'
-import { threePhasePromptLines } from './three-phase.js'
+// [2.5.4][T3R1] 负责人分派前深度梳理门禁与主 Agent/叶子同一字数判据：
+// 复用 three-phase 的 40/40/20 下限常量（three-phase 只依赖 lessons，无循环）。
+import {
+  MIN_PLANNING_APPROACH_CHARS,
+  MIN_PLANNING_BASIS_CHARS,
+  MIN_PLANNING_PROBLEM_CHARS,
+  threePhasePromptLines,
+} from './three-phase.js'
 
 export {
   allowedEffortsForModel,
@@ -170,7 +177,8 @@ export function buildLlmRulesBrief(info: LlmRulesBriefInfo = {}): string {
   if (info.tier === 'delegate') {
     lines.push(`- 你是部门第三层执行者（${info.memberRole === 'expert' ? '本部门相关领域全球顶尖专家' : '本部门组员'}${info.memberName ? `：${info.memberName}` : ''}）。执行自己的任务必须先走两轮深度思考（2.5.1 强制，详见三阶段工作法）：先全面、全盘、深入梳理、研究、思考自己的任务；再基于刚才前一步完成好的所有结果，再全面、全盘、深入地开展梳理、研究和思考，理清自己的思路，理清自己该具体如何一步步执行、达到最终完美完成自己任务的方法、流程和步骤；最后，基于刚才理清楚的所有方法、流程、步骤，开始具体的执行工作，全程少走弯路（先查历史教训、先验证再动手、不重复试错）。分工表给你的档位仅为建议：你必须在 phase-0（low 档启动）经 dsh_workplan_delegate(action="self_effort") 按自己任务复杂度提交自配档（reasoningEffort+complexityRationale），平台登记后立即以自配档接续你执行正式任务；越界档会被钳制并留痕。必须确保自身任务完成品质非常高的前提下，完美、超高效率地执行。`)
   } else {
-    lines.push('- 部门负责人（本任务书的直接接收者）强制流程（用户要求 1/2/3，2.5.0 强化；2.5.1 两轮深度思考协议）：你拥有本部门内的再分配权限——执行自己的任务必须先走两轮深度思考：第一轮，先全面、全盘、深入梳理、研究、思考自己的任务；第二轮，基于刚才第一轮完成好的所有结果，再全面、全盘、深入地开展梳理、研究和思考，理清自己的思路，理清自己该具体如何一步步以最高效率执行、确保完美完成自己任务的方法、流程和步骤（含全程如何少走弯路：先查历史教训、先验证再动手、不重复试错）；最后，基于第二轮理清楚的所有方法、流程、步骤，开始具体的执行与再分配。两轮思考产物经 dsh_workplan_delegate(action="review") 提交（problemAnalysis=第一轮任务深研 + approach=第二轮方法流程步骤 + approachBasis=第二轮基于第一轮全部结果的依据对应 + 分工表 + 每位专家/组员的推理等级配置），并在 consolidation.taskReasoningEffort 里按你接到任务的复杂度配置你自己的整体推理等级（先配置后开工：phase-0 以 low 启动，登记后平台立即以自配档接续本会话进入 phase-1，重试/续跑全程生效）；梳理产物未提交前，dsh_workplan_delegate(action="dispatch") 会被平台拒绝（硬门禁）。梳理完成后必须把任务拆得更简单——每位下级只承担单一目标、单一主产物、可独立验收的一项工作——再合理分配给本部门多名相关领域全球顶尖专家与本部门组员（expert 与 member 各至少 1 名，最多 6 人）；每位下级必须在 phase-0 经 dsh_workplan_delegate(action="self_effort") 按自己分到的单项任务复杂度自配推理等级（轻度=low；qwen 中等=medium、非 qwen 中等=high；qwen 非常复杂=xhigh、非 qwen 非常复杂=max），成员自配为权威（分工表 per-member 档仅建议），平台登记后以自配档接续下级会话，全程应用；平台会按上述等级集合自动钳制越界档并留痕，等级在其任务全生命周期生效且不可被覆盖。第三层为叶子层：任何第四层派发一律被拒绝。')
+    // [2.5.4][T4] 人数口径同步（D1/D2）：非复杂≤6；复杂（medium/high/xhigh/max）≥8 且 ≤12，少于 8 硬性阻断。
+    lines.push('- 部门负责人（本任务书的直接接收者）强制流程（用户要求 1/2/3，2.5.0 强化；2.5.1 两轮深度思考协议）：你拥有本部门内的再分配权限——执行自己的任务必须先走两轮深度思考：第一轮，先全面、全盘、深入梳理、研究、思考自己的任务；第二轮，基于刚才第一轮完成好的所有结果，再全面、全盘、深入地开展梳理、研究和思考，理清自己的思路，理清自己该具体如何一步步以最高效率执行、确保完美完成自己任务的方法、流程和步骤（含全程如何少走弯路：先查历史教训、先验证再动手、不重复试错）；最后，基于第二轮理清楚的所有方法、流程、步骤，开始具体的执行与再分配。两轮思考产物经 dsh_workplan_delegate(action="review") 提交（problemAnalysis=第一轮任务深研 + approach=第二轮方法流程步骤 + approachBasis=第二轮基于第一轮全部结果的依据对应 + 分工表 + 每位专家/组员的推理等级配置），并在 consolidation.taskReasoningEffort 里按你接到任务的复杂度配置你自己的整体推理等级（先配置后开工：phase-0 以 low 启动，登记后平台立即以自配档接续本会话进入 phase-1，重试/续跑全程生效）；梳理产物未提交前，dsh_workplan_delegate(action="dispatch") 会被平台拒绝（硬门禁）。梳理完成后必须把任务拆得更简单——每位下级只承担单一目标、单一主产物、可独立验收的一项工作——再合理分配给本部门多名相关领域全球顶尖专家与本部门组员（expert 与 member 各至少 1 名；非复杂任务（low/未配置）最多 6 人；复杂任务（medium/high/xhigh/max）合计不少于 8 人且最多 12 人，少于 8 人硬性阻断）；每位下级必须在 phase-0 经 dsh_workplan_delegate(action="self_effort") 按自己分到的单项任务复杂度自配推理等级（轻度=low；qwen 中等=medium、非 qwen 中等=high；qwen 非常复杂=xhigh、非 qwen 非常复杂=max），成员自配为权威（分工表 per-member 档仅建议），平台登记后以自配档接续下级会话，全程应用；平台会按上述等级集合自动钳制越界档并留痕，等级在其任务全生命周期生效且不可被覆盖。第三层为叶子层：任何第四层派发一律被拒绝。')
   }
   return lines.join('\n')
 }
@@ -237,6 +245,16 @@ export interface DelegationPlan {
 }
 
 const MAX_DELEGATE_MEMBERS = 6
+/**
+ * [2.5.4][T4] 用户决策 D1/D2：复杂任务（声明档 medium/high/xhigh/max）分派
+ * 人数下限 8（expert+member 合计，少于 8 硬性阻断）；上限放宽到 12
+ * （12 为实现取值，D2 授权提高上限）。非复杂（low/未配置）保持 6 人上限
+ * 与原有静默截断，旧行为零变化。
+ */
+const MIN_COMPLEX_DELEGATE_MEMBERS = 8
+const MAX_COMPLEX_DELEGATE_MEMBERS = 12
+/** [2.5.4][T4] D1：除 low 外全部算复杂——medium/high/xhigh/max 均触发 ≥8 人门禁，xhigh 不豁免。 */
+const COMPLEX_DECLARED_EFFORTS: readonly string[] = Object.freeze(['medium', 'high', 'xhigh', 'max'])
 
 function readTrimmedStrings(value: unknown, limit: number): string[] {
   return (Array.isArray(value) ? value : [])
@@ -272,7 +290,35 @@ export function planDelegations(input: {
   if (problemAnalysis.length === 0) {
     return { ...empty, code: 'DELEGATE_CONSOLIDATION_INCOMPLETE', error: '梳理产物不完整：problemAnalysis 至少 1 条（现状/事实/约束/未知/主要矛盾逐条写清），未梳理完不得进入再分配。' }
   }
-  const assignments = (Array.isArray(consolidation.assignments) ? consolidation.assignments : []).slice(0, MAX_DELEGATE_MEMBERS)
+  /*
+   * [2.5.4][T3R1] 分派前深度梳理质量闸（用户要求 1 的代码级保障）：旧实现只查
+   * 「有没有交」（length>0），一句话就能冒充全面梳理；主 Agent（three-phase
+   * validateMainDeepThink）与叶子（self_effort）早有 40/40/20 字下限，负责人层
+   * 缺失。此处补齐同一判据：合计字数=各项长度之和（与 three-phase totalChars
+   * 同语义），不合格硬拒，合格才放行 dispatch。
+   */
+  const problemChars = problemAnalysis.reduce((sum, item) => sum + item.length, 0)
+  if (problemChars < MIN_PLANNING_PROBLEM_CHARS) {
+    return { ...empty, code: 'DELEGATE_CONSOLIDATION_INCOMPLETE', error: `梳理产物太薄：problemAnalysis 合计 ${problemChars} 字，至少 ${MIN_PLANNING_PROBLEM_CHARS} 字——第一轮必须全面、全盘、深入梳理、研究、思考自己的任务，逐条写清目标与验收、现状、约束、未知、主要矛盾与边界；一句话不能冒充深度梳理。` }
+  }
+  /*
+   * [2.5.4][T4] 复杂判定必须用「声明档」（钳制前）：
+   * declared = consolidation.taskReasoningEffort ?? input.taskEffortFallback。
+   * 原因（D1）：correctEffortForModel 在非 qwen 系会把 medium 钳到 low，
+   * 若按钳制后档位判复杂会静默豁免 medium，违反「medium/high/xhigh/max 均触发」。
+   * 这里只提前「原始声明档读取 + 复杂判定 + 上限选择」这一纯读取逻辑，
+   * TASK_EFFORT_INVALID 校验与其余各闸位置一律不动，既有拒因顺序完全保持。
+   * 持久化边界（负责人补充说明 2）：review 通过后宿主把钳制后值写回
+   * row.consolidation.taskReasoningEffort 与 effortOverride，dispatch 读回的是
+   * 钳制后声明——因此强制点在 review 入口（dispatch 必须先有合格 review，每个
+   * 复杂声明都必然在 review 处按原始声明被 ≥8 校验）；dispatch 复读为纵深复核，
+   * 非 qwen+medium 的极端组合复读时虽看到钳制后的 low，但分工表已是 review 放行
+   * 的 ≥8 人名单，强制语义不破。qwen 系钳制不改变复杂性分类，两入口完全一致。
+   */
+  const declaredEffort = consolidation.taskReasoningEffort ?? input.taskEffortFallback
+  const complexTask = typeof declaredEffort === 'string' && COMPLEX_DECLARED_EFFORTS.includes(declaredEffort)
+  const memberCap = complexTask ? MAX_COMPLEX_DELEGATE_MEMBERS : MAX_DELEGATE_MEMBERS
+  const assignments = (Array.isArray(consolidation.assignments) ? consolidation.assignments : []).slice(0, memberCap)
   if (assignments.length === 0) {
     return { ...empty, code: 'DELEGATE_CONSOLIDATION_INCOMPLETE', error: '梳理产物不完整：分工表 assignments 至少 1 条（member/role/task/reasoningEffort 四项齐全）。' }
   }
@@ -380,12 +426,48 @@ export function planDelegations(input: {
       error: '两轮深度思考未完成：approach 至少 1 条——第二轮必须基于第一轮完成好的所有结果，再全面、全盘、深入地开展梳理、研究和思考，理清自己该具体如何一步步执行、达到最终完美完成自己任务的方法、流程和步骤；未理清前不得进入执行与再分配。',
     }
   }
+  // [2.5.4][T3R1] 第二轮方法流程步骤质量闸：与主 Agent/叶子同一 40 字下限。
+  const approachChars = approach.reduce((sum, item) => sum + item.length, 0)
+  if (approachChars < MIN_PLANNING_APPROACH_CHARS) {
+    return {
+      ...empty,
+      code: 'DELEGATE_CONSOLIDATION_INCOMPLETE',
+      error: `梳理产物太薄：approach 合计 ${approachChars} 字，至少 ${MIN_PLANNING_APPROACH_CHARS} 字——第二轮要基于第一轮全部结果理清具体一步步执行、完美完成任务的方法、流程和步骤，而不是一句目标。`,
+    }
+  }
   const approachBasis = readTrimmedStrings(consolidation.approachBasis, 12)
   if (approachBasis.length === 0) {
     return {
       ...empty,
       code: 'DELEGATE_CONSOLIDATION_INCOMPLETE',
       error: '两轮深度思考未完成：approachBasis 至少 1 条——第二轮的方法、流程、步骤必须基于第一轮完成好的所有结果，逐条写清第一轮的哪些事实/约束/矛盾决定了第二轮的哪些方法/流程/步骤（依赖依据，不可省略）。',
+    }
+  }
+  // [2.5.4][T3R1] 第二轮依据质量闸：与主 Agent/叶子同一 20 字下限。
+  const basisChars = approachBasis.reduce((sum, item) => sum + item.length, 0)
+  if (basisChars < MIN_PLANNING_BASIS_CHARS) {
+    return {
+      ...empty,
+      code: 'DELEGATE_CONSOLIDATION_INCOMPLETE',
+      error: `梳理产物太薄：approachBasis 合计 ${basisChars} 字，至少 ${MIN_PLANNING_BASIS_CHARS} 字——要写清第二轮的方法、流程、步骤如何基于第一轮梳理、研究、思考完成好的所有结果（拆解理由与依赖对应，不可省略）。`,
+    }
+  }
+  /*
+   * [2.5.4][T4] 用户决策 D1/D2 人数下限硬门禁（新增的最后一道闸）：
+   * 复杂任务（声明档 medium/high/xhigh/max）expert+member 合计必须 ≥8 人，
+   * 不足直接阻断分派。人数按截断后实际分派数计（复杂上限 12≥8，截断前后
+   * 判定等价）；角色配比校验（ROLE_MIX_REQUIRED）在本闸之前，保持不变。
+   * 放在拒因链最后：既有 8 道拒因顺序完全不变。
+   */
+  if (complexTask && assignments.length < MIN_COMPLEX_DELEGATE_MEMBERS) {
+    return {
+      ok: false,
+      code: 'DELEGATE_HEADCOUNT_MIN',
+      members: [],
+      clamped: [],
+      taskEffort: null,
+      taskEffortClamped: null,
+      error: `复杂任务（声明档 ${String(declaredEffort)}）按用户决策 D1/D2 须 expert+member 合计 ≥8 人，当前 ${assignments.length} 人；请把任务拆得更简单（单一目标/单一主产物/可独立验收）并扩充分工表后重新 review/dispatch。`,
     }
   }
   return {
@@ -452,6 +534,7 @@ export function buildDelegateePrompt(input: {
     '- 你的推理等级以自配为权威（分工表档仅建议）：phase-0（low 档启动）唯一职责是经 dsh_workplan_delegate(action="self_effort") 提交自配档；phase-1 以登记生效的自配档全程应用（规划、执行、验证、复盘全生命周期），不得自行换档。',
     '- 必须在确保自身任务完成品质非常高的前提下，完美、超高效率地执行；严禁低效执行与浪费 token。',
     '- 你是第三层叶子执行者：不得派生任何第四层 Agent/子会话；无法完成时在结论首行写 BLOCKED: 原因 并说明缺什么，不要空转。',
+    '- 遇阻上报通道：遇阻（缺权限/缺输入/依赖产物缺失/需求自相矛盾/无法验证/需要负责人决定方向）时，第一动作是调用 dsh_workplan_escalate({ "question": "需要负责人回答的单个问题", "options": ["可选方向"], "needs": ["需要谁提供什么"] })——请示会经 delegate 登记落到你所属部门行的第三层台账（待指示），由部门负责人用 dsh_workplan_instruct 答复你；调用成功后停止推进、只做只读核对，不要自行选定一个选项继续。',
     '- 完成后把结论与逐项证据（命令输出/文件/引用）用简洁中文回报给部门负责人会话；同时把同一份结构化结论写入 reports/wp-member-<你的成员名>-<任务代号>.json（相对工作目录，目录不存在就创建）作为结算兜底。',
     `- 结果块契约：以 ${EVIDENCE_MARKER_BEGIN} 开头、${EVIDENCE_MARKER_END} 结尾，内含合法 JSON（status ∈ done/blocked/partial、phases 三阶段、acceptance 逐条带证据）。`,
     '',

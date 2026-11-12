@@ -200,8 +200,9 @@ test('源码锚定：maybePlan 在 runPlanner 之前 start、finally 里 stop、
   // stop 落在 finally 块内（规划成功/降级/中止都收束）
   const finallyIdx = runtimeSource.lastIndexOf('} finally {', stopIdx)
   assert.ok(finallyIdx > runIdx && finallyIdx < stopIdx, 'stop 必须在 finally 内')
-  // 心跳通知走唯一合规写入器，不新增事件类型
+  // 心跳通知走唯一合规写入器，不新增事件类型；[2.5.4] 规划期通知声明 deferUntilHead，
+  // 头未就绪暂存、头就绪补发，避免抢在 protected system head 之前落 surface（2.5.3 根因）。
   const hbBlock = runtimeSource.slice(runtimeSource.indexOf('const planningHeartbeat = createPlanningHeartbeat('), startIdx)
-  assert.match(hbBlock, /appendNotice: \(text: string\) => appendUserMessage\(session, text\)/)
+  assert.match(hbBlock, /appendNotice: \(text: string\) => appendUserMessage\(session, text, undefined, \{ deferUntilHead: true \}\)/)
   assert.ok(!/system\/message/.test(hbBlock), '心跳不得触碰 system/message')
 })

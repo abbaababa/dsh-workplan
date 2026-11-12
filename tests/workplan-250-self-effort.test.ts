@@ -68,8 +68,9 @@ function makeRuntime(opts: { failPhase1?: boolean } = {}) {
 }
 
 const consolidation = (overrides: any = {}) => ({
-  problemAnalysis: ['现状：任务拆给专家与组员'],
-  approach: ['专家做核心实现'],
+  // [2.5.4][T3R1] 夹具适配：补足合计字数 ≥40/40/20（断言意图零改动）。
+  problemAnalysis: ['现状：任务拆给专家与组员；目标是保质保量完成；约束是不改无关文件；边界是只做分内工作。'],
+  approach: ['专家做核心实现：先确认入口再最小改动，并附聚焦单测自测；组员整理证据清单并逐条核对验收。'],
   approachBasis: ["第二轮分工的方法、流程、步骤基于第一轮完成好的全部结果：质量与时间的主要矛盾决定专家承担核心实现、组员承担自测与证据，约束决定不改无关文件。"],
   assignments: [
     { member: 'Expert-A', role: 'expert', task: '实现核心逻辑并自测', reasoningEffort: 'low' },
@@ -77,13 +78,24 @@ const consolidation = (overrides: any = {}) => ({
   ],
   ...overrides,
 })
+// [2.5.4][T4] 按 D1/D2 新契约适配，意图不变：复杂档（medium/high/xhigh/max）分工表须合计 ≥8 人。
+// 默认 consolidation() 保持 2 人（非复杂用例依赖上限 6）；复杂用例专用 8 人表，
+// Expert-A 的 low 建议档原样保留（phase-0 强制 low/自配权威的被测意图不变）。
+const assignments8 = () => [
+  { member: 'Expert-A', role: 'expert', task: '实现核心逻辑并自测', reasoningEffort: 'low' },
+  { member: 'Member-B', role: 'member', task: '整理验收证据清单' },
+  ...Array.from({ length: 6 }, (_, i) => ({
+    member: `Member-${String.fromCharCode(67 + i)}`, role: 'member', task: `单一目标子任务 ${i + 3}（单一主产物、可独立验收）`,
+  })),
+]
 const leafAgent = (childId: string) => ({ session: { id: childId, header: { parentSession: 'child-leader', cwd: '/tmp/self-cwd' } }, options: { provider: 'qw', model: QWEN } })
-const promptOf = (s: any) => s.request.request.prompt[0].text
-const effortOf = (s: any) => s.request.request.agentOptions.reasoningEffort
+const promptOf = (s: any) => s.request.prompt[0].text
+const effortOf = (s: any) => s.request.agentOptions.reasoningEffort
 
 test('自配档：dispatch 叶子 phase-0 一律 low 启动，任务书唯一职责=self_effort 自配（分工表档降为建议）', async () => {
   const { runtime, spawned, leaderAgent } = makeRuntime()
-  await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation({ taskReasoningEffort: 'xhigh' }) })
+  // [2.5.4][T4] 按 D1/D2 新契约适配，意图不变：声明 xhigh=复杂 ⇒ 分工表扩到 8 人，phase-0 强制 low 的被测行为不变。
+  await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation({ taskReasoningEffort: 'xhigh', assignments: assignments8() }) })
   const r = await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
   assert.equal(r.ok, true, JSON.stringify(r))
   for (const s of spawned) {
@@ -216,7 +228,8 @@ test('自配档：负责人 phase-0 low → review 自配 → 平台以自配档
       setTimeout(async () => {
         reviewDone = await runtime.delegateTool(
           { session: { id: act.childId, header: { parentSession: 'session-root', cwd: '/tmp/self-cwd' } }, options: { provider: 'qw', model: QWEN } },
-          { action: 'review', consolidation: consolidation({ taskReasoningEffort: 'xhigh' }) },
+          // [2.5.4][T4] 按 D1/D2 新契约适配，意图不变：声明 xhigh=复杂 ⇒ 分工表扩到 8 人，负责人 phase-0→phase-1 接续意图不变。
+          { action: 'review', consolidation: consolidation({ taskReasoningEffort: 'xhigh', assignments: assignments8() }) },
         )
         spawned[spawned.length - 1].resolveResult({ stopReason: 'completed', output: [{ type: 'text', text: 'phase-0 梳理完成：主要矛盾是质量与时间' }] })
       }, 0)

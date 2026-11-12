@@ -1,0 +1,151 @@
+{
+  "planId": "wp-480eda74-6759-4794-a64a-d46ae5c4eaf1",
+  "subtaskId": "T3",
+  "childId": "6f9ebf4f-c266-455d-b9cb-8f0c68845d53",
+  "agent": "agent-17/agent-1 (expert-patch, self:xhigh)",
+  "role": "第三层叶子·补丁实现（单一写者，负责人裁决 A）",
+  "status": "done",
+  "verification": "structured",
+  "capturedAt": "2026-11-12T22:36:26+08:00",
+  "deliverableRoot": "plugins/dsh-workplan/patches/r3-session-search/",
+  "finalHashes": {
+    "baseline/src/index.ts": "72868e4ae967fee94967df5939ee092a582249ff7b37afc4fe0cf7660d48b8d3",
+    "baseline/lib/index.js": "dbecf83320e10d93d735b3d01384ab817a0b90102ccecb0a22c013c71dfe70a0",
+    "patched/src/index.ts": "f587a0fb71355c7a0a44842000d160cab87bb5746cb4dd38cc6e695e77c3afd1",
+    "patched/lib/index.js": "fdb67cd053231205561d37b33b98ed30e7d4fbf8baabf231c36d645f76d8ba35",
+    "r3-session-search.patch": "d1050888da86a1c652727a323f1fc3e75a6bcad6edaa84154b7d895254142639",
+    "apply-r3-patch.py": "83ea8e29e41f6e4585b8375f5f638b888c59bcab819f8067df76b013f528121c"
+  },
+  "markers": [
+    "[R3-fix] incremental per-session commit",
+    "[R3-fix] startup background pre-warm"
+  ],
+  "acceptance": [
+    {
+      "criterion": "① diff 套用到全新基线副本成功且产物与 patched/ 逐字节一致（cmp exit 0，两文件各一次）",
+      "result": "pass",
+      "evidence": "git apply OK + patch -p1 OK；cmp src/lib (git apply) exit=0 ×2；cmp src/lib (patch -p1) exit=0 ×2；PATCH-NOTES §3.6；verify/reapply/ 与 verify/reapply-patch/"
+    },
+    {
+      "criterion": "② node --check patched/lib/index.js 通过",
+      "result": "pass",
+      "evidence": "node --check exit=0（最终内容，含规格5）；PATCH-NOTES §3.1"
+    },
+    {
+      "criterion": "③ 套用器幂等（二次运行跳过 exit 0）与哈希拒绝路径（篡改一个字节→非零退出）各演示一次",
+      "result": "pass",
+      "evidence": "verify/applier-demo.log：no-args exit=2；first-apply exit=0（.bak-r3 备份哈希==基线，cmp×2 exit=0）；second-apply exit=0 IDEMPOTENT SKIP；tampered exit=3 HASH MISMATCH 打印期望/实际哈希"
+    },
+    {
+      "criterion": "④ sha256 清单完整可复算",
+      "result": "pass",
+      "evidence": "SHA256SUMS.txt 覆盖 9 个交付文件；shasum -a 256 -c 全部 OK（verify/sha256-recheck.log）；baseline/SHA256SUMS.txt 为 shasum 原文输出"
+    },
+    {
+      "criterion": "⑤ 规格外零语义改动自查清单（逐条对照规格 3 保持项 + 规格 5d 边界）",
+      "result": "pass",
+      "evidence": "406 行统一 diff 逐 hunk 审计，全部映射规格 1/2/4/5；PATCH-NOTES §4 清单；live-preferred 子句提取哈希基线==补丁后（6c53d69e…6886c）；cursor/_replace*/_query*/selectedDocumentsSql/schema 均不在 diff 内"
+    },
+    {
+      "criterion": "规格1/2 行为证明：中止进展>0、二次收敛、毒丸隔离、零成功保险丝、churn 收敛、命名 logger 告警",
+      "result": "pass",
+      "evidence": "verify/behavior-patched.log 12/12 PASS（A1 中止后 7 提交；A2 收敛 40/40 且命中；A3 已提交零重读；A4 代数单调；B1 毒丸仅损失该会话；B2 name=session-query-sqlite；C1 保险丝；D1 churn 收敛）；基线对照 5/5 证明缺陷原在（verify/behavior-baseline.log）"
+    },
+    {
+      "criterion": "规格5 预热证明：startup 无搜索即建索引、close 及时中止保留进展、first-search 零变化、预热失败非致命",
+      "result": "pass",
+      "evidence": "P1 committed=12/coldReads=12（零搜索调用）；P2 closeMs=54 保留 3 提交；P3 first-search 无 DB 文件零冷读；P4 仅日志告警服务可用；tsc strict exit=0（verify/tsc-patched.log）"
+    }
+  ],
+  "artifacts": [
+    { "kind": "file", "ref": "plugins/dsh-workplan/patches/r3-session-search/baseline/src/index.ts", "exists": true },
+    { "kind": "file", "ref": "plugins/dsh-workplan/patches/r3-session-search/baseline/lib/index.js", "exists": true },
+    { "kind": "file", "ref": "plugins/dsh-workplan/patches/r3-session-search/baseline/SHA256SUMS.txt", "exists": true },
+    { "kind": "file", "ref": "plugins/dsh-workplan/patches/r3-session-search/patched/src/index.ts", "exists": true },
+    { "kind": "file", "ref": "plugins/dsh-workplan/patches/r3-session-search/patched/lib/index.js", "exists": true },
+    { "kind": "file", "ref": "plugins/dsh-workplan/patches/r3-session-search/r3-session-search.patch", "exists": true },
+    { "kind": "file", "ref": "plugins/dsh-workplan/patches/r3-session-search/apply-r3-patch.py", "exists": true },
+    { "kind": "file", "ref": "plugins/dsh-workplan/patches/r3-session-search/MANIFEST.md", "exists": true },
+    { "kind": "file", "ref": "plugins/dsh-workplan/patches/r3-session-search/PATCH-NOTES.md", "exists": true },
+    { "kind": "file", "ref": "plugins/dsh-workplan/patches/r3-session-search/SHA256SUMS.txt", "exists": true },
+    { "kind": "file", "ref": "plugins/dsh-workplan/patches/r3-session-search/verify/behavior.mjs", "exists": true },
+    { "kind": "file", "ref": "plugins/dsh-workplan/patches/r3-session-search/verify/behavior-patched.log", "exists": true },
+    { "kind": "file", "ref": "plugins/dsh-workplan/patches/r3-session-search/verify/behavior-baseline.log", "exists": true },
+    { "kind": "file", "ref": "plugins/dsh-workplan/patches/r3-session-search/verify/applier-demo.log", "exists": true },
+    { "kind": "file", "ref": "plugins/dsh-workplan/patches/r3-session-search/verify/sha256-recheck.log", "exists": true },
+    { "kind": "file", "ref": "plugins/dsh-workplan/patches/r3-session-search/verify/tsc-patched.log", "exists": true },
+    { "kind": "file", "ref": "plugins/dsh-workplan/patches/r3-session-search/verify/smoke-patched-final.log", "exists": true },
+    { "kind": "file", "ref": "plugins/dsh-workplan/patches/r3-session-search/verify/TWIN-HASHES-PRE.txt", "exists": true }
+  ],
+  "missingArtifacts": [],
+  "phases": {
+    "planning": {
+      "problemAnalysis": [
+        "目标：按负责人规格 1–5 产出 R3 最小修复双轨补丁包（src+lib 语义等价），单一主产物 plugins/dsh-workplan/patches/r3-session-search/，五条验收逐条附命令+输出+退出码+哈希。",
+        "事实：宿主包 0.2.2-rc.2 每次搜索先 _reconcile 全量冷读 2118 会话（离线下限 24.2s、真实后端约 204s），仅整轮稳定后单事务提交；30s 中止即零提交、:memory: 索引永空、死循环；整轮稳定性比对还会被 live-owned churn 拖死。",
+        "约束：checkout 与 ~/.dsh 只读；不重启/不安装/不 npm 重装；叶子层不派生；lib 为运行时实际加载物且无构建工具，必须手工双轨等价。",
+        "未知：任务书规格截断→已向负责人索取全文（1/3、2/3、3/3、5/5 补发齐全）；执行中发现并行双写实例→负责人裁决单一写者。",
+        "主要矛盾：双轨语义一致＋事务/代数/中止恢复正确性必须在只读宿主、不重启前提下离线可证明。"
+      ],
+      "approach": [
+        "先查教训（lessons.jsonl 166 行）→补全规格→只读复核源码锚点→pristine 基线哈希保全→工作区副本上实现→离线行为证明→产物与验收→结算备份+结果块回报。",
+        "实现走最小改动：盘上既有实现经裁决保留，仅做规格2b日志形态外科手术＋规格5预热追加；每步先验证再动手。",
+        "验证分层：node --check 语法、tsc strict 类型、smoke 装配、12 项行为套件（含基线对照 5 项）、diff 重套 cmp、套用器幂等/拒绝演示、sha256 复算、逐 hunk 规格外零改动审计。"
+      ],
+      "approachBasis": [
+        "规格截断（未知）→先补全再动手；lib 是运行时加载物且无构建（事实/约束）→双轨等价+离线证明；只读宿主（约束）→一切写入落工作区、应用/重启留给主 Agent/用户；主要矛盾→分层验证与逐 hunk 审计。"
+      ]
+    },
+    "execution": {
+      "steps": [
+        "22:07 pristine 基线捕获（sha256 与 checkout 逐位一致）；22:09–22:12 收到规格 1/3–3/3，建 baseline/patched 布局。",
+        "22:13:54 并行实例先写入 patched/；我的 splice 写前断言失败未写入→停写、只读审查、发现规格2b日志偏离→上报；负责人裁决 A 我为唯一写者。",
+        "22:20 最小外科手术：两轨日志改为命名 logger('session-query-sqlite').warn + try/catch（消息文本逐字保留）。",
+        "22:20–22:26 验证轮1：修我自己夹具的 seq-0 缺失缺陷后 8/8+4/4、tsc×2 exit 0、diff 重套 cmp×4 exit 0、套用器演示 2/0/0/3。",
+        "22:27 收到规格5/5；22:29 两轨各 3 处定向编辑（_prewarmAbort 字段、Service.init fire-and-forget 预热、_close 中止）。",
+        "22:30–22:32 新增 P1–P4 预热套件；修两处夹具缺陷（逐次读计数口径、first-search 无 DB 文件处理）后 12/12+5/5；重生成 diff(406行)+套用器；重跑全部验收演示通过。",
+        "22:33–22:36 MANIFEST/PATCH-NOTES 定稿（含双写者事件时间线与双方哈希）、SHA256SUMS 全 OK、live-preferred 子句哈希基线==补丁后、本结算新鲜落盘。"
+      ],
+      "deviations": [
+        "我的原始 splice 路径被并行实例产物取代（从未写入），按负责人裁决改为最小外科手术——已留痕 TWIN-HASHES-PRE.txt 与 PATCH-NOTES §5。",
+        "coldReadFailures 存原始 error（规格字面为 errorMessage 字符串）：语义与规格2c一致（消息摘要+原始 cause），按裁决保留不改写——PATCH-NOTES §2 披露。",
+        "三次测试夹具缺陷均只修 verify/behavior.mjs，未触碰实现。"
+      ]
+    },
+    "verification": {
+      "allPassed": true,
+      "requirementCheck": "规格1a–g、2a–f、3、4、5a–e 逐条实现并验证；任务书3/3 五条验收全部 pass（见 acceptance）；边界全程遵守：checkout/~/.dsh 零写入、无重启/安装/npm 重装、未派生第四层。",
+      "checks": [
+        { "criterion": "验收①", "method": "git apply 与 patch -p1 双工具重套全新基线副本 + cmp", "evidence": "cmp×4 exit=0（PATCH-NOTES §3.6）" },
+        { "criterion": "验收②", "method": "node --check patched/lib/index.js", "evidence": "exit=0（§3.1）" },
+        { "criterion": "验收③", "method": "套用器四场景演示", "evidence": "no-args=2 / first=0 / second=0(skip) / tampered=3（verify/applier-demo.log）" },
+        { "criterion": "验收④", "method": "shasum -a 256 -c SHA256SUMS.txt", "evidence": "9/9 OK（verify/sha256-recheck.log）" },
+        { "criterion": "验收⑤", "method": "406 行 diff 逐 hunk 审计 + 保持项清单 + live-preferred 子句哈希比对", "evidence": "PATCH-NOTES §4；子句哈希 6c53d69e…6886c 基线==补丁后" },
+        { "criterion": "行为正确性", "method": "真实引擎+合成 persistence 离线套件（patched 12 项 / baseline 5 项对照）", "evidence": "verify/behavior-patched.log 12/12；verify/behavior-baseline.log 5/5" },
+        { "criterion": "类型与装配", "method": "tsc 5.9.3 strict nodenext noEmit + cordis 真实装配 smoke", "evidence": "tsc patched/baseline exit=0；SMOKE PASS（首尾一致）" }
+      ],
+      "retrospective": {
+        "problems": [
+          "双写者：phase-0 原会话与 self_effort 接续会话被并行续跑同一任务，另一实例 22:13:54 先写入我的产物目录（根因：平台接续机制产生并行实例且任务落点相同）。",
+          "任务书规格在派发文本中被截断（根因：消息超长）。",
+          "我的合成夹具三处缺陷：缺 seq-0 头事件、读计数跨调用聚合口径错、first-search 未建 DB 文件时 readOnly 打开报错（根因：对引擎表面契约与 SQLite 文件生命周期理解不全）。",
+          "演示脚本两次被 set -e 在预期非零退出处中止（根因：预期失败场景与 set -e 冲突）。"
+        ],
+        "detours": [
+          "splice 块路径整体作废（写前断言拦截，未污染产物）；行为套件因夹具缺陷重跑三次；applier 演示因 set -e 重跑一次。"
+        ],
+        "resolutions": [
+          "写前哈希断言+立即停写+只读审查+上报裁决，保住单一写者与既有产物；规格经负责人分条补全；夹具缺陷只修测试不改实现；演示脚本改为显式捕获退出码。"
+        ],
+        "prevention": [
+          "遇到共享产物目录，写前必须断言基线哈希并先向负责人确认写者归属，发现并行实例立即停写上报。",
+          "遇到超长任务书截断，先索取全文再动手，不猜测条款。",
+          "遇到合成会话夹具，先带 seq-0 头事件并核对引擎表面契约；first-search 引擎的 DB 文件可能不存在，检查前先判存在。",
+          "遇到含预期非零退出的演示脚本，不用 set -e，逐条显式记录退出码。"
+        ]
+      }
+    }
+  },
+  "boundaryCompliance": "checkout 与 ~/.dsh 全程只读（写探针历史证据见旧 T3 取证）；未重启/未安装/未 npm 重装；未派生第四层；harness 仅复制后使用，lead-owned 原件未改。",
+  "nextStep": "主 Agent 在 checkout 执行 python3 apply-r3-patch.py --target <包目录>（或 git apply），随后用户手工重启；负责人独立重套 diff+tsc+node --check+回归套件(R3_EXPECT=fixed)+真实语料 E 系列与 L4 预热用例复核。"
+}

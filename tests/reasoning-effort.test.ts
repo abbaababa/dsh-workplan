@@ -240,7 +240,7 @@ test('部门子会话档位只由子任务自身复杂度决定：主 Agent 五�
         async startActivation(spec: any) {
           const label = String(spec?.label ?? '')
           const id = label.match(/:(T\d+)\s/)?.[1] ?? ''
-          seen.push({ id, effort: spec?.request?.agentOptions?.reasoningEffort })
+          seen.push({ id, effort: spec?.agentOptions?.reasoningEffort })
           return {
             childId: `child-${mainEffort}-${seen.length}`,
             result: Promise.resolve({ output: [{ type: 'text', text: '完成' }], stopReason: 'completed' }),

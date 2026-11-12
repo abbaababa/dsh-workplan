@@ -103,7 +103,8 @@ window.__ModuleLoader__.load({
           "done": "已完成",
           "failed": "失败",
           "timeout": "超时",
-          "rejected": "派发被拒"
+          "rejected": "派发被拒",
+          "blocked": "受阻"
         },
         "dept": {
           "engineering": "工程研发",
@@ -330,7 +331,8 @@ window.__ModuleLoader__.load({
           "done": "done",
           "failed": "failed",
           "timeout": "timeout",
-          "rejected": "rejected"
+          "rejected": "rejected",
+          "blocked": "blocked"
         },
         "dept": {
           "engineering": "Engineering",
@@ -1823,6 +1825,15 @@ window.__ModuleLoader__.load({
                 + (member?.requested && member.requested !== member.effort ? `（越界钳制自 ${String(member.requested)}）` : '')
                 + (member?.selfEffort ? `｜自配档 ${String(member.selfEffort)}${member?.selfEffortRequested && member.selfEffortRequested !== member.selfEffort ? `（钳制自 ${String(member.selfEffortRequested)}）` : ''}` : '｜自配档 待自配')
                 + `｜${t(`delegateStatus.${String(member?.status ?? 'running')}`)}`
+                /*
+                 * [2.5.6] 第三层闭环可见性：叶子的「待指示/已给指示/已回应」
+                 * 与第一层同一套 closure 文案（服务端下发，客户端不推导），
+                 * 请示问题随待指示标记一并展示，负责人/用户一眼看到谁在等谁。
+                 */
+                + (member?.escalation ? `｜${t('closureEscalated')}${member.escalation.question ? `：${String(member.escalation.question)}` : ''}` : '')
+                + (member?.lastInstruction ? `｜${t('closureInstructed')}` : '')
+                + (member?.closure === 'acknowledged' ? `｜${t('closureAcknowledged')}` : '')
+                + (member?.instructionOverdue ? `｜${t('closureNoAck')}` : '')
                 + (member?.summary ? `：${String(member.summary)}` : ''),
               )),
             ),

@@ -21,6 +21,7 @@ import {
   computeStats,
   createStatuses,
   derivePlanSnapshot,
+  parseResultMessage,
   planPhase,
   resetBlockedStatuses,
 } from '../src/plan.js'
@@ -298,7 +299,10 @@ test('timeouts are clamped so a bad config cannot disable or explode them', () =
 /* ------------------------------------------------------------------ */
 
 test('describeError never renders an object as [object Object]', () => {
-  assert.equal(describeError(new Error('  boom  ')), 'boom')
+  // [2.5.5][T6] 堆栈留痕：message 保留在前，截断堆栈后缀可选；不得出现 [object Object]。
+  const boom = describeError(new Error('  boom  '))
+  assert.ok(boom.startsWith('boom'), 'message 必须保留')
+  assert.doesNotMatch(boom, /\[object Object\]/)
   assert.equal(describeError('plain'), 'plain')
   assert.equal(describeError({ message: 'nested message' }), 'nested message')
   assert.match(describeError({ code: 'CHILD_TIMEOUT' }), /CHILD_TIMEOUT/)
@@ -363,10 +367,10 @@ test('a stalled child blocks only itself, then a re-dispatch resumes the plan', 
   // 幂等只发一次），不是轮级结果消息——按本断言本意一并排除。
   // [2.5.2] 主 Agent 两轮深度思考登记【两轮深度思考已登记】是首次派发门禁的
   // 计划级 notice（同一计划只登记一次），同样不是轮级结果消息——按本意排除。
-  const resultOnly = (ev: any) => {
-    const text = String(ev.data?.content?.[0]?.text ?? '')
-    return !text.includes('【dsh-workplan·执行中断】') && !text.includes('【派发预告】') && !text.includes('【规划预告】') && !text.includes('【两轮深度思考已登记】')
-  }
+  // [T9][用户要求6] wait 模式也推部门完成即时汇报（纯文本、不带 workplan 标记），
+  // 原按文本排除法会把完成通知计入；改用生产解析器只数轮级结果消息——断言意图
+  // （每次派发恰写 1 条持久结果消息）零删改，且不再受新增 notice 种类影响。
+  const resultOnly = (ev: any) => ev.type === 'user/message' && Boolean(parseResultMessage(ev.data))
   assert.equal(session.events.filter(resultOnly).length, 2, 'each dispatch writes one durable result message')
 })
 

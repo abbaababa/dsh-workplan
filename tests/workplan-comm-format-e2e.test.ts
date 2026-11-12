@@ -146,7 +146,7 @@ function makeRuntime(outputs: string[]) {
     logger: { warn() {} },
     subagents: {
       startActivation: async (activation: any) => {
-        const prompt = String(activation?.request?.prompt?.[0]?.text ?? '')
+        const prompt = String(activation?.prompt?.[0]?.text ?? '')
         prompts.push(prompt)
         const output = outputs.shift() ?? compliantOutput()
         return {

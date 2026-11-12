@@ -90,10 +90,11 @@ function makePlan() {
 
 function consolidation(overrides: any = {}) {
   return {
-    problemAnalysis: ['现状：部门任务需要拆给专家与组员', '主要矛盾：质量与时间'],
+    // [2.5.4][T3R1] 夹具适配：补足合计字数 ≥40/40/20（断言意图零改动）。
+    problemAnalysis: ['现状：部门任务需要拆给专家与组员；目标是保质保量完成；约束是不改无关文件；主要矛盾是质量与时间。', '主要矛盾：质量与时间'],
     constraints: ['不得改动无关文件'],
     unknowns: [],
-    approach: ['专家做核心实现', '组员做自测'],
+    approach: ['专家做核心实现：先确认入口再最小改动，并附聚焦单测自测', '组员做自测：逐条核对验收标准并落盘留证'],
     approachBasis: ['第二轮分工的方法、流程、步骤基于第一轮全部梳理结果：质量与时间矛盾决定专家做核心实现、组员做自测。'],
     assignments: [
       { member: 'Expert-A', role: 'expert', task: '实现核心逻辑并自测', reasoningEffort: 'xhigh' },
@@ -232,10 +233,12 @@ test('两轮产物齐全 ⇒ 放行，approachBasis 随梳理产物返回', () =
 test('旧拒因顺序不变：problemAnalysis → assignments → 角色配比 先于两轮产物闸', () => {
   const noAnalysis = planDelegations({ consolidation: { assignments: consolidation().assignments }, model: 'qwen3.8-flash' })
   assert.match(noAnalysis.error!, /problemAnalysis/)
-  const noAssignments = planDelegations({ consolidation: { problemAnalysis: ['梳理'] }, model: 'qwen3.8-flash' })
+  // [2.5.4][T3R1] 补足字数，使拒因落在被测的 assignments 缺口（断言意图不变）。
+  const noAssignments = planDelegations({ consolidation: { problemAnalysis: ['现状：部门任务需要拆给专家与组员；目标是保质保量完成；约束是不改无关文件；主要矛盾是质量与时间。'] }, model: 'qwen3.8-flash' })
   assert.match(noAssignments.error!, /assignments/)
   const expertOnly = planDelegations({
-    consolidation: { problemAnalysis: ['梳理'], assignments: [{ member: 'A', role: 'expert', task: 't', reasoningEffort: 'low' }] },
+    // [2.5.4][T3R1] 补足字数，使拒因落在被测的角色配比（断言意图不变）。
+    consolidation: { problemAnalysis: ['现状：部门任务需要拆给专家与组员；目标是保质保量完成；约束是不改无关文件；主要矛盾是质量与时间。'], assignments: [{ member: 'A', role: 'expert', task: 't', reasoningEffort: 'low' }] },
     model: 'qwen3.8-flash',
   })
   assert.equal(expertOnly.code, 'DELEGATE_ROLE_MIX_REQUIRED')

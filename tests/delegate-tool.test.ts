@@ -94,10 +94,11 @@ function makeRuntime(model: string, provider = 'qw') {
 }
 
 const goodConsolidation = (efforts: { expert: string; member: string }) => ({
-  problemAnalysis: ['现状：需要把部门任务拆给专家与组员', '主要矛盾：质量与时间'],
+  // [2.5.4][T3R1] 夹具适配：补足合计字数 ≥40/40/20（断言意图零改动）。
+  problemAnalysis: ['现状：需要把部门任务拆给专家与组员；目标是保质保量完成；约束是不改无关文件；主要矛盾是质量与时间。', '主要矛盾：质量与时间'],
   constraints: ['不得改动无关文件'],
   unknowns: [],
-  approach: ['专家做核心实现', '组员做自测'],
+  approach: ['专家做核心实现：先确认入口再最小改动，并附聚焦单测自测', '组员做自测：逐条核对验收标准并落盘留证'],
   approachBasis: ["第二轮分工的方法、流程、步骤基于第一轮完成好的全部结果：质量与时间的主要矛盾决定专家承担核心实现、组员承担自测与证据，约束决定不改无关文件。"],
   assignments: [
     { member: 'Expert-A', role: 'expert', task: '实现核心逻辑并自测', reasoningEffort: efforts.expert },
@@ -161,7 +162,8 @@ test('delegateTool：review 缺 problemAnalysis / assignments ⇒ 拒绝并给�
 
   const noAssignments = await runtime.delegateTool(leaderAgent, {
     action: 'review',
-    consolidation: { problemAnalysis: ['梳理'] },
+    // [2.5.4][T3R1] 补足字数，使拒因落在被测的 assignments 缺口（断言意图不变）。
+    consolidation: { problemAnalysis: ['现状：部门任务需要拆给专家与组员；目标是保质保量完成；约束是不改无关文件；主要矛盾是质量与时间。'] },
   })
   assert.equal(noAssignments.ok, false)
   assert.match(noAssignments.error, /assignments/)
@@ -172,7 +174,8 @@ test('delegateTool：分工表只有专家没有组员（或反之）⇒ DELEGAT
   const result = await runtime.delegateTool(leaderAgent, {
     action: 'review',
     consolidation: {
-      problemAnalysis: ['梳理'],
+      // [2.5.4][T3R1] 补足字数，使拒因落在被测的角色配比（断言意图不变）。
+      problemAnalysis: ['现状：部门任务需要拆给专家与组员；目标是保质保量完成；约束是不改无关文件；主要矛盾是质量与时间。'],
       assignments: [{ member: 'A', role: 'expert', task: 't', reasoningEffort: 'low' }],
     },
   })
@@ -209,8 +212,9 @@ test('delegateTool：非 qwen 模型上 medium→low、xhigh→high 钳制；max
   const result = await runtime.delegateTool(leaderAgent, {
     action: 'review',
     consolidation: {
-      problemAnalysis: ['梳理'],
-      approach: ['专家做复杂任务', '组员做轻度任务'],
+      // [2.5.4][T3R1] 夹具适配：补足合计字数 ≥40/40/20（断言意图零改动）。
+      problemAnalysis: ['现状：部门任务需要拆给专家与组员；目标是保质保量完成；约束是不改无关文件；主要矛盾是质量与时间。'],
+      approach: ['专家做复杂任务：先确认入口再最小改动，并附聚焦单测自测', '组员做轻度任务：逐条核对验收标准并落盘留证'],
       approachBasis: ['第二轮分工基于第一轮梳理：任务复杂度差异决定专家承担复杂任务、组员承担轻度任务。'],
       assignments: [
         { member: 'E', role: 'expert', task: '复杂任务', reasoningEffort: 'max' },
@@ -240,11 +244,11 @@ test('delegateTool：dispatch 为每位下级派生第三层子会话——等�
   assert.equal(subagents.spawned.length, 2, '必须为专家与组员各派生一个第三层子会话')
 
   for (const spawned of subagents.spawned) {
-    // startActivation 参数结构：{ provider, label, request:{ prompt, parent, cwd,
-    // agentOptions, maxDepth }, signal, delivery }——与真实 dispatchPlan 同构，
-    // maxDepth/agentOptions/prompt 在内层 request，delivery 在顶层。
+    // [2.5.5] startActivation 参数结构（现宿主 SubagentActivationSpec 契约）：
+    // { provider, label, prompt, parent, cwd, agentOptions, maxDepth, signal,
+    // delivery }——全部顶层，与真实 dispatchPlan 同构。
     const activation = spawned.request
-    const inner = activation.request
+    const inner = activation
     assert.equal(inner.maxDepth, 2, '第三层为叶子层：maxDepth=2，第四层（depth 3）由宿主硬拒')
     assert.equal(activation.delivery, 'caller', '下级结论必须送回部门负责人会话')
     assert.equal(inner.agentOptions.provider, 'qw')
@@ -256,8 +260,8 @@ test('delegateTool：dispatch 为每位下级派生第三层子会话——等�
     assert.match(promptText, /推理等级/, '第三层任务书必须携带推理等级规则')
     assert.match(promptText, /不得派生任何第四层/, '叶子层禁令必须写进任务书')
   }
-  const expertSpawn = subagents.spawned.find((s: any) => s.request.request.prompt[0].text.includes('Expert-A'))
-  assert.equal(expertSpawn.request.request.agentOptions.reasoningEffort, 'low', '[2.5.0][自配档] 先配置后开工：叶子 phase-0 一律 low 启动，分工表档降为建议，self_effort 登记后才以自配档接续')
+  const expertSpawn = subagents.spawned.find((s: any) => s.request.prompt[0].text.includes('Expert-A'))
+  assert.equal(expertSpawn.request.agentOptions.reasoningEffort, 'low', '[2.5.0][自配档] 先配置后开工：叶子 phase-0 一律 low 启动，分工表档降为建议，self_effort 登记后才以自配档接续')
 
   // 台账落档
   const row = record.statuses[0]

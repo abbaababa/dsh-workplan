@@ -25,11 +25,14 @@ import {
   resolveLeadAgentId,
   validateNoticeChannel,
 } from './notice-channel.js'
+// [T5-channel][契约v1 §2] 部门消息留痕：冻结 API，只 import 不改（journal-member 实现）。
+import { appendDeptMessage, makeDeptMessageId, readDeptMessages } from './dept-journal.js'
 import {
   MAX_CONCURRENT,
   PlanError,
   aggregateInvariantViolations,
   appendUserMessage,
+  enterPreHeadWindow,
   applyStatus,
   attachPlanMeta,
   blockCancelledDependents,
@@ -83,6 +86,9 @@ import {
   validatePlan,
   applyResultStatuses,
   adjudicateResult,
+  // [2.5.2][T4b][D2] 备份归属校验需要从标记块内提取 JSON（裸 JSON 之外的第二入口）。
+  EVIDENCE_MARKER_BEGIN,
+  EVIDENCE_MARKER_END,
   activeDenyCode,
   MAX_CONVERSATION_CHARS,
   MAX_ESCALATION_OPTIONS,
@@ -1034,6 +1040,10 @@ export async function runPlanner(ctx: any, options: any) {
           const plan: any = validated.plan
           plan.taskAnchor = guard.audit.anchor
           plan.understandingAudit = compactUnderstandingAudit(guard.audit)
+          // [2.5.5] 归一化留痕随计划持久化，status/回放可见（治本不静默）。
+          if (Array.isArray((validated as any).notes) && (validated as any).notes.length > 0) {
+            plan.normalizations = (validated as any).notes
+          }
           return plan
         }
         outcome = 'CONTEXT_GUARD'
@@ -1862,6 +1872,24 @@ export function announceSubtaskInterrupt(
   return true
 }
 
+/*
+ * [2.5.5][T6] 活体 agent 解析兜底：工具路径（exec.agent）与自动派发路径
+ * （payload.agent）都可能因宿主契约差异拿不到 agent，旧实现把 undefined 直传
+ * 宿主 startActivation，在 spec.parent.id 处毫秒级抛 TypeError（session-1513
+ * 与当前会话实测，childId=null）。这里用宿主同款安全访问器按 session.id 解析；
+ * 解析不到由调用方 fail-closed，绝不裸抛 TypeError。
+ */
+function resolveLiveAgent(ctx: any, sessionId: any): any {
+  const id = typeof sessionId === 'string' && sessionId.trim() !== '' ? sessionId.trim() : ''
+  if (!id) return null
+  try {
+    const agentsService = typeof ctx?.get === 'function' ? ctx.get('agents') : ctx?.agents
+    return agentsService?.get?.(id) ?? null
+  } catch {
+    return null
+  }
+}
+
 async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, options: any) {
   const { parentSignal, deadline, modelSelection, conversationContext = '', child, guard } = options
   /*
@@ -2133,11 +2161,23 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
         const childEffort = childEffortSupport === null
           ? staticRuleChildEffort
           : (clampEffortToSupported(staticRuleChildEffort, childEffortSupport) ?? '')
+        /*
+         * [2.5.5][治本] 宿主 SubagentActivationSpec 契约：prompt/parent/cwd/
+         * agentOptions/maxDepth 必须在 spec **顶层**（dsh-subagent types.d.ts
+         * SubagentStartRequest）。旧实现把它们嵌套在 request:{} 里（旧宿主形状），
+         * 现宿主读 spec.parent 得 undefined → 派发期即抛
+         * 「Cannot read properties of undefined (reading 'id')」，全部子任务
+         * 级联受阻（本会话重启后 0/6 现场）。单点拍平，两处 spawn 同口径。
+         */
+        // [2.5.5][T6] agent 兜底 + fail-closed（见 resolveLiveAgent 注释）。
+        const liveAgent = options.agent ?? resolveLiveAgent(ctx, options.session?.id ?? record?.plan?.sessionId)
+        if (!liveAgent) {
+          throw new PlanError('派发失败：无法解析活体父 Agent（agent 缺失且 agents 服务兜底失败），fail-closed 不创建子会话', 'AGENT_RESOLUTION_FAILED', { subtaskId: subtask.id })
+        }
         activation = await ctx.subagents.startActivation({
           provider: 'spawn',
           label: `${subtask.department}:${subtask.id} ${subtask.title}`.slice(0, 120),
-          request: {
-            prompt: [{
+          prompt: [{
               type: 'text',
               text: phaseZeroActivation ? buildPhaseZeroLeaderPrompt({
                 subtaskId: subtask.id,
@@ -2202,7 +2242,7 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
                 }),
               }),
             }],
-            parent: options.agent,
+            parent: liveAgent,
             cwd: typeof options.cwd === 'string' && options.cwd ? options.cwd : undefined,
             /*
              * [2.2.0][T13/推理等级] 子 Agent 不得继承主 Agent 的推理等级。
@@ -2233,7 +2273,6 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
              * 负责人行可调用」的校验——提示词说服模型，代码守住边界。
              */
             maxDepth: 2,
-          },
           signal: child.controller.signal,
           delivery: 'caller',
         })
@@ -2554,16 +2593,64 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
           const settleBackup = join(options.cwd ?? process.cwd(), 'reports', `wp-settlement-${subtask.id}.json`)
           let backupVerdict: any = null
           let backupText = ''
+          /*
+           * [2.5.2][T4b][D2] 备份采纳前的新鲜度+归属闸。根因
+           * （reports/D1-D2-root-cause-diagnosis.md §2）：固定文件名跨计划跨会话
+           * 复用，旧实现读到合法 JSON 即采纳、不做任何校验——本次误采纳 T1 的
+           * 陈旧截图任务结算（假完成）与 T2 的陈旧基金基线结算（误 blocked），
+           * 级联冻结 T3/T4/T5。现在：
+           *  ① 新鲜度：备份 mtime 必须 >= 本次尝试 startedAt（只认本次尝试内
+           *     新写的备份；提示词同步要求覆盖旧文件）。
+           *  ② 归属：备份 JSON 顶层含 planId/subtaskId 则必须与本计划/本子任务
+           *     一致（裸 JSON 或标记块内 JSON 两个入口都查；无这些字段的旧格式
+           *     备份仍受新鲜度闸约束，adjudicateResult 对额外顶层字段容忍）。
+           *  ③ 任一不满足 ⇒ 不采纳，写 record.errors 审计行（含文件 mtime 与
+           *     startedAt），落回下方既有 EVIDENCE_MISSING 有界回喂路径。
+           *     结算严格性不变：缺失永不计 done。
+           */
+          let backupRejectReason = ''
+          let backupMtimeMs: number | null = null
+          const backupAttemptStartedAt = Number(attemptRow()?.startedAt ?? 0)
           try {
-            backupText = readFileSync(settleBackup, 'utf8')
-            backupVerdict = adjudicateResult({
-              output: backupText,
-              strict: true,
-              expectedAcceptance: Array.isArray(subtask?.acceptance) ? subtask.acceptance : [],
-            })
-            if (!backupVerdict || /结果块缺失|无法解析/.test(String(backupVerdict.error ?? ''))) backupVerdict = null
+            const backupStat = statSync(settleBackup)
+            backupMtimeMs = backupStat.mtimeMs
+            if (backupStat.mtimeMs < backupAttemptStartedAt) {
+              backupRejectReason = '陈旧备份（mtime 早于本次尝试 startedAt，非本次执行新写）'
+            } else {
+              backupText = readFileSync(settleBackup, 'utf8')
+              let backupMeta: any = null
+              try {
+                backupMeta = JSON.parse(backupText)
+              } catch {
+                const beginAt = backupText.lastIndexOf(EVIDENCE_MARKER_BEGIN)
+                const endAt = backupText.indexOf(EVIDENCE_MARKER_END, beginAt + EVIDENCE_MARKER_BEGIN.length)
+                if (beginAt >= 0 && endAt > beginAt) {
+                  try { backupMeta = JSON.parse(backupText.slice(beginAt + EVIDENCE_MARKER_BEGIN.length, endAt).trim()) } catch { backupMeta = null }
+                }
+              }
+              const metaPlanId = typeof backupMeta?.planId === 'string' && backupMeta.planId ? backupMeta.planId : null
+              const metaSubtaskId = typeof backupMeta?.subtaskId === 'string' && backupMeta.subtaskId ? backupMeta.subtaskId : null
+              if (metaPlanId && metaPlanId !== record.plan.planId) {
+                backupRejectReason = `归属不匹配（备份 planId=${metaPlanId} ≠ 本计划 ${record.plan.planId}）`
+              } else if (metaSubtaskId && metaSubtaskId !== subtask.id) {
+                backupRejectReason = `归属不匹配（备份 subtaskId=${metaSubtaskId} ≠ 本子任务 ${subtask.id}）`
+              } else {
+                backupVerdict = adjudicateResult({
+                  output: backupText,
+                  strict: true,
+                  expectedAcceptance: Array.isArray(subtask?.acceptance) ? subtask.acceptance : [],
+                })
+                if (!backupVerdict || /结果块缺失|无法解析/.test(String(backupVerdict.error ?? ''))) backupVerdict = null
+              }
+            }
           } catch {
             backupVerdict = null
+          }
+          if (backupRejectReason) {
+            record.errors = [
+              ...(record.errors ?? []),
+              `${subtask.id}: 拒绝采纳盘上结算备份 ${settleBackup}——${backupRejectReason}（文件 mtime=${backupMtimeMs === null ? '未知' : new Date(backupMtimeMs).toISOString()}，本次尝试 startedAt=${new Date(backupAttemptStartedAt).toISOString()}；[2.5.2][T4b][D2] 新鲜度/归属闸），落回 EVIDENCE_MISSING 回喂`,
+            ].slice(-20)
           }
           if (backupVerdict) {
             settleFromOutput(record, subtask, backupText, guard, options, backupVerdict,
@@ -4534,6 +4621,9 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
               delegateSelfEfforts: update.delegateSelfEfforts,
               // [2.5.2] 叶子执行前两轮思考台账回放（applyStatus 同口径消毒）。
               delegateDeepThinks: update.delegateDeepThinks,
+              // [2.5.4][T3R1] 分派前深度梳理门禁审计回放（A3：刷新/重启后
+              // 拒绝/放行记录仍可复核；applyStatus 同口径消毒，undefined 保留旧值）。
+              gateAudit: update.gateAudit,
               updatedBy: 'agent',
             })
             /*
@@ -5079,6 +5169,9 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
    *  - 失败只记录错误，不把「派发失败」伪装成「计划生成失败」。
    */
   function startAutoDispatch(record: any, session: any, agent: any) {
+    // [2.5.5][T6] payload.agent 缺失时按 session.id 兜底解析活体 agent，
+    // 避免宿主 spec.parent.id 毫秒级崩溃（自动派发与工具路径同病实测）。
+    agent = agent ?? resolveLiveAgent(ctx, session?.id)
     const controller = new AbortController()
     record.abortDispatch = (reason: string) => {
       if (!controller.signal.aborted) {
@@ -6304,7 +6397,8 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
   }
 
   /**
-   * [2.2.0][T6/O-1a] 完成即时通知的插件兜底投递器（后台轮次专用）。
+   * [2.2.0][T6/O-1a] 完成即时通知的插件兜底投递器。
+   * [T9][用户要求6] 起 wait/async 两模式均启用：部门负责人完成即独立汇报主 Agent。
    *
    * 方案 §2.3 双通道：①协议通道由子 Agent 完成即 `send_message`；②兜底通道
    * 由这里在 `settleFromOutput` 结算成功后立刻写一条纯文本 `user/message`
@@ -6324,14 +6418,79 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     const acceptance = Array.isArray(verdict?.acceptance) ? verdict.acceptance : []
     const passed = acceptance.filter((item: any) => item?.result === 'pass').length
     const acceptanceCount = acceptance.length > 0
-      ? `验收 ${passed}/${acceptance.length} 通过`
-      : '验收记录 0 条（legacy 未提供结构化验收）'
+      ? `验收结论：${passed}/${acceptance.length} 通过`
+      : '验收结论：0 条验收记录（legacy 未提供结构化验收）'
     const elapsedMs = Number.isFinite(Number(row?.startedAt))
       ? Math.max(0, Date.now() - Number(row.startedAt))
       : 0
     const elapsed = elapsedMs < 1000 ? `${elapsedMs}ms` : `${(elapsedMs / 1000).toFixed(1)}s`
     const summary = truncate(String(row?.summary ?? '').replace(/\s+/g, ' ').trim(), 160) || '（无摘要）'
-    const text = `[dsh-workplan] 子任务 ${String(subtask?.id ?? '')} 已完成并结算：${summary}；${acceptanceCount}；用时 ${elapsed}`
+    /*
+     * [T9][用户要求6/D7] 部门负责人完成 → 主 Agent 即时汇报的文本增强。
+     * 行级「完美完成」判据与 deliveryReadiness 的行级口径同源（plan.ts）：
+     * verification==='structured' ＋ acceptance 非空 ＋ 每项 result==='pass'
+     * ＋ 无 missingArtifacts。达到才允许声称「完美完成」；未达到仍保留结算
+     * 通知，但必须显式写明缺口，绝不声称完美（D7）。
+     */
+    const rowAcceptance = Array.isArray(row?.acceptance) ? row.acceptance : acceptance
+    const missingArtifacts = Array.isArray(row?.missingArtifacts) ? row.missingArtifacts : []
+    const d7Reasons: string[] = []
+    if (row?.verification !== 'structured') d7Reasons.push(`证据等级为 ${String(row?.verification ?? '缺失')}（需 structured）`)
+    if (rowAcceptance.length === 0) d7Reasons.push('未提供验收项（acceptance 为空）')
+    else if (rowAcceptance.some((item: any) => item?.result !== 'pass')) d7Reasons.push('验收未全部 pass')
+    if (missingArtifacts.length > 0) {
+      d7Reasons.push(`缺少声明产物：${missingArtifacts.slice(0, 5).map((ref: any) => truncate(String(ref ?? ''), 80)).join('、')}`)
+    }
+    const conclusion = d7Reasons.length === 0
+      ? `完美完成（验收 ${rowAcceptance.length}/${rowAcceptance.length} 全部 pass，structured）`
+      : `未达完美完成判据：${d7Reasons.join('；')}`
+    const acceptanceLines = rowAcceptance.map((item: any) =>
+      `  - ${truncate(String(item?.criterion ?? '未命名验收项').replace(/\s+/g, ' ').trim(), 80)} → ${String(item?.result ?? '缺失')}`)
+    const needs = Array.isArray(row?.needs) ? row.needs : []
+    const todoLines = [
+      '待主 Agent 执行事项：',
+      '  - 核验本行证据与验收结论，处置 needs/待指示（如有）',
+      ...needs.map((item: any) => `  - 跨部门需求：${truncate(needEntryText(item), 300)}`),
+      ...missingArtifacts.map((ref: any) => `  - 缺失产物待补：${truncate(String(ref ?? ''), 200)}`),
+      '  - 生效建议：插件源码改动需用户手动重启 dsh web 生效，无需安装；Agent 不得自行重启或安装（D8）',
+    ]
+    const text = truncate([
+      `[dsh-workplan] 子任务 ${String(subtask?.id ?? '')} 已完成并结算：${summary}；${acceptanceCount}；用时 ${elapsed}`,
+      conclusion,
+      ...(acceptanceLines.length > 0 ? ['逐条验收结论：', ...acceptanceLines] : []),
+      ...todoLines,
+    ].join('\n'), 4000)
+    const ref = `${record?.plan?.planId ?? 'plan'}:${record?.dispatchedAt ?? 0}`
+    /*
+     * [T9][T5 冻结契约 §1/§4/§5] head→root 完成留痕 kind='completion'（复用
+     * channelJournal 统一入口，不另造通道）。留痕结果与投递结果分开报、绝不
+     * 互相掩盖：留痕写失败只 warn＋pushRecordError，不阻塞通知投递与回报标记。
+     */
+    const journalCompletion = (delivery: any) => {
+      try {
+        const artifacts = (Array.isArray(row?.artifacts) ? row.artifacts : [])
+          .map((artifact: any) => truncate(String(artifact?.ref ?? ''), 200))
+          .filter(Boolean)
+          .slice(0, 20)
+        const written = channelJournal({
+          planId: String(record?.plan?.planId ?? ''),
+          subtaskId: String(subtask?.id ?? ''),
+          kind: 'completion',
+          from: { sessionId: String(row?.childId || session.id), role: 'head' },
+          to: { sessionId: String(session.id), role: 'root' },
+          body: text,
+          data: { status: 'done', acceptanceCount: passed, artifacts },
+          delivery,
+        })
+        if (!written.result?.ok) {
+          ctx.logger?.warn?.(`dsh-workplan: 完成汇报留痕写入失败 ${String(subtask?.id ?? '')}：${String(written.result?.error ?? 'JOURNAL_WRITE_FAILED')}`)
+          pushRecordError(record, `完成汇报留痕写入失败（通知投递结果=${String(delivery?.status ?? 'unknown')}）：${String(written.result?.error ?? 'JOURNAL_WRITE_FAILED')}`)
+        }
+      } catch (error) {
+        ctx.logger?.warn?.(`dsh-workplan: 完成汇报留痕写入失败 ${String(subtask?.id ?? '')}：${error instanceof Error ? error.message : String(error)}`)
+        pushRecordError(record, `完成汇报留痕写入失败（通知投递结果=${String(delivery?.status ?? 'unknown')}）：${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
     try {
       appendUserMessage(session, text)
     } catch (error) {
@@ -6339,11 +6498,181 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         `dsh-workplan: 完成即时通知写入失败 ${String(subtask?.id ?? '')}：`
         + `${error instanceof Error ? error.message : String(error)}`,
       )
+      /* [T9][D6] 投递失败显式留 failed 痕（可重试、不静默），维持 reportPending
+       * 交 finishRound 补齐——「先写通知后记回报、绝不留无证据已回报」不变。 */
+      journalCompletion({ status: 'failed', error: truncate(String(error instanceof Error ? error.message : error), 300) })
       record.reportPending = true
       return
     }
-    const ref = `${record?.plan?.planId ?? 'plan'}:${record?.dispatchedAt ?? 0}`
+    journalCompletion({ status: 'sent' })
     markReported(record, session, ref, subtask?.id)
+  }
+
+  /**
+   * [T8] 第三层叶子完成即时通知：收件方 = 原分派部门负责人会话。
+   *
+   * 改动前验证结论（2026-11-12）：两处叶子结算回调（delegateTool dispatch /
+   * selfEffortTool 自配档接续）此前只把 durable workplan-update 写到根会话；
+   * 负责人会话只能靠宿主 delivery=caller 转达子会话原文，没有插件侧「已结算
+   * 为 done」的即时完成汇报，delegates 条目也没有回报幂等标记。负责人会话
+   * id 的反查判据：根计划部门行 row.childId（executeSubtask 派发时登记，
+   * delegateTool 按 statuses[].childId===负责人会话 id 定位行），与
+   * escalateDelegateLeaf 的 headChildId 同一判据。
+   *
+   * 复用 T5 冻结契约（_t5_channel_20261112/00-contract-v1.md §1/§5）：
+   *   - 投递：ctx.subagents.sendMessage（根 agent → row.childId 负责人会话，
+   *     宿主 lineage 校验与 instructDelegate/followup 同范式）；辅助
+   *     user/message 纯文本通知（appendUserMessage 唯一合规写入器，尽力而为，
+   *     不改变投递判定）；
+   *   - 留痕：channelJournal kind='completion'，data={status:'done'}，
+   *     from 叶子 → to head；
+   *   - done-only：只对 delegates[].status==='done' 通知（failed/待指示不产生
+   *     「已完成」措辞）；
+   *   - 幂等：只有 report.state==='sent' 拦重报（T5 教训：failed 必须可重试）；
+   *     先投递、成功才记 sent；
+   *   - 兜底：投递失败显式 DELIVERY_FAILED + report.state='failed' +
+   *     record.errors 留痕，下一次结算（含其他成员结算）自动补发所有 done
+   *     未 sent 条目——与 reportPending「绝不留无证据的已回报」同一纪律；
+   *     不触碰主行 closure/deriveReportPending，通知失败绝不回滚或阻塞完成判定。
+   * 主计划子任务通知仍 → 根会话（emitSubtaskDoneNotice 不变，T9 范围）。
+   */
+  /*
+   * [T8][race-fix] 并发结算竞态治本（负责人独立审读发现，2026-11-12）：
+   * 旧实现在 pending 过滤与 report 标记写回之间隔着 await sendMessage——
+   * 8 名下属同一 tick 完成时，回调 A 在 await 处让出事件循环，回调 B 随即
+   * 把 m1（尚未写 sent 标记）也视为 pending → 重复投递，击穿「8 人=恰 8 条」；
+   * 且各回调用入口捕获的 delegates 快照写回，会互相覆盖对方的结算与标记
+   * （lost update）。治本 = 等价串行化：每 record 一条 promise 链（闭包级
+   * WeakMap，随 record 生命周期回收，无定时器/认领泄漏），入队在同步段完成
+   * （任何 await 之前）；链节内「读最新台账 → 投递 → 写标记」整段互斥，
+   * 上一节完全结束才跑下一节；异常在节内捕获，链永不断裂。failed 天然可重试
+   * （无认领，state!=='sent' 即补发）。
+   */
+  const delegateNoticeChains = new WeakMap<object, Promise<void>>()
+  const delegateNoticeKey = (item: any) => `${String(item?.childId ?? '')}|${String(item?.member ?? '')}`
+  function emitDelegateDoneNotices(record: any, leaderSession: any, rootSession: any, subtaskId: string): Promise<void> {
+    if (!record || !leaderSession) return Promise.resolve()
+    const prior = delegateNoticeChains.get(record) ?? Promise.resolve()
+    const task = prior
+      .then(() => deliverDelegateDoneNotices(record, leaderSession, rootSession, subtaskId))
+      .catch((error) => {
+        // 意外异常只留痕：链不得断裂，也不得影响结算判定。
+        try {
+          ctx.logger?.warn?.(`dsh-workplan: 第三层完成通知链节异常 ${subtaskId}：${error instanceof Error ? error.message : String(error)}`)
+          record.errors = [...(record.errors ?? []), `${subtaskId} 完成通知链节异常：${truncate(String(error instanceof Error ? error.message : error), 200)}`].slice(-20)
+        } catch { /* 留痕失败不影响主链路 */ }
+      })
+    delegateNoticeChains.set(record, task)
+    return task
+  }
+
+  async function deliverDelegateDoneNotices(record: any, leaderSession: any, rootSession: any, subtaskId: string) {
+    if (!record || !leaderSession) return
+    const row = Array.isArray(record.statuses)
+      ? record.statuses.find((item: any) => item?.subtaskId === subtaskId)
+      : null
+    const delegates = Array.isArray(row?.delegates) ? row.delegates : []
+    const pending = delegates.filter((item: any) => item?.status === 'done' && item?.report?.state !== 'sent')
+    if (pending.length === 0) return
+    const headChildId = typeof row?.childId === 'string' && row.childId ? row.childId : String(leaderSession?.id ?? '')
+    const service: any = (ctx as any).subagents
+    /*
+     * 发送者必须是根会话 agent：负责人会话是根会话的直接子会话，宿主 lineage
+     * 校验只允许父→子投递（instructDelegate 同范式）。结算回调闭包里的 agent
+     * 是负责人自己（delegateTool 调用者），不能作发送者。解析失败 fail-closed
+     * 记 failed，绝不静默跳过。
+     */
+    const rootAgent = resolveLiveAgent(ctx, rootSession?.id)
+    const rawTurn = Number(state.activeTurns?.get?.(leaderSession?.id) ?? NaN)
+    const turn = Number.isFinite(rawTurn) ? rawTurn : null
+    const ref = `${record?.plan?.planId ?? 'plan'}:${record?.dispatchedAt ?? 0}`
+    const marks = new Map<string, any>()
+    for (const member of pending) {
+      const startedAt = Number(member?.startedAt)
+      const finishedAt = Number(member?.finishedAt)
+      const elapsedMs = Number.isFinite(startedAt) && Number.isFinite(finishedAt) ? Math.max(0, finishedAt - startedAt) : 0
+      const elapsed = elapsedMs < 1000 ? `${elapsedMs}ms` : `${(elapsedMs / 1000).toFixed(1)}s`
+      const summary = truncate(String(member?.summary ?? '').replace(/\s+/g, ' ').trim(), 300) || '（无摘要）'
+      const body = truncate([
+        `【第三层完成汇报｜${String(member?.member ?? '')} → 部门负责人】`,
+        `子任务 ${subtaskId} 的第三层成员 ${String(member?.member ?? '')} 已完成并结算（status=done）。`,
+        `摘要：${summary}`,
+        `用时：${elapsed}`,
+        '请核验并汇总该成员产物；收齐后写最终结果块。',
+      ].join('\n'), 4000)
+      const deliveryStartedAt = Date.now()
+      let messageId = ''
+      let deliveryError = ''
+      if (!headChildId) deliveryError = '部门行没有登记负责人会话（childId 缺失），无法投递完成汇报'
+      else if (!service || typeof service.sendMessage !== 'function') deliveryError = '当前部署没有可用的 subagent 服务（NO_SUBAGENT_SERVICE），无法投递完成汇报'
+      else if (!rootAgent) deliveryError = '根会话 agent 解析失败，无法向负责人会话投递完成汇报'
+      else {
+        try {
+          messageId = String(await service.sendMessage(rootAgent, headChildId, [{ type: 'text', text: body }], {}) ?? '')
+        } catch (error: any) {
+          deliveryError = truncate(error instanceof Error ? error.message : String(error), 500)
+        }
+      }
+      const delivery = deliveryError ? 'failed' : 'sent'
+      const journal = channelJournal({
+        planId: String(record?.plan?.planId ?? ''),
+        subtaskId,
+        kind: 'completion',
+        from: { sessionId: String(member?.childId ?? ''), role: member?.role === 'expert' ? 'expert' : 'member', member: String(member?.member ?? '') },
+        to: { sessionId: headChildId, role: 'head' },
+        body,
+        data: { status: 'done' },
+        delivery: { status: delivery, ...(messageId ? { messageId } : {}), latencyMs: Date.now() - deliveryStartedAt, ...(deliveryError ? { code: 'DELIVERY_FAILED', error: deliveryError } : {}) },
+      })
+      // 契约 §4：留痕写失败本身也要显式报 JOURNAL_WRITE_FAILED，且不得掩盖投递结果。
+      if (!journal.result.ok) {
+        record.errors = [...(record.errors ?? []), `${subtaskId}/${String(member?.member ?? '')} 完成留痕写入失败 JOURNAL_WRITE_FAILED：${truncate(String(journal.result.error ?? ''), 200)}`].slice(-20)
+      }
+      // 辅助用户可见纯文本通知（user/message 通道，尽力而为）：不替代 sendMessage 投递，不改变投递判定。
+      if (typeof leaderSession.append === 'function') {
+        try {
+          appendUserMessage(leaderSession, `[dsh-workplan] 第三层成员 ${String(member?.member ?? '')}（子任务 ${subtaskId}）已完成并结算：${truncate(summary, 160)}；用时 ${elapsed}。请核验并汇总该成员产物。`)
+        } catch (error) {
+          ctx.logger?.warn?.(`dsh-workplan: 第三层完成纯文本通知写入失败 ${subtaskId}/${String(member?.member ?? '')}：${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+      if (deliveryError) {
+        ctx.logger?.warn?.(`dsh-workplan: 第三层完成即时通知投递失败 ${subtaskId}/${String(member?.member ?? '')}：DELIVERY_FAILED ${deliveryError}`)
+        record.errors = [...(record.errors ?? []), `${subtaskId}/${String(member?.member ?? '')} 完成即时通知投递失败 DELIVERY_FAILED（report.state=failed，待兜底补发）：${truncate(deliveryError, 200)}`].slice(-20)
+      }
+      marks.set(delegateNoticeKey(member), { state: delivery, at: Date.now(), ref, turn })
+    }
+    /*
+     * 幂等标记写回台账（applyStatus 唯一写入口 + delegates.report 消毒）并
+     * durable 回放到根会话：刷新/重启后「已通知」不丢、重复结算不重报。
+     * 标记写失败只留痕：下次结算按 state!=='sent' 补发，不影响结算判定。
+     */
+    try {
+      // [T8][race-fix] 写时重读当前行＋按键贴标记：不用入口快照，对
+      // escalate/instruct 等非结算路径的并发写也免疫（不覆盖请示/指示子对象）。
+      const currentRow = Array.isArray(record.statuses)
+        ? record.statuses.find((item: any) => item?.subtaskId === subtaskId)
+        : null
+      const currentDelegates = Array.isArray(currentRow?.delegates) ? currentRow.delegates : delegates
+      const list = currentDelegates.map((item: any) => {
+        const mark = marks.get(delegateNoticeKey(item))
+        return mark ? { ...item, report: mark } : item
+      })
+      const revision = Number(currentRow?.revision ?? row?.revision ?? 0) + 1
+      record.statuses = applyStatus(record.statuses, subtaskId, { delegates: list, revision, updatedBy: 'system' })
+      record.updatedAt = Date.now()
+      const written = record.statuses.find((item: any) => item?.subtaskId === subtaskId)
+      appendUserMessage(rootSession, buildUpdateMessage({
+        planId: record?.plan?.planId,
+        subtaskId,
+        status: written?.status ?? row?.status,
+        delegates: written?.delegates ?? list,
+        revision,
+        note: '第三层成员完成即时通知已回报原分派负责人会话（delegates[].report）',
+      }))
+    } catch (error) {
+      record.errors = [...(record.errors ?? []), `${subtaskId} delegates[].report 标记写入失败：${truncate(String(error instanceof Error ? error.message : error), 200)}`].slice(-20)
+    }
   }
 
   function finishRound(record: any, session: any) {
@@ -6683,6 +7012,180 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
   }
 
   /**
+   * [2.5.6] 第三层叶子归属反查（叶子↔负责人双向请示/指示通道的读侧）。
+   *
+   * 叶子会话的父链是「叶子 → 部门负责人 → 根会话」，计划只挂在根会话上。
+   * 沿父链向上（≤3 跳，防环）找到第一个有计划记录的祖先，再按 delegate
+   * 登记（行 delegates[].childId）定位叶子所属的部门行与成员条目——与
+   * selfEffortTool 同一判据，不信任自报 subtaskId。找不到计划或 childId
+   * 未登记时返回 null，由调用方维持原错误语义。
+   */
+  function findDelegateLeafContext(childSession: any) {
+    let ancestorId = childSession?.header?.parentSession
+    for (let hop = 0; hop < 3 && typeof ancestorId === 'string' && ancestorId; hop += 1) {
+      let rec = state.records.get(ancestorId)
+      if (!rec?.plan) {
+        const sess = (ctx as any).sessions?.get?.(ancestorId)
+        if (sess) {
+          try { rec = reconstructFromSession(sess) } catch (error) { pushRecordError({ errors: [] } as any, error) }
+        }
+      }
+      if (rec?.plan) {
+        const deptRow = (rec.statuses ?? []).find((item: any) => Array.isArray(item?.delegates)
+          && item.delegates.some((d: any) => d?.childId === childSession.id))
+        if (!deptRow) return null
+        const member = deptRow.delegates.find((d: any) => d?.childId === childSession.id)
+        return { record: rec, row: deptRow, member, ownerId: ancestorId }
+      }
+      const sess = (ctx as any).sessions?.get?.(ancestorId)
+      ancestorId = sess?.header?.parentSession
+    }
+    return null
+  }
+
+  /**
+   * [T5-channel][契约v1 §1/§2] 通道留痕统一入口：补齐 v/id/ts 后交
+   * appendDeptMessage（fail-closed 校验＋显式 JOURNAL_WRITE_FAILED）。返回
+   * 消息 id 与写盘结果，供调用方把「投递结果」与「留痕结果」两者都报，
+   * 绝不互相掩盖（契约 §4）。
+   */
+  function channelJournal(fields: {
+    planId: string
+    subtaskId: string
+    // [T8] completion 复用同一留痕入口（T5 冻结契约 §5：叶子→head 完成汇报）。
+    kind: 'escalation' | 'instruction' | 'completion'
+    from: any
+    to: any
+    body: string
+    data?: Record<string, unknown>
+    delivery: any
+  }) {
+    const message = { v: 1, id: makeDeptMessageId(), ts: Date.now(), ...fields }
+    const written = appendDeptMessage(message)
+    return { id: message.id, result: written }
+  }
+
+  /**
+   * [T5-channel][契约v1 §3a] 第三层叶子的请示落档（写侧）：question/options/
+   * needs 经 ctx.subagents.sendMessage 投给部门负责人会话（row.childId），写
+   * kind='escalation' 留痕，经 applyStatus 把 delegates[i].escalation 子对象
+   * 持久化并发 durable update 到根会话。部门行本身的 status/closure 不变——
+   * 问题等负责人答，不是等主 Agent。announceSubtaskInterrupt 仅作辅助用户
+   * 可见通知，不替代给负责人的 sendMessage 投递。
+   */
+  async function escalateDelegateLeaf(agent: any, leaf: any, args: any) {
+    const { record, row, member, ownerId } = leaf
+    if (member.status === 'done') {
+      return { ok: false, code: 'ALREADY_DONE', subtaskId: row.subtaskId, member: member.member, error: '该成员已结算，不能再提交请示' }
+    }
+    const question = truncate(String(args?.question ?? '').trim(), MAX_QUESTION_CHARS)
+    if (!question) {
+      return { ok: false, code: 'INVALID_QUESTION', subtaskId: row.subtaskId, member: member.member, error: 'question 必填：写清需要部门负责人决定的单个问题' }
+    }
+    // [T5-channel][D6] 投递失败的请示允许重试：delivery='failed' 不走幂等分支，
+    // 重新投递并覆盖留档；只有已成功送达（sent）的请示才拦截重复提交。
+    if (member.escalation && member.escalation.delivery !== 'failed') {
+      return {
+        ok: true,
+        alreadyEscalated: true,
+        routedTo: 'head',
+        planId: record.plan.planId,
+        subtaskId: row.subtaskId,
+        member: member.member,
+        question: member.escalation.question ?? question,
+        message: '这条请示已经在上报队列里，不要重复提交；停止推进，等待部门负责人指示。',
+      }
+    }
+    const options = (Array.isArray(args?.options) ? args.options : [])
+      .slice(0, MAX_ESCALATION_OPTIONS)
+      .map((item: any) => truncate(needEntryText(item), 300))
+      .filter(Boolean)
+    const needs = (Array.isArray(args?.needs) ? args.needs : [])
+      .slice(0, 10)
+      .map((item: any) => truncate(needEntryText(item), 300))
+      .filter(Boolean)
+    const headChildId = typeof row.childId === 'string' ? row.childId : ''
+    if (!headChildId) {
+      return { ok: false, code: 'NO_SUBTASK', subtaskId: row.subtaskId, member: member.member, error: '部门行没有登记负责人会话（childId 缺失），无法投递请示' }
+    }
+    const service: any = (ctx as any).subagents
+    if (!service || typeof service.sendMessage !== 'function') {
+      return { ok: false, code: 'NO_SUBAGENT_SERVICE', subtaskId: row.subtaskId, member: member.member, error: '当前部署没有可用的 subagent 服务，无法投递请示' }
+    }
+    const now = Date.now()
+    const body = truncate([
+      `【第三层请示｜${member.member} → 部门负责人】`,
+      `子任务 ${row.subtaskId} 的第三层成员 ${member.member} 执行中请求指示：`,
+      question,
+      options.length ? `可选方向：${options.join('；')}` : '',
+      needs.length ? `跨部门需求：${needs.join('；')}` : '',
+      `请答复：dsh_workplan_instruct（subtaskId=${row.subtaskId}，member=${member.member}，instruction=你的决定）。答复前该成员停止推进、只做只读核对。`,
+    ].filter(Boolean).join('\n'), 4000)
+    const startedAt = Date.now()
+    let messageId = ''
+    let deliveryError = ''
+    try {
+      messageId = String(await service.sendMessage(agent, headChildId, [{ type: 'text', text: body }], {}) ?? '')
+    } catch (error: any) {
+      deliveryError = truncate(error instanceof Error ? error.message : String(error), 500)
+    }
+    const latencyMs = Date.now() - startedAt
+    const delivery = deliveryError ? 'failed' : 'sent'
+    const journal = channelJournal({
+      planId: record.plan.planId,
+      subtaskId: row.subtaskId,
+      kind: 'escalation',
+      from: { sessionId: String(agent?.session?.id ?? ''), role: member.role === 'expert' ? 'expert' : 'member', member: member.member },
+      to: { sessionId: headChildId, role: 'head' },
+      body,
+      data: { options, needs },
+      delivery: { status: delivery, ...(messageId ? { messageId } : {}), latencyMs, ...(deliveryError ? { code: 'DELIVERY_FAILED', error: deliveryError } : {}) },
+    })
+    const journalInfo = journal.result.ok ? {} : { journal: { ok: false, code: journal.result.code, error: journal.result.error } }
+    const revision = Number(row.revision ?? 0) + 1
+    const delegates = (Array.isArray(row.delegates) ? row.delegates : []).map((item: any) => (item?.childId === member.childId
+      ? { ...item, escalation: { question, options, needs, at: now, ...(messageId ? { messageId } : {}), delivery } }
+      : item))
+    record.statuses = applyStatus(record.statuses, row.subtaskId, { delegates, revision, updatedBy: 'child' })
+    record.updatedAt = now
+    try {
+      const written = record.statuses.find((item: any) => item?.subtaskId === row.subtaskId)
+      const ownerSession = (ctx as any).sessions?.get?.(ownerId)
+      // durable 回放挂在计划所有者（根会话）上：刷新/重启后请示不丢。
+      appendUserMessage(ownerSession, buildUpdateMessage({
+        planId: record.plan.planId,
+        subtaskId: row.subtaskId,
+        status: written?.status ?? row.status,
+        delegates: written?.delegates ?? delegates,
+        revision,
+        note: `第三层成员 ${member.member} 提交请示（待指示）`,
+      }))
+      // 辅助用户可见通知（不替代 sendMessage 投递）：负责人当下看到谁在等谁。
+      const leader = (ctx as any).sessions?.get?.(headChildId)
+      announceSubtaskInterrupt(record, leader, row.subtaskId,
+        `第三层成员 ${member.member} 请求指示：${truncate(question, 160)}；性质：等待部门负责人拍板，不是执行失败；处理：负责人用 dsh_workplan_instruct（subtaskId=${row.subtaskId}，member=${member.member}）答复后，该成员恢复执行。`)
+    } catch (error) {
+      pushRecordError(record, error)
+    }
+    if (deliveryError) {
+      return { ok: false, code: 'DELIVERY_FAILED', subtaskId: row.subtaskId, member: member.member, error: deliveryError, ...journalInfo }
+    }
+    return {
+      ok: true,
+      routedTo: 'head',
+      planId: record.plan.planId,
+      subtaskId: row.subtaskId,
+      member: member.member,
+      messageId,
+      latencyMs,
+      question,
+      revision,
+      ...journalInfo,
+      message: '已上报部门负责人。请立即停止推进，只允许做只读核对；等待指示期间不要开始新的写入或大改。',
+    }
+  }
+
+  /**
    * [1.11.0] 子 → 父的唯一反向通道（T4 C-09 / T6 M5）。
    *
    * 子会话只知道自己的 `session.id` 和父会话 id。这里用父链 + `childId` 反查
@@ -6714,15 +7217,24 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         }
       }
     }
-    if (!record?.plan) {
-      return {
-        ok: false,
-        code: 'NO_PLAN',
-        error: '父会话没有可关联的计划；请在结果块写 status=blocked + question，由主 Agent 处理',
+    const row = (record?.statuses ?? []).find((item: any) => item?.childId === childSession.id)
+    /*
+     * [2.5.6] 第三层叶子兜底（治本）：叶子的直接父会话是部门负责人，负责人
+     * 自己没有计划记录——旧实现在这里直接 NO_PLAN，叶子永远无法请示。现在
+     * 经 delegate 登记（根计划行 delegates[].childId）反查所属部门行，把
+     * 「待指示」落在该行的第三层台账上，并通知负责人。第一层（父会话即计划
+     * 所有者）路径逐字节不变。
+     */
+    if (!record?.plan || !row) {
+      const leaf = findDelegateLeafContext(childSession)
+      if (leaf) return await escalateDelegateLeaf(agent, leaf, args)
+      if (!record?.plan) {
+        return {
+          ok: false,
+          code: 'NO_PLAN',
+          error: '父会话没有可关联的计划；请在结果块写 status=blocked + question，由主 Agent 处理',
+        }
       }
-    }
-    const row = (record.statuses ?? []).find((item: any) => item?.childId === childSession.id)
-    if (!row) {
       return {
         ok: false,
         code: 'NO_SUBTASK',
@@ -6919,17 +7431,45 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
   /**
    * [1.11.0] 主 → 子下发指示（T4 C-10 / T6 M6）。
    *
-   * 只有根会话能调用；只接受 `closure:'escalated'` 的行；只投递给本会话直接
-   * 子会话。投递失败时不改状态（不伪造成「已指示」），把错误原样交给主 Agent。
+   * [T5-channel][契约v1 §3b] 放权为「目标子会话的直接父会话」可调用：根会话
+   * 答复第一层部门行（行为逐字节不变）；部门负责人答复自己派出的第三层叶子
+   * （严格 lineage：调用者必须是该部门行的 childId，目标必须登记在本行
+   * delegates 且在调用者的直接子会话 catalog 里）。非直系（跨行、跨层、无关
+   * 会话）一律拒绝。根路径只接受 `closure:'escalated'` 的行；负责人路径按
+   * member/sessionId 指定目标。投递失败时不改状态（不伪造成「已指示」），
+   * 把错误原样交给调用方。
    */
   async function instructSubtask(agent: any, args: any, signal?: any, existingRecord?: any) {
     const session = agent?.session
     if (!session) return { ok: false, code: 'NO_SESSION', error: '只能在会话内下发指示' }
-    if (!isRootSession(session)) return { ok: false, code: 'NOT_ROOT', error: '只有根会话可以下发指示' }
-    let record = existingRecord ?? state.records.get(session.id)
-    if (!record?.plan) record = reconstructFromSession(session, args?.planId)
-    record = adoptRequestedPlan(session, record, args?.planId)
-    if (!record?.plan) return { ok: false, code: 'NO_PLAN', error: '当前会话还没有已生成的计划' }
+    const callerIsRoot = isRootSession(session)
+    let record: any
+    if (callerIsRoot) {
+      record = existingRecord ?? state.records.get(session.id)
+      if (!record?.plan) record = reconstructFromSession(session, args?.planId)
+      record = adoptRequestedPlan(session, record, args?.planId)
+      if (!record?.plan) return { ok: false, code: 'NO_PLAN', error: '当前会话还没有已生成的计划' }
+    } else {
+      /*
+       * [T5-channel][契约v1 §3b] 负责人答复自己的叶子：先沿父链反查根计划，
+       * 再判负责人身份（根记录中 statuses[].childId === session.id 的行）。
+       * 既非根也非登记负责人 ⇒ 维持 NOT_ROOT；subtaskId 可省略（默认自己的
+       * 行），给了必须等于自己的行，否则 UNKNOWN_SUBTASK。目标登记/catalog/
+       * 父链的严格 lineage 在 instructDelegateLeaf 内硬校验。
+       */
+      record = findAncestorPlanRecord(session)
+      if (!record?.plan) return { ok: false, code: 'NOT_ROOT', error: '只有根会话可以下发指示' }
+      if (typeof args?.planId === 'string' && args.planId && record.plan.planId !== args.planId) {
+        return { ok: false, code: 'NO_PLAN', error: `指定计划 ${args.planId} 与当前会话关联的计划不一致` }
+      }
+      const headRow = (record.statuses ?? []).find((item: any) => item?.childId === session.id)
+      if (!headRow) return { ok: false, code: 'NOT_ROOT', error: '只有根会话可以下发指示' }
+      const requested = typeof args?.subtaskId === 'string' ? args.subtaskId.trim() : ''
+      if (requested && requested !== String(headRow.subtaskId)) {
+        return { ok: false, code: 'UNKNOWN_SUBTASK', subtaskId: requested, error: `未知子任务：${requested}（负责人只能答复自己的部门行 ${String(headRow.subtaskId)}）` }
+      }
+      return instructDelegateLeaf(agent, args, signal, record, headRow)
+    }
     clearAutoResumeTimer(record, 'manual-instruct')
     const subtaskId = typeof args?.subtaskId === 'string' ? args.subtaskId.trim() : ''
     if (!subtaskId) return { ok: false, code: 'MISSING_SUBTASK', error: '缺少 subtaskId' }
@@ -7037,6 +7577,276 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       deliveryReady: readiness.ready,
       hint: '指示已投递，该行已变为「已收到指示」。子 Agent 会开启新一轮；完成前仍不得交付。',
     }
+  }
+
+  /**
+   * [2.5.6] 沿父链向上（≤3 跳，防环）找到第一个有计划记录的祖先会话。
+   * 负责人 instruct 与叶子 escalate 共用同一父链判据；不信任自报 planId。
+   */
+  function findAncestorPlanRecord(session: any) {
+    let ancestorId = session?.header?.parentSession
+    for (let hop = 0; hop < 3 && typeof ancestorId === 'string' && ancestorId; hop += 1) {
+      let rec = state.records.get(ancestorId)
+      if (!rec?.plan) {
+        const sess = (ctx as any).sessions?.get?.(ancestorId)
+        if (sess) {
+          try { rec = reconstructFromSession(sess) } catch (error) { pushRecordError({ errors: [] } as any, error) }
+        }
+      }
+      if (rec?.plan) return rec
+      const sess = (ctx as any).sessions?.get?.(ancestorId)
+      ancestorId = sess?.header?.parentSession
+    }
+    return null
+  }
+
+  /**
+   * [T5-channel][契约v1 §3b] 负责人 → 第三层叶子的指示投递（instruct 的叶子分支）。
+   *
+   * 负责人身份与行级 lineage 已在 instructSubtask 校验（调用者 == 部门行
+   * childId）；这里按 member/sessionId（至少其一）定位本行 delegates 登记的
+   * 目标，再校验 spawnedChildIds 直接子会话证据＋父链双保险。投递复用
+   * ctx.subagents.sendMessage 既有通道（与 follow-up/延期告知同一条），不新建
+   * 队列；写 kind='instruction' 留痕（data.inReplyTo 指向被答复的请示）；
+   * 持久化 delegates[i].lastInstruction 并清 escalation；负责人行 closure
+   * 不变。投递失败不改状态（不伪造成「已指示」）。
+   */
+  async function instructDelegateLeaf(agent: any, args: any, signal: any, record: any, current: any) {
+    const session = agent.session
+    const subtaskId = String(current.subtaskId)
+    const memberName = typeof args?.member === 'string' ? args.member.trim() : ''
+    const targetSessionId = typeof args?.sessionId === 'string' ? args.sessionId.trim() : ''
+    if (!memberName && !targetSessionId) {
+      return { ok: false, code: 'MISSING_TARGET', subtaskId, error: 'member 与 sessionId 至少提供其一：指定要答复的第三层成员' }
+    }
+    const delegates = Array.isArray(current.delegates) ? current.delegates : []
+    const target = memberName
+      ? delegates.find((item: any) => item?.member === memberName)
+      : delegates.find((item: any) => item?.childId === targetSessionId)
+    if (!target) {
+      return memberName
+        ? { ok: false, code: 'UNKNOWN_MEMBER', subtaskId, member: memberName, error: `成员 ${memberName} 未登记在本行 delegates[]` }
+        : { ok: false, code: 'NOT_DELEGATE', subtaskId, sessionId: targetSessionId, error: `${targetSessionId} 不是本行登记的第三层成员（跨部门/未登记目标一律拒绝）` }
+    }
+    if (memberName && targetSessionId && target.childId !== targetSessionId) {
+      return { ok: false, code: 'NOT_DELEGATE', subtaskId, error: 'member 与 sessionId 指向不同成员，拒绝投递' }
+    }
+    const childId = typeof target.childId === 'string' ? target.childId : ''
+    if (!childId) {
+      return { ok: false, code: 'NOT_DELEGATE', subtaskId, member: target.member, error: '该成员没有登记子会话 childId，无法投递指示' }
+    }
+    if (!spawnedChildIds(session).has(childId)) {
+      return { ok: false, code: 'NOT_DIRECT_CHILD', subtaskId, error: `${childId} 不是本会话的直接子会话（父会话 catalog 未登记），拒绝投递` }
+    }
+    const targetSession = (ctx as any).sessions?.get?.(childId)
+    if (targetSession?.header?.parentSession && targetSession.header.parentSession !== session.id) {
+      return { ok: false, code: 'NOT_DIRECT_CHILD', subtaskId, error: '严格血缘校验失败：目标子会话的直接父会话不是调用者，拒绝投递' }
+    }
+    const instruction = truncate(String(args?.instruction ?? args?.text ?? '').trim(), MAX_INSTRUCTION_CHARS)
+    if (!instruction) return { ok: false, code: 'INVALID_INSTRUCTION', subtaskId, error: 'instruction 必填：写清要成员执行的决定' }
+    const service: any = (ctx as any).subagents
+    if (!service || typeof service.sendMessage !== 'function') {
+      return { ok: false, code: 'NO_SUBAGENT_SERVICE', subtaskId, error: '当前部署没有可用的 subagent 服务，无法投递指示' }
+    }
+    // inReplyTo（可选）：从留痕回放找该成员最近一条请示消息 id；读失败不阻断投递。
+    let inReplyTo = ''
+    try {
+      const prior = readDeptMessages(record.plan.planId, { kind: 'escalation' })
+      if (prior.ok) {
+        const match = [...prior.messages].reverse().find((m: any) => m.from?.sessionId === childId && m.subtaskId === subtaskId)
+        inReplyTo = match?.id ?? ''
+      }
+    } catch { /* 留痕读失败不阻断投递；inReplyTo 可选 */ }
+    const body = truncate([
+      '【部门负责人指示（对应你此前提交的请示）】',
+      instruction,
+      '',
+      '请按上述指示继续原任务。若仍受阻，先调用 dsh_workplan_escalate 再次上报，然后停止推进等待指示；不要自行猜测未被回答的部分。',
+    ].join('\n'), 4000)
+    const startedAt = Date.now()
+    let messageId = ''
+    try {
+      messageId = String(await service.sendMessage(agent, childId, [{ type: 'text', text: body }], { signal }) ?? '')
+    } catch (error: any) {
+      const errorText = truncate(error instanceof Error ? error.message : String(error), 500)
+      const failedJournal = channelJournal({
+        planId: record.plan.planId,
+        subtaskId,
+        kind: 'instruction',
+        from: { sessionId: session.id, role: 'head' },
+        to: { sessionId: childId, role: target.role === 'expert' ? 'expert' : 'member', member: target.member },
+        body,
+        ...(inReplyTo ? { data: { inReplyTo } } : {}),
+        delivery: { status: 'failed', code: 'DELIVERY_FAILED', error: errorText, latencyMs: Date.now() - startedAt },
+      })
+      return {
+        ok: false,
+        code: 'DELIVERY_FAILED',
+        subtaskId,
+        member: target.member,
+        sessionId: childId,
+        error: errorText,
+        hint: '状态未改变，该成员仍是待指示；可重试投递。',
+        ...(failedJournal.result.ok ? {} : { journal: { ok: false, code: failedJournal.result.code, error: failedJournal.result.error } }),
+      }
+    }
+    const latencyMs = Date.now() - startedAt
+    const now = Date.now()
+    const journal = channelJournal({
+      planId: record.plan.planId,
+      subtaskId,
+      kind: 'instruction',
+      from: { sessionId: session.id, role: 'head' },
+      to: { sessionId: childId, role: target.role === 'expert' ? 'expert' : 'member', member: target.member },
+      body,
+      ...(inReplyTo ? { data: { inReplyTo } } : {}),
+      delivery: { status: 'sent', ...(messageId ? { messageId } : {}), latencyMs },
+    })
+    const revision = Number(current.revision ?? 0) + 1
+    const delegatesList = (Array.isArray(current.delegates) ? current.delegates : []).map((item: any) => (item?.childId === childId
+      ? {
+          ...item,
+          status: 'running',
+          closure: 'instructed',
+          lastInstruction: { text: instruction, at: now, ...(messageId ? { messageId } : {}), delivery: 'sent' },
+          escalation: undefined,
+          instructionSeq: revision,
+          instructionOverdue: false,
+          ackedAt: null,
+          blockedKind: null,
+          error: null,
+          finishedAt: null,
+        }
+      : item))
+    record.statuses = applyStatus(record.statuses, subtaskId, { delegates: delegatesList, revision, updatedBy: 'agent' })
+    record.updatedAt = now
+    try {
+      const written = record.statuses.find((item: any) => item?.subtaskId === subtaskId)
+      const update = buildUpdateMessage({
+        planId: record.plan.planId,
+        subtaskId,
+        status: written?.status ?? current.status,
+        delegates: written?.delegates ?? delegatesList,
+        revision,
+        note: `负责人已向第三层成员 ${target.member} 下发指示`,
+      })
+      // durable 回放挂在计划所有者（根会话）上；负责人会话留一份供其回放核对。
+      const ownerSession = (ctx as any).sessions?.get?.(record.plan.sessionId)
+      appendUserMessage(ownerSession, update)
+      if (ownerSession !== session) appendUserMessage(session, update)
+    } catch (error) {
+      pushRecordError(record, error)
+    }
+    scheduleDelegateInstructionAck(record, subtaskId, target.member, childId, revision)
+    return {
+      ok: true,
+      planId: record.plan.planId,
+      subtaskId,
+      member: target.member,
+      sessionId: childId,
+      messageId,
+      latencyMs,
+      revision,
+      ...(journal.result.ok ? {} : { journal: { ok: false, code: journal.result.code, error: journal.result.error } }),
+      hint: '指示已投递给第三层成员，该成员已变为「已收到指示」。它会开启新一轮；收齐结论前仍不得写最终结果块。',
+    }
+  }
+
+  /**
+   * [2.5.6] 叶子指示回执：与 scheduleInstructionAck 同一套三观察点语义
+   * （轮询 seq 增长=acknowledged；60s 无增长=instructionOverdue；180s 无
+   * 增长=blocked/no-ack），只是读写目标从部门行换成行内 delegates 成员条目。
+   * 独立实现而不改动根会话共用的 scheduleInstructionAck，保证第一层零回归。
+   */
+  function scheduleDelegateInstructionAck(record: any, subtaskId: string, member: string, childId: string, revision: number) {
+    const rowOf = () => record.statuses.find((item: any) => item?.subtaskId === subtaskId)
+    const entryOf = () => {
+      const row = rowOf()
+      return (Array.isArray(row?.delegates) ? row.delegates : []).find((item: any) => item?.member === member) ?? null
+    }
+    const patchEntry = (patch: any) => {
+      const row = rowOf()
+      if (!row) return null
+      const list = (Array.isArray(row.delegates) ? row.delegates : [])
+        .map((item: any) => (item?.member === member ? { ...item, ...patch } : item))
+      const nextRevision = Number(row.revision ?? 0) + 1
+      record.statuses = applyStatus(record.statuses, subtaskId, { delegates: list, revision: nextRevision, updatedBy: 'system' })
+      record.updatedAt = Date.now()
+      return entryOf()
+    }
+    const readSeq = () => {
+      try {
+        const seq = Number((ctx as any).sessions?.get?.(childId)?.seq)
+        return Number.isFinite(seq) ? seq : undefined
+      } catch {
+        return undefined
+      }
+    }
+    const baseline = readSeq()
+    let stopped = false
+    const timers: Array<ReturnType<typeof setTimeout> | ReturnType<typeof setInterval>> = []
+    const stop = () => {
+      if (stopped) return
+      stopped = true
+      for (const timer of timers) {
+        clearTimeout(timer as any)
+        clearInterval(timer as any)
+      }
+    }
+    const sameAttempt = (entry: any) => {
+      if (stopped) return false
+      if (!entry || entry.closure !== 'instructed') return false
+      return Number(entry.instructionSeq ?? 0) === Number(revision)
+    }
+    const unchanged = (entry: any) => {
+      if (!sameAttempt(entry)) return false
+      const seq = readSeq()
+      if (seq === undefined || baseline === undefined) return true
+      return seq <= baseline
+    }
+    const poll = setInterval(() => {
+      const entry = entryOf()
+      if (!sameAttempt(entry)) { stop(); return }
+      const seq = readSeq()
+      if (seq === undefined || baseline === undefined || seq <= baseline) return
+      try {
+        patchEntry({
+          closure: 'acknowledged',
+          ackedAt: Date.now(),
+          instructionOverdue: false,
+        })
+      } catch {
+        return
+      }
+      stop()
+    }, INSTRUCTION_POLL_MS)
+    poll.unref?.()
+    timers.push(poll)
+    const notice = setTimeout(() => {
+      if (!unchanged(entryOf())) return
+      try { patchEntry({ instructionOverdue: true }) } catch { /* entry moved on */ }
+    }, INSTRUCTION_ACK_NOTICE_MS)
+    notice.unref?.()
+    timers.push(notice)
+    const deadline = setTimeout(() => {
+      if (!unchanged(entryOf())) { stop(); return }
+      const seconds = Math.round(INSTRUCTION_ACK_DEADLINE_MS / 1000)
+      const message = `指示下发后 ${seconds}s 成员会话仍无任何新事件（no-ack）：指示没有被执行`
+      try {
+        patchEntry({
+          status: 'blocked',
+          closure: 'blocked',
+          blockedKind: 'no-ack',
+          error: message,
+          summary: `未完成：${message}`,
+          finishedAt: Date.now(),
+        })
+      } catch {
+        // Entry already left instructed.
+      }
+      stop()
+    }, INSTRUCTION_ACK_DEADLINE_MS)
+    timers.push(deadline)
   }
 
   /**
@@ -7294,13 +8104,41 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     // delegateDeepThinks 双通道落档，重置保留、durable 回放（G1 双侧接线）。
     const deepThinkStash = { ...(currentRow()?.delegateDeepThinks ?? {}), [member.member]: leafDeepThink }
     persistSelf({ delegates: registerList, delegateSelfEfforts: stash, delegateDeepThinks: deepThinkStash })
+    /*
+     * [2.5.2][T4b][D1] 负责人 agent 解析必须先于 interrupt，且用宿主同款安全
+     * 访问器。根因（reports/D1-D2-root-cause-diagnosis.md §1）：旧实现在
+     * interrupt 之后用属性访问 `(ctx as any).agents?.get?.(leaderId)`，而插件
+     * inject 清单（host.ts）不含 'agents'——Cordis 上下文代理对未注入服务的
+     * 属性访问直接抛 `cannot get property "agents" without inject`（可选链挡
+     * 不住代理 getter 抛错）。异常发生在 interrupt 之后、startActivation 之前、
+     * 且不在任何 try/catch 内 ⇒ 接续会话从未创建、失败台账路径不可达，四个
+     * 叶子永久死亡。现在：
+     *  ① 解析移到 interrupt 之前：ctx.get('agents') 安全访问器（宿主
+     *     dsh-subagent / dsh-tool-jobs 同款范式），整体 try/catch；无 get 方法
+     *     的上下文（旧测试夹具）回退属性访问，同样在 try/catch 内。
+     *  ② 解析失败 ⇒ 不中断 phase-0；自配档与两轮思考产物已登记保留
+     *     （delegateSelfEfforts / delegateDeepThinks 已 durable 落档，负责人
+     *     重派该成员时读档直连 phase-1），显式返回
+     *     SELF_EFFORT_CONTINUATION_FAILED，绝不静默。
+     */
+    let leaderAgent: any = null
+    try {
+      const agentsService = typeof (ctx as any).get === 'function' ? (ctx as any).get('agents') : (ctx as any).agents
+      leaderAgent = agentsService?.get?.(leaderId) ?? null
+    } catch { leaderAgent = null }
+    if (!leaderAgent) {
+      const message = '自配档与两轮思考产物已登记，但负责人 agent 解析失败（agents 服务不可用）：phase-0 未被中断，登记保留——负责人可重派该成员，重派将读档直接以自配档接续 phase-1（禁止静默降档）'
+      const failedList = (currentRow()?.delegates ?? [])
+        .map((d: any) => (d?.childId === childSession.id ? { ...d, status: 'failed', error: truncate(message, 300), finishedAt: Date.now() } : d))
+      persistSelf({ delegates: failedList })
+      return { ok: false, code: 'SELF_EFFORT_CONTINUATION_FAILED', subtaskId, member: member.member, selfEffort, error: message }
+    }
     // 接续：中断 phase-0（parent authority, continuable），尽力而为。
     try {
       if (typeof (ctx as any).subagents?.interruptByParent === 'function') {
         (ctx as any).subagents.interruptByParent(childSession.id, leaderId, 'continuable')
       }
     } catch { /* 中断失败不阻断接续 */ }
-    const leaderAgent = (ctx as any).agents?.get?.(leaderId)
     const departmentLabel = DEPARTMENTS[row.department as keyof typeof DEPARTMENTS]?.zh ?? String(row.department ?? '部门')
     const fullTask = (Array.isArray(row.consolidation?.assignments) ? row.consolidation.assignments : [])
       .find((a: any) => a?.member === member.member)?.task ?? member.task
@@ -7319,20 +8157,25 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     let lastError: any = null
     for (let i = 0; i < 2; i += 1) {
       try {
+        // [2.5.5][治本] 第三处 spawn 同口径：spec 顶层契约（prompt/parent/cwd/agentOptions/maxDepth）。
         activation = await ctx.subagents.startActivation({
           provider: 'spawn',
           label: `${row.department}:${subtaskId}→${member.member}(self:${selfEffort})`.slice(0, 120),
-          request: {
-            prompt: [{ type: 'text', text: promptText }],
-            parent: leaderAgent ?? agent,
-            cwd: typeof childSession.header?.cwd === 'string' && childSession.header.cwd ? childSession.header.cwd : undefined,
-            agentOptions: {
-              ...(modelSelection?.provider && modelSelection?.model ? { provider: modelSelection.provider, model: modelSelection.model } : {}),
-              reasoningEffort: selfEffort,
-            },
-            maxDepth: 2,
+          prompt: [{ type: 'text', text: promptText }],
+          parent: leaderAgent ?? agent,
+          cwd: typeof childSession.header?.cwd === 'string' && childSession.header.cwd ? childSession.header.cwd : undefined,
+          agentOptions: {
+            ...(modelSelection?.provider && modelSelection?.model ? { provider: modelSelection.provider, model: modelSelection.model } : {}),
+            reasoningEffort: selfEffort,
           },
-          signal,
+          maxDepth: 2,
+          /*
+           * [2.5.2][T4b][D1] 接续是平台驱动的重激活：signal 不得复用调用方
+           * （phase-0 回合）的 signal——phase-0 即将被 interrupt，复用会让接续
+           * 在 publication 前被连带取消。宿主契约 spec.signal 必填、语义只管
+           * publication 前取消 ⇒ 用独立不中止的控制器。
+           */
+          signal: new AbortController().signal,
           delivery: 'caller',
         })
         break
@@ -7350,18 +8193,25 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       .map((d: any) => (d?.childId === childSession.id ? { ...d, childId: newChildId, status: 'running', startedAt: Date.now(), finishedAt: null, error: null } : d))
     const written = persistSelf({ delegates: continuedList })
     if (activation && typeof activation.result?.then === 'function') {
-      activation.result.then((outcome: any) => {
+      // [T8] 结算回调异步化：完成即时通知经 sendMessage 定向投递（T5 契约）。
+      activation.result.then(async (outcome: any) => {
         try {
           const completed = outcome?.stopReason === 'completed'
           const current = (record.statuses ?? []).find((item: any) => item?.subtaskId === subtaskId)
           const list = (Array.isArray(current?.delegates) ? current.delegates : [])
             .map((item: any) => (item?.childId === newChildId
-              ? { ...item, status: completed ? 'done' : 'failed', summary: truncate(resultText(outcome), 300), error: completed ? null : truncate(String(outcome?.diagnostic ?? `子会话结束状态 ${outcome?.stopReason}`), 300), finishedAt: Date.now() }
+              // [T5-channel] 与 delegateTool 结算同款：待指示优先于结算——escalation
+              // 子对象存在即请示未答复，不得覆盖成 done/failed（契约v1 权威形状）。
+              ? (item?.escalation
+                ? item
+                : { ...item, status: completed ? 'done' : 'failed', closure: null, summary: truncate(resultText(outcome), 300), error: completed ? null : truncate(String(outcome?.diagnostic ?? `子会话结束状态 ${outcome?.stopReason}`), 300), finishedAt: Date.now() })
               : item))
           const revision = Number(current?.revision ?? 0) + 1
           record.statuses = applyStatus(record.statuses, subtaskId, { delegates: list, revision, updatedBy: 'child' })
           record.updatedAt = Date.now()
           appendUserMessage(rootSession, buildUpdateMessage({ planId: record.plan.planId, subtaskId, status: current?.status ?? row.status, delegates: list, revision }))
+          // [T8] 与 delegateTool 结算同款：完成即时通知 → 原分派负责人会话（leaderId）。
+          await emitDelegateDoneNotices(record, (ctx as any).sessions?.get?.(String(leaderId ?? '')) ?? leaderSession, rootSession, subtaskId)
         } catch { /* 结算留痕失败不影响主链路 */ }
       }).catch(() => {})
     }
@@ -7443,6 +8293,8 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
           status: written?.status ?? row.status,
           ...(patch.consolidation === undefined ? {} : { consolidation: written?.consolidation }),
           ...(patch.delegates === undefined ? {} : { delegates: written?.delegates }),
+          // [2.5.4][T3R1] 门禁审计随 durable workplan-update 落盘（A3 可复核）。
+          ...(patch.gateAudit === undefined ? {} : { gateAudit: written?.gateAudit }),
           // [2.5.0] 整体任务等级随 durable workplan-update 回放，重启不丢。
           ...(patch.effortOverride === undefined ? {} : { effortOverride: written?.effortOverride }),
           revision: written?.revision ?? revision,
@@ -7451,6 +8303,18 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         pushRecordError(record, error)
       }
       return record.statuses.find((item: any) => item?.subtaskId === subtaskId)
+    }
+
+    /*
+     * [2.5.4][T3R1] 门禁审计记录器（T3 A3）：review/dispatch 的每次拒绝都经
+     * persist 留痕（durable workplan-update + applyStatus 消毒，有界 20 条）。
+     * 放行记录并入各自动作既有的 persist 补丁（review 登记/dispatch 台账），
+     * 避免同一动作二次 persist 造成 revision 竞争。
+     */
+    const recordGate = (gateAction: 'review' | 'dispatch', ok: boolean, code?: string | null) => {
+      const prior = Array.isArray(row.gateAudit) ? row.gateAudit : []
+      const entry = { at: Date.now(), action: gateAction, ok, code: ok ? null : String(code ?? 'UNKNOWN') }
+      return persist({ gateAudit: [...prior, entry].slice(-20) })
     }
 
     if (action === 'status') {
@@ -7462,12 +8326,14 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         action,
         consolidation: row.consolidation ?? null,
         effortOverride: row.effortOverride ?? null,
+        // [2.5.4][T3R1] 门禁审计对负责人可见（A3：拒绝/放行记录可复核）。
+        gateAudit: Array.isArray(row.gateAudit) ? row.gateAudit : [],
         delegates,
         hint: !row.consolidation
           ? '尚未提交梳理产物：先调用 action="review"（用户要求 4 的硬门禁）。'
           : delegates.length === 0
             ? '梳理产物已登记，可调用 action="dispatch" 正式派发给顶尖专家与组员。'
-            : '第三层已派发；各下级结论会送回本会话，收齐后汇总核验，再写最终结果块。',
+            : '第三层已派发；各下级结论会送回本会话，收齐后汇总核验，再写最终结果块。若有成员 closure=escalated（待指示），必须当轮用 dsh_workplan_instruct（subtaskId=本部门行 ID，多个成员同时请示时加 member）答复，不要沉默略过。',
       }
     }
 
@@ -7485,6 +8351,8 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       // effortOverride（重置不清除的任务级配置），全程贯穿不丢。
       const preview = planDelegations({ consolidation: input, model, taskEffortFallback: row.effortOverride })
       if (!preview.ok) {
+        // [2.5.4][T3R1] 门禁拒绝留痕（A3）：薄产物/缺产物都记入 gateAudit。
+        recordGate('review', false, preview.code ?? 'DELEGATE_CONSOLIDATION_INVALID')
         return {
           ok: false,
           code: preview.code ?? 'DELEGATE_CONSOLIDATION_INVALID',
@@ -7511,6 +8379,8 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         // [2.5.0] 用户要求 2：负责人配置的整体等级写入状态行，本任务每次
         // 派发/重试/续跑优先读它（resolveTaskEffort），全程生效、durable 回放。
         ...(preview.taskEffort ? { effortOverride: preview.taskEffort } : {}),
+        // [2.5.4][T3R1] 门禁放行留痕（A3）：合格梳理登记成功记入 gateAudit。
+        gateAudit: [...(Array.isArray(row.gateAudit) ? row.gateAudit : []), { at: Date.now(), action: 'review', ok: true, code: null }].slice(-20),
       })
       /*
        * [2.5.0][自配档] 登记后立即中断 phase-0 回合（parent authority, continuable）；
@@ -7552,6 +8422,8 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     // effortOverride（durable 回放/重置后依然全程贯穿）。
     const delegationPlan = planDelegations({ consolidation, model, taskEffortFallback: row.effortOverride })
     if (!delegationPlan.ok) {
+      // [2.5.4][T3R1] 分派门禁拒绝留痕（A3）：未梳理/薄产物一律记录拒因。
+      recordGate('dispatch', false, delegationPlan.code ?? 'DELEGATE_CONSOLIDATION_MISSING')
       return {
         ok: false,
         code: delegationPlan.code ?? 'DELEGATE_CONSOLIDATION_MISSING',
@@ -7637,11 +8509,11 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       let memberStatus = 'running'
       let memberError: string | null = null
       try {
+        // [2.5.5][治本] 同 executeSubtask：spec 顶层契约（prompt/parent/cwd/agentOptions/maxDepth）。
         const activation = await ctx.subagents.startActivation({
           provider: 'spawn',
           label: `${row.department}:${subtaskId}→${assignment.member}`.slice(0, 120),
-          request: {
-            prompt: [{ type: 'text', text: promptText }],
+          prompt: [{ type: 'text', text: promptText }],
             parent: agent,
             cwd,
             agentOptions: {
@@ -7653,26 +8525,35 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
             },
             // 成员在 depth 2；任何第四层（depth 3）被宿主绝对深度上限硬拒。
             maxDepth: 2,
-          },
           signal,
           delivery: 'caller',
         })
         childId = typeof activation?.childId === 'string' ? activation.childId : null
         if (activation && typeof activation.result?.then === 'function') {
           const settledChildId = childId
-          activation.result.then((outcome: any) => {
+          // [T8] 结算回调异步化：完成即时通知经 sendMessage 定向投递（T5 契约）。
+          activation.result.then(async (outcome: any) => {
             try {
               const completed = outcome?.stopReason === 'completed'
               const current = (record.statuses ?? []).find((item: any) => item?.subtaskId === subtaskId)
               const list = (Array.isArray(current?.delegates) ? current.delegates : [])
                 .map((item: any) => (item?.childId === settledChildId
-                  ? {
-                      ...item,
-                      status: completed ? 'done' : 'failed',
-                      summary: truncate(resultText(outcome), 300),
-                      error: completed ? null : truncate(String(outcome?.diagnostic ?? `子会话结束状态 ${outcome?.stopReason}`), 300),
-                      finishedAt: Date.now(),
-                    }
+                  /*
+                   * [2.5.6] 待指示优先于结算：叶子请示后结束回合（stopReason
+                   * 可能是 completed），但请示还没被负责人答复——结算不得把
+                   * escalated 覆盖成 done/failed，否则「待指示」凭空消失。
+                   * 负责人 instruct 投递后叶子恢复执行，正常结算再收敛。
+                   */
+                  ? (item?.escalation
+                    ? item
+                    : {
+                        ...item,
+                        status: completed ? 'done' : 'failed',
+                        closure: null,
+                        summary: truncate(resultText(outcome), 300),
+                        error: completed ? null : truncate(String(outcome?.diagnostic ?? `子会话结束状态 ${outcome?.stopReason}`), 300),
+                        finishedAt: Date.now(),
+                      })
                   : item))
               const revision = Number(current?.revision ?? 0) + 1
               record.statuses = applyStatus(record.statuses, subtaskId, { delegates: list, revision, updatedBy: 'child' })
@@ -7684,6 +8565,9 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
                 delegates: list,
                 revision,
               }))
+              // [T8] 完成即时通知 → 原分派负责人会话（row.childId）：done-only、
+              // report.state='sent' 幂等、投递失败留 failed 待兜底补发，绝不回滚结算。
+              await emitDelegateDoneNotices(record, (ctx as any).sessions?.get?.(String(row.childId ?? '')) ?? childSession, parentSession, subtaskId)
             } catch {
               // 结算留痕失败不影响主链路：看板下次刷新按内存行渲染。
             }
@@ -7707,7 +8591,12 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         finishedAt: null,
       })
     }
-    const written = persist({ delegates })
+    // [2.5.4][T3R1] 分派门禁放行留痕（A3）：并入台账 persist，同一动作不二次
+    // persist（避免 revision 竞争）；gateAudit 经 applyStatus 消毒 + durable 回放。
+    const written = persist({
+      delegates,
+      gateAudit: [...(Array.isArray(row.gateAudit) ? row.gateAudit : []), { at: Date.now(), action: 'dispatch', ok: true, code: null }].slice(-20),
+    })
     const rejected = delegates.filter((item) => item.status === 'rejected')
     return {
       ok: rejected.length < delegates.length,
@@ -7719,7 +8608,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       taskEffort: delegationPlan.taskEffort,
       effortOverride: written?.effortOverride ?? row.effortOverride ?? null,
       ...(rejected.length ? { rejected: rejected.map((item) => ({ member: item.member, error: item.error })) } : {}),
-      hint: '第三层已派发（一层下级、叶子层，第四层会被硬拒）。每位专家/组员的完成结论会送回本会话（delivery=caller）；收齐后由你汇总核验，再写最终结果块。用 action="status" 查看进度。',
+      hint: '第三层已派发（一层下级、叶子层，第四层会被硬拒）。每位专家/组员的完成结论会送回本会话（delivery=caller）；收齐后由你汇总核验，再写最终结果块。用 action="status" 查看进度。成员遇阻会经 dsh_workplan_escalate 在你这里落「待指示」（delegates[].closure=escalated）：必须当轮用 dsh_workplan_instruct（subtaskId=本部门行 ID，多个成员同时请示时加 member）答复，投递成功后该成员恢复执行。',
     }
   }
 
@@ -7987,11 +8876,13 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       cwd: session.header?.cwd ?? options.cwd,
       conversationContext: record.conversationContext ?? '',
       /*
-       * [2.2.0][T6/O-1a] 只有后台（async）轮次推即时通知：wait 模式主 Agent
-       * 在调用栈内等待，轮级结果消息就是该模式的完成通道，避免同一轮重复
-       * 两条消息；既有的「每轮恰 1 条持久结果消息」断言因此保持不变。
+       * [T9][用户要求6] 两种模式都推完成即时汇报：各部门负责人任务完成必须
+       * 立刻、独立地向主 Agent 汇报，不分 wait/async（2.2.0「wait 不推」语义
+       * 由 T9 取代）。即时通知是纯文本 user/message、不带 workplan 标记，
+       * 不是轮级结果消息——「每轮恰 1 条持久结果消息」断言不受影响。
+       * 结算备份采纳路径（settleFromOutput 同一 options）因此同样覆盖。
        */
-      notifyCompletion: mode === 'async',
+      notifyCompletion: true,
       onSubtaskDone: (recordArg: any, subtask: any, verdict: any) =>
         emitSubtaskDoneNotice(recordArg, session, subtask, verdict),
     }
@@ -9115,6 +10006,8 @@ async function maybePlan(ctx: any, state: any, payload: any, downstream: any, op
   const session = payload.agent?.session
   if (!session || !isRootSession(session)) return downstream
   if (payload.step !== 1) return downstream
+  // [2.5.5][T3] pre-step 窗口标记：规划/自动派发的头前通知一律暂存（治本）。
+  enterPreHeadWindow(session)
   const planMode = isPlanModeActive(ctx, session)
   const human = humanMessages(payload.messages)
   const existing = state.records.get(session.id)
@@ -9321,7 +10214,7 @@ async function maybePlan(ctx: any, state: any, payload: any, downstream: any, op
   appendUserMessage(session, buildPlanningPreAnnouncement(
     normalisePlannerWindow(options?.limits?.plannerTimeoutMs ?? options?.plannerTimeoutMs, PLANNER_TIMEOUT_MS),
     PLANNER_MAX_ATTEMPTS,
-  ))
+  ), undefined, { deferUntilHead: true })
   /*
    * [2.2.5][T5] 进度回调落点（T1 P-6 / T3 §3 C2/C3、§4 频率规则）：
    * 通道 A = 占位卡片 errors 区追加重试摘要（≤2 行，保底通道）；通道 B =
@@ -9334,7 +10227,7 @@ async function maybePlan(ctx: any, state: any, payload: any, downstream: any, op
     signal: payload.signal,
     record: planningRecord,
     setRecord: (record: any) => state.records.set(session.id, record),
-    appendNotice: (text: string) => appendUserMessage(session, text),
+    appendNotice: (text: string) => appendUserMessage(session, text, undefined, { deferUntilHead: true }),
     maxAttempts: PLANNER_MAX_ATTEMPTS,
   })
   /*
@@ -9348,7 +10241,7 @@ async function maybePlan(ctx: any, state: any, payload: any, downstream: any, op
    */
   const planningHeartbeat = createPlanningHeartbeat({
     signal: payload.signal,
-    appendNotice: (text: string) => appendUserMessage(session, text),
+    appendNotice: (text: string) => appendUserMessage(session, text, undefined, { deferUntilHead: true }),
     intervalMs: planningHeartbeatIntervalMs(process.env.DSH_WORKPLAN_PLANNING_HEARTBEAT_MS ?? PLANNING_HEARTBEAT_MS),
     startedAt: planningStartedAt,
     getAttempt: () => plannerAttempt,

@@ -1,0 +1,46 @@
+{
+  "member": "patch-review-expert",
+  "agent": "agent-18/agent-4",
+  "task": "T3-final-agent18: R3 补丁包独立同行评审",
+  "plan": "wp-480eda74-6759-4794-a64a-d46ae5c4eaf1",
+  "parentTask": "T3",
+  "status": "done",
+  "verdict": "Conditional APPROVE（有条件通过）：核心修复对症且证据链独立复现通过；F1 中危游标契约缺陷已实证，应用前需修复或书面风险接受",
+  "reasoningEffort": "xhigh",
+  "reviewWindow": "2026-11-12T22:26/22:41+08:00",
+  "pinnedSnapshot": {
+    "baseline/src/index.ts": "72868e4ae967fee94967df5939ee092a582249ff7b37afc4fe0cf7660d48b8d3",
+    "baseline/lib/index.js": "dbecf83320e10d93d735b3d01384ab817a0b90102ccecb0a22c013c71dfe70a0",
+    "patched/src/index.ts": "f587a0fb71355c7a0a44842000d160cab87bb5746cb4dd38cc6e695e77c3afd1",
+    "patched/lib/index.js": "fdb67cd053231205561d37b33b98ed30e7d4fbf8baabf231c36d645f76d8ba35",
+    "r3-session-search.patch": "d1050888da86a1c652727a323f1fc3e75a6bcad6edaa84154b7d895254142639",
+    "apply-r3-patch.py": "83ea8e29e41f6e4585b8375f5f638b888c59bcab819f8067df76b013f528121c"
+  },
+  "deliverables": [
+    "plugins/dsh-workplan/reports/_r3_fix_t3_20261112/t3-final-agent18/expert-patch-review.md",
+    "plugins/dsh-workplan/reports/wp-member-patch-review-expert-t3-final-agent18.json",
+    "plugins/dsh-workplan/reports/_r3_fix_t3_20261112/t3-final-agent18/work/probe-cursor-gap.mjs",
+    "plugins/dsh-workplan/reports/_r3_fix_t3_20261112/t3-final-agent18/work/probe-fixed.json",
+    "plugins/dsh-workplan/reports/_r3_fix_t3_20261112/t3-final-agent18/work/probe-baseline.json",
+    "plugins/dsh-workplan/reports/_r3_fix_t3_20261112/t3-final-agent18/work/snapshot-hashes.txt"
+  ],
+  "findings": [
+    {"id": "F1", "severity": "medium", "summary": "abort/尾事务失败路径代际记账滞后：已提交行 generation=G+1 而 search_state.global_generation 与内存 _globalGeneration 未推进，同代际重写内容后旧游标被接受，STALE_CURSOR 契约在 events/sessions 双 scope 窄交错窗口失效", "evidence": "work/probe-fixed.json（R4 双游标 accepted，preconditionsMet=true）vs work/probe-baseline.json（R4 双 STALE_CURSOR）；报告 §5.1", "recommendation": "commitPersisted 事务内同步 UPDATE search_state（A）＋异常路径 persistedWriteCount>0 时 _globalGeneration+=1（B）；固化探针为回归用例；或书面风险接受"},
+    {"id": "F2", "severity": "low", "summary": "稳定性收窄引入未冷读会话增删/header churn 的有界陈旧（≤1 轮，自愈）", "evidence": "报告 §5.4 状态推演；D1 绿", "recommendation": "PATCH-NOTES 明写语义放宽"},
+    {"id": "F3", "severity": "low", "summary": "逐会话 catch 将 commitPersisted 的 INDEX_FAILED 写故障也隔离为冷读失败（系统性故障仍经零成功阀 fail-closed）", "evidence": "报告 §5.3；C1 绿", "recommendation": "区分写故障/数据故障"},
+    {"id": "F4", "severity": "low", "summary": "applier 非原子 write_bytes、post-check 失败不自动恢复、无 symlink 防护/包身份校验（备份+哈希门禁+后检已缓解；checkout 靶文件核实为常规文件）", "evidence": "报告 §8；work/applier-*.log 2/0/0/3", "recommendation": "temp+os.replace、失败自动回滚、islink 拒绝"},
+    {"id": "F5", "severity": "info", "summary": "评审窗口内包被并发更新（22:29 预热加入/22:32 patch+applier 重生/22:35 文档终化）；已锁快照并复核 9/9 STABLE", "evidence": "报告 §11；work/snapshot-hashes.txt", "recommendation": "应用前冻结包"},
+    {"id": "F6", "severity": "info", "summary": "startup 预热在途搜索仍排队超时（~204s 作者报告值未重测）；默认 first-search 预热不生效（P3 零变化）", "evidence": "报告 §6；behavior P1-P4", "recommendation": "向用户披露；openAt 决策归负责人/用户"},
+    {"id": "F7", "severity": "info", "summary": "4 毒丸会话修复前仍不可搜（隔离+每轮 warn；全失败才熔断）", "evidence": "报告 §5.3；B1/C1；T2 §3.4", "recommendation": "衔接毒丸修复轨"},
+    {"id": "F8", "severity": "info", "summary": "roundtrip*/hostpkg/behavior.test.mjs/runs/ 为 twin 期历史留档（哈希与 TWIN-HASHES-PRE 自洽），终版证据=reapply/ 等", "evidence": "报告 §7；shasum 对照", "recommendation": "标注 superseded 或移除"}
+  ],
+  "acceptance": [
+    {"criterion": "A1 逐 hunk 对照 T2 根因＋happy path 不变＋generation/游标/live-preferred/失败隔离/稳定性收窄语义审查（含三个高危交错专项）", "result": "pass", "evidence": "报告 §3 根因映射表、§4 20-hunk 双轨表（越界零触及）、§5 三高危推演＋差分探针实证（F1 成立/②良性/③正确）、§6 预热审查"},
+    {"criterion": "A2 provenance 审计：baseline≡checkout 逐字节、tsc 退出码、roundtrip 与 TWIN-HASHES、behavior a-d 对照日志", "result": "pass", "evidence": "报告 §7：cmp×4 exit0（两次）、package.json 0.2.2-rc.2、SHA256SUMS -c 9/9 OK、内嵌内容 ALL-MATCH、patch -p1/git apply 四 cmp exit0、reapply 4/4 终版哈希、TWIN 自洽、tsc 重跑双 exit0、behavior 重跑 12/12+5/5 exit0、smoke 重跑 PASS、node --check exit0"},
+    {"criterion": "A3 apply-r3-patch.py 只读审计（默认干跑？备份？原子？范围仅该包？）", "result": "pass", "evidence": "报告 §8：无干跑模式但无 --target 零写入(exit2)、写前 copy2 备份(哈希==baseline)、非原子(F4)、范围仅靶包两文件+备份、无网络/安装/重启；独立四幕演示 2/0/0/3"},
+    {"criterion": "A4 唯一主产物 expert-patch-review.md 落盘于指定路径", "result": "pass", "evidence": "plugins/dsh-workplan/reports/_r3_fix_t3_20261112/t3-final-agent18/expert-patch-review.md（12 节完整报告）"},
+    {"criterion": "A5 结构化结论结算备份＋结果块契约", "result": "pass", "evidence": "本 JSON＋最终答复 WORKPLAN_EVIDENCE 结果块"},
+    {"criterion": "A6 发现可执行（严重度/证据/建议）＋判定明确＋合规（只读宿主、未应用、未重启）", "result": "pass", "evidence": "F1-F8 表；Conditional APPROVE＋应用前置四条；checkout 两次 cmp 净基线；全部写入限评审目录"}
+  ],
+  "compliance": "全程只读 checkout 与 ~/.dsh；写入仅限 reports/_r3_fix_t3_20261112/t3-final-agent18/ 与本 JSON；未重启/安装/npm 重装/应用补丁到宿主；未派生第四层 Agent"
+}

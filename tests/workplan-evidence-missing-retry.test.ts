@@ -14,7 +14,7 @@
 import test from 'node:test'
 import { seedLeaderSelfEffort } from './helpers/self-effort-contract.js'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -133,7 +133,7 @@ function makeRuntime(outputs: string[], cwd: string) {
     logger: { warn() {} },
     subagents: {
       startActivation: async (activation: any) => {
-        const prompt = String(activation?.request?.prompt?.[0]?.text ?? '')
+        const prompt = String(activation?.prompt?.[0]?.text ?? '')
         prompts.push(prompt)
         const output = outputs.shift() ?? compliantOutput()
         return {
@@ -186,7 +186,8 @@ test('A2 前置：无标记散文被判「结果块缺失」且 verification=unv
 test('A2：盘上备份合法 → 单次激活即采纳结算，不回喂不重做', async () => {
   const cwd = mkdtempSync(join(tmpdir(), 'dsh-wp-t9-'))
   mkdirSync(join(cwd, 'reports'), { recursive: true })
-  writeFileSync(join(cwd, 'reports', 'wp-settlement-T1.json'), JSON.stringify({
+  const backupPath = join(cwd, 'reports', 'wp-settlement-T1.json')
+  writeFileSync(backupPath, JSON.stringify({
     status: 'done',
     blockedReason: '',
     phases: phasesFixture(),
@@ -194,6 +195,11 @@ test('A2：盘上备份合法 → 单次激活即采纳结算，不回喂不重�
     artifacts: [],
     needs: [],
   }))
+  // [2.5.2][T4b][D2] 新鲜度契约适配：备份必须是「本次尝试内新写」。本夹具在
+  // dispatch 之前预置文件，用 utimesSync 把 mtime 置为未来时刻模拟「尝试开始
+  // 后新写」；语义断言零改动（真实链路由子会话在尝试内写备份，mtime 天然新鲜）。
+  const future = new Date(Date.now() + 60_000)
+  utimesSync(backupPath, future, future)
   const { session, runtime, prompts } = makeRuntime([proseOnly()], cwd)
   const signal = new AbortController().signal
   const result: any = await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE,}, signal)

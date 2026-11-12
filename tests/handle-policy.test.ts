@@ -24,10 +24,15 @@ const SRC_DIR = path.resolve(process.cwd(), 'src')
 const HYGIENE_WHITELIST: Record<string, number> = {
   // runtime.ts 派发 ack 提示（T1 R7）
   noticeTimer: 1,
-  // runtime.ts 指示回执轮询（T1 R8）
-  poll: 1,
-  // runtime.ts 指示未回执提示（T1 R9）
-  notice: 1,
+  // runtime.ts 指示回执轮询（T1 R8）＋ [T5-channel] 叶子指示回执轮询
+  // （scheduleDelegateInstructionAck：卫生类，只提供提前确认，deadline 收束判定兜底，不驱动终态）
+  poll: 2,
+  // runtime.ts 指示未回执提示（T1 R9）＋ [T5-channel] 叶子指示未回执提示
+  // （与根同款语义：只丢一次 overdue 提示，有界，不驱动终态）
+  notice: 2,
+  // plan.ts [2.5.5] head 落地补发保险丝：卫生类（只补发可见通知、不驱动终态；
+  // 2s×300 有界自停；缺失仅延迟通知可见性，不影响任何收束）
+  flushPoll: 1,
 }
 
 /** 历史事故点位黑名单：显式命名，回归时给出最直白的报错（与白名单检查互为双保险）。 */
@@ -50,10 +55,11 @@ test('[2.2.9][P-3] handle-policy：src/ 全部 unref 点位 === 卫生类白名�
     if (names.length > 0) found.set(f, names)
   }
 
-  // 1) 精确集合契约：只有 runtime.ts 的三处卫生类点位允许 unref。
+  // 1) 精确集合契约：runtime.ts 五处（根 ack 三处＋[T5-channel] 叶子 ack 两处）+ plan.ts [2.5.5] flushPoll（head 落地
+  //    补发保险丝，卫生类：只补发可见通知、有界自停、不驱动终态）允许 unref。
   assert.deepEqual(
     Object.fromEntries([...found.entries()].map(([f, n]) => [f, n.sort()])),
-    { 'runtime.ts': ['notice', 'noticeTimer', 'poll'] },
+    { 'plan.ts': ['flushPoll'], 'runtime.ts': ['notice', 'notice', 'noticeTimer', 'poll', 'poll'] },
     'unref 点位与 handle-policy 契约不符：收束类计时器（必须触发才能到达终态）禁止 unref；'
     + '新增卫生类计时器必须显式加入 tests/handle-policy.test.ts 白名单并附分类理由。'
     + '背景见 docs/rootcause-red-x-recurrence-20261110-T1.md §3/§4.1。',
@@ -71,7 +77,7 @@ test('[2.2.9][P-3] handle-policy：src/ 全部 unref 点位 === 卫生类白名�
 
   // 3) 白名单计数核查：卫生类 unref 被误删也会红（反向回归：插件拖住关闭中的宿主）。
   for (const [name, count] of Object.entries(HYGIENE_WHITELIST)) {
-    const actual = (found.get('runtime.ts') ?? []).filter((n) => n === name).length
+    const actual = [...found.values()].flat().filter((n) => n === name).length
     assert.equal(actual, count, `卫生类计时器「${name}」应保留 unref ${count} 处（实际 ${actual}）：删掉会拖住关闭中的宿主`)
   }
 })

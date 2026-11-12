@@ -550,7 +550,7 @@ test('G5-X1 T7 有界重试结算后，低 rev 旧事件被闸拒绝：重试行
     logger: { warn() {} },
     subagents: {
       startActivation: async (activation: any) => {
-        prompts.push(String(activation?.request?.prompt?.[0]?.text ?? ''))
+        prompts.push(String(activation?.prompt?.[0]?.text ?? ''))
         const output = outputs.shift() ?? compliantX1()
         return {
           childId: `child-x1-${prompts.length}`,

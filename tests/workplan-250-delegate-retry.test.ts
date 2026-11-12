@@ -75,8 +75,9 @@ function makeRuntime(cwd: string) {
 }
 
 const consolidation = (overrides: any = {}) => ({
-  problemAnalysis: ['现状：部门任务需要拆给专家与组员'],
-  approach: ['专家做核心实现', '组员做证据清单'],
+  // [2.5.4][T3R1] 夹具适配：补足合计字数 ≥40/40/20（保留「专家做核心实现」子串供重试简报断言）。
+  problemAnalysis: ['现状：部门任务需要拆给专家与组员；目标是保质保量完成；约束是不改无关文件；主要矛盾是质量与时间。'],
+  approach: ['专家做核心实现：先确认入口再最小改动，并附聚焦单测自测', '组员做证据清单：逐条核对验收标准并落盘留证'],
   approachBasis: ["第二轮分工的方法、流程、步骤基于第一轮完成好的全部结果：质量与时间的主要矛盾决定专家承担核心实现、组员承担自测与证据，约束决定不改无关文件。"],
   assignments: [
     { member: 'Expert-A', role: 'expert', task: '实现核心逻辑并自测' },
@@ -85,7 +86,17 @@ const consolidation = (overrides: any = {}) => ({
   ...overrides,
 })
 
-const promptOf = (spawned: any) => spawned.request.request.prompt[0].text
+// [2.5.4][T4] 按 D1/D2 新契约适配，意图不变：复杂档（medium/high/xhigh/max）分工表须合计 ≥8 人。
+// 默认 consolidation() 保持 2 人（非复杂子案依赖上限 6）；复杂子案专用 8 人表（≥1expert+≥1member）。
+const assignments8 = () => [
+  { member: 'Expert-A', role: 'expert', task: '实现核心逻辑并自测' },
+  { member: 'Member-B', role: 'member', task: '整理验收证据清单' },
+  ...Array.from({ length: 6 }, (_, i) => ({
+    member: `Member-${String.fromCharCode(67 + i)}`, role: 'member', task: `单一目标子任务 ${i + 3}（单一主产物、可独立验收）`,
+  })),
+]
+
+const promptOf = (spawned: any) => spawned.request.prompt[0].text
 
 /* ---------- 1. 在盘产物探测（纯逻辑，listDir 可注入） ---------- */
 
@@ -174,13 +185,15 @@ test('R4 端到端：叶子 failed/done 后重派——新任务书附上次失�
 /* ---------- 4. R2×R4：重置后整体等级不丢（effortOverride 回落继承） ---------- */
 
 test('R2×R4：planDelegations taskEffortFallback——梳理未带整体等级时继承行上 effortOverride，显式配置优先', () => {
-  const inherited = planDelegations({ consolidation: consolidation(), model: QWEN, taskEffortFallback: 'xhigh' })
+  // [2.5.4][T4] 按 D1/D2 新契约适配，意图不变：回落源 xhigh/high=复杂 ⇒ 对应子案扩到 8 人；
+  // 显式 low 与无配置子案=非复杂，保持 2 人旧行为不变。
+  const inherited = planDelegations({ consolidation: consolidation({ assignments: assignments8() }), model: QWEN, taskEffortFallback: 'xhigh' })
   assert.equal(inherited.ok, true)
   assert.equal(inherited.taskEffort, 'xhigh')
-  assert.deepEqual(inherited.members.map((m) => m.effort), ['xhigh', 'xhigh'])
+  assert.deepEqual(inherited.members.map((m) => m.effort), Array(8).fill('xhigh'))
   const explicit = planDelegations({ consolidation: consolidation({ taskReasoningEffort: 'low' }), model: QWEN, taskEffortFallback: 'xhigh' })
   assert.equal(explicit.taskEffort, 'low', '显式配置优先于回落源')
-  const clamped = planDelegations({ consolidation: consolidation(), model: QWEN, taskEffortFallback: 'high' })
+  const clamped = planDelegations({ consolidation: consolidation({ assignments: assignments8() }), model: QWEN, taskEffortFallback: 'high' })
   assert.equal(clamped.taskEffort, 'medium', '回落源同样按家族钳制并留痕')
   assert.equal(clamped.taskEffortClamped?.requested, 'high')
   const none = planDelegations({ consolidation: consolidation(), model: QWEN })
@@ -191,9 +204,10 @@ test('R2×R4 端到端：重置清掉 consolidation 后重新 review/dispatch—
   const cwd = mkdtempSync(join(tmpdir(), 'wp250-effort-'))
   try {
     const { runtime, record, spawned, leaderAgent } = makeRuntime(cwd)
+    // [2.5.4][T4] 按 D1/D2 新契约适配，意图不变：声明 xhigh=复杂 ⇒ 首发 review 分工表扩到 8 人。
     const review = await runtime.delegateTool(leaderAgent, {
       action: 'review',
-      consolidation: consolidation({ taskReasoningEffort: 'xhigh' }),
+      consolidation: consolidation({ taskReasoningEffort: 'xhigh', assignments: assignments8() }),
     })
     assert.equal(review.ok, true)
     assert.equal(record.statuses[0].effortOverride, 'xhigh')
@@ -205,10 +219,11 @@ test('R2×R4 端到端：重置清掉 consolidation 后重新 review/dispatch—
     record.statuses[0].status = 'in_progress'
     record.statuses[0].childId = 'child-leader'
     // 重新 review 未再配整体等级、下级也未单独配档 ⇒ 必须继承 effortOverride。
-    const reReview = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation() })
+    // [2.5.4][T4] 按 D1/D2 新契约适配，意图不变：effortOverride=xhigh 回落判复杂 ⇒ reReview 同样扩到 8 人。
+    const reReview = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation({ assignments: assignments8() }) })
     assert.equal(reReview.ok, true, JSON.stringify(reReview))
     assert.equal(reReview.taskEffort, 'xhigh', '重新 review 不得丢失已配置的整体等级')
-    assert.deepEqual(reReview.members.map((m: any) => m.effort), ['xhigh', 'xhigh'])
+    assert.deepEqual(reReview.members.map((m: any) => m.effort), Array(8).fill('xhigh'))
     assert.equal(record.statuses[0].effortOverride, 'xhigh')
     assert.equal(record.statuses[0].consolidation.taskReasoningEffort, 'xhigh')
     const dispatch = await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
@@ -216,7 +231,7 @@ test('R2×R4 端到端：重置清掉 consolidation 后重新 review/dispatch—
     assert.equal(dispatch.effortOverride, 'xhigh')
     for (const child of spawned) {
       // [2.5.0][自配档] 叶子未自配 ⇒ phase-0 low 启动；整体等级 effortOverride 仍全程贯穿（负责人层）。
-      assert.equal(child.request.request.agentOptions.reasoningEffort, 'low', '叶子 phase-0 一律 low 启动，等待 self_effort 自配')
+      assert.equal(child.request.agentOptions.reasoningEffort, 'low', '叶子 phase-0 一律 low 启动，等待 self_effort 自配')
     }
   } finally {
     rmSync(cwd, { recursive: true, force: true })

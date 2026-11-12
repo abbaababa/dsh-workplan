@@ -1,0 +1,118 @@
+{
+  "planId": "wp-480eda74-6759-4794-a64a-d46ae5c4eaf1",
+  "subtaskId": "T3",
+  "status": "done",
+  "blockedReason": "",
+  "phases": {
+    "planning": {
+      "problemAnalysis": [
+        "目标与验收：按 H1 用户裁决（宿主侧治本＋毒丸备份后加固；工作区产补丁包，工作区外应用由主 Agent 经审批，重启用户手工）实现 R3 最小修复补丁＋回归用例＋前后对比。A1 对症可复核；A2 回归可重复；A3 P1 由超时降至 30s 内或给原始数据与原因；A4 构建/静态检查；A5 不重启/不安装/不 npm 重装/不调主派发；A6 工作区外动作只写建议。",
+        "第一手事实：根因=零进展死循环（全量冷读＋整轮稳定后单次提交，30s 中止全丢，:memory: 永空）＋整轮稳定性比对含 live 存档 churn（活跃工作区必失败）；lib 为未压缩 bundle、checkout 无构建工具→src+lib 双轨等价补丁；4 毒丸存档=单 zstd 帧＋workplan/notice 无 ignorable 双重缺陷，真实 list() 静默跳过（召回损失，更正 T2 快速失败推测）；插件 2.5.5 已有头前闸无需改插件。",
+        "约束：checkout/~/.dsh 只读（沙箱 workspace-write 实测拒写）；改动仅限 dsh-session-query-sqlite 两文件；保留 live-preferred/generation/游标语义；不触碰 R1/R2 链路；叶子不派生。",
+        "主要矛盾：治本 vs 最小改动面；真实后端全量冷建实测 204–243s≫30s→仅增量提交不够，需配置门控启动预热＋持久索引建议。",
+        "未知：cordis 离线装配（冒烟解决）、真实冷建时长（实测解决）、在体效果（留主 Agent/用户重启后验证）。"
+      ],
+      "constraints": ["工作区外只读；不重启/不安装/不 npm 重装/不调主派发", "仅改一个包两文件（src+lib 双轨）", "保留硬语义；不改 30s 阈值", "单一写者纪律；证据=命令+输出+退出码+哈希；不采信自述"],
+      "unknowns": ["在体（重启后）效果——已写明由主 Agent/用户执行的建议步骤"],
+      "approach": [
+        "第1步 负责人第一手读码锁定改动点→设计规格（增量提交闭包＋稳定性收窄＋失败隔离＋零成功保险丝＋配置门控预热）。",
+        "第2步 派 4 叶子并行（补丁/毒丸/语料/回归），负责人并行建真实引擎 harness（cordis＋真实 jsonl 后端＋冻结语料副本＋独立 oracle）。",
+        "第3步 E 系列前后对比：基线 30s/10s 中止零进展 vs 修复增量收敛＋无预算全建＋热查询；oracle 逐条逐序比对。",
+        "第4步 独立复核全部叶子产物（重套 diff/tsc/node --check/回归重跑/毒丸 --apply 演练/哈希抽验）；双写者裁决单一写者。",
+        "第5步 agent-18 独立评审发现 2 缺陷→负责人核实并下发 A/B/C 修正规格→agent-18 唯一写者修正冻结→负责人冻结版全量复核→报告/结算。"
+      ],
+      "approachBasis": [
+        "零进展死循环＋末尾单事务→增量提交为核心；lib bundle 无构建工具→双轨补丁＋功能测试直接验证 patched lib；毒丸双重缺陷＋list() 跳过→修帧布局＋ignorable 并以真实读取路径验证；整轮稳定性含 live churn→稳定性收窄到本轮冷读会话；冷建 204–243s≫30s→门控预热＋持久索引建议；工作区外只读→全部产物落工作区、在体动作写建议；历史教训→三件套补丁证据、不采信自述、独立重跑。"
+      ]
+    },
+    "execution": {
+      "steps": [
+        "21:48–22:00 第一手读码（sqlite index.ts 全文/schema/cold-read/jsonl list/storage-contract/known-event-types/旧修复脚本/插件头前闸）＋T1/T2 报告＋预估上报。",
+        "22:00 review 登记 xhigh＋派发 4 叶子；cordis 装配冒烟 PASS；harness（bench/compare-p1/typecheck）就绪。",
+        "22:10–22:30 叶子产物独立复核：回归基线 13 项 6 绿 7 红 MATCH（重跑一致）；毒丸脚本审阅＋mini/全语料克隆 --apply 演练 2/2、4/4，真实后端 list 0→4，原件 sha 未变；语料 4452 文件 manifest 抽验通过，P1 oracle 62 双实现一致。",
+        "22:20–22:46 E 系列：基线 E1 P1@30s=30003ms abort 0 行、E5@10s 0 行；修复 E2/E3/E4=561→1027→1379 收敛、E5p@10s 52 行、E6 无预算 203868ms 2216 会话 62 命中 MATCH、E7 热 700ms、E8 修复语料 2220 会话（含 4 毒丸）MATCH；supplement 19 项全绿；tsc/node --check/套回/applier 全过。",
+        "22:13–22:20 expert-patch 双写者事件：裁决 agent-1 唯一写者，日志形态最小手术＋规格5预热追加，TWIN-HASHES 留痕。",
+        "22:40–22:55 agent-18 独立评审＋探针发现 2 缺陷（毒丸隔离后安静调用保险丝误熔断；中止部分提交代际滞后致 STALE_CURSOR 失效）＋1 低危（写故障被隔离）；负责人 L5/L6/L7 缺陷捕获测试独立证实，下发 A/B/C 规格＋尾事务补强，裁决 agent-18 为 patches/报告/结算唯一写者。",
+        "22:55–23:05 冻结版（src ee4d11b8/lib 574ef3cc）全量独立复核：六件哈希一致、SHA256SUMS 9/9、套回 cmp×2=0、tsc strict=0、node --check=0、回归 fixed 13/13×2、supplement 28/28×2（基线 21/28 捕获）、behavior 14/14 vs 5/5、applier 2/0/0/3（原子写+回滚）、E2/E3 进展 500→874、E5p 51、E7 热 1142ms 62 MATCH、P3 606ms、E6-frozen 243385ms 2216/306371/62 MATCH、E8-frozen 210018ms 2220/307052/62 MATCH＋4 毒丸入索引；与 agent-18 冻结流水线互证（全建 210744ms、P1 562ms、预热 10ms 激活/250612ms 收敛/P1 488ms 62 命中）。",
+        "报告 R3-fix-patch.md（agent-18 写、负责人清单预审＋冻结复核）覆盖 A1–A6/双链署名/事件披露；负责人结算另写 wp-settlement-T3-agent17.json。"
+      ],
+      "deviations": [
+        "E7 热跑两次因 --db 路径拼接 bug 误建新库（30s abort），诊断后修正路径重跑（564/1142ms MATCH）； stray 嵌套目录核实后删除。",
+        "supplement L2 用例首版自身缺陷（空库 fallback 建无表库）改 existsSync 守卫。",
+        "一次忘设 R3_LIB_PATH 跑了基线，输出留作基线对照（21/28）。",
+        "平台并行接续致双写者与双负责人，经单一写者裁决＋所有权隔离解决，无第三次事故。",
+        "预估多次修订（35→45→50–55→+15–20 分钟）：真实冷建远超 T2 离线下限＋评审修正轮。"
+      ]
+    },
+    "verification": {
+      "allPassed": true,
+      "checks": [
+        {"criterion": "A1 补丁只针对已判定根因，清单与 diff 可逐条复核", "method": "冻结六件哈希比对＋diff 套回全新基线 cmp＋逐 hunk 审阅＋SHA256SUMS 复算", "evidence": "frozen-verify/frozen-hashes.txt（src ee4d11b8/lib 574ef3cc/patch e14923ea/applier db9f4ea2/MANIFEST 890d0f55/SHA256SUMS 6ec05d70 全一致）；reapply cmp_src=0 cmp_lib=0；shasum -c 9/9 OK；472 行 diff 逐 hunk 映射 PATCH-NOTES §1/§7；独立评审 expert-patch-review.md"},
+        {"criterion": "A2 新增回归用例可重复运行且通过", "method": "冻结 lib 上主套件×2＋supplement×2＋behavior 双模式独立重跑；基线缺陷捕获对照", "evidence": "frozen-verify/regression-fixed-{1,2}.log 13/13 exit0；supplement-fixed-{1,2}.log 28/28 exit0（sha 574ef3cc 绑定）；behavior-fixed.log 14/14、behavior-baseline.log 5/5；regression-baseline.log MATCH；supplement-baseline.log 21/28 红项=L4.1/L4.2/L4.4/L5.1/L5.2/L6.1/L6.2；修正前捕获 final-verify/supplement-defect-capture-patched.log"},
+        {"criterion": "A3 同一复现参数本地耗时由超时降至 30s 内（或原始数据与原因）", "method": "真实引擎＋真实 jsonl 后端＋冻结语料副本，P1 原参数前后对比＋oracle 比对", "evidence": "基线 E1 30003ms abort 0 行（experiments/E1-baseline-p1-30s.json）；冻结修复 E7 热 1142ms ok 62 命中 MATCH、P3 606ms；agent-18 冻结查询组 P1 562ms/62 MATCH；预热模式激活 10ms、后台 250612ms 收敛、P1 488ms/62；冷启动收敛原始数据 E2/E3=500→874（负载下）与 561→1027→1379（空载）如实披露；E6-frozen 243385ms/E8-frozen 210018ms 全建 62 命中 MATCH"},
+        {"criterion": "A4 构建与静态检查通过", "method": "tsc 5.9.3 strict noEmit＋node --check＋套回复现＋applier 演示", "evidence": "frozen-verify/tsc-frozen.log exit0；node --check exit0；reapply cmp×2 exit0；applier noargs=2/first=0(cmp OK)/second=0 幂等/tampered=3；F4 原子写 os.replace＋失败回滚代码核实"},
+        {"criterion": "A5 未重启/未安装/未 npm 重装/未调主派发", "method": "全程命令自查＋沙箱拒写实测", "evidence": "仅工作区写入＋只读命令；delegate 仅本部门；checkout/~/.dsh 零写入（毒丸原件 sha 4/4 修复前后一致，real-poison-sha-now.txt）；无 restart/install/npm 命令；未调 dsh_workplan_dispatch"},
+        {"criterion": "A6 需主 Agent 的动作以建议列出，未自行执行", "method": "报告 §7 核对", "evidence": "R3-fix-patch.md §7 六项建议（应用补丁/毒丸 --apply/持久索引+openAt overlay/用户手工重启/重启后在体验证/回滚）全部未执行；H2 分工在案"}
+      ],
+      "requirementCheck": "用户原要求「R3修」＋H1 裁决逐项落实：最小补丁冻结并经双方独立复核；回归 13+28+14 项可重复全绿（基线精确捕获缺陷）；P1 由基线 30003ms 超时 0 结果→收敛索引 562–1142ms 返回 62 条正确结果（oracle 逐条逐序 MATCH，未牺牲召回/排序）；毒丸 4 存档备份后修复干跑闭环（召回 2216→2220，IMG_0464 探针 16 命中）；构建/静态检查全绿；未重启/未安装/未 npm 重装/未调主派发；应用/重启/在体验证全部写成建议。",
+      "retrospective": {
+        "problems": [
+          "零成功保险丝规格缺陷：未区分整库故障与仅存已知毒丸重试，隔离后第 2+ 次安静调用误熔断（agent-18 探针实证；负责人规格责任）——根因：只推演首次调用截面，未推演重复调用状态转移。",
+          "中止部分提交代际记账滞后：提交粒度前移但代际令牌更新仍在轮末，STALE_CURSOR 契约窄窗口失效——根因：改提交粒度时未同步审查代际令牌全部消费方。",
+          "平台并行接续致双写者（expert-patch twin）与双负责人（agent-17/18）——根因：平台重试机制与在跑会话并存。",
+          "真实后端全量冷建 204–243s 远超 T2 离线下限 24.2s——根因：重建未含句柄生命周期/稳定性重读/FTS 插入/yield 等加性成本。"
+        ],
+        "detours": [
+          "E7 热跑路径拼接 bug 两次（误建新库→30s abort），诊断后修正。",
+          "supplement L2 用例自身缺陷返工一次。",
+          "忘设 R3_LIB_PATH 跑了一次基线（转为对照证据）。",
+          "twin 事件消耗一轮协调。"
+        ],
+        "resolutions": [
+          "保险丝改 skippedAsIndexed 三条件（任何 revision 门跳过即证明 list+索引可用）；全新全毒丸仍 fail-closed；L5 锁定三次安静调用。",
+          "代际：B1 提交事务内同步 search_state＋B2 观察异常路径内存令牌+1＋尾事务 catch 补强；L6 四步交错锁定双游标 STALE_CURSOR＋DB 同步。",
+          "写故障 INDEX_FAILED 重抛不隔离（L7 锁定）。",
+          "双写者：单一写者裁决＋文件所有权隔离＋全程哈希留痕；双负责人以唯一写者＋独立复核协作。",
+          "冷建缺口：配置门控启动预热（激活 10ms、后台 ~250s 收敛、随后 P1 488ms）＋持久索引 overlay 建议（跨重启增量）。"
+        ],
+        "prevention": [
+          "遇到状态机/记账类改动，先穷举状态的全部消费方（游标/代际/计数器）与重复调用、中止交错，逐交错设计差分探针，禁止只测首次调用截面。",
+          "遇到 fuse/fail-closed 设计，先区分整体故障与部分已知坏，以任一成功/跳过证明为熔断必要条件，并用重复安静调用回归锁定。",
+          "遇到平台并行接续，先 list_agents＋盘上 mtime/哈希确认单一写者，裁决所有权后再写，留双方写前哈希。",
+          "遇到性能修复，先用真实后端全路径实测（非重建流水线）再做预算决策。",
+          "遇到 harness 路径参数，先区分绝对/相对并断言目标 DB 前置状态（行数），防止热跑变冷建。"
+        ]
+      }
+    }
+  },
+  "acceptance": [
+    {"criterion": "A1 补丁只针对已判定根因, 变更文件清单与 diff 可被他人逐条复核", "result": "pass", "evidence": "冻结六件哈希一致（frozen-verify/frozen-hashes.txt）；472 行 diff 套回全新基线 cmp×2 exit0；SHA256SUMS 9/9；PATCH-NOTES §1/§7 逐 hunk 映射＋§4 保留语义清单；独立同行评审 expert-patch-review.md；仅 dsh-session-query-sqlite 两文件，R1/R2 链路零触及"},
+    {"criterion": "A2 新增回归用例可重复运行且通过", "result": "pass", "evidence": "冻结 lib：主套件 13/13×2、supplement 28/28×2、behavior 14/14（基线 5/5）；基线精确缺陷捕获 MATCH＋supplement 21/28；修正前后差分日志在盘；全部一条命令可重跑（tests/r3-session-search/README.md）"},
+    {"criterion": "A3 同一复现参数的本地耗时由超时降至 30s 内, 或给出未达标的原始数据与原因", "result": "pass", "evidence": "P1 基线 30003ms abort 0 行→冻结修复收敛索引 562ms（agent-18）/1142ms（agent-17 负载下）ok 62 命中 oracle MATCH；预热模式 P1 488ms；冷启动头几次仍 30s 但有进展（500→874/561→1027→1379）原始数据＋原因（真实冷建 204–243s）＋预热/持久索引解法如实披露（报告 §4/§8）"},
+    {"criterion": "A4 构建与静态检查通过", "result": "pass", "evidence": "tsc 5.9.3 strict exit0（冻结 src，frozen-verify/tsc-frozen.log）；node --check exit0；套回复现 cmp×2 exit0；applier 2/0/0/3＋原子写/备份/回滚；冒烟基线 vs 修复逐字一致"},
+    {"criterion": "A5 未重启服务, 未安装或升级依赖, 未从 npm 重装, 未调用主计划派发工具", "result": "pass", "evidence": "全程仅工作区写入＋只读命令；checkout/~/.dsh 零写入（毒丸原件 sha 4/4 未变）；delegate 仅本部门两层；无 restart/install/npm 命令；未调 dsh_workplan_dispatch"},
+    {"criterion": "A6 需主 Agent 执行的动作以建议形式列出, 未自行执行", "result": "pass", "evidence": "R3-fix-patch.md §7 六项建议（应用/毒丸 --apply/持久索引+startup overlay/用户手工重启/重启后在体验证/回滚）全部未执行；H2 分工在案未重复上报"}
+  ],
+  "artifacts": [
+    {"kind": "file", "ref": "plugins/dsh-workplan/reports/R3-fix-patch.md"},
+    {"kind": "file", "ref": "plugins/dsh-workplan/patches/r3-session-search/r3-session-search.patch"},
+    {"kind": "file", "ref": "plugins/dsh-workplan/patches/r3-session-search/patched/src/index.ts"},
+    {"kind": "file", "ref": "plugins/dsh-workplan/patches/r3-session-search/patched/lib/index.js"},
+    {"kind": "file", "ref": "plugins/dsh-workplan/patches/r3-session-search/apply-r3-patch.py"},
+    {"kind": "file", "ref": "plugins/dsh-workplan/patches/r3-session-search/MANIFEST.md"},
+    {"kind": "file", "ref": "plugins/dsh-workplan/patches/r3-session-search/PATCH-NOTES.md"},
+    {"kind": "file", "ref": "plugins/dsh-workplan/scripts/repair-poison-notices.mjs"},
+    {"kind": "file", "ref": "plugins/dsh-workplan/tests/r3-session-search/run.mjs"},
+    {"kind": "file", "ref": "plugins/dsh-workplan/tests/r3-session-search/lead-supplement.mjs"},
+    {"kind": "file", "ref": "plugins/dsh-workplan/reports/_r3_fix_t3_20261112/experiments/frozen-verify/frozen-hashes.txt"},
+    {"kind": "file", "ref": "plugins/dsh-workplan/reports/_r3_fix_t3_20261112/t3-final-agent18/expert-patch-review.md"},
+    {"kind": "file", "ref": "plugins/dsh-workplan/reports/_r3_fix_t3_20261112/expected-p1-hits.json"},
+    {"kind": "file", "ref": "plugins/dsh-workplan/reports/_r3_fix_t3_20261112/poison-dryrun/README.md"},
+    {"kind": "note", "ref": "语料冻结副本 corpus/（4452 文件/810MB）与 corpus-repaired/、E 系列原始 JSON（experiments/）、manifest.json 均在 reports/_r3_fix_t3_20261112/ 下"}
+  ],
+  "needs": [],
+  "question": "",
+  "options": [],
+  "timeSpentMinutes": 78,
+  "finalEstimateMinutes": 78
+}

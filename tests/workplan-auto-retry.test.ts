@@ -124,7 +124,7 @@ test('硬超时且预算充足时自动重试一次，第二次带着 CHILD_TIME
     let calls = 0
     const ctx = makeCtx((spec: any) => {
       calls += 1
-      prompts.push(String(spec?.request?.prompt?.[0]?.text ?? ''))
+      prompts.push(String(spec?.prompt?.[0]?.text ?? ''))
       if (calls === 1) {
         // 第一次执行先落盘再「卡住」：真实事故里子 Agent 就是这样，产物已写出
         // 但会话被上限掐断。
@@ -180,7 +180,7 @@ test('重试前核对发现产物在超时后被改动：不覆盖、不重试�
     const prompts: string[] = []
     const ctx = makeCtx((spec: any) => {
       calls += 1
-      prompts.push(String(spec?.request?.prompt?.[0]?.text ?? ''))
+      prompts.push(String(spec?.prompt?.[0]?.text ?? ''))
       if (calls > 1) return quickChild('不应该被调用')
       // 第一次先落盘，再挂起等待上限。
       writeFileSync(target, '# first attempt\n')

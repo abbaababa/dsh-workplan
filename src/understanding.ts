@@ -1259,7 +1259,18 @@ export function auditTaskUnderstanding(plan: any, context: PlanAuditContext = {}
     const listedOption = new RegExp(
       '(?:^|[^A-Za-z])' + reference.token + '\\s*(?:方案|选项|=|＝|：|:|、|\\)|）|\\.|．)\\s*\\S',
     )
-    if (/^[A-D]$/.test(reference.token) && !listedOption.test(conversation)) return reference
+    /*
+     * [2.5.5][治本] 反序枚举同样算「列出选项」：助手常用「方案 A（推荐）」/
+     * 「选项 A」写法（标记在字母前），旧正则只认「A 方案/A：…」正序，导致
+     * 用户回「选A」时被 CONTEXT_GUARD 误判无先行词、烧掉一次规划尝试
+     * （本会话 turn 2 第 2 次尝试现场）。两种语序任一命中即视为已列出。
+     */
+    const listedOptionReverse = new RegExp(
+      '(?:方案|选项)\\s*' + reference.token + '(?:[^A-Za-z]|$)',
+    )
+    if (/^[A-D]$/.test(reference.token)
+      && !listedOption.test(conversation)
+      && !listedOptionReverse.test(conversation)) return reference
     /*
      * [T3] Record where the referent came from. Reusing 'context' for an
      * antecedent found inside the task text would misreport an empty

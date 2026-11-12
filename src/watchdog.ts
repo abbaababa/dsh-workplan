@@ -69,7 +69,12 @@ export function describeError(value: unknown): string {
   }
   if (value instanceof Error) {
     const message = typeof value.message === 'string' ? value.message.trim() : ''
-    return message !== '' ? message : (value.name || '未知失败')
+    const base = message !== '' ? message : (value.name || '未知失败')
+    // [2.5.5][T6] 堆栈留痕：毫秒级崩溃（如 TypeError reading 'id'）旧实现只留
+    // message 一行，根因无法闭环（session-1513 缺口 G2）。附截断堆栈，durable
+    // 结果/看板可直接定位崩溃点。
+    const stack = typeof value.stack === 'string' ? value.stack.split('\n').slice(0, 6).join(' | ').trim() : ''
+    return stack ? `${base}［stack: ${stack.slice(0, 600)}］` : base
   }
   if (typeof value === 'object') {
     const record = value as Record<string, unknown>

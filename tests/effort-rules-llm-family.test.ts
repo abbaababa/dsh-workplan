@@ -13,6 +13,7 @@ import {
   classifyModelFamily,
   effortForComplexity,
   highestEffortOf,
+  normalizePlanRaw,
   validatePlan,
 } from '../src/plan.js'
 import {
@@ -123,11 +124,15 @@ function rawPlanWithEffort(effort: string) {
 }
 const familyErrors = (result: any) => (result.errors ?? []).filter((e: string) => e.includes('reasoningEffort'))
 
-test('[2.3.9/事前] validatePlan 传 qwen 集合：显式 high 拒绝并点名家族集合', () => {
+test('[2.5.5/治本] validatePlan 传 qwen 集合：显式 high 自动归一为 medium 并留痕（不再拒绝降级）', () => {
   const r: any = validatePlan(rawPlanWithEffort('high'), { allowedEfforts: allowedEffortsForModel('qwen3.8') })
-  assert.equal(r.ok, false)
-  assert.equal(familyErrors(r).length >= 1, true, '必须有 reasoningEffort 点名错误')
-  assert.match(familyErrors(r)[0] ?? '', /low \/ medium \/ xhigh/)
+  assert.equal(familyErrors(r).length, 0, '家族集合外但五档合法不得再产生拒绝错误')
+  assert.equal((r.notes ?? []).some((n: string) => n.includes('high→medium')), true, '归一化必须留痕')
+  const norm = (effort: string, allowed: readonly string[]) =>
+    normalizePlanRaw(rawPlanWithEffort(effort), allowed).raw.stages[0].subtasks[0].reasoningEffort
+  assert.equal(norm('high', allowedEffortsForModel('qwen3.8')!), 'medium')
+  assert.equal(norm('max', allowedEffortsForModel('qwen3.8')!), 'xhigh')
+  assert.equal(norm('xhigh', allowedEffortsForModel('gpt-5')!), 'high')
 })
 
 test('[2.3.9/事前] 合法档位不被家族校验误伤；未传集合=旧调用零迁移（回放兼容）', () => {
