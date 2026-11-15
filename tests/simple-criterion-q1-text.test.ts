@@ -16,7 +16,7 @@
 import test, { before } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -27,7 +27,13 @@ const SRC_FILES = ['plan.ts', 'host.ts', 'runtime.ts', 'client.ts', 'llm-rules.t
 
 let ta: Record<string, { ok: boolean; detail: string; level: string }> = {}
 
+// [CI] 条文检查器位于作者工作区的 ../../reports（取证资产，不入库）；CI 检出目录没有它，
+// 此时整组用例按 skip 处理，避免把"本机取证资产缺失"误报成插件缺陷。
+const HAS_CHECKER = existsSync(CHECKER)
+const SKIP = HAS_CHECKER ? false : '外部条文检查器 reports/simple-criterion-v2-text-assertions.py 不在当前工作区（CI 无取证目录）'
+
 before(() => {
+  if (!HAS_CHECKER) return
   const outDir = mkdtempSync(path.join(tmpdir(), 'scv2-t6-ta-'))
   const jsonPath = path.join(outDir, 'text-assertions.json')
   const run = spawnSync('python3', [CHECKER, '--json', jsonPath], { cwd: PLUGIN_ROOT, encoding: 'utf8' })
@@ -42,19 +48,19 @@ function rule(name: string) {
   return ta[name]
 }
 
-test('C-Q1-01（AC-Q1-1 正例）：plan.ts 与 host.ts 均含判据层 10 分钟完成目标允许措辞＋两层标签同现', () => {
+test('C-Q1-01（AC-Q1-1 正例）：plan.ts 与 host.ts 均含判据层 10 分钟完成目标允许措辞＋两层标签同现' , { skip: SKIP }, () => {
   const ta01 = rule('TA-01')
   const ta02 = rule('TA-02')
   assert.equal(ta01.ok, true, `TA-01：${ta01.detail}`)
   assert.equal(ta02.ok, true, `TA-02：${ta02.detail}`)
 })
 
-test('C-Q1-02（AC-Q1-1 反例）：全仓 src 旧绝对否定零命中（命中即失败并打印文件行号）', () => {
+test('C-Q1-02（AC-Q1-1 反例）：全仓 src 旧绝对否定零命中（命中即失败并打印文件行号）' , { skip: SKIP }, () => {
   const ta01b = rule('TA-01b')
   assert.equal(ta01b.ok, true, `TA-01b：${ta01b.detail}`)
 })
 
-test('C-Q1-09（AC-Q1-5 正例）：E1/B1 已改写为双向/条件断言（判据层目标句命中＋运行层禁令保留＋TA-05 条件）', () => {
+test('C-Q1-09（AC-Q1-5 正例）：E1/B1 已改写为双向/条件断言（判据层目标句命中＋运行层禁令保留＋TA-05 条件）' , { skip: SKIP }, () => {
   const e1File = readFileSync(path.join(PLUGIN_ROOT, 'tests/no-fixed-deadline-semantics.test.ts'), 'utf8')
   const b1File = readFileSync(path.join(PLUGIN_ROOT, 'tests/time-estimate-negotiation.test.ts'), 'utf8')
   // 改写标记与 TA-05 条件断言函数必须在场（机械可 grep）
@@ -71,14 +77,14 @@ test('C-Q1-09（AC-Q1-5 正例）：E1/B1 已改写为双向/条件断言（判�
   assert.ok(b1File.includes('estimateMinutes=${value}（1–240 区间内）必须通过校验'), 'B2/O-2b 区间守卫断言被改动（必须保持）')
 })
 
-test('C-Q7-01（AC-Q7-1 正例）：两层标签同现＋10 分钟句归判据层＋120 分钟句归运行层（TA-02/TA-04）', () => {
+test('C-Q7-01（AC-Q7-1 正例）：两层标签同现＋10 分钟句归判据层＋120 分钟句归运行层（TA-02/TA-04）' , { skip: SKIP }, () => {
   const ta02 = rule('TA-02')
   const ta04 = rule('TA-04')
   assert.equal(ta02.ok, true, `TA-02：${ta02.detail}`)
   assert.equal(ta04.ok, true, `TA-04：${ta04.detail}`)
 })
 
-test('C-Q7-02（AC-Q7-1 边界）：每处「15 分钟」在运行层上下文＋无未标注规模参考＋10/120 归属不互换（TA-03/TA-04）', () => {
+test('C-Q7-02（AC-Q7-1 边界）：每处「15 分钟」在运行层上下文＋无未标注规模参考＋10/120 归属不互换（TA-03/TA-04）' , { skip: SKIP }, () => {
   const ta03 = rule('TA-03')
   const ta04 = rule('TA-04')
   assert.equal(ta03.ok, true, `TA-03：${ta03.detail}`)
@@ -107,7 +113,7 @@ test('C-Q7-02（AC-Q7-1 边界）：每处「15 分钟」在运行层上下文�
   assert.equal(ta04.ok, true, `TA-04（10/120 归属）：${ta04.detail}`)
 })
 
-test('C-Q7-04（AC-Q7-3 反例）：「10 分钟不是完成期限」「120 分钟＝允许慢」零命中（TA-06）', () => {
+test('C-Q7-04（AC-Q7-3 反例）：「10 分钟不是完成期限」「120 分钟＝允许慢」零命中（TA-06）' , { skip: SKIP }, () => {
   const ta06 = rule('TA-06')
   assert.equal(ta06.ok, true, `TA-06：${ta06.detail}`)
 })
