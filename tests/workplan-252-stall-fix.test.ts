@@ -30,7 +30,8 @@ const QWEN = 'qwen3-max-preview'
 function makePlan() {
   return {
     planId: 'wp-stall-fix', sessionId: 'session-root', createdTurn: 1, createdAt: 1000, title: '无反应缺陷修复用例',
-    stages: [{ id: 'S1', name: '实施', subtasks: [{ id: 'T1', title: '部门任务', department: 'engineering', dependsOn: [] }] }],
+    // [2.5.5] 夹具适配：本文件测 stalled 恢复，不测低档禁派；任务行声明 high 放行第三层派发。
+    stages: [{ id: 'S1', name: '实施', subtasks: [{ id: 'T1', title: '部门任务', department: 'engineering', dependsOn: [], reasoningEffort: 'high' }] }],
   }
 }
 
@@ -58,6 +59,8 @@ function makeRuntime() {
         return { childId, result, dispose: async () => {} }
       },
       interruptByParent: (childId: string, parentId: string, mode: string) => { interrupts.push({ childId, parentId, mode }); return { ok: true } },
+      // [T6] 预估送达通道 stub：self_effort 登记后经 sendMessage 投给负责人（缺此函数会 ESTIMATE_DELIVERY_FAILED）。
+      sendMessage: async () => 'msg-stall-fix-stub',
     },
     sessions: { get: (id: string) => (id === 'session-root' ? rootSession : id === 'child-leader' ? leaderSession : undefined), list: () => [], eventAt: () => undefined },
     agents: { get: (id: string) => (id === 'child-leader' ? leaderAgent : undefined) },
@@ -80,8 +83,8 @@ const consolidation = (effort?: string) => ({
   // （D1/D2）：前两名保留原 Expert-A/Member-B，其余补通用组员；本文件用例只考察
   // 中断/心跳/门禁语义，无派生数量断言，补人数不改断言意图。
   assignments: [
-    { member: 'Expert-A', role: 'expert', task: '实现核心逻辑并自测', reasoningEffort: 'low' },
-    { member: 'Member-B', role: 'member', task: '整理验收证据清单' },
+    { member: 'Expert-A', role: 'expert', task: '实现核心逻辑并自测', reasoningEffort: 'low', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
+    { member: 'Member-B', role: 'expert', task: '整理验收证据清单', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
     ...gateMembers(8).slice(2),
   ],
   ...(effort ? { taskReasoningEffort: effort } : {}),
@@ -229,6 +232,6 @@ test('冒烟：主 Agent deepThink 门禁与叶子 self_effort+deepThink 门禁�
   const noThink = await runtime.delegateTool(leaf, { action: 'self_effort', reasoningEffort: 'xhigh', complexityRationale: '复杂' })
   assert.equal(noThink.ok, false)
   assert.equal(noThink.code, 'DEEP_THINK_MISSING')
-  const withThink = await runtime.delegateTool(leaf, { action: 'self_effort', reasoningEffort: 'xhigh', complexityRationale: '复杂', deepThink: MAIN_DEEP_THINK_FIXTURE })
+  const withThink = await runtime.delegateTool(leaf, { action: 'self_effort', reasoningEffort: 'xhigh', complexityRationale: '复杂', deepThink: MAIN_DEEP_THINK_FIXTURE, timeNotice: { declaredMinutes: 15, reason: '复杂' } })
   assert.equal(withThink.ok, true, JSON.stringify(withThink))
 })

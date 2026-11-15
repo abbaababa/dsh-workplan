@@ -147,18 +147,24 @@ test('结果摘要未完成时先写「未完成」，不再说「请核对并�
 
 test('未完成的结果消息只命令续跑，完成的结果消息才命令收尾', () => {
   const inbox = makeRecord(makePlan())
-  const incomplete = textOf(buildResultMessage({
+  const incompleteMessage = buildResultMessage({
     planId: 'wp-stop-gate',
     sessionId: 'session-stop-gate',
     statuses: inbox.statuses,
     stats: derivePlanSnapshot(inbox.statuses).stats,
     phase: 'paused',
     errors: [],
-  }))
-  assert.match(incomplete, /【未完成，禁止交付】/)
-  assert.match(incomplete, /不要调用 present/)
+  })
+  const incomplete = textOf(incompleteMessage)
+  /*
+   * [T9] 可见正文收敛为一行【关键进度·计划级】：旧文案【未完成，禁止交付】
+   * 与逐项清单已移入 durable 信封/摘要，改为锁新契约——计划级关键进度、
+   * 显式 present 禁令与续跑指引；不得再出现「给出最终答复」的收尾命令。
+   */
+  assert.match(incomplete, /【关键进度·计划级】/)
+  assert.match(incomplete, /禁止交付：不要调用 present/)
   assert.match(incomplete, /再次调用 dsh_workplan_dispatch/)
-  assert.doesNotMatch(incomplete, /3\. 给出最终答复/)
+  assert.doesNotMatch(incomplete, /给出最终答复/)
 
   markDelivered(inbox)
   const finished = textOf(buildResultMessage({
@@ -169,8 +175,8 @@ test('未完成的结果消息只命令续跑，完成的结果消息才命令�
     phase: 'done',
     errors: [],
   }))
-  assert.match(finished, /3\. 给出最终答复/)
-  assert.doesNotMatch(finished, /【未完成，禁止交付】/)
+  assert.match(finished, /全部完成且可交付/)
+  assert.match(finished, /present/)
 
   /*
    * [1.8.13] T5-B/D: all rows done but no structured evidence used to produce
@@ -187,9 +193,8 @@ test('未完成的结果消息只命令续跑，完成的结果消息才命令�
     phase: 'done',
     errors: [],
   }))
-  assert.match(evidenceBlocked, /【证据未通过，禁止交付】/)
+  assert.match(evidenceBlocked, /证据未通过/)
   assert.match(evidenceBlocked, /dsh_workplan_update/)
-  assert.doesNotMatch(evidenceBlocked, /3\. 给出最终答复/)
 })
 
 test('收尾指令写清剩余量、禁止交付与唯一恢复动作', () => {

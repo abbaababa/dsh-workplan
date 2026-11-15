@@ -71,7 +71,34 @@ function completed(text = '完成') {
   return { stopReason: 'completed', output: [{ type: 'text', text }] }
 }
 
-test('E1：三处文案不再含固定期限措辞（O-5a/O-5b）', () => {
+/*
+ * [SCv2-T6][C-Q1-09] TA-05 条件断言（AC-Q1-5 改写，预期来源 spec:76）：
+ * 「必须在 N 分钟内完成/交付」句式不再一律禁止——判据层目标句是允许且必需的，
+ * 但必须满足 N=10＋同行含判据层/完成目标标签＋相邻行（±2）含批准/例外通道；
+ * 运行层被写成固定截止仍然禁止。口径与 reports/simple-criterion-v2-text-assertions.py
+ * rule_ta05 逐字一致（同正则、同窗口、同词表），不另写第二套判据。
+ */
+function ta05Holds(source: string): boolean {
+  const lines = String(source).split('\n')
+  const pattern = /必须在[^\n。]{0,12}分钟内(?:完成|交付)/g
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    pattern.lastIndex = 0
+    let m: RegExpExecArray | null
+    while ((m = pattern.exec(line)) !== null) {
+      const seg = line.slice(Math.max(0, m.index - 6), m.index + m[0].length + 6)
+      const num = /(\d+)\s*分钟/.exec(seg)
+      const okNum = !!num && num[1] === '10'
+      const okLabel = /(判据层|完成目标)/.test(line)
+      const window = lines.slice(Math.max(0, i - 2), i + 3).join('\n')
+      const okExc = /(批准|例外)/.test(window)
+      if (!(okNum && okLabel && okExc)) return false
+    }
+  }
+  return true
+}
+
+test('E1：三处文案不再含固定期限措辞（O-5a/O-5b）＋[SCv2-T6][C-Q1-09] 双向断言（AC-Q1-5）', () => {
   const hostSource = readFileSync(path.resolve(process.cwd(), 'src/host.ts'), 'utf8')
   const planSource = readFileSync(path.resolve(process.cwd(), 'src/plan.ts'), 'utf8')
   assert.doesNotMatch(
@@ -79,12 +106,20 @@ test('E1：三处文案不再含固定期限措辞（O-5a/O-5b）', () => {
     /硬执行上限（默认 15 分钟\/步）/,
     '待实现（O-5a/E1）：src/host.ts 系统提示词仍把超时写成「硬执行上限（默认 15 分钟/步）」——必须改为「超时是安全兜底（防止任务无限运行），不是交付期限」',
   )
+  // 反向（运行层禁令保留）：「15 分钟/步」「硬执行上限」「强制结束」零命中
   for (const [label, source] of [['src/host.ts', hostSource], ['src/plan.ts', planSource]] as const) {
     assert.doesNotMatch(
       source,
-      /15 分钟\/步|必须在[^\n。]{0,12}分钟内(完成|交付)/,
-      `E1：${label} 不得再出现固定完成期限措辞（时间是协商出来的安全兜底，不是固定交付期限）`,
+      /15 分钟\/步|硬执行上限|强制结束/,
+      `E1：${label} 不得把运行层写成固定截止/强制结束（运行层是安全兜底，不是固定交付期限）`,
     )
+    // [SCv2-T6][C-Q1-09] 正向：判据层目标句必须命中（TA-01 允许措辞三式之一）
+    assert.ok(
+      /完成目标[^\n]{0,12}(?:≤|<=|不超过)\s*10\s*分钟|10\s*分钟[^\n]{0,6}完成目标|判据层[^\n]{0,20}10\s*分钟/.test(source),
+      `E1 正向（AC-Q1-5 双向断言）：${label} 必须含判据层 10 分钟完成目标表述`,
+    )
+    // 条件断言（TA-05）：替代旧「一律禁止 必须在…分钟内完成」
+    assert.ok(ta05Holds(source), `E1/TA-05：${label} 的「必须在 N 分钟内完成」句式必须满足 N=10＋判据层标签＋例外通道`)
   }
   const plan = rawPlan()
   const stage = (plan as any).stages[0]
@@ -97,9 +132,11 @@ test('E1：三处文案不再含固定期限措辞（O-5a/O-5b）', () => {
   for (const [label, text] of texts) {
     assert.doesNotMatch(
       String(text),
-      /硬执行上限|15 分钟\/步|必须在[^\n。]{0,12}分钟内(完成|交付)/,
-      `E1：${label} 输出不得含固定期限措辞（超时是安全兜底，不是交付期限）`,
+      /硬执行上限|15 分钟\/步|强制结束/,
+      `E1：${label} 输出不得含运行层固定期限措辞（超时是安全兜底，不是交付期限）`,
     )
+    // [SCv2-T6][C-Q1-09] 条件断言（TA-05）：判据层目标句允许，运行层固定截止禁止
+    assert.ok(ta05Holds(String(text)), `E1/TA-05：${label} 输出的「必须在 N 分钟内完成」句式必须满足 N=10＋判据层标签＋例外通道`)
   }
 })
 
@@ -114,6 +151,13 @@ test('E2：预算预告把预估标注为「仅供参考/非承诺」（O-5b）'
     text,
     /协商/,
     'E2：预告文应点明实际时长由协商决定（extendMs 等协商路径）',
+  )
+  // [SCv2-T6][C-Q1-09][E2] 「协商」断言保留且必须处运行层语境（AC-Q1-5/AC-Q7-1）：
+  // 协商属于运行层安全兜底，不得与判据层完成目标混写。
+  assert.match(
+    text,
+    /运行层|安全兜底/,
+    'E2：预算预告必须带运行层标签（协商属运行层安全兜底，不是判据层目标）',
   )
 })
 

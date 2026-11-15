@@ -210,7 +210,7 @@ test('present：全 done 无证据一律拒绝；取消文案不再暗示可交�
 
   const cancelMessage: any = buildCancelMessage('wp-cancel-copy')
   const text = String(cancelMessage?.content?.[0]?.text ?? '')
-  assert.match(text, /取消不等于完成/)
+  assert.match(text, /取消≠完成：未完成项不得交付、不得声称完成/)
   assert.match(text, /不要调用 present/)
   assert.match(text, /未完成：剩余 N 项/)
 })

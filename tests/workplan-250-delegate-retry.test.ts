@@ -31,7 +31,8 @@ function makePlan() {
     stages: [{
       id: 'S1',
       name: '实施',
-      subtasks: [{ id: 'T1', title: '部门任务', department: 'engineering', dependsOn: [] }],
+      // [2.5.5] 夹具适配：本文件测重派简报，不测低档禁派；任务行声明 high 放行第三层派发。
+      subtasks: [{ id: 'T1', title: '部门任务', department: 'engineering', dependsOn: [], reasoningEffort: 'high' }],
     }],
   }
 }
@@ -80,8 +81,8 @@ const consolidation = (overrides: any = {}) => ({
   approach: ['专家做核心实现：先确认入口再最小改动，并附聚焦单测自测', '组员做证据清单：逐条核对验收标准并落盘留证'],
   approachBasis: ["第二轮分工的方法、流程、步骤基于第一轮完成好的全部结果：质量与时间的主要矛盾决定专家承担核心实现、组员承担自测与证据，约束决定不改无关文件。"],
   assignments: [
-    { member: 'Expert-A', role: 'expert', task: '实现核心逻辑并自测' },
-    { member: 'Member-B', role: 'member', task: '整理验收证据清单' },
+    { member: 'Expert-A', role: 'expert', task: '实现核心逻辑并自测', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
+    { member: 'Member-B', role: 'expert', task: '整理验收证据清单', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
   ],
   ...overrides,
 })
@@ -89,10 +90,10 @@ const consolidation = (overrides: any = {}) => ({
 // [2.5.4][T4] 按 D1/D2 新契约适配，意图不变：复杂档（medium/high/xhigh/max）分工表须合计 ≥8 人。
 // 默认 consolidation() 保持 2 人（非复杂子案依赖上限 6）；复杂子案专用 8 人表（≥1expert+≥1member）。
 const assignments8 = () => [
-  { member: 'Expert-A', role: 'expert', task: '实现核心逻辑并自测' },
-  { member: 'Member-B', role: 'member', task: '整理验收证据清单' },
+  { member: 'Expert-A', role: 'expert', task: '实现核心逻辑并自测', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
+  { member: 'Member-B', role: 'expert', task: '整理验收证据清单', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
   ...Array.from({ length: 6 }, (_, i) => ({
-    member: `Member-${String.fromCharCode(67 + i)}`, role: 'member', task: `单一目标子任务 ${i + 3}（单一主产物、可独立验收）`,
+    member: `Member-${String.fromCharCode(67 + i)}`, role: 'expert', task: `单一目标子任务 ${i + 3}（单一主产物、可独立验收）`, qualityRequirements: ['必须给出可复核的命令输出或文件证据'],
   })),
 ]
 
@@ -185,19 +186,26 @@ test('R4 端到端：叶子 failed/done 后重派——新任务书附上次失�
 /* ---------- 4. R2×R4：重置后整体等级不丢（effortOverride 回落继承） ---------- */
 
 test('R2×R4：planDelegations taskEffortFallback——梳理未带整体等级时继承行上 effortOverride，显式配置优先', () => {
-  // [2.5.4][T4] 按 D1/D2 新契约适配，意图不变：回落源 xhigh/high=复杂 ⇒ 对应子案扩到 8 人；
-  // 显式 low 与无配置子案=非复杂，保持 2 人旧行为不变。
+  // [2.5.4][T4] 按 D1/D2 新契约适配，意图不变：回落源 xhigh/high=复杂 ⇒ 对应子案扩到 8 人。
+  // [T10][E-A] 按 2.5.5/D1–D5 新契约适配：low 与「未配置（视同 low）」已被禁派，
+  // 原「explicit low 返回 taskEffort=low」「none 回落 low 仍 ok」在现行契约下是非法前提；
+  // 现改为断言「显式 low 优先于回落源 → 命中 low 禁派闸」与「未配置视同 low → 禁派」，
+  // 既保留「显式配置优先于回落源」的原意，又钉死新裁决语义（断言意图不弱化）。
   const inherited = planDelegations({ consolidation: consolidation({ assignments: assignments8() }), model: QWEN, taskEffortFallback: 'xhigh' })
   assert.equal(inherited.ok, true)
   assert.equal(inherited.taskEffort, 'xhigh')
   assert.deepEqual(inherited.members.map((m) => m.effort), Array(8).fill('xhigh'))
   const explicit = planDelegations({ consolidation: consolidation({ taskReasoningEffort: 'low' }), model: QWEN, taskEffortFallback: 'xhigh' })
-  assert.equal(explicit.taskEffort, 'low', '显式配置优先于回落源')
+  assert.equal(explicit.ok, false, '显式 low 优先于回落源 xhigh，必须命中 low 禁派闸')
+  assert.equal(explicit.code, 'DELEGATE_LOW_TASK_FORBIDDEN')
+  assert.equal(explicit.taskEffort, null)
   const clamped = planDelegations({ consolidation: consolidation({ assignments: assignments8() }), model: QWEN, taskEffortFallback: 'high' })
   assert.equal(clamped.taskEffort, 'medium', '回落源同样按家族钳制并留痕')
   assert.equal(clamped.taskEffortClamped?.requested, 'high')
   const none = planDelegations({ consolidation: consolidation(), model: QWEN })
-  assert.deepEqual(none.members.map((m) => m.effort), ['low', 'low'], '无整体配置回落 low 的旧行为不变')
+  assert.equal(none.ok, false, '未配置整体等级 ⇒ 视同 low ⇒ 禁派（D1–D5）')
+  assert.equal(none.code, 'DELEGATE_LOW_TASK_FORBIDDEN')
+  assert.deepEqual(none.members, [])
 })
 
 test('R2×R4 端到端：重置清掉 consolidation 后重新 review/dispatch——effortOverride 全程贯穿到叶子 agentOptions', async () => {
@@ -264,13 +272,13 @@ test('R2/G1：刷新/重启回放后 effortOverride/consolidation/delegates 全�
       approach: ['专家做核心实现'],
       approachBasis: ["第二轮分工的方法、流程、步骤基于第一轮完成好的全部结果：质量与时间的主要矛盾决定专家承担核心实现、组员承担自测与证据，约束决定不改无关文件。"],
       assignments: [
-        { member: 'Expert-A', role: 'expert', task: '实现核心逻辑', reasoningEffort: 'xhigh' },
-        { member: 'Member-B', role: 'member', task: '证据清单', reasoningEffort: 'low' },
+        { member: 'Expert-A', role: 'expert', task: '实现核心逻辑', reasoningEffort: 'xhigh', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
+        { member: 'Member-B', role: 'expert', task: '证据清单', reasoningEffort: 'low', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
       ],
       taskReasoningEffort: 'xhigh',
     },
     delegates: [
-      { member: 'Expert-A', role: 'expert', task: '实现核心逻辑', effort: 'xhigh', childId: 'member-1', status: 'done', summary: '已完成', startedAt: 1, finishedAt: 2 },
+      { member: 'Expert-A', role: 'expert', task: '实现核心逻辑', effort: 'xhigh', childId: 'member-1', status: 'done', summary: '已完成', startedAt: 1, finishedAt: 2, qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
     ],
     revision: 2,
   }))

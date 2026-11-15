@@ -15,7 +15,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { applyStatus, buildPlanMessage, buildUpdateMessage, createStatuses } from '../src/plan.js'
+import { applyStatus, buildPlanMessage, buildUpdateMessage, createStatuses, flushPendingWorkplanUpdates } from '../src/plan.js'
 import { createWorkplanRuntime, reconstructFromSession } from '../src/runtime.js'
 import { threePhasePromptLines } from '../src/three-phase.js'
 import { buildLlmRulesBrief, buildPhaseZeroDelegateePrompt } from '../src/llm-rules.js'
@@ -29,7 +29,9 @@ function makePlan() {
     planId: 'wp-252-leaf', sessionId: 'session-root', createdTurn: 1, createdAt: 1000, title: '叶子执行前门禁用例',
     taskUnderstanding: { originalRequest: '补齐叶子执行前门禁', deliverable: '补丁' },
     contradictions: { primary: { statement: '先思考后执行 vs 不卡死回放' }, secondary: [], transformationConditions: [] },
-    stages: [{ id: 'S1', name: '实施', subtasks: [{ id: 'T1', title: '部门任务', department: 'engineering', dependsOn: [] }] }],
+    // [T10][D-R1] 夹具适配：计划行声明复杂档，通过 2.5.5 low 禁派闸（未配置视同 low）；
+    // 行档位不进入 declaredEffort ⇒ 不触发 ≥8 人闸，2 人分工与既有断言保持不变。
+    stages: [{ id: 'S1', name: '实施', subtasks: [{ id: 'T1', title: '部门任务', department: 'engineering', dependsOn: [], reasoningEffort: 'high' }] }],
   }
 }
 
@@ -56,6 +58,8 @@ function makeRuntime() {
         return { childId, result, dispose: async () => {} }
       },
       interruptByParent: () => ({ ok: true }),
+      // [T6] 预估送达通道 stub：self_effort 登记后经 sendMessage 投给负责人（缺此函数会 ESTIMATE_DELIVERY_FAILED）。
+      sendMessage: async () => 'msg-leaf-deep-think-stub',
     },
     sessions: { get: (id: string) => (id === 'session-root' ? rootSession : id === 'child-leader' ? leaderSession : undefined), list: () => [], eventAt: () => undefined },
     agents: { get: (id: string) => (id === 'child-leader' ? leaderAgent : undefined) },
@@ -75,8 +79,8 @@ const consolidation = () => ({
   approach: ['专家做核心实现：先确认入口再最小改动，并附聚焦单测自测', '组员做证据：逐条核对验收标准并落盘留证'],
   approachBasis: ['第二轮分工基于第一轮全部梳理结果：质量与时间矛盾决定专家做核心实现、组员做证据。'],
   assignments: [
-    { member: 'Expert-A', role: 'expert', task: '实现核心逻辑并自测', reasoningEffort: 'low' },
-    { member: 'Member-B', role: 'member', task: '整理验收证据清单' },
+    { member: 'Expert-A', role: 'expert', task: '实现核心逻辑并自测', reasoningEffort: 'low', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
+    { member: 'Member-B', role: 'expert', task: '整理验收证据清单', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
   ],
 })
 const leafAgent = (childId: string) => ({ session: { id: childId, header: { parentSession: 'child-leader', cwd: '/tmp/leaf-cwd' } }, options: { provider: 'qw', model: QWEN } })
@@ -138,7 +142,7 @@ test('拒绝顺序不变：非法档/缺依据先于 deepThink 校验（旧拒�
 test('叶子 self_effort+合格 deepThink ⇒ 登记并以自配档接续 phase-1，执行蓝图随任务书下发', async () => {
   const { runtime, record, rootSession, spawned } = await dispatched()
   const r = await runtime.delegateTool(leafAgent('member-1'), {
-    action: 'self_effort', reasoningEffort: 'max', complexityRationale: '跨模块根因排查', deepThink: MAIN_DEEP_THINK_FIXTURE,
+    action: 'self_effort', reasoningEffort: 'max', complexityRationale: '跨模块根因排查', deepThink: MAIN_DEEP_THINK_FIXTURE, timeNotice: { declaredMinutes: 20, reason: '跨模块根因排查' },
   })
   assert.equal(r.ok, true, JSON.stringify(r))
   assert.equal(spawned.length, 3, '必须新派生 phase-1 激活')
@@ -150,6 +154,7 @@ test('叶子 self_effort+合格 deepThink ⇒ 登记并以自配档接续 phase-
   const row = record.statuses[0]
   assert.deepEqual(row.delegates[0].deepThink, MAIN_DEEP_THINK_FIXTURE, 'delegates[].deepThink 落档')
   assert.deepEqual(row.delegateDeepThinks['Expert-A'], MAIN_DEEP_THINK_FIXTURE, 'delegateDeepThinks 台账落档')
+  flushPendingWorkplanUpdates(rootSession)
   assert.match(JSON.stringify(rootSession.events), /delegateDeepThinks/, 'durable workplan-update 携带思考台账（重启不丢）')
   spawned[2].resolveResult({ stopReason: 'completed', output: [{ type: 'text', text: '完成' }] })
   await new Promise((resolve) => setTimeout(resolve, 10))
@@ -160,7 +165,7 @@ test('叶子 self_effort+合格 deepThink ⇒ 登记并以自配档接续 phase-
 test('重置保留 delegateDeepThinks；重派读档直接 phase-1（不再 phase-0、不重复提交）', async () => {
   const { runtime, record, spawned, leaderAgent } = await dispatched()
   await runtime.delegateTool(leafAgent('member-1'), {
-    action: 'self_effort', reasoningEffort: 'xhigh', complexityRationale: '非常复杂', deepThink: MAIN_DEEP_THINK_FIXTURE,
+    action: 'self_effort', reasoningEffort: 'xhigh', complexityRationale: '非常复杂', deepThink: MAIN_DEEP_THINK_FIXTURE, timeNotice: { declaredMinutes: 25, reason: '非常复杂' },
   })
   spawned[2].resolveResult({ stopReason: 'error', diagnostic: '中断' })
   spawned[1].resolveResult({ stopReason: 'error', diagnostic: '中断' })
@@ -225,7 +230,7 @@ test('协议文案同源：三阶段/主Agent提示词/负责人与叶子 brief/
   assert.match(head, /少走弯路/)
   const leaf = buildLlmRulesBrief({ model: QWEN, tier: 'delegate', memberRole: 'expert' })
   assert.match(leaf, /少走弯路/)
-  const phase0 = buildPhaseZeroDelegateePrompt({ departmentLabel: '工程', member: { member: 'X', role: 'expert', task: 't', effort: 'low' }, cwd: '/tmp' })
+  const phase0 = buildPhaseZeroDelegateePrompt({ departmentLabel: '工程', member: { member: 'X', role: 'expert', task: '读取目标文件并写出一份结论', effort: 'low', qualityRequirements: ['必须给出命令输出'] }, cwd: '/tmp' })
   assert.match(phase0, /deepThink/, 'phase-0 任务书必须写明 deepThink 义务')
   assert.match(phase0, /DEEP_THINK_MISSING/)
   assert.match(phase0, /少走弯路/)

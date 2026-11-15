@@ -90,8 +90,19 @@ test('下发：子任务提示词附带统一格式规范，且与核验用的�
     stage: { name: 'S1', goal: '修复' },
     cwd: '/tmp',
   })
-  assert.ok(prompt.includes(renderCommFormatSpec()), '提示词必须原样附带同一份规范文本')
+  /*
+   * [3.0.0] 规范自 2 版起分层下发：部门负责人任务书下发 leader 层（F1–F9 + F11），
+   * 专家任务书另下发 expert 层（F1–F9 + F10）。断言改为「同一份数据、按层级原样附带」，
+   * 且负责人层不得越权要求 F10（专家汇报）、专家层不得要求 F11（部门汇总）。
+   */
+  assert.ok(prompt.includes(renderCommFormatSpec('leader')), '提示词必须原样附带同一份规范文本（leader 层）')
+  assert.doesNotMatch(prompt, /【F10】/)
   for (const req of COMM_FORMAT_SPEC.requirements) {
+    // [3.0.0] F10 只下发到专家层任务书，F11 只下发到负责人层；其余条目两层都要有。
+    if (req.id === 'F10') {
+      assert.ok(!prompt.includes('【F10】'), '负责人层不得下发专家汇报条目 F10')
+      continue
+    }
     assert.ok(prompt.includes(req.id), `提示词缺少规范条目 ${req.id}`)
   }
   assert.match(prompt, /提交前自查（强制）/, '必须要求部门人员提交前自查')
@@ -99,10 +110,12 @@ test('下发：子任务提示词附带统一格式规范，且与核验用的�
 })
 
 test('规范：版本号与条目集合稳定（对外契约，改动须升版本）', () => {
-  assert.equal(COMM_FORMAT_VERSION, 1)
+  // [3.0.0] 用户要求 7/10 新增 F10（专家精简 JSON 汇报）与 F11（部门精简 JSON 汇总），
+  // 依「改动须升版本」把版本从 1 升到 2；F1–F9 原文一字未改。
+  assert.equal(COMM_FORMAT_VERSION, 2)
   assert.deepEqual(
     COMM_FORMAT_SPEC.requirements.map((item: any) => item.id),
-    ['F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8', 'F9'],
+    ['F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F11'],
   )
   for (const req of COMM_FORMAT_SPEC.requirements) {
     assert.ok(req.description.trim().length > 10, `${req.id} 描述过于单薄`)

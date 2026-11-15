@@ -292,10 +292,12 @@ test('G3-A3 无 revision 字段的旧格式事件不被误拦（向后兼容）'
   const session = makeSession()
   seedResult(session, plan, settledStatuses(plan, 'reported', 16))
   const msg = buildUpdateMessage({ planId: PLAN_ID, subtaskId: 'T2', status: 'done', note: '旧格式改判', revision: 16 })
-  const before = msg.content[0].text
-  const after = before.replace('"revision":16', '"__stripped__":1')
-  assert.notEqual(after, before, '构造前提：载荷必须先带 rev 才能剥')
-  msg.content = [{ type: 'text', text: after }]
+  // [T10][E-B] 断言适配：T7 起 JSON 信封已从可见文本迁入 source.durable（可见文本为空），
+  // 原「对可见文本做字符串替换剥 revision」已失效（替换是空操作）。改为直接删除 durable
+  // 载荷中的 revision 字段来构造「无 revision 的旧格式」，语义与被测契约一致（gate 不误拦）。
+  const durable: any = msg.source?.durable
+  assert.ok(durable && Object.prototype.hasOwnProperty.call(durable, 'revision'), '构造前提：durable 载荷必须先带 rev 才能剥')
+  delete durable.revision
   session.append('user/message', msg)
   const { value: record, warns } = await captureWarns(() => reconstructFromSession(session) as any)
   const row = rowOf(record.statuses, 'T2')
@@ -523,6 +525,7 @@ function makeX1Plan() {
         id: 'T1', title: '实现通道', department: 'engineering', role: 'engineer',
         objective: '通过验收', method: ['实现', '测试'], inputs: [],
         outputs: ['reports/t4-cross-report.md'], acceptance: ['通道可用'], risk: '低', dependsOn: [],
+        qualityRequirements: ['必须给出可复核的命令输出或文件证据'],
       }],
     }],
   }

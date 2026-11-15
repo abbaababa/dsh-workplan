@@ -244,7 +244,34 @@ test('O-3b/C3：协商上限 = clamp(预告分钟 × 2.0, MIN_CHILD_TIMEOUT_MS, 
   }
 })
 
-test('B1/O-2a：派发提示词含「开工前先报预估时长」条款，且不含固定完成承诺', () => {
+/*
+ * [SCv2-T6][C-Q1-09] TA-05 条件断言（AC-Q1-5 改写，预期来源 spec:76）：
+ * B1 原「一律禁止 必须…分钟内完成」改为条件断言——判据层目标句允许且必需，
+ * 但必须 N=10＋同行判据层/完成目标标签＋相邻行（±2）批准/例外通道；
+ * 运行层固定截止（小时级承诺、截止点/时刻、15 分钟/步）仍然禁止。
+ * 口径与 reports/simple-criterion-v2-text-assertions.py rule_ta05 逐字一致。
+ */
+function ta05Holds(source: string): boolean {
+  const lines = String(source).split('\n')
+  const pattern = /必须在[^\n。]{0,12}分钟内(?:完成|交付)/g
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    pattern.lastIndex = 0
+    let m: RegExpExecArray | null
+    while ((m = pattern.exec(line)) !== null) {
+      const seg = line.slice(Math.max(0, m.index - 6), m.index + m[0].length + 6)
+      const num = /(\d+)\s*分钟/.exec(seg)
+      const okNum = !!num && num[1] === '10'
+      const okLabel = /(判据层|完成目标)/.test(line)
+      const window = lines.slice(Math.max(0, i - 2), i + 3).join('\n')
+      const okExc = /(批准|例外)/.test(window)
+      if (!(okNum && okLabel && okExc)) return false
+    }
+  }
+  return true
+}
+
+test('B1/O-2a：派发提示词含「开工前先报预估时长」条款，且不含固定完成承诺（[SCv2-T6][C-Q1-09] TA-05 条件断言）', () => {
   const subtask = baseSubtask({ estimateMinutes: 10 })
   const plan = {
     planId: 'wp-prompt',
@@ -265,10 +292,16 @@ test('B1/O-2a：派发提示词含「开工前先报预估时长」条款，且�
     /开工前/.test(prompt) && /预估/.test(prompt) && /send_message/.test(prompt),
     '待实现（O-2a/B1/2.6 表 #3）：buildChildPrompt 执行要求区需含「柔性时长协商协议」段——开工前 send_message(target:"lead") 报预估完成时长，新预估覆盖旧预估（方案 §2.3）',
   )
+  // [SCv2-T6][C-Q1-09] 运行层固定承诺仍然禁止（小时级承诺/截止点时刻/15 分钟每步）；
+  // 分钟级「必须在 N 分钟内完成」改为 TA-05 条件断言（N=10 且带例外通道）。
   assert.doesNotMatch(
     prompt,
-    /必须.{0,8}(分钟|小时内)(完成|交付)|截止.{0,8}(点|时刻)|15 分钟\/步/,
-    'B1：派发提示词不得出现固定完成承诺（时间是协商出来的安全兜底，不是固定交付期限）',
+    /必须.{0,8}小时内(完成|交付)|截止.{0,8}(点|时刻)|15 分钟\/步/,
+    'B1：派发提示词不得出现运行层固定完成承诺（时间是协商出来的安全兜底，不是固定交付期限）',
+  )
+  assert.ok(
+    ta05Holds(prompt),
+    'B1/TA-05（AC-Q1-5）：「必须在 N 分钟内完成」句式仅当 N=10＋判据层标签＋例外通道时允许（判据层目标句合法，运行层固定截止非法）',
   )
 })
 

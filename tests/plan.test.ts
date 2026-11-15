@@ -254,7 +254,7 @@ test('cancel message round-trips and preserves the plan id', () => {
   assert.equal(parsed.planId, 'wp-cancel')
   assert.equal(parsed.reason, '用户选择直接修复')
   const text = messageText(message)
-  assert.match(text, /不会把未完成项标成完成/)
+  assert.match(text, /未完成项不得交付、不得声称完成/)
   assert.doesNotMatch(text, /没有派发部门 Agent/)
 })
 

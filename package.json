@@ -1,6 +1,6 @@
 {
   "name": "dsh-workplan",
-  "version": "2.5.4",
+  "version": "3.0.0",
   "description": "Automatic task decomposition, real department subagents, and a responsive workplan dashboard for DeepSeek Harness.",
   "type": "module",
   "license": "MIT",
@@ -66,7 +66,7 @@
   },
   "scripts": {
     "clean": "rm -rf dist dist-tests",
-    "build": "rm -rf dist && tsc -p tsconfig.json && cp dist/*.js lib/ && cp dist/client.js client.js",
+    "build": "rm -rf dist && tsc -p tsconfig.json && rm -f lib/*.js && cp dist/*.js lib/ && cp dist/client.js client.js",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && rm -rf dist-tests && tsc -p tsconfig.test.json && node scripts/run-tests.mjs",
     "verify": "npm run check && npm test",

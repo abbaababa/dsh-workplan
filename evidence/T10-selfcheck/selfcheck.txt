@@ -1,0 +1,22 @@
+PASS  C1 产物存在 reports/T4-修复后复核-20261114.md  | bytes=8399 sha=bfe00b5c
+PASS  C1 产物存在 reports/T10-修复说明-20261114.md  | bytes=9370 sha=534d53f5
+PASS  C2 禁用表述为零 T4-修复后复核-20261114.md  | 0 命中
+PASS  C2 禁用表述为零 T10-修复说明-20261114.md  | 0 命中
+PASS  C3 dist==lib plan.js  | cd91112b
+PASS  C3 dist==lib runtime.js  | f7e5d341
+PASS  C4 全量回归 pass=1146 fail=0  | [run-tests] pass=1146 fail=0 cancelled=0 exit=0
+PASS  C5 锚点 src/plan.ts :: PENDING_UPDATE_COUNT_LIMIT = 100
+PASS  C5 锚点 src/plan.ts :: PENDING_UPDATE_SIZE_LIMIT = 200_000
+PASS  C5 锚点 src/plan.ts :: PENDING_UPDATE_FLUSH_MS = 20_000
+PASS  C5 锚点 src/plan.ts :: function tryBufferWorkplanUpdate
+PASS  C5 锚点 src/plan.ts :: export function flushPendingWorkplanUp
+PASS  C5 锚点 src/plan.ts :: export function parseUpdateMessages
+PASS  C5 锚点 src/runtime.ts :: for (const update of parseUpdateMessag
+PASS  C5 锚点 src/runtime.ts :: const cancel = parseCancelMessage(even
+PASS  C6 cancel 在 for 之后  | for@4672 cancel@4883
+PASS  C6b 循环体内无新的 for 未闭合  | braces net=0
+PASS  C7 用例存在 tests/workplan-255-injection-merge.test.ts
+PASS  C7 用例存在 tests/workplan-255-cancel-replay.test.ts
+PASS  C8 HEAD 仍为 3af2686  | 3af2686
+INFO  git status 行数 = 147（含本次新增报告/证据，故大于 143 属预期）
+RESULT: ALL PASS  (fail=0)

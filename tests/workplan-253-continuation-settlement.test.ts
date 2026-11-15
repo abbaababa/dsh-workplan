@@ -57,7 +57,9 @@ const QWEN = 'qwen3-max-preview'
 function makeD1Plan() {
   return {
     planId: 'wp-253-d1', sessionId: 'session-root', createdTurn: 1, createdAt: 1000, title: 'D1 接续回归',
-    stages: [{ id: 'S1', name: '实施', subtasks: [{ id: 'T1', title: '部门任务', department: 'engineering', dependsOn: [] }] }],
+    // [T10][E-A] 夹具适配：计划行声明复杂档，通过 2.5.5 low 禁派闸（未配置视同 low）；
+    // 行档位不进入 declaredEffort ⇒ 不触发 ≥8 人闸，2 人分工与既有断言保持不变。
+    stages: [{ id: 'S1', name: '实施', subtasks: [{ id: 'T1', title: '部门任务', department: 'engineering', dependsOn: [], reasoningEffort: 'high' }] }],
   }
 }
 
@@ -94,6 +96,8 @@ function makeD1Runtime(opts: { failContinuation?: boolean; agentsUnavailable?: b
         interrupts.push({ childId, parentId, mode })
         return { ok: true }
       },
+      // [T6] 预估送达通道 stub：self_effort 登记后经 sendMessage 投给负责人（缺此函数会 ESTIMATE_DELIVERY_FAILED）。
+      sendMessage: async () => 'msg-253-stub',
     },
     sessions: { get: (id: string) => (id === 'session-root' ? rootSession : id === 'child-leader' ? leaderSession : undefined), list: () => [], eventAt: () => undefined },
     // 宿主同款安全访问器（普通函数 mock）：ctx.get('agents') 可用。
@@ -129,8 +133,8 @@ const consolidation = () => ({
   approach: ['专家做核心实现：先确认入口再最小改动，并附聚焦单测自测；组员整理证据清单并逐条核对验收。'],
   approachBasis: ['第二轮分工的方法、流程、步骤基于第一轮完成好的全部结果：质量与时间的主要矛盾决定专家承担核心实现、组员承担自测与证据，约束决定不改无关文件。'],
   assignments: [
-    { member: 'Expert-A', role: 'expert', task: '实现核心逻辑并自测', reasoningEffort: 'low' },
-    { member: 'Member-B', role: 'member', task: '整理验收证据清单' },
+    { member: 'Expert-A', role: 'expert', task: '实现核心逻辑并自测', reasoningEffort: 'low', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
+    { member: 'Member-B', role: 'expert', task: '整理验收证据清单', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
   ],
 })
 const leafAgent = (childId: string) => ({ session: { id: childId, header: { parentSession: 'child-leader', cwd: '/tmp/t4b-cwd' } }, options: { provider: 'qw', model: QWEN } })
@@ -144,7 +148,7 @@ test('D1-1：属性访问 agents 抛错但 ctx.get 可用 ⇒ 解析先于 inter
   const caller = new AbortController()
   const r = await runtime.delegateTool(
     leafAgent('member-1'),
-    { action: 'self_effort', reasoningEffort: 'medium', complexityRationale: '跨模块根因排查，验证难度中等偏上', deepThink: MAIN_DEEP_THINK_FIXTURE },
+    { action: 'self_effort', reasoningEffort: 'medium', complexityRationale: '跨模块根因排查，验证难度中等偏上', deepThink: MAIN_DEEP_THINK_FIXTURE, timeNotice: { declaredMinutes: 15, reason: '跨模块根因排查，验证难度中等偏上' } },
     caller.signal,
   )
   assert.equal(r.ok, true, JSON.stringify(r))
@@ -171,7 +175,7 @@ test('D1-2：agents 服务不可用 ⇒ 不中断 phase-0、显式 SELF_EFFORT_C
   const { runtime, record, spawned, interrupts, leaderAgent } = makeD1Runtime({ agentsUnavailable: true })
   await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation() })
   await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
-  const r = await runtime.delegateTool(leafAgent('member-1'), { action: 'self_effort', reasoningEffort: 'medium', complexityRationale: '中等复杂度', deepThink: MAIN_DEEP_THINK_FIXTURE })
+  const r = await runtime.delegateTool(leafAgent('member-1'), { action: 'self_effort', reasoningEffort: 'medium', complexityRationale: '中等复杂度', deepThink: MAIN_DEEP_THINK_FIXTURE, timeNotice: { declaredMinutes: 15, reason: '中等复杂度' } })
   assert.equal(r.ok, false)
   assert.equal(r.code, 'SELF_EFFORT_CONTINUATION_FAILED', '解析失败必须显式报错，绝不静默')
   assert.match(String(r.error), /agents 服务不可用/)
@@ -197,7 +201,7 @@ test('D1-3：startActivation 连续两次失败 ⇒ 既有失败台账路径不�
   const { runtime, record, spawned, spawnAttempts, interrupts, leaderAgent } = makeD1Runtime({ failContinuation: true })
   await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation() })
   await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
-  const r = await runtime.delegateTool(leafAgent('member-1'), { action: 'self_effort', reasoningEffort: 'medium', complexityRationale: '中等复杂度', deepThink: MAIN_DEEP_THINK_FIXTURE })
+  const r = await runtime.delegateTool(leafAgent('member-1'), { action: 'self_effort', reasoningEffort: 'medium', complexityRationale: '中等复杂度', deepThink: MAIN_DEEP_THINK_FIXTURE, timeNotice: { declaredMinutes: 15, reason: '中等复杂度' } })
   assert.equal(r.ok, false)
   assert.equal(r.code, 'SELF_EFFORT_CONTINUATION_FAILED')
   assert.equal(spawnAttempts.count, 4, '2 次 phase-0 成功 + 2 次接续尝试失败（恰重试 1 次）')

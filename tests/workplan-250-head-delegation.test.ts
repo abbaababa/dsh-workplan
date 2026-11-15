@@ -31,8 +31,8 @@ const QWEN = 'qwen3-max-preview'
 
 function assignments(extra: any[] = []) {
   return [
-    { member: '专家甲', role: 'expert', task: '实现核心逻辑并附单测', ...extra[0] },
-    { member: '组员乙', role: 'member', task: '整理验收证据清单', ...extra[1] },
+    { member: '专家甲', role: 'expert', task: '实现核心逻辑并附单测', ...extra[0], qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
+    { member: '组员乙', role: 'expert', task: '整理验收证据清单', ...extra[1], qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
   ]
 }
 
@@ -40,7 +40,7 @@ function assignments(extra: any[] = []) {
 // 默认 assignments() 保持 2 人（非复杂子案依赖上限 6）；复杂子案专用 8 人表，extra 逐项覆盖语义不变。
 function assignments8(extra: any[] = []) {
   const fillers = Array.from({ length: 6 }, (_, i) => ({
-    member: `组员${'丙丁戊己庚辛'[i]}`, role: 'member', task: `单一目标子任务 ${i + 3}（单一主产物、可独立验收）`,
+    member: `组员${'丙丁戊己庚辛'[i]}`, role: 'expert', task: `单一目标子任务 ${i + 3}（单一主产物、可独立验收）`, qualityRequirements: ['必须给出可复核的命令输出或文件证据'],
   }))
   return [...assignments(extra), ...fillers]
 }
@@ -65,9 +65,10 @@ test('要求2：整体任务等级按模型家族钳制并留痕（qwen high→m
   assert.equal(plan.taskEffortClamped?.corrected, 'medium')
 })
 
-test('要求2：下级未单独配档时继承整体等级；显式配档优先；无整体配置回落 low', () => {
-  // [2.5.4][T4] 按 D1/D2 新契约适配，意图不变：xhigh=复杂 ⇒ 继承/显式两子案扩到 8 人（档位断言逐人保留）；
-  // noTask 子案未配置整体档=非复杂，保持 2 人旧行为不变。
+test('要求2：下级未单独配档时继承整体等级；显式配档优先；未配置视同 low 禁派（T3）', () => {
+  // [2.5.4][T4] 按 D1/D2 新契约适配，意图不变：xhigh=复杂 ⇒ 继承/显式两子案扩到 8 人（档位断言逐人保留）。
+  // [2.5.5][T3] 原则②：noTask 子案意图本就是未配置下派行为——旧「回落 low 放行」改为
+  // 新拒因 DELEGATE_LOW_TASK_FORBIDDEN＋direct 指路（D3 未配置视同 low 禁派）。
   const inherited = planDelegations({ consolidation: consolidation({ taskReasoningEffort: 'xhigh', assignments: assignments8() }), model: QWEN })
   assert.equal(inherited.ok, true)
   assert.deepEqual(inherited.members.map((m) => m.effort), Array(8).fill('xhigh'))
@@ -80,8 +81,9 @@ test('要求2：下级未单独配档时继承整体等级；显式配档优先�
   })
   assert.deepEqual(explicit.members.map((m) => m.effort), ['low', ...Array(7).fill('xhigh')])
   const noTask = planDelegations({ consolidation: consolidation(), model: QWEN })
-  assert.deepEqual(noTask.members.map((m) => m.effort), ['low', 'low'])
-  assert.equal(noTask.taskEffort, null)
+  assert.equal(noTask.ok, false)
+  assert.equal(noTask.code, 'DELEGATE_LOW_TASK_FORBIDDEN')
+  assert.match(noTask.error!, /direct/, '拒因须指路 direct 登记')
 })
 
 test('要求2：非法整体等级明确拒绝（A3 报错轨），不改写不静默', () => {
@@ -141,7 +143,9 @@ test('要求1/3：负责人任务书授予再分配权限，不再含矛盾禁�
   assert.ok(prompt.includes('单一目标'))
   const planner = buildPlannerPrompt('优化插件底层机制', '/tmp', '', {})
   assert.ok(planner.includes('分解必须更简单'))
-  assert.ok(planner.includes('多名相关领域全球顶尖专家与组员'))
+  // [3.0.0][用户要求 9] 组员角色已取消：规划器提示词改为「全球顶尖专家」单一角色。
+  assert.ok(planner.includes('多名相关领域全球顶尖专家'))
+  assert.ok(!planner.includes('与组员'))
   assert.ok(planner.includes('再分配权限'))
 })
 
@@ -210,9 +214,9 @@ test('要求2 端到端：review 配置整体等级 → 状态行 effortOverride
   assert.equal(status.effortOverride, 'medium')
 })
 
-test('要求5：版本声明统一 2.5.4（2.5.0 断言随定版升级）', () => {
+test('要求5：版本声明统一 3.0.0（2.5.0 断言随定版升级）', () => {
   const pkg = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8'))
-  assert.equal(pkg.version, '2.5.4')
+  assert.equal(pkg.version, '3.0.0')
   const fixture = JSON.parse(readFileSync(join(process.cwd(), 'tests/fixtures/tool-surface.json'), 'utf8'))
-  assert.equal(fixture.version, '2.5.4')
+  assert.equal(fixture.version, '3.0.0')
 })

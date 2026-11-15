@@ -19,11 +19,16 @@ export const GATE_PAD_APPROACH = '第二轮方法流程步骤：先按依赖顺�
  * [2.5.4][T4] 复杂任务（声明档 medium/high/xhigh/max）expert+member 合计 ≥8 人
  * （用户决策 D1/D2）。前两名固定 Expert-A（expert）/Member-B（member），
  * 其余为通用组员——既有按成员名定位的断言（member-1=Expert-A 等）不受影响。
+ *
+ * [3.0.0] 两处契约升级同步到本 helper，断言意图不变：
+ *  1) 用户要求 9：部门组员角色取消 —— role 一律 'expert'（成员名可继续叫 Member-x）；
+ *  2) 用户要求 3/6：质量要求必填 —— 每项统一附一条可检查的质量要求。
  */
 export function gateMembers(count: number) {
   return Array.from({ length: count }, (_, i) => {
-    if (i === 0) return { member: 'Expert-A', role: 'expert', task: '实现核心逻辑并自测' }
-    if (i === 1) return { member: 'Member-B', role: 'member', task: '整理验收证据清单' }
-    return { member: `Member-${i + 1}`, role: 'member', task: `单一目标子任务 ${i + 1}（单一主产物、可独立验收）` }
+    const qualityRequirements = ['必须给出可复核的命令输出或文件证据']
+    if (i === 0) return { member: 'Expert-A', role: 'expert', task: '实现核心逻辑并自测', qualityRequirements }
+    if (i === 1) return { member: 'Member-B', role: 'expert', task: '整理验收证据清单', qualityRequirements }
+    return { member: `Member-${i + 1}`, role: 'expert', task: `单一目标子任务 ${i + 1}（单一主产物、可独立验收）`, qualityRequirements }
   })
 }

@@ -1,3 +1,41 @@
+## 3.0.0 — 2026-11-14
+
+> **定版依据**：用户 2026-11-14 明确要求「优化全部完美完成后，此插件版本定为 3.0.0」，并裁决发布方式为**仅本地**（改版本号 + 构建 + 回归 + 变更说明，不对外发布、不打 tag）。本节下方「low 任务禁止第三层下派」一段原为 2.5.5 候选改动，经用户裁决**整体保留为 3.0.0 基线的一部分**，故并入本节，不再单独定版。
+>
+> **基线原则**：2.5.4 已有的全部强制机制（四角色两轮深度思考门禁、复杂任务 ≥8 人、下属开工预估上报、单任务 ≤10 分钟判据、F1–F9 沟通格式）**一条不减**，本节 13 条改动只做叠加。
+
+### 十三条底层机制优化（用户 2026-11-14 原话逐条对应）
+
+1. **会话内必须显示用户刚输入的任务内容**（原缺陷：等待分配期间切换会话再切回，看不到自己刚输入的任务）。根因（`reports/T4b-会话内容丢失根因报告-20261114.md`，3497 个会话 / 4034 轮对照）：宿主在 pre-step 之前就认领用户消息，人类 `user/message` 只在首个 model step 内部落盘；插件却在 pre-step 里 `await runPlanner`，把这一步推迟到分钟级（含规划轮 p50=58.4s / p90=250s，不含规划轮 p50=0.04s），这段时间日志里没有可渲染的任务正文，屏幕上唯一副本是客户端回声，而客户端收到回执后无条件退休回声 → 切走再切回就空了。**治本**：pre-step 不再等待规划 —— 先同步放行本步并注入「正在分配、别自己动手」的说明，规划转后台（`src/runtime.ts` 的 `runPlanningInBackground`，同会话幂等、沿用本步 signal 的取消语义），计划一成即经唯一合规写入器 `appendUserMessage` 写入会话并照旧自动派发；首 step 秒级启动后宿主立即落盘人类消息。**加固**：`src/plan.ts` 的 `buildPlanMessage` 另把 `taskAnchor.text`（截断 4000）以「用户刚才输入的任务原文（只读锚点，与你最初的输入逐字一致）：」逐字写进计划消息，任何回放都能读到原文。
+
+2. **收到任务即输出固定文案**：`任务正在分配中，请稍等一下......`。由平台在规划预告之前写入会话（`src/runtime.ts` 的 `maybePlan`，`appendUserMessage(..., { deferUntilHead: true })`），常量定义在 `src/v3-contract.ts` 的 `STATUS_ASSIGNING_TEXT`（6 个半角点，逐字冻结）。
+3. **派发给部门负责人的每个任务必须附质量要求**：新增 `qualityRequirements` 字段并设为**必填**（`src/host.ts` 的 schema、`src/llm-rules.ts` 的 `DelegationAssignment`），缺失即拒 `DELEGATE_QUALITY_REQUIREMENTS_MISSING`；负责人任务书用 `renderQualityRequirementsBlock` 逐条渲染并注明下达方。
+4. **分配完成即输出固定文案**：`任务已经完成分配，正在执行中......`。由 `src/runtime.ts` 的 `dispatchPlan` 在 `record.phase='executing'` 之后写入（`STATUS_ASSIGNED_TEXT`）。两条文案各只发一次，重试/续跑不重复刷屏（提示词同步禁止子 Agent 自行复述这两句）。
+5. **负责人派出的每个任务必须极简（1+1=2）**：新增硬门槛 `checkAtomicAssignment`（`src/v3-contract.ts`）：单句、≤300 字符、≥8 字符、禁止并列多目标词（并且/同时/另外/还要/以及/分别/顺便）、禁止分号与多句，且必须带质量要求；不满足即拒 `DELEGATE_TASK_NOT_ATOMIC`，拒因附**可照做的拆小指令**（硬门槛，用户裁决 A）。
+6. **派发给全球顶尖专家的任务必须交代成果要求与质量**：`src/llm-rules.ts` 的 `buildDelegateePrompt` 与 `buildPhaseZeroDelegateePrompt` 固定角色标签为「本部门相关领域全球顶尖专家」，插入质量要求块与专家汇报契约全文。
+7. **专家成果必须极简、JSON 结构化汇报**：新增 F10 门禁与 `checkExpertReport` —— 字段仅 `keyResults` / `keyInfo` / `importantInfo` / `leadRequirements`，每条 ≤200 字符、每字段 ≤6 条，多余字段直接判不合规；重复内容用「完全相同 / 短条被长条包含（≥12 字符）/ bigram Dice ≥ 0.85 近义重复 / 去重键相同」四路拦截。
+8. **负责人必须全面深入汇总本部门全部专家汇报**：F11 门禁用 `expectedExperts` 按名称核对 `sources` 是否覆盖全部专家，缺一即退回。
+9. **取消部门组员角色**：`role` 枚举只剩 `['expert']`；历史 `member` 读取时归一为 `expert`（不报错、不迁移、不改历史日志）；`ROLE_MIX_REQUIRED` 配比门禁删除，改为「至少 1 名专家」；client 文案、three-phase 提示词、journal 新写入全部去掉组员。
+10. **负责人汇总报告必须精简、禁止累赘重复、JSON 结构化**：新增 F11 与 `checkDepartmentSummary` —— 字段仅 `keyResults` / `keyInfo` / `importantInfo` / `sources`，同一套四路去重规则；超长或重复一律退回。
+11. **汇总报告完成后必须直接交给主 Agent**：`settleFromOutput` 把 `departmentSummary` 持久化到任务行，`emitSubtaskDoneNotice` 在完成通知里原样附「部门汇总报告（JSON，直接交给主 Agent）：」+ 完整 JSON，不经二次概括、不裁剪。
+12. **全部任务交回后由主 Agent 汇总最终成果**：`src/host.ts` 的 `PROMPT_SECTION` 新增 R12 硬规则（收齐全部部门汇总 JSON 后由主 Agent 统一深入汇总，不得把部门汇总直接当最终成果）。
+13. **版本定为 3.0.0**：`package.json` / `package-lock.json` / `src/host.ts` meta / `tests/fixtures/tool-surface.json` / `README(.md/.en.md)` 安装示例全部同步 3.0.0。
+
+### 兼容与回归
+
+- **沟通格式规范升版**：`COMM_FORMAT_VERSION` 1 → 2，新增 F10/F11，**F1–F9 原文一字未改**；只有 `status==='done'` 且声明了层级（`tier:'expert'|'leader'`）时才追加对应条目，历史回放与旧日志零回归（有专门用例锁定）。
+- **新增回归**：`tests/workplan-v3-contract.test.ts` 24 例（固定文案逐字、任务原文可见、质量要求归一与渲染、极简门槛各类拒绝、专家/部门 JSON 校验含 Dice 近义重复与去重键、F10/F11 层级接线、role=member 归一、版本 3.0.0）。
+- **生效方式**：改的是 `src/`，运行中的进程不热加载 —— 已 `npm run build` 并同步 `lib/`，**须用户手工重启 dsh web** 后生效（禁止 Agent 自行重启）。
+
+- **low 任务禁止第三层下派（用户裁决 D1–D6；计划 wp-43d5099c；实现规格 `reports/wp-T3-impl-spec-20261114.md`）**：
+  - **D1/D3 判定链（钳制前）**：low 判定＝负责人自配 `consolidation.taskReasoningEffort`（钳制前原始声明，经 `taskReasoningEffortDeclared` 持久化记忆）→ 缺失时按任务行记录等级 `subtask.reasoningEffort` 兜底 → 两者皆缺＝「未配置」**视同 low** 一并禁派。判定链与 `complexTask`（决定 ≥8 人闸与 6/12 人上限）**完全解耦**（`src/llm-rules.ts:348` `banDeclared = … ?? declaredEffort ?? input.taskRowEffort`）。
+  - **D2/D4 出口与拦截**：review 与 dispatch 共用唯一入口 `planDelegations`（`src/llm-rules.ts:352-360`），low（含视同 low）一律硬拒 `DELEGATE_LOW_TASK_FORBIDDEN`，拒因含「负责人亲自执行 + `action="direct"` 登记 + 40/40/20 字 + 无任何例外通道 + 历史派发不回溯」五要素；负责人改经新增动作 `dsh_workplan_delegate(action="direct")` 登记两轮深度思考产物后由平台以 low 档接续本人执行（`src/runtime.ts:8853`，schema `src/host.ts:862`）。direct 防旁路：复杂档/非法档 ⇒ `DELEGATE_DIRECT_EFFORT_INVALID`；携带分工表 ⇒ `DELEGATE_DIRECT_ASSIGNMENTS_FORBIDDEN`；缺/薄思考产物 ⇒ `THINK_MISSING`/`THINK_INCOMPLETE`（与主 Agent、叶子同一 40/40/20 判据）；叶子调 direct ⇒ `NOT_LEADER_SESSION`/`NO_PLAN` 路由隔离。
+  - **D5 生效范围**：判据在「新下派请求时」计算，无迁移、无回溯、**不设独立配置开关**（由「无任何例外通道」推断，标注为推断项）；回退＝恢复旧版 lib ＋ 用户手工重启。
+  - **D6 基线与路径**：基线 dsh-workplan@2.5.4，源码 `plugins/dsh-workplan`（符号链接至 web/headless 双 profile，改源码两端同时生效）。改动集中在 `src/llm-rules.ts`（新增闸＋可选 `taskRowEffort` 参数＋`taskReasoningEffortDeclared`）、`src/runtime.ts`（direct 分支、review/dispatch 传参、review 注入字段剥离、`gateAudit` 留痕、`SELF_EFFORT_MISSING` 文案指路 direct）、`src/plan.ts`（consolidation 消毒白名单＋负责人任务书/接续提示文案）、`src/host.ts`（schema enum 与描述）；`src/three-phase.ts` 零改动。
+  - **验证与证据**：专用回归 `tests/workplan-low-delegation-gate.test.ts` 30 例（A 判定链 / B 非法值与拒因顺序 / C 钳制记忆与防注入 / D direct 出口十项 / E 钳制前后 / F S4 非 low 零变化 / G 端到端），加受影响 4 文件共 **5 文件 72 例全绿**；全量回归 **1138 例 / 1137 通过 / 0 失败 / exit=0**（日志 `/tmp/full-final2.log`）。四态与非法值映射见 `/Users/open/Documents/Stocks/reports/T4-回归用例与执行结果_20261114.md`；对照 D1–D6/S1–S6 的逐条验收见 `/Users/open/Documents/Stocks/reports/T5-low禁派机制-对照原要求验收报告_20261114.md`；历史 81 条红灯整体修复与归因见 `/Users/open/Documents/Stocks/reports/本轮最终结果-81条回归清零-20261114.md`。
+  - **生效交接**：`node node_modules/typescript/bin/tsc -p tsconfig.json` 已构建并 `cp dist/*.js lib/`，`lib/` 已含改动；运行中进程不热加载，**须用户手工重启 dsh web** 后按 `/Users/open/Documents/Stocks/reports/T5-low禁派机制-对照原要求验收报告_20261114.md` §五命令复核（禁止 Agent 自行重启）。改动在工作树，未 commit/push/tag（发布归用户决定）。
+  - **已知问题（如实登记，未擅自处置）**：① 版本递增号待用户定版；② `delegateSelfEfforts`/`delegateDeepThinks` 的 `slice(0,6)` 与 `delegates`/`estimates` 的 `slice(0,12)` 上限不对称（第 7 名起台账截断，decision-record §5-2「O2」）；③ `allowBanned` 豁免（专家预估上报必达主会话）与内部噪音禁止清单的规则冲突待用户裁决（F3）。
+
 ## 2.5.4 — 2026-11-12
 
 - **机制缺陷治本（用户 2026-11-12 本会话实锤，③④⑥ 落地；②⑤ 经核实为有意安全契约，不 loosening）**：
@@ -7,6 +45,25 @@
   - **②/⑤ 契约澄清（不改迁移表/覆盖守卫）**：reported→done/assigned 的拒绝与「只回一半/否定词反转不覆盖」是插件有意的防假完成契约（既有 204/Q6/U-16/T4 测试锁定）。本会话的误 blocked 实为子会话迟到结算写了非法 closure；remedy 走写入侧（结算不写非法 closure、人工补证带 A 编号），不 loosening 状态机与门禁。新增 tests/workplan-254-closure-gate.test.ts 7 例锁定 ③④⑥ + 契约原样 + 2.5.3 前置闸回归。
   - **版本一致性**：package.json / package-lock（两处）/ host.ts meta / tool-surface fixture / README(.en) 安装命令 / 本 CHANGELOG 统一 2.5.4。
 - **生效交接**：npm run build 已执行；运行中进程不热加载，须用户手工重启 dsh web 后复核。
+- **T6 下属开工前预估时间上报硬门禁（用户 D9：「没有告知部门负责人预估时间，先拦截，再告知此人，你必须自己预估时间，汇报给对应负责人后，才可以重试或继续执行」；契约 _t6_estimate_20261112/00-contract-estimate-v1.md FROZEN）**：
+  - **self_effort 原子对新增必填 timeNotice**：`timeNotice={ declaredMinutes: 正整数分钟（Number.isInteger 且 1–10080）, reason?: ≤300 字符 }`；校验顺序 reasoningEffort → complexityRationale → deepThink → timeNotice（最后校验），缺交硬拒 `ESTIMATE_MISSING`、形状非法硬拒 `ESTIMATE_INVALID`（error 均含 D9 原话＋形状/非法原因），不登记、不接续 phase-1；成功返回附 `estimate:{declaredMinutes,reason?,delivery}`。
+  - **kind=estimate 送达负责人（复用 T5 通道，不新建队列）**：登记（persistSelf）之后、interrupt/接续之前经 `ctx.subagents.sendMessage` 投递【第三层开工预估】消息至部门行负责人会话（row.childId，缺失回退 leaderId）；channelJournal kind 联合扩为 'escalation'|'instruction'|'estimate'，from.member/to 归属留痕；两者皆缺或投递失败 ⇒ `ESTIMATE_DELIVERY_FAILED`（delivery:'failed' 落档、不接续，重试重新投递并覆盖；已 sent 幂等不重复投递）；journal 写失败不掩盖投递结果（ok:true 附 journal:{ok:false,…}）。
+  - **delegateEstimates 双通道持久化**：`delegates[].estimate` + 任务级 `delegateEstimates: Record<member,estimate>`（与 selfEffort/deepThink 同范式）；applyStatus fail-closed 消毒（非法子对象丢弃、非法 map 抛 `INVALID_DELEGATE_ESTIMATES`）、尝试重置保留、durable 回放白名单一处不漏（buildUpdateMessage/reconstruct 消费端/persistSelf/modelStatusLines/derivePlanSnapshot）；delegates 上限沿用 T8 同步值 slice(0,12)，8 人预估全部存活。
+  - **重派未预估回 phase-0**：`leafPhaseZero = !priorSelf || !stashedThink || !stashedEstimate`——旧叶子已配档/已思考但未预估 ⇒ 回 phase-0 补交完整原子对；selfContinuation 文案附「预估已登记（含分钟数）」。
+  - **schema 与任务书同源**：host.ts delegate schema 新增 timeNotice 属性与 T6/D9 描述；llm-rules.ts phase-0 提交清单与叶子 brief 同步「整数分钟、未上报不接续」；plan.ts 负责人任务书补「下属预估即时送达并留痕（kind=estimate），未上报者被拦截开工」（时长求和归 T7，T6 只存不算；T7 读 delegateEstimates/journal estimate 求和）。
+  - **验证与生效交接（D8）**：测试与全量回归数字以负责人全量回归日志为准（reports/T6-lead-independent-verification-20261112.md）；机制说明与冒烟步骤见 reports/T6-estimate-gate-mechanism-20261112.md。无需安装/升级插件包，集成构建由负责人执行；运行中进程不热加载，**须用户手工重启 dsh web** 后按冒烟步骤复核（派 1 名下级 → self_effort 缺 timeNotice 应被 ESTIMATE_MISSING 拦截 → 补交后负责人收到预估消息并接续执行）。
+
+- **七条底层机制全面优化（用户 2026-11-12 七项要求 R1–R7；计划 wp-437e264b，T1–T11＋T10R 全部 structured 验收通过；用户决策 D1–D10 见 reports/wp-user-decisions-20261112.md）**：
+  - **R1/T3 负责人分派前两轮深度梳理硬门禁**：部门负责人 review/dispatch 共用同一质量闸——problemAnalysis≥40字、approach≥40字、approachBasis≥20字（与主 Agent/叶子同源常量 three-phase.ts MIN_PLANNING_*），缺/薄产物硬拒 `DELEGATE_CONSOLIDATION_INCOMPLETE`（拒因点名实际字数与下限），合格才放行；每次拒绝/放行记入 gateAudit 台账（有界20条、durable 回放、status 可查）。标记 [2.5.4][T3R1]。证据 reports/T3-gate-audit-20261112.md。
+  - **R2/T4 复杂任务≥8人硬门禁**：`DELEGATE_HEADCOUNT_MIN`——声明档 medium/high/xhigh/max（`COMPLEX_DECLARED_EFFORTS`，钳制前判复杂、xhigh 不豁免）合计≥8人（`MIN_COMPLEX_DELEGATE_MEMBERS=8`）硬阻断，复杂上限放宽至12、非复杂保持6＋静默截断；仍≥1 expert＋≥1 member；持久化消毒上限同步 6→12（plan.ts `slice(0,12)`，门禁为唯一人数判据）。聚焦 tests/workplan-254-min-headcount.test.ts 11/11。证据 reports/T4-min-headcount-final-20261112.md。
+  - **R3/T5 负责人↔专家↔组员双向沟通通道**：叶子 dsh_workplan_escalate 经 delegate 登记反查部门行（不再 NO_PLAN 断链）、instruct 放权直系父会话（lineage 硬校验）；新增 dept-journal.ts JSONL 留痕（坏行计 skipped）；消息接口契约 v1 冻结（_t5_channel_20261112/00-contract-v1.md）。20 往返 40 投递 0 丢、故障注入 10/10 DELIVERY_FAILED 显式可重试、契约测试 17/17。证据 reports/T5-message-interface-v1-20261112.md。
+  - **R4/T6 下属开工前预估时间上报硬门禁**：见上条 T6（self_effort 原子对必填 timeNotice，ESTIMATE_MISSING/INVALID/DELIVERY_FAILED，D9 原话拦截）。
+  - **R5/T7 负责人任务时长=下属预估之和**：读时派生纯函数 `deriveLeaderEstimate`（plan.ts）挂三读面（serialisePlan→normaliseStatusEntry／modelStatusLines／delegate status），只计每成员最新 delivery='sent' 的 declaredMinutes 算术和、不含负责人自身耗时；客户端只渲染禁求和、无新增持久化（D3 口径）。tests/workplan-t7-duration-sum.test.ts 23 例。证据 reports/T7-final-acceptance-agent27.md。
+  - **R6/T9 负责人完美完成即时报主 Agent**：`emitSubtaskDoneNotice` 增强——验收结论 X/Y＋D7 完美判据（structured＋全 pass）＋逐条验收＋待主 Agent 执行事项（含 D8 手动重启建议）；head→root completion 留痕；wait/async 均 notifyCompletion:true。证据 reports/T9-final-verification-20261112.md。
+  - **R7/T8 下属完美完成即时报负责人**：`emitDelegateDoneNotices`/`deliverDelegateDoneNotices`——done-only 过滤、sent 幂等、写时重读防竞态、DELIVERY_FAILED 显式＋failed 留痕＋下次结算兜底补发；两处结算接线。证据 reports/t8-full-suite-r3-20261112.log。
+  - **T11 两处运行态缺陷治本（T6/T7 实测暴露）**：①重启早期负责人会话不可见时 selfEffortTool 不再误报 `SELF_EFFORT_NOT_LEAF`——按 childId 懒加载回退扫 state.records（真非叶子仍拒绝）；②deliverDelegateDoneNotices 及 extendMs/escalate/estimate 同路径 sendMessage 全部携带有效 signal（`new AbortController().signal`），消除 "Cannot read properties of undefined (reading 'throwIfAborted')"，恢复要求7完成汇报真实投递（保留正常取消语义）。tests/workplan-t11-runtime-defects.test.ts 6 例。证据 reports/T11-acceptance-20261113.md。
+  - **T10R 最终回归验收**：7 条机制正反例锚定当前源码＋全量绿；全量回归 **1035 pass / 0 fail / 0 cancelled / exit 0**（基线 983→1006→1029→1035）、tsc 零错误。证据 reports/T10R-final-acceptance-20261113.md、_t11_runtime_defects_20261113/full-test.log。
+  - **生效交接（D8）**：npm run build 已执行、lib 已含全部改动；运行中进程不热加载，**须用户手工重启 dsh web** 后按 T10R 报告冒烟步骤复核（禁止 Agent 自行重启）。改动在工作树，未 commit/push/tag（发布归用户决定）。
 
 ## 2.5.3 — 2026-11-12
 

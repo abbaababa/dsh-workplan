@@ -20,13 +20,18 @@
  * runtime 夹具完全仿照 tests/delegate-tool.test.ts（createWorkplanRuntime +
  * makePlan + makeSession + fake subagents）；durable 回放仿照
  * tests/workplan-251-deep-think.test.ts 与 workplan-250-delegate-retry.test.ts。
+ *
+ * [2.5.5][T3] 夹具适配（负责人裁决，门禁实现与夹具适配同批交付）：low/未配置禁派后，
+ * 质量闸/放行类用例经 complexReview()（声明 medium＋8 人表）绕过禁派闸，原断言意图
+ * 零删改；G10 显式档 low→medium 承载同一优先级意图。薄 problemAnalysis 用例不受影响
+ * （problemAnalysis 闸先于禁派闸）。
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { planDelegations } from '../src/llm-rules.js'
 import { createWorkplanRuntime, reconstructFromSession } from '../src/runtime.js'
-import { buildPlanMessage, buildUpdateMessage, createStatuses } from '../src/plan.js'
+import { buildPlanMessage, buildUpdateMessage, createStatuses, flushPendingWorkplanUpdates } from '../src/plan.js'
 import {
   MIN_PLANNING_APPROACH_CHARS,
   MIN_PLANNING_BASIS_CHARS,
@@ -120,12 +125,23 @@ function goodConsolidation(overrides: any = {}) {
     approach: ['专家做核心实现：先确认入口再最小改动，并附聚焦单测自测', '组员做自测：逐条核对验收标准并落盘留证'],
     approachBasis: ['第二轮分工的方法、流程、步骤基于第一轮完成好的全部结果：质量与时间的主要矛盾决定专家承担核心实现、组员承担自测与证据，约束决定不改无关文件。'],
     assignments: [
-      { member: 'Expert-A', role: 'expert', task: '实现核心逻辑并自测', reasoningEffort: 'xhigh' },
-      { member: 'Member-B', role: 'member', task: '补充回归用例', reasoningEffort: 'low' },
+      { member: 'Expert-A', role: 'expert', task: '实现核心逻辑并自测', reasoningEffort: 'xhigh', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
+      { member: 'Member-B', role: 'expert', task: '补充核心路径回归用例', reasoningEffort: 'low', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
     ],
     ...overrides,
   }
 }
+
+// [2.5.5][T3] 夹具适配（原则①）：low/未配置禁派后，质量闸用例须带复杂声明绕过禁派闸；
+// 复杂声明触发 ≥8 人闸，故放行类用例分工表扩到 8 人——前两条保持原夹具语义
+// （Expert-A xhigh / Member-B low），原断言意图零删改。
+const eightAssignments = () => [
+  ...goodConsolidation().assignments,
+  ...Array.from({ length: 6 }, (_, i) => ({
+    member: `Member-${i + 3}`, role: 'expert', task: `单一目标子任务 ${i + 3}（单一主产物、可独立验收）`, qualityRequirements: ['必须给出可复核的命令输出或文件证据'],
+  })),
+]
+const complexReview = () => goodConsolidation({ taskReasoningEffort: 'medium', assignments: eightAssignments() })
 
 /* ---------- G1 缺产物：两入口同一拒因 ---------- */
 
@@ -166,23 +182,25 @@ test('G2：problemAnalysis 非空但合计 <40 字 ⇒ INCOMPLETE，拒因含字
 })
 
 test('G3：approach 合计 <40 字 ⇒ INCOMPLETE，拒因含 approach 与 40', () => {
-  const single = planDelegations({ consolidation: goodConsolidation({ approach: [chars(39)] }), model: QWEN })
+  // [2.5.5][T3] 原则①：补复杂声明绕过禁派闸，approach 质量闸意图不变（人数闸在 approach 闸之后）。
+  const single = planDelegations({ consolidation: goodConsolidation({ taskReasoningEffort: 'medium', approach: [chars(39)] }), model: QWEN })
   assert.equal(single.ok, false)
   assert.equal(single.code, 'DELEGATE_CONSOLIDATION_INCOMPLETE')
   assert.match(single.error!, /approach/)
   assert.match(single.error!, /40/)
-  const multi = planDelegations({ consolidation: goodConsolidation({ approach: [chars(19), chars(20)] }), model: QWEN })
+  const multi = planDelegations({ consolidation: goodConsolidation({ taskReasoningEffort: 'medium', approach: [chars(19), chars(20)] }), model: QWEN })
   assert.equal(multi.ok, false)
   assert.equal(multi.code, 'DELEGATE_CONSOLIDATION_INCOMPLETE')
 })
 
 test('G4：approachBasis 合计 <20 字 ⇒ INCOMPLETE，拒因含 approachBasis 与 20', () => {
-  const single = planDelegations({ consolidation: goodConsolidation({ approachBasis: [chars(19)] }), model: QWEN })
+  // [2.5.5][T3] 原则①：补复杂声明绕过禁派闸，approachBasis 质量闸意图不变。
+  const single = planDelegations({ consolidation: goodConsolidation({ taskReasoningEffort: 'medium', approachBasis: [chars(19)] }), model: QWEN })
   assert.equal(single.ok, false)
   assert.equal(single.code, 'DELEGATE_CONSOLIDATION_INCOMPLETE')
   assert.match(single.error!, /approachBasis/)
   assert.match(single.error!, /20/)
-  const multi = planDelegations({ consolidation: goodConsolidation({ approachBasis: [chars(10), chars(9)] }), model: QWEN })
+  const multi = planDelegations({ consolidation: goodConsolidation({ taskReasoningEffort: 'medium', approachBasis: [chars(10), chars(9)] }), model: QWEN })
   assert.equal(multi.ok, false)
   assert.equal(multi.code, 'DELEGATE_CONSOLIDATION_INCOMPLETE')
 })
@@ -193,12 +211,14 @@ test('G5：恰好 40/40/20 字 ⇒ 放行；常量与主 Agent/叶子同一真�
   assert.equal(MIN_PLANNING_PROBLEM_CHARS, 40)
   assert.equal(MIN_PLANNING_APPROACH_CHARS, 40)
   assert.equal(MIN_PLANNING_BASIS_CHARS, 20)
+  // [2.5.5][T3] 原则①：补复杂声明＋≥8 人分工表绕过禁派闸/人数闸，40/40/20 边界意图不变。
   const exact = planDelegations({
     consolidation: {
       problemAnalysis: [chars(40)],
       approach: [chars(40)],
       approachBasis: [chars(20)],
-      assignments: goodConsolidation().assignments,
+      taskReasoningEffort: 'medium',
+      assignments: eightAssignments(),
     },
     model: QWEN,
   })
@@ -209,7 +229,8 @@ test('G5：恰好 40/40/20 字 ⇒ 放行；常量与主 Agent/叶子同一真�
       problemAnalysis: [chars(20), chars(20)],
       approach: [chars(19), chars(21)],
       approachBasis: [chars(10), chars(10)],
-      assignments: goodConsolidation().assignments,
+      taskReasoningEffort: 'medium',
+      assignments: eightAssignments(),
     },
     model: QWEN,
   })
@@ -220,7 +241,8 @@ test('G5：恰好 40/40/20 字 ⇒ 放行；常量与主 Agent/叶子同一真�
       problemAnalysis: ['  ' + chars(40) + '  '],
       approach: ['\n' + chars(40) + '\t'],
       approachBasis: [' ' + chars(20) + ' '],
-      assignments: goodConsolidation().assignments,
+      taskReasoningEffort: 'medium',
+      assignments: eightAssignments(),
     },
     model: QWEN,
   })
@@ -230,11 +252,14 @@ test('G5：恰好 40/40/20 字 ⇒ 放行；常量与主 Agent/叶子同一真�
 /* ---------- G6 合格产物 ---------- */
 
 test('G6：合格产物 ⇒ ok:true，members/角色配比/等级不变', () => {
-  const result = planDelegations({ consolidation: goodConsolidation(), model: QWEN })
+  // [2.5.5][T3] 原则①：复杂声明＋8 人表；前两条成员的角色/显式档断言逐字保留，
+  // 新增 6 名未配档组员继承整体档 medium（继承语义另见 G10）。
+  const result = planDelegations({ consolidation: complexReview(), model: QWEN })
   assert.equal(result.ok, true, JSON.stringify(result))
-  assert.equal(result.members.length, 2)
-  assert.deepEqual(result.members.map((m) => m.role), ['expert', 'member'])
-  assert.deepEqual(result.members.map((m) => m.effort), ['xhigh', 'low'])
+  assert.equal(result.members.length, 8)
+  // [3.0.0][用户要求 9] 组员角色取消：前两名也都是 expert（角色断言改成员名，等级断言不变）。
+  assert.deepEqual(result.members.slice(0, 2).map((m) => m.member), ['Expert-A', 'Member-B'])
+  assert.deepEqual(result.members.slice(0, 2).map((m) => m.effort), ['xhigh', 'low'])
   assert.equal(result.consolidation!.approachBasis.length, 1)
 })
 
@@ -255,7 +280,7 @@ test('G7 runtime：薄 review 拒+记拒 → 合格 review 登记+记放 → dis
     [audit[audit.length - 1].action, audit[audit.length - 1].ok, audit[audit.length - 1].code],
     ['review', false, 'DELEGATE_CONSOLIDATION_INCOMPLETE'],
   )
-  const good = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: goodConsolidation() })
+  const good = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: complexReview() })
   assert.equal(good.ok, true, JSON.stringify(good))
   audit = record.statuses[0].gateAudit
   assert.deepEqual(
@@ -264,7 +289,8 @@ test('G7 runtime：薄 review 拒+记拒 → 合格 review 登记+记放 → dis
   )
   const dispatched = await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
   assert.equal(dispatched.ok, true, JSON.stringify(dispatched))
-  assert.equal(subagents.spawned.length, 2, '合格梳理后 dispatch 必须为专家与组员各派生叶子')
+  // [2.5.5][T3] 原则①：复杂声明 8 人分工表 ⇒ 派生 8 叶子（原 2 人），门禁链路意图不变。
+  assert.equal(subagents.spawned.length, 8, '合格梳理后 dispatch 必须为专家与组员各派生叶子')
   audit = record.statuses[0].gateAudit
   assert.deepEqual(
     [audit[audit.length - 1].action, audit[audit.length - 1].ok, audit[audit.length - 1].code],
@@ -278,11 +304,13 @@ test('G7 runtime：薄 review 拒+记拒 → 合格 review 登记+记放 → dis
 test('G7b：gateAudit 有界 20 条——连续拒绝只保留最近 20 条', async () => {
   const { runtime, leaderAgent, record } = makeRuntime(QWEN)
   for (let i = 0; i < 22; i += 1) {
+    // [2.5.5][T3] 原则①：补复杂声明，使拒绝真正来自 approachBasis 质量闸（而非禁派闸），有界审计意图不变。
     const result = await runtime.delegateTool(leaderAgent, {
       action: 'review',
-      consolidation: goodConsolidation({ approachBasis: [chars(19)] }),
+      consolidation: goodConsolidation({ taskReasoningEffort: 'medium', approachBasis: [chars(19)] }),
     })
     assert.equal(result.ok, false)
+    assert.equal(result.code, 'DELEGATE_CONSOLIDATION_INCOMPLETE')
   }
   const audit = record.statuses[0].gateAudit
   assert.equal(audit.length, 20)
@@ -292,7 +320,8 @@ test('G7b：gateAudit 有界 20 条——连续拒绝只保留最近 20 条', as
 /* ---------- G8 空数组旧拒因顺序不变 ---------- */
 
 test('G8：空数组仍按原拒因拒绝（空检查先于字数闸），顺序不变', () => {
-  const base = goodConsolidation()
+  // [2.5.5][T3] 原则①：补复杂声明绕过禁派闸，空数组旧拒因与顺序断言逐字保留。
+  const base = goodConsolidation({ taskReasoningEffort: 'medium' })
   const noAnalysis = planDelegations({ consolidation: { ...base, problemAnalysis: [] }, model: QWEN })
   assert.equal(noAnalysis.code, 'DELEGATE_CONSOLIDATION_INCOMPLETE')
   assert.match(noAnalysis.error!, /problemAnalysis 至少 1 条/)
@@ -337,8 +366,10 @@ test('G9b：gateAudit durable 回放——刷新/重启后拒绝/放行记录仍
   const { runtime, leaderAgent, rootSession, record } = makeRuntime(QWEN)
   rootSession.append('user/message', buildPlanMessage(record.plan))
   await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: goodConsolidation({ problemAnalysis: [chars(39)] }) })
-  await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: goodConsolidation() })
+  // [2.5.5][T3] 原则①：合格 review 补复杂声明＋8 人表，durable 审计回放意图不变。
+  await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: complexReview() })
   await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
+  flushPendingWorkplanUpdates(rootSession)
   const rebuilt: any = reconstructFromSession(rootSession)
   assert.ok(rebuilt?.plan, '计划必须可重建')
   const row = rebuilt.statuses.find((item: any) => item.subtaskId === 'T1')
@@ -385,14 +416,17 @@ test('G10：梳理未带整体等级 ⇒ 继承 taskEffortFallback；显式配�
   // 复杂声明档（xhigh）按 T4 须 ≥8 人：1 expert + 7 member，均未单独配档。
   const eight = Array.from({ length: 8 }, (_, i) => ({
     member: `M${i + 1}`,
-    role: i === 0 ? 'expert' : 'member',
+    // [3.0.0] 组员角色取消 + 质量要求必填（断言意图：继承/显式优先，与角色无关）。
+    role: 'expert',
     task: `单一目标子任务 ${i + 1}（单一主产物、可独立验收）`,
+    qualityRequirements: ['必须给出可复核的命令输出或文件证据'],
   }))
   const inherited = planDelegations({ consolidation: goodConsolidation({ assignments: eight }), model: QWEN, taskEffortFallback: 'xhigh' })
   assert.equal(inherited.ok, true, JSON.stringify(inherited))
   assert.equal(inherited.taskEffort, 'xhigh')
   assert.deepEqual(inherited.members.map((m) => m.effort), Array(8).fill('xhigh'))
-  const explicit = planDelegations({ consolidation: goodConsolidation({ taskReasoningEffort: 'low' }), model: QWEN, taskEffortFallback: 'xhigh' })
+  // [2.5.5][T3] 原则①：显式档原用 low，low 禁派后改用 medium 承载同一「显式配置优先于回落源」意图。
+  const explicit = planDelegations({ consolidation: goodConsolidation({ taskReasoningEffort: 'medium', assignments: eight }), model: QWEN, taskEffortFallback: 'xhigh' })
   assert.equal(explicit.ok, true, JSON.stringify(explicit))
-  assert.equal(explicit.taskEffort, 'low', '显式配置优先于回落源')
+  assert.equal(explicit.taskEffort, 'medium', '显式配置优先于回落源')
 })

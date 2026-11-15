@@ -17,6 +17,7 @@ import {
   buildResultMessage,
   messageText,
   parseEvidenceBlock,
+  parseResultMessage,
 } from '../src/plan.js'
 
 function block(payload: any, prefix = '做完了。') {
@@ -177,7 +178,7 @@ test('多个证据块时以最后一个为准（提示词模板在前、真实�
   assert.equal(adjudicateResult({ output }).status, 'blocked')
 })
 
-test('结果消息把未验证、自检失败、旧格式、缺失产物、needs 逐项交给主 Agent', () => {
+test('结果消息的 durable 信封把未验证、旧格式、缺失产物、needs 逐项交给主 Agent', () => {
   const message = buildResultMessage({
     planId: 'wp-evidence',
     sessionId: 'session-evidence',
@@ -190,11 +191,42 @@ test('结果消息把未验证、自检失败、旧格式、缺失产物、needs
     ],
   })
   const text = messageText(message)
-  assert.match(text, /验收核对/)
-  assert.match(text, /未验证 1 条：T2/)
-  assert.match(text, /未提供结构化证据 1 条：T3/)
-  assert.match(text, /声明产物缺失：T1：lib\/app\.js/)
-  assert.match(text, /跨部门待转达/)
-  assert.match(text, /需要 T2 提供表格/)
-  assert.match(text, /不要声称未验证的完成/)
+  /*
+   * [T9] 可见正文收敛为一行【关键进度·计划级】，逐项明细改由 source.durable
+   * 信封承载（C2「按需可查」）。因此正文只锁计划级事实：关键进度标题、
+   * deliveryReady 与待处置的跨部门需求条数——不再断言已移出正文的「验收核对」。
+   */
+  assert.match(text, /【关键进度·计划级】/)
+  assert.match(text, /deliveryReady=false/)
+  assert.match(text, /跨部门需求 1 条待处置/)
+  assert.doesNotMatch(text, /验收核对/)
+
+  /*
+   * 明细必须「保活」而不是被收敛丢掉：主 Agent 用 dsh_workplan_status /
+   * dsh_workplan_handoff 按需读取，逐项验证等级、缺失产物与跨部门需求都要
+   * 能从同一份 durable 信封读回；否则未验证项会被悄悄漏成「都完成了」。
+   */
+  const parsed: any = parseResultMessage(message)
+  assert.ok(parsed, '结果消息必须能被 parseResultMessage 读回')
+  assert.ok(Array.isArray(parsed.review), '逐项证据核对明细要随 durable 信封保活')
+  const reviewText = parsed.review.join('\n')
+  assert.match(reviewText, /未验证 1 条：T2/)
+  assert.match(reviewText, /未提供结构化证据 1 条：T3/)
+  assert.match(reviewText, /声明产物缺失：T1：lib\/app\.js/)
+  assert.equal(parsed.deliveryReady, false, '存在未验证/旧格式/缺失产物时不得可交付')
+  assert.equal(parsed.statuses.length, 3)
+  assert.equal(parsed.statuses[0].verification, 'structured')
+  assert.deepEqual(parsed.statuses[0].missingArtifacts, ['lib/app.js'], '声明缺失的产物要逐项落盘')
+  assert.deepEqual(parsed.statuses[0].needs, ['需要 T2 提供表格'], '跨部门需求要逐条落盘')
+  assert.equal(parsed.statuses[1].verification, 'unverified')
+  assert.equal(parsed.statuses[1].acceptance[0].result, 'unverified')
+  assert.equal(parsed.statuses[2].verification, 'legacy')
+  /*
+   * 可见正文仍保留「不要声称未验证的完成」的安全语义：显式禁止交付，且不得
+   * 出现「给出最终答复」这类收尾结论（注意“已完成的不重跑”是恢复指引的一部分，
+   * 不含完成声明，不能用 /已完成/ 做负向断言）。
+   */
+  assert.match(text, /禁止交付：不要调用 present/)
+  assert.match(text, /完成前不得交付/)
+  assert.doesNotMatch(text, /给出最终答复/)
 })

@@ -58,11 +58,18 @@ import {
   createStatuses,
   DEFAULT_REASONING_EFFORT,
   deliveryReadiness,
+  // [T7][lead-decisions J2/G2] 负责人时长聚合纯函数：模型可读面与 delegate status
+  // 挂同一函数（看板载荷经 plan.ts normaliseStatusEntry 同源），读时派生不持久化。
+  deriveLeaderEstimate,
+  leaderEstimateRoster,
   derivePlanSnapshot,
   // [2.2.0][T4/O-3b] O-3b 消费接线：缺省协商上限由预估派生（plan.ts 纯函数，T3 已定稿）。
   deriveSubtaskTimeoutMs,
   extractJson,
   flattenSubtasks,
+  // [T7] 关键进度收敛：单条 500 上限裁剪器＋轮预算重置（C3）。
+  capKeyProgressText,
+  resetRoundInjectionBudget,
   isRecord,
   isSocialMessage,
   isTerminalPhase,
@@ -86,6 +93,8 @@ import {
   validatePlan,
   applyResultStatuses,
   adjudicateResult,
+  // [3.0.0] F10 专家汇报核验（adjudicateExpertReport）复用同一解析器。
+  parseEvidenceBlock,
   // [2.5.2][T4b][D2] 备份归属校验需要从标记块内提取 JSON（裸 JSON 之外的第二入口）。
   EVIDENCE_MARKER_BEGIN,
   EVIDENCE_MARKER_END,
@@ -95,6 +104,9 @@ import {
   MAX_INSTRUCTION_CHARS,
   MAX_QUESTION_CHARS,
   parseUpdateMessage,
+  // [2.5.5][T10] 合并闸：回放按批展开，结算前把缓冲台账合并落盘。
+  parseUpdateMessages,
+  flushPendingWorkplanUpdates,
   buildUpdateMessage,
   normaliseHandoffs,
   mergeHandoffEntriesByUpdatedAt,
@@ -104,8 +116,22 @@ import {
   DEPARTMENT_IDS,
   MAX_HANDOFF_RESPONSE_CHARS,
   findSubtask,
+  EFFORT_STRENGTH_ORDER,
 } from './plan.js'
+// [3.0.0] 用户 2026-11-14 第 2、4 条：两条逐字冻结的会话固定文案。
+import { STATUS_ASSIGNED_TEXT, STATUS_ASSIGNING_TEXT, checkExpertReport, checkSubtaskQualityRequirements, isQualityGatePlan } from './v3-contract.js'
 import type { PresentDenialVerdict, PresentDenyCode } from './plan.js'
+// [SCv2-T4] 判据层单一真源（用户 2026-11-13 裁决 B/B/B/B/A/A/B）：生效边界 D-1、
+// 例外批准 Q1-B、结算三选一 §3.5、单次墙钟 Q6-A、事前聚合 Q4-B。运行层常量不改。
+import {
+  CRITERION_TARGET_MINUTES,
+  appendCriterionViolation,
+  attemptWallClockMsOf,
+  criterionExAnte,
+  criterionV2Active,
+  evaluateCriterion,
+  sanitizeCriterionException,
+} from './criterion.js'
 import { auditClarifyNeed, compactUnderstandingAudit, validatePlanContext } from './understanding.js'
 // [2.3.9][T3] LLM 家族检测 + 推理等级静态约束（用户强制要求 1/2；详见 llm-rules.ts 头注释）。
 // [2.3.9][T4b] 追加第三层派发纯逻辑核：buildLlmRulesBrief（要求 1/2 全文告知注入，
@@ -246,7 +272,6 @@ function readinessOf(record: any, snapshot?: any) {
  * 12.5 分钟零输出）。与失败重试通知正交，不改重试/超时语义。
  */
 export const PLANNING_HEARTBEAT_MS = 45000
-export const PLANNER_TIMEOUT_MS = 300000
 /**
  * 无进展窗口（默认 300s，DSH_WORKPLAN_PLANNER_TIMEOUT_MS，毫秒 >0）。
  *
@@ -259,19 +284,20 @@ export const PLANNER_TIMEOUT_MS = 300000
  * 300.06s）规划器仍在工作却被 abort，自动分解直接降级——提高默认值或开放
  * 配置都没有解决「按墙钟掐断一个正在产出的调用」这个结构问题。
  */
-export const PLANNER_IDLE_TIMEOUT_MS = 90000
+export const PLANNER_TIMEOUT_MS = 300000
 /**
  * 首个 chunk 之后的「完全静默」窗口（默认 90s，DSH_WORKPLAN_PLANNER_IDLE_
  * TIMEOUT_MS，毫秒 >0）：文本、推理、usage 一个 chunk 都没有这么久，判定为
  * 连接卡死而不是模型还在思考。这个常量在 2.1.6 之前只声明、从未接线（死
  * 代码），现在真正参与计时；设为不小于无进展窗口即等价于关闭。
  */
-export const PLANNER_HARD_MULTIPLIER = 3
+export const PLANNER_IDLE_TIMEOUT_MS = 90000
 /**
  * 绝对上限 = 无进展窗口 × 该倍数（默认 900s）。慢可以，慢到没边不行：它给
  * 单次规划器尝试一个终点，保证规划失败永远是「有限时间后给出可执行建议」，
  * 而不是无限占用本轮预算。
  */
+export const PLANNER_HARD_MULTIPLIER = 3
 /**
  * [2.2.0][T13b/推理等级] 规划器默认推理档 = max（用户 2026-11-08 决策 5）。
  *
@@ -314,9 +340,7 @@ export const DEFAULT_PLANNER_REASONING_EFFORT = 'max'
  *    与宿主 resolveCallWithInfo 的「reasoning===undefined 时任何档位都抛错」对齐；
  *  - 能力查询不可用（宿主不暴露 / 查询抛错）⇒ 保持旧行为，绝不因钳制引入新故障。
  */
-const EFFORT_STRENGTH_ORDER: readonly string[] = Object.freeze(
-  ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
-)
+// [3.0.0] 去副本：强度序单一真源为 plan.ts 导出的 EFFORT_STRENGTH_ORDER（上方已导入，本文件直接引用）。
 
 /** 请求档位 → 模型支持清单内的等效钳制档；空清单返回 undefined（= 不发送该字段）。 */
 export function clampEffortToSupported(effort: string, supported: readonly string[] | null | undefined): string | undefined {
@@ -384,6 +408,12 @@ export async function resolveSupportedEfforts(
  * 2.0×60000, MIN, MAX)），本常量只在无预估、无显式值时兜底（③C2 零回归）。
  * 时间是协商出来的安全兜底，不是固定交付期限：到点走 L4 安全兜底结算＋
  * 「待裁决」标记（延期 / 重试 / 接受），不表述为「强制结束」式固定期限误杀。
+ *
+ * [2.6.0][Q1-B/Q7-B] 分层：判据层完成目标 ≤10 分钟（默认必须达成，超出须用户
+ * 明确批准并留痕）；本条协商上限属运行层安全兜底，数值与公式一律不变，且不构成
+ * 「允许慢」的许可。「延期（extendMs）」不再是主 Agent 单方可为——须先取得用户
+ * 批准留痕（任务 ID、批准原文/来源、批准时间、放宽后分钟数、适用范围；无留痕＝
+ * 未批准），未批准时按判据层未达标处理（不 done、转接替子任务）。
  */
 export const CHILD_TIMEOUT_MS = 900000
 /** No-progress window: the child's own session log stopped growing. */
@@ -401,6 +431,9 @@ export const MIN_CHILD_TIMEOUT_MS = 1000
  * 单次绝对上限)（方案 §1③），2h 让「预告 60 分钟的子任务，其单次执行上限
  * ≥ 60 分钟」（方案 C1）成立；tests/time-estimate-negotiation.test.ts 的
  * expected 公式直接引用本常量，数值不同步会红灯。
+ *
+ * [2.6.0][Q7-B] 分层声明：120 分钟是运行层安全兜底（防失控），不是时长许可；
+ * 判据层完成目标为 ≤10 分钟（Q1/Q4），两层互不取代，数值与公式零改动。
  */
 export const MAX_CHILD_TIMEOUT_MS = 7200000
 export const MIN_CHILD_IDLE_MS = 1000
@@ -526,14 +559,15 @@ export function goalRoundPlanningTask(ctx: any, payload: any, existing: any) {
 /**
  * Whether an existing plan record still owns work in this session.
  *
- * `isTerminalPhase()` 只覆盖 cancelled/superseded（present 门禁的语义）；
- * 对 goal 轮次的入口判定，done/ended/degraded/clarify 同样是「这一轮可以
- * 开始新计划」的历史记录，不能把 `/goal` 任务永久挡在自动分解之外。
+ * 终态（cancelled/superseded）判定复用 plan.ts 的同一真源 `isTerminalPhase()`
+ * （TERMINAL_PHASES），不再本地硬编码；goal 轮次入口在终态之外，done/ended/
+ * degraded/clarify 同样是「这一轮可以开始新计划」的历史记录，不能把 `/goal`
+ * 任务永久挡在自动分解之外。
  */
 function planRecordIsLive(existing: any) {
   if (!existing?.plan) return false
   const phase = String(existing.phase ?? '')
-  return !['done', 'ended', 'cancelled', 'superseded', 'clarify', 'degraded'].includes(phase)
+  return !isTerminalPhase(phase) && !['done', 'ended', 'clarify', 'degraded'].includes(phase)
 }
 
 /** Read the structured objective of the current goal view, when the service exists. */
@@ -1048,6 +1082,25 @@ export async function runPlanner(ctx: any, options: any) {
         }
         outcome = 'CONTEXT_GUARD'
         lastErrors = guard.errors.length > 0 ? guard.errors : guard.warnings
+        /*
+         * [3.0.1][治本] 只有用户本人能答复的校验错误（CLARIFY=要求自相矛盾、
+         * CONTEXT=指代找不到先行词）禁止交回规划器重试：重试的所谓「修复」只能是
+         * 模型替用户瞎猜，猜过守卫后计划照常自动派发——用户还没来得及答复，
+         * 部门 Agent 已经对着猜出来的目标开工（本次用户报告的正是这一行为）。
+         * 这类错误立即中止规划，由入口转成「先澄清」卡片等用户明确答复；
+         * 只有 DEVIATION 这类规划器自己能改写的才继续重试。
+         */
+        const askUser = lastErrors.filter((entry: any) => /^(?:CLARIFY|CONTEXT):/.test(String(entry)))
+        if (askUser.length > 0) {
+          const reason = askUser.map((entry: any) => String(entry).replace(/^(?:CLARIFY|CONTEXT):\s*/, '')).join('；')
+          const hasClarify = askUser.some((entry: any) => String(entry).startsWith('CLARIFY'))
+          const hasContext = askUser.some((entry: any) => String(entry).startsWith('CONTEXT'))
+          const question = [
+            hasClarify ? '上述互相矛盾/缺失的信息以哪个为准？请用户明确取舍' : '',
+            hasContext ? '任务里的指代具体指哪个对象？请用户给出名称、路径或原内容' : '',
+          ].filter(Boolean).join('；')
+          throw new PlanError(reason, 'CLARIFY_NEEDED', question)
+        }
         continue
       }
       outcome = 'INVALID_PLAN'
@@ -1058,6 +1111,14 @@ export async function runPlanner(ctx: any, options: any) {
        * 真实原因。这里优先读我们自己写进 controller.signal.reason 的判定码，
        * 再区分「用户/宿主主动取消」，最后才当作可重试的偶发错误。
        */
+      /*
+       * [3.0.1] CLARIFY_NEEDED 是终态，不是可重试错误：原样上抛给入口转澄清卡片。
+       * 必须最先判定——否则会被下面的泛化处理标成 outcome 并进入下一次重试。
+       */
+      if (error instanceof PlanError && error.code === 'CLARIFY_NEEDED') {
+        outcome = 'CLARIFY_NEEDED'
+        throw error
+      }
       const reason: any = controller.signal.aborted ? controller.signal.reason : undefined
       if (reason && PLANNER_ABORT_CODES.includes(String(reason.code))) {
         /*
@@ -1275,6 +1336,35 @@ function waitForActivation(activation: any, signal: any) {
 function resultText(result: any) {
   const text = messageText({ content: result?.output ?? [] }).trim()
   return text
+}
+
+/*
+ * [3.0.0] F10 专家汇报门禁接线（用户 2026-11-14 要求 7；契约同一事实源
+ * src/comm-format.ts 的 F10 条目 / src/v3-contract.ts 的 checkExpertReport）。
+ *
+ * 第三层叶子（专家）的产出有两处结算回调消费（delegateTool dispatch /
+ * selfEffort 接续），此前只看 stopReason：专家即使不写精简 report 对象也会被
+ * 记成 done，F10 形同虚设。现在在两处回调的汇报入口统一过这道核验：
+ * 只对「子会话正常结束且结果块声明 done」的汇报校验 report 对象
+ * （keyResults/keyInfo/importantInfo/leadRequirements 四字段齐全、非空、
+ * 不重复）；缺失或重复即退回（该成员记 failed 并附 F10 拒因），绝不记 done。
+ *
+ * 最小侵入、只拦 done 路径：结果块无法解析 / 声明 blocked/partial 时维持原
+ * 语义（受阻诊断归 escalate/instruct 通道），F1–F9 与三阶段既有判定不在此
+ * 重复；replay/读档路径不经这两个回调，行为零变化。
+ */
+function adjudicateExpertReport(outcome: any): { ok: true } | { ok: false; rejection: string } {
+  const text = resultText(outcome)
+  const parsed = parseEvidenceBlock(text)
+  const payload = parsed && typeof parsed === 'object' ? parsed.payload : null
+  if (!payload || typeof payload !== 'object') return { ok: true }
+  if (String(payload.status ?? '') !== 'done') return { ok: true }
+  const report = checkExpertReport((payload as any).report)
+  if (!Array.isArray(report.violations) || report.violations.length === 0) return { ok: true }
+  return {
+    ok: false,
+    rejection: `专家汇报未通过 F10 精简汇报契约核验，结果退回重交：${report.violations.slice(0, 4).join('；')}`,
+  }
 }
 
 async function disposeActivation(activation: any, record: any, subtaskId: string, guard?: SubtaskGuard) {
@@ -1562,7 +1652,8 @@ export function timeoutBlockedPatch(subtask: any, cwd: any, message: string, art
 /**
  * [1.8.19] The round budget reset used to erase every trace of the attempt.
  *
- * The 20-minute `TOTAL_TIMEOUT` branch resets unfinished rows to `pending`, and
+ * The `TOTAL_TIMEOUT` branch（整轮预算到点；现行默认 TOTAL_TIMEOUT_MS=0 即不设
+ * 整轮硬预算，仅显式配置正数时启用）resets unfinished rows to `pending`, and
  * `applyStatus` (by design) clears `childId / startedAt / finishedAt`. In the
  * 2026-10-31 incident T10 had run for ~19 minutes and had already written its
  * coverage report at 23:06:26 when the budget fired at 23:07:25; the card then
@@ -1643,6 +1734,23 @@ function settleFromOutput(
      * 交付才被用户发现。
      */
     expectedAcceptance: Array.isArray(subtask?.acceptance) ? subtask.acceptance : [],
+    /*
+     * [3.0.0][用户要求 7/10/11] 格式层级：计划行＝部门负责人，结果必须带
+     * departmentSummary（F11）；专家结果必须带 report（F10）。结算时按行上
+     * 已派发的专家名单做覆盖度核对。缺省（无层级/旧回放）不查新条目。
+     */
+    formatTier: (Array.isArray(record?.statuses)
+      ? record.statuses
+        .find((item: any) => item?.subtaskId === subtask?.id)?.delegates
+        ?.map((item: any) => String(item?.member ?? ''))
+        .filter((name: string) => name !== '') ?? []
+      : []).length > 0 ? 'leader' : undefined,
+    expectedExperts: Array.isArray(record?.statuses)
+      ? record.statuses
+        .find((item: any) => item?.subtaskId === subtask?.id)?.delegates
+        ?.map((item: any) => String(item?.member ?? ''))
+        .filter((name: string) => name !== '') ?? []
+      : [],
   })
   const checked = checkArtifacts(verdict.artifacts, options.cwd, options.artifactExists)
   const escalated = verdict.status === 'blocked'
@@ -1695,12 +1803,60 @@ function settleFromOutput(
       lessonNote = `复盘记忆写入失败：${truncate(error instanceof Error ? error.message : String(error), 120)}`
     }
   }
+  /*
+   * [SCv2-T4][Q1-B/S-Q1-3/Q3-B/Q6-A] 判据层结算闸（spec §3.5 第 4 步）：
+   * 仅对判据 v2 已生效的计划（D-1 三重门后新创建）判定；未生效计划行为逐字不变。
+   * 运行层先安全结算（不丢成果，L4/产物探测照旧），再判判据层：done 且
+   * 事前预估之和 ≤10 且事后单次墙钟 ≤10 ⇒ met；有用户批准留痕 ⇒ exception-approved；
+   * 否则 unmet ⇒ 不得 done，改判 blocked(criterion-overrun)、记违规（append-only）、
+   * 文案指向 replan(replace) 接替行只补缺口。判定顺序＝运行层→判据层（S-Q7-5）。
+   */
+  let effectiveStatus = verdict.status
+  let effectiveError = settleError
+  let criterionResultValue: string | null = null
+  let criterionDirectWrite: any = null
+  if (verdict.status === 'done' && criterionV2Active(record.plan?.createdAt)) {
+    const criterionRow = record.statuses.find((item: any) => item?.subtaskId === subtask.id)
+    const settledAt = Date.now()
+    let leaderForCriterion: any = null
+    try { leaderForCriterion = deriveLeaderEstimate(criterionRow) } catch { leaderForCriterion = null }
+    const exAnte = criterionExAnte(criterionRow, leaderForCriterion)
+    const wallClockMs = attemptWallClockMsOf({ startedAt: criterionRow?.startedAt, finishedAt: settledAt })
+    const evaluation = evaluateCriterion({
+      exAnteMinutes: exAnte.minutes,
+      exAnteComplete: exAnte.complete,
+      wallClockMs,
+      exception: sanitizeCriterionException(criterionRow?.criterionException),
+      settledAt,
+    })
+    criterionResultValue = evaluation.criterionResult
+    criterionDirectWrite = { criterionResult: evaluation.criterionResult }
+    if (evaluation.criterionResult === 'unmet') {
+      effectiveStatus = 'blocked'
+      criterionDirectWrite = {
+        criterionResult: 'unmet',
+        closure: 'blocked',
+        blockedKind: 'criterion-overrun',
+        criterionViolations: appendCriterionViolation(criterionRow?.criterionViolations, {
+          at: settledAt,
+          attempt: Number(criterionRow?.timeoutCount ?? 0) + 1,
+          wallClockMs,
+          exAnteMinutes: exAnte.minutes,
+          reasons: evaluation.reasons,
+        }),
+      }
+      effectiveError = `${typeof settleError === 'string' && settleError !== '' ? `${settleError}；` : ''}`
+        + `判据违规（criterion-overrun）：${evaluation.reasons.join('；')}。`
+        + '未获用户批准不得以 done 收尾（Q1-B）；已完成产物只读保留，请用 dsh_workplan_replan(replace) 生成接替子任务只补缺口，'
+        + '或先向用户申请例外批准并留痕（criterionApproval）后复核改判。'
+    }
+  }
   writeSubtaskStatus(record, subtask.id, {
-    status: verdict.status,
+    status: effectiveStatus,
     progress: 100,
     finishedAt: Date.now(),
     summary: truncate(lessonNote ? `${output}\n[自我学习] ${lessonNote}` : output, 3000),
-    error: settleError,
+    error: effectiveError,
     verification: verdict.verification,
     acceptance: verdict.acceptance,
     artifacts: checked.artifacts.length > 0
@@ -1710,6 +1866,13 @@ function settleFromOutput(
       ? checked.missingArtifacts
       : (extraEvidence && extraEvidence.missingArtifacts.length > 0 ? extraEvidence.missingArtifacts : undefined),
     needs: verdict.needs.length > 0 ? verdict.needs : undefined,
+    /*
+     * [3.0.0][用户要求 7/8/10/11] 两级精简 JSON 落行：专家汇报 report 与
+     * 部门汇总 departmentSummary。它们已通过 F10/F11 格式门禁，这里原样
+     * 持久化，供完成通知与看板按需读取（不裁剪内容）。
+     */
+    ...(verdict.departmentSummary ? { departmentSummary: verdict.departmentSummary } : {}),
+    ...(verdict.report ? { report: verdict.report } : {}),
     /*
      * [1.11.0] 文本兜底：子会话拿不到 escalate 工具时，结果块里的
      * `question` 就是同一条请示。它仍然写成 blocked 投影，但 closure 是
@@ -1724,7 +1887,7 @@ function settleFromOutput(
           escalatedAt: Date.now(),
           escalationSeq: Number(current?.revision ?? 0) + 1,
         }
-      : verdict.status === 'done'
+      : effectiveStatus === 'done'
         /*
          * [1.11.0] 完成必须落到 `closure:'done'`，不是 `blocked`。
          *
@@ -1744,8 +1907,17 @@ function settleFromOutput(
             blockedKind: verdict.blockedKind === 'comm-format' ? 'comm-format' : 'failed',
           }),
   }, guard)
-  if (verdict.status === 'blocked') {
-    recordSubtaskError(record, subtask.id, escalated ? `待指示：${verdict.question}` : (settleError ?? '未完成'), guard)
+  /*
+   * [SCv2-T4][C08] 判据字段走 StatusEntry 未知字段直写通道（applyStatus 白名单
+   * 不路由新字段，与 pendingAdjudication/timeoutCount 同一纪律）；回放白名单
+   * 已追加 criterionResult/criterionException/criterionViolations，刷新不丢。
+   */
+  if (criterionDirectWrite) {
+    const criterionRow = record.statuses.find((item: any) => item?.subtaskId === subtask.id)
+    if (criterionRow) Object.assign(criterionRow, criterionDirectWrite)
+  }
+  if (effectiveStatus === 'blocked') {
+    recordSubtaskError(record, subtask.id, escalated ? `待指示：${verdict.question}` : (effectiveError ?? '未完成'), guard)
   } else if (checked.missingArtifacts.length > 0) {
     recordSubtaskError(record, subtask.id, `声明产物缺失：${checked.missingArtifacts.join('、')}`, guard)
   }
@@ -1757,7 +1929,7 @@ function settleFromOutput(
    * 措辞，A4）。投递与幂等标记由 `onSubtaskDone` 处理器负责：先写通知、
    * 写成功才记 report.state='sent'，绝不留无证据的已回报。
    */
-  if (verdict.status === 'done' && options.notifyCompletion === true
+  if (effectiveStatus === 'done' && options.notifyCompletion === true
     && typeof options.onSubtaskDone === 'function') {
     try {
       options.onSubtaskDone(record, subtask, verdict)
@@ -1768,7 +1940,7 @@ function settleFromOutput(
        */
     }
   }
-  return { ...verdict, escalated }
+  return { ...verdict, status: effectiveStatus, escalated, ...(criterionResultValue ? { criterionResult: criterionResultValue } : {}) }
 }
 
 /**
@@ -1796,7 +1968,8 @@ export function shouldRetryAttempt(error: any, attempt: any, remainingMs: any, i
      * 重试要有意义，必须给它留够「至少再跑一次短任务」的时间。
      *
      * [1.10.6] 这里**不能**再拿空闲窗口当门槛（旧式 `max(idle, 120s)`）：
-     * 出厂配置是 ceiling=900s / idle=300s / round=1200s，撞上限后剩下约
+     * 现行默认是 ceiling=CHILD_TIMEOUT_MS(900s) / idle=CHILD_IDLE_TIMEOUT_MS
+     * (300s) / round=TOTAL_TIMEOUT_MS(0=不设整轮硬预算)，撞上限后剩下约
      * 300s，而 `remaining > 300s` 恒为假——用户要的「有预算就自动重试一次」
      * 会在默认配置下永远不触发，正是 T6 记录的那类「策略说会、链路不会」。
      * 固定 120s 是「够跑一次短任务」的下限，同时保证不会刚重试就被砍掉。
@@ -2231,7 +2404,7 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
                  * 的推理等级 + 部门负责人「先全面梳理、再用 dsh_workplan_delegate
                  * 分配给顶尖专家与组员」的强制流程告知。
                  */
-                phaseZeroContinuation: phaseZeroCompleted ? buildPhaseZeroContinuationHint(String(effortRow?.effortOverride ?? ''), phaseZeroOutput) : '',
+                phaseZeroContinuation: phaseZeroCompleted ? buildPhaseZeroContinuationHint(String(effortRow?.effortOverride ?? ''), phaseZeroOutput, effortRow?.effortOverride === 'low' && (effortRow?.consolidation?.assignments ?? []).length === 0) : '',
                 llmRulesBrief: buildLlmRulesBrief({
                   model: modelSelection?.model ?? null,
                   effort: staticRuleChildEffort || null,
@@ -2498,7 +2671,7 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
             continue
           }
           throw new PlanError(
-            'phase-0 结束但未提交自配推理等级：先配置后开工是平台硬规则——请评估任务复杂度并经 dsh_workplan_delegate(action="review") 配置 consolidation.taskReasoningEffort，平台将以自配档接续',
+            'phase-0 结束但未提交自配推理等级：先配置后开工是平台硬规则——请评估任务复杂度并经 dsh_workplan_delegate(action="review") 配置 consolidation.taskReasoningEffort，平台将以自配档接续；low（轻度）任务请改经 action="direct" 登记两轮思考产物（负责人亲自执行，禁止下派）',
             'SELF_EFFORT_MISSING',
             { subtaskId: subtask.id },
           )
@@ -3072,7 +3245,7 @@ async function notifyExpertOfExtension(ctx: any, agent: any, record: any, subtas
     + '你必须在保证工作质量的前提下高效率执行：优先推进高价值步骤，已完成内容及时落盘，'
     + '并在回报中明确区分「已完成 / 未完成」。收到本通知后请继续当前工作，不要重新开始。'
   try {
-    await service.sendMessage(agent, childId, [{ type: 'text', text }], {})
+    await service.sendMessage(agent, childId, [{ type: 'text', text }], { signal: new AbortController().signal }) // [T11] 缺陷②：延期告知携带有效 signal，消除 throwIfAborted
     if (row) {
       const journal = Array.isArray(row.timeJournal) ? row.timeJournal : []
       journal.push({ at: Date.now(), action: 'notify-expert', deadlineAt: Number(deadlineAt), by: 'system' })
@@ -3168,8 +3341,8 @@ async function runSubtaskAttempt(
       const preRow = record.statuses.find((item: any) => item?.subtaskId === subtask.id)
       const timeoutCountAtFire = Number(preRow?.timeoutCount ?? 0) + 1
       const message = timeoutCountAtFire >= TAKEOVER_AFTER_TIMEOUTS
-        ? `子任务 ${subtask.id} 第 ${timeoutCountAtFire} 次达到协商执行上限（${timeoutMs}ms），已按安全兜底结算（待裁决：takeoverRequired——预估时间已两次超时，请主 Agent 直接接手完成尚未完成的部分；专家已完成并落盘的部分已登记只读保护，禁止丢弃、禁止整步重跑）`
-        : `子任务 ${subtask.id} 第 ${timeoutCountAtFire} 次达到协商执行上限（${timeoutMs}ms），已按安全兜底结算（待裁决：请主 Agent 立即放宽（extendMs，放宽后插件自动告知专家最新时限与保证质量高效率要求）/ 重试 / 接受，或转新轮续跑、人工裁决）`
+        ? `子任务 ${subtask.id} 第 ${timeoutCountAtFire} 次达到协商执行上限（${timeoutMs}ms），已按安全兜底结算（待裁决：takeoverRequired——预估时间已两次超时，请主 Agent 直接接手完成尚未完成的部分；专家已完成并落盘的部分已登记只读保护，禁止丢弃、禁止整步重跑；接手仅发生在已批准延期的场景）`
+        : `子任务 ${subtask.id} 第 ${timeoutCountAtFire} 次达到协商执行上限（${timeoutMs}ms），已按运行层安全兜底结算（待裁决：判据层 10 分钟完成目标未达成且无用户批准 → 判未完成，优先 replan(replace) 转新子任务只补缺口；或经用户批准并留痕后 extendMs 放宽；或重试 / 接受、转新轮续跑、人工裁决）`
       try {
         // [1.8.19] Keep the evidence of what already landed on disk.
         const { patch, landed } = timeoutBlockedPatch(subtask, options.cwd, message, options.artifactExists)
@@ -3201,6 +3374,44 @@ async function runSubtaskAttempt(
         const settleRow = record.statuses.find((item: any) => item?.subtaskId === subtask.id)
         if (settleRow) settleRow.pendingAdjudication = true
         /*
+         * [SCv2-T4][Q1-B/Q3-B/Q6-A] 到点结算的判据层判定（仅生效计划）：
+         * 运行层兜底已完成（blocked＋产物抢救照旧），这里追加判据结果与违规
+         * 审计；unmet 时把「判未完成→replan(replace) 接替」写进 error/summary，
+         * 与 C15 文案同向。pendingAdjudication 事实标记保留（C16 不改）。
+         */
+        if (settleRow && criterionV2Active(record.plan?.createdAt)) {
+          try {
+            let leaderForCriterion: any = null
+            try { leaderForCriterion = deriveLeaderEstimate(settleRow) } catch { leaderForCriterion = null }
+            const exAnte = criterionExAnte(settleRow, leaderForCriterion)
+            const wallClockMs = attemptWallClockMsOf(settleRow)
+            const evaluation = evaluateCriterion({
+              exAnteMinutes: exAnte.minutes,
+              exAnteComplete: exAnte.complete,
+              wallClockMs,
+              exception: sanitizeCriterionException(settleRow.criterionException),
+              settledAt: Date.now(),
+            })
+            settleRow.criterionResult = evaluation.criterionResult
+            if (evaluation.criterionResult === 'unmet') {
+              settleRow.criterionViolations = appendCriterionViolation(settleRow.criterionViolations, {
+                at: Date.now(),
+                attempt: timeoutCountAtFire,
+                wallClockMs,
+                exAnteMinutes: exAnte.minutes,
+                reasons: evaluation.reasons,
+              })
+              const criterionNote = `判据违规（criterion-overrun）：${evaluation.reasons.join('；')}。`
+                + '未获用户批准不得以 done 收尾（Q1-B）；已完成产物只读保留，优先 replan(replace) 转接替子任务只补缺口，'
+                + '或先向用户申请例外批准并留痕（criterionApproval）后放宽。'
+              settleRow.error = truncate(`${settleRow.error ?? ''}；${criterionNote}`, 3000)
+              settleRow.summary = truncate(`未完成：${criterionNote}`, 3000)
+            }
+          } catch (error: any) {
+            record.errors = [...(record.errors ?? []), `${subtask.id}: 判据层判定写入失败：${truncate(String(error?.message ?? error), 300)}`].slice(-20)
+          }
+        }
+        /*
          * [2.3.0][T1] 超时计数与二次超时接手（用户要求 1/2 的机读落点）：
          * 每次到点收束给状态行 timeoutCount +1 并记入 timeJournal（action:'timeout'）。
          *  第 1 次超时 → 即时通知主 Agent「必须放宽（extendMs）并告知专家最新时限」，
@@ -3227,8 +3438,12 @@ async function runSubtaskAttempt(
               ? `子任务 ${subtask.id} 已第 ${timeoutCount} 次达到协商时限（二次超时）：按 2.3.0 机制本行已置「主 Agent 接手」（takeoverRequired）。`
                 + `专家已完成并登记保护的部分（只读、禁止丢弃）：${(ceilingLanded as string[]).slice(0, 8).join('、') || '（见 takeoverBrief）'}；`
                 + '请主 Agent 直接接手继续未完成部分，不要整步重跑、不要删除或覆盖已登记产物。'
-              : `子任务 ${subtask.id} 第 1 次达到协商时限：按 2.3.0 机制请主 Agent 尽快用 dsh_workplan_update(extendMs) 放宽，`
-                + '延期成功后插件会自动把最新时限与「保证质量、高效率执行」要求告知专家；如判断无需再放宽，请接手继续未完成部分（已完成产物将只读保护）。'
+              : (criterionV2Active(record.plan?.createdAt)
+                ? `子任务 ${subtask.id} 第 1 次达到协商时限：按用户 2026-11-13 裁决 Q1-B，第一次超时不再自动放宽——请先向用户申请例外批准并留痕`
+                  + '（任务 ID、批准原文/来源、批准时间、放宽后分钟数、适用范围；无留痕＝未批准），批准后才可用 dsh_workplan_update(extendMs, criterionApproval) 放宽；'
+                  + '未获批准不得放宽，按判据层未达标处理（不 done、replan(replace) 转接替子任务只补缺口，已完成产物只读保护）。'
+                : `子任务 ${subtask.id} 第 1 次达到协商时限：按 2.3.0 机制请主 Agent 尽快用 dsh_workplan_update(extendMs) 放宽，`
+                  + '延期成功后插件会自动把最新时限与「保证质量、高效率执行」要求告知专家；如判断无需再放宽，请接手继续未完成部分（已完成产物将只读保护）。')
             announceSubtaskInterrupt(record, options.session ?? options.agent?.session, subtask.id, takeoverText)
           } catch {
             // 通知失败不影响结算（与预警同一纪律）。
@@ -3410,7 +3625,22 @@ async function runWithConcurrency(items: any, limit: any, worker: any) {
  */
 export function modelStatusLines(statuses: any) {
   const list = Array.isArray(statuses) ? statuses : []
-  return list.map((item: any) => ({
+  return list.map((item: any) => {
+    /*
+     * [T7][lead-decisions J2/G2] 负责人时长聚合：与看板载荷（plan.ts
+     * normaliseStatusEntry）挂同一读时派生纯函数，模型可读面不是第二套计算。
+     * null＝空 roster（无下属分工）/replanned 旧行/越界 fail-closed；
+     * roster 非空且非 replanned 却为 null ⇒ 总和越界异常，显式标注拒绝展示（J8）。
+     */
+    const leaderEstimate = deriveLeaderEstimate(item)
+    const leaderEstimateAnomaly = leaderEstimate === null
+      && item?.closure !== 'replanned'
+      && leaderEstimateRoster(item).length > 0
+      ? '下属开工预估聚合异常（总和超出安全整数范围），拒绝展示数值；请核对 delegateEstimates 台账'
+      : null
+    // [SCv2-T4][Q4-B/C22] 事前预估口径（有叶子＝和；直做＝负责人自身预估，D-2）。
+    const exAnteView = criterionExAnte(item, leaderEstimate)
+    return {
     subtaskId: item.subtaskId,
     title: item.title,
     department: item.department,
@@ -3495,7 +3725,30 @@ export function modelStatusLines(statuses: any) {
      * 只写状态行不让读，等于又是一个「看不见的失败」。
      */
     noticeChannel: item.noticeChannel ?? null,
-  }))
+    /*
+     * [T6][契约v1 §3] 第三层开工预估进入模型可读面：delegates 行透出 estimate
+     * （declaredMinutes/delivery 等，照录不改写），任务级 delegateEstimates 台账
+     * 一并透传——主 Agent/负责人据此核对「谁预估了多少分钟、是否已送达」。
+     */
+    delegates: (Array.isArray(item.delegates) ? item.delegates : [])
+      .filter((entry: any) => entry && typeof entry === 'object')
+      .map((entry: any) => ({ ...entry })),
+    delegateEstimates: item.delegateEstimates ?? null,
+    // [T7][J1 冻结结构] {totalMinutes, reported, expected, missing[], failed[]} | null。
+    leaderEstimate,
+    ...(leaderEstimateAnomaly ? { leaderEstimateAnomaly } : {}),
+    /*
+     * [SCv2-T4] 判据层字段进入模型可读面（与看板载荷 normaliseStatusEntry 同源）：
+     * 单次尝试墙钟（缺失＝null 未验证，绝不按 0）、结算三选一、用户批准留痕、
+     * 违规审计（append-only）、事前预估超判据布尔（服务端算术，客户端不计算）。
+     */
+    attemptWallClockMs: attemptWallClockMsOf(item),
+    criterionResult: item.criterionResult ?? null,
+    criterionException: item.criterionException ?? null,
+    criterionViolations: Array.isArray(item.criterionViolations) ? item.criterionViolations.slice(-10) : [],
+    leaderEstimateOverCriterion: exAnteView.minutes !== null && exAnteView.minutes > CRITERION_TARGET_MINUTES,
+    }
+  })
 }
 
 export function buildRoundResult(record: any, sessionId: any, limits: any) {
@@ -3665,6 +3918,25 @@ export async function dispatchPlan(ctx: any, record: any, options: any) {
   record.phase = 'executing'
   record.updatedAt = record.dispatchedAt
   /*
+   * [3.0.0][用户要求 4] 分配完成后，会话内必须输出固定文案
+   * 「任务已经完成分配，正在执行中......」。放在本轮真正开跑（phase=executing、
+   * 子 Agent 即将启动）之后、任何子任务结算之前，自动派发与手工派发同一路径，
+   * 因此只输出一次、不会漏也不会重复。逐字冻结，不得改写。
+   */
+  {
+    const assignSession = options.session ?? agent?.session
+    /*
+     * [3.0.0][幂等键] 同一份计划只发一次：续跑/重派/durable 回放都会再次走到
+     * 这里，若不加键就会重复刷屏。键＝planId，随 record 持久化（record 本身
+     * 走 durable 快照），刷新后仍然生效。
+     */
+    const noticeKey = String(record.plan?.planId ?? record.planId ?? '')
+    if (assignSession && noticeKey && record.assignedNoticeKey !== noticeKey) {
+      record.assignedNoticeKey = noticeKey
+      appendUserMessage(assignSession, STATUS_ASSIGNED_TEXT)
+    }
+  }
+  /*
    * [2.5.2][stall-fix] 执行期进度心跳（用户报告「提交任务后长时间无反应/以为
    * 死机」）：规划心跳只覆盖 runPlanner，派发后的执行轮次（可能十几分钟）
    * 旧实现期间零会话输出。现在只要本轮还在跑，就按固定间隔（默认 45s，
@@ -3674,10 +3946,15 @@ export async function dispatchPlan(ctx: any, record: any, options: any) {
    * 不新增事件类型、不触碰 system/message。
    */
   const dispatchHbSession = options.session ?? agent?.session
+  // [T7] C3 整轮预算：新一轮开跑即重置注入预算（roundKey=planId:dispatchedAt，与 finishRound 同键；
+  // 会话取 dispatchHbSession，与本轮 appendUserMessage 同一对象，WeakMap 键一致）。
+  if (dispatchHbSession) resetRoundInjectionBudget(dispatchHbSession, `${record.plan.planId}:${record.dispatchedAt}`)
   const dispatchHeartbeat = dispatchHbSession ? createPlanningHeartbeat({
     signal: childController.signal,
     appendNotice: (text: string) => appendUserMessage(dispatchHbSession, text),
-    intervalMs: planningHeartbeatIntervalMs(process.env.DSH_WORKPLAN_DISPATCH_HEARTBEAT_MS ?? 45000),
+    // 默认值引用 PLANNING_HEARTBEAT_MS 单一真源（同为 45s 心跳间隔）；
+    // 环境变量名 DSH_WORKPLAN_DISPATCH_HEARTBEAT_MS 保持不变。
+    intervalMs: planningHeartbeatIntervalMs(process.env.DSH_WORKPLAN_DISPATCH_HEARTBEAT_MS ?? PLANNING_HEARTBEAT_MS),
     startedAt: record.dispatchedAt,
     maxAttempts: 1,
     buildMessage: (elapsedMs: number) => {
@@ -3725,7 +4002,47 @@ export async function dispatchPlan(ctx: any, record: any, options: any) {
               && !(Array.isArray(dependency?.missingArtifacts) && dependency.missingArtifacts.length > 0),
           }
         : {})
-      if (ready.length === 0) {
+      /*
+       * [3.0.0+] 派发质量闸（2026-11-15 用户裁决）：主 Agent 派给部门负责人的
+       * 每个子任务必须携带 qualityRequirements（质量要求）。缺失的子任务本轮
+       * 直接拒发（不启动部门 Agent），落 blocked + closure:'escalated'——等主
+       * Agent replan 补齐后重派：该形态不参与自动续跑（canResumePlan 排除
+       * escalated）、不会被 readySubtasks 重复选中，天然防重试空转；其余合格
+       * 子任务照常并发执行，互不影响。旧计划（createdAt 早于
+       * QUALITY_GATE_ACTIVATED_AT）豁免，零回归。
+       */
+      let runnable = ready
+      if (isQualityGatePlan(record.plan)) {
+        const rejected: string[] = []
+        runnable = []
+        for (const item of ready) {
+          const check = checkSubtaskQualityRequirements(item)
+          if (check.ok) { runnable.push(item); continue }
+          rejected.push(`${item.id}（${String(item.title ?? '无标题')}）：${check.error}`)
+          record.statuses = applyStatus(record.statuses, item.id, {
+            status: 'blocked',
+            closure: 'escalated',
+            blockedKind: 'escalated',
+            question: `${check.error} ${check.hint}`,
+            error: check.error,
+            escalatedAt: Date.now(),
+          })
+          record.errors = [...(record.errors ?? []), `${item.id}: ${check.code} ${check.error}`].slice(-20)
+        }
+        if (rejected.length > 0) {
+          const noticeSession = options.session ?? agent?.session
+          if (noticeSession) {
+            appendUserMessage(noticeSession, [
+              `【派发拒发 · 质量要求缺失】${rejected.length} 个子任务未携带质量要求（qualityRequirements），`
+              + '已被系统直接拒发（DISPATCH_QUALITY_REQUIREMENTS_MISSING），未启动任何部门 Agent：',
+              ...rejected.map((line, index) => `  ${index + 1}. ${line}`),
+              '请立刻用 dsh_workplan_replan 为这些子任务补写质量要求（至少 1 条可检查：什么算合格、什么算不合格），'
+              + '然后重新派发；本次其余合格子任务正常执行、不受影响。',
+            ].join('\n'))
+          }
+        }
+      }
+      if (runnable.length === 0) {
         /*
          * [1.8.6] "Nothing is ready" is not the same thing as "everything
          * failed".
@@ -3746,7 +4063,7 @@ export async function dispatchPlan(ctx: any, record: any, options: any) {
         }
         break
       }
-      await runWithConcurrency(ready, MAX_CONCURRENT, async (item: any) => {
+      await runWithConcurrency(runnable, MAX_CONCURRENT, async (item: any) => {
         // readySubtasks() returns subtask objects (they carry `id`, not
         // `subtaskId`); using the status key here silently skipped every task
         // and spun the dispatcher until DISPATCH_LOOP marked all blocked.
@@ -4324,6 +4641,8 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
     /* [2.5.1] 主 Agent 两轮深度思考产物（计划级），随 durable workplan-update 回放。 */
     mainDeepThink: any
     mainDeepThinkPlanId: string | null
+    /* [2.5.7] 续跑上限随回放快照透传（durable 消息未携带时为 undefined，回落 MAX_PLAN_RESUMES）。 */
+    resumeLimit?: number
   }
   /*
    * [1.8.9] 回放按 planId 分账，不按会话「最后一个计划」分账。
@@ -4447,7 +4766,7 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
           for (const entry of (Array.isArray(result.statuses) ? result.statuses : [])) {
             const rebuiltRow = snap.statuses.find((item: any) => item?.subtaskId === entry?.subtaskId)
             if (!rebuiltRow || !isRecord(entry)) continue
-            for (const field of ['deadlineAt', 'timeNotice', 'timeWarning', 'timeJournal', 'pendingAdjudication', 'timeoutCount', 'takeoverRequired', 'takeoverBrief']) {
+            for (const field of ['deadlineAt', 'timeNotice', 'timeWarning', 'timeJournal', 'pendingAdjudication', 'timeoutCount', 'takeoverRequired', 'takeoverBrief', 'criterionResult', 'criterionException', 'criterionViolations']) {
               if (entry[field] !== undefined) rebuiltRow[field] = entry[field]
             }
             /*
@@ -4498,7 +4817,8 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
        * a strictly-lower revision never overwrites; equal revision passes
        * (dedup for the same write lives in `appliedUpdates`).
        */
-      const update = parseUpdateMessage(event.data)
+      /* [2.5.5][T10] 合并汇总消息按序展开成多条 update，逐条应用（与逐条落盘等价）。 */
+      for (const update of parseUpdateMessages(event.data)) {
       /*
        * [2.5.1] 主 Agent 两轮深度思考产物回放（计划级字段）：写入侧
        * （dispatchTool 门禁登记）把 mainDeepThink/mainDeepThinkPlanId 随
@@ -4621,6 +4941,9 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
               delegateSelfEfforts: update.delegateSelfEfforts,
               // [2.5.2] 叶子执行前两轮思考台账回放（applyStatus 同口径消毒）。
               delegateDeepThinks: update.delegateDeepThinks,
+              // [T6][契约v1 §3] 第三层开工预估台账回放（applyStatus 同口径消毒，
+              // undefined 保留旧值）：刷新/重启后预估不丢，重派读档门禁据此判定。
+              delegateEstimates: update.delegateEstimates,
               // [2.5.4][T3R1] 分派前深度梳理门禁审计回放（A3：刷新/重启后
               // 拒绝/放行记录仍可复核；applyStatus 同口径消毒，undefined 保留旧值）。
               gateAudit: update.gateAudit,
@@ -4662,7 +4985,7 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
              */
             const replayRow = snap.statuses.find((item: any) => item?.subtaskId === update.subtaskId)
             if (replayRow) {
-              for (const field of ['deadlineAt', 'timeNotice', 'timeWarning', 'timeJournal', 'pendingAdjudication', 'timeoutCount', 'takeoverRequired', 'takeoverBrief']) {
+              for (const field of ['deadlineAt', 'timeNotice', 'timeWarning', 'timeJournal', 'pendingAdjudication', 'timeoutCount', 'takeoverRequired', 'takeoverBrief', 'criterionResult', 'criterionException', 'criterionViolations']) {
                 if (update[field] !== undefined) replayRow[field] = update[field]
               }
               const replayExtend = Number(update.extendMs)
@@ -4704,6 +5027,7 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
             )
           }
         }
+      }
       }
       const cancel = parseCancelMessage(event.data)
       if (cancel && typeof cancel.planId === 'string') {
@@ -4865,8 +5189,10 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
      * abort that marked the rest of the plan blocked.
      */
     errors: (chosen.errors ?? []).slice(-20),
-    resumeLimit: MAX_PLAN_RESUMES,
-    resumeAvailable: canResumePlan({ phase, statuses, resumeCount }, MAX_PLAN_RESUMES).resume,
+    // [2.5.7] 与 serialisePlan/status 输出同口径：优先读档内 resumeLimit，
+    // 缺失才回落 MAX_PLAN_RESUMES（三源统一，消除第四套口径）。
+    resumeLimit: Number(chosen?.resumeLimit ?? MAX_PLAN_RESUMES),
+    resumeAvailable: canResumePlan({ phase, statuses, resumeCount }, Number(chosen?.resumeLimit ?? MAX_PLAN_RESUMES)).resume,
     stale: stalePending,
     /*
      * [1.8.14] Two facts, one from the log: whether the plan is cancelled and
@@ -5153,8 +5479,10 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     maxResumes: Number.isFinite(Number(options.maxResumes)) && Number(options.maxResumes) >= 0
       ? Math.min(5, Math.floor(Number(options.maxResumes)))
       : MAX_PLAN_RESUMES,
+    // [1.12.0] 默认开启：仅显式 `autoResume:false`（或
+    // `DSH_WORKPLAN_AUTO_RESUME=0`）才关闭，与 `AUTO_RESUME_DEFAULTS.enabled=true` 一致。
     autoResume: {
-      enabled: options.autoResume === true,
+      enabled: options.autoResume !== false,
       maxAttempts: autoResumeAttemptCap(options.autoResumeMaxAttempts),
     },
   }
@@ -5392,6 +5720,26 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     row.timeJournal = journal.slice(-20)
     record.updatedAt = at
     /*
+     * [SCv2-T4][Q4-B/C22] 部门行事前预估落档后的超判据告警（仅生效计划）：
+     * 叶子预估之和（或无叶子直做时负责人自身预估）>10 ⇒ 即时告知主 Agent
+     * 拆分或向用户申请例外批准；预估未齐只显示部分和、不得视为达标（D-3）。
+     * 告警是观测设施：写失败只留档 errors，绝不影响记录与执行。
+     */
+    try {
+      if (criterionV2Active(record?.plan?.createdAt) && session) {
+        let leaderForNotice: any = null
+        try { leaderForNotice = deriveLeaderEstimate(row) } catch { leaderForNotice = null }
+        const exAnte = criterionExAnte(row, leaderForNotice)
+        if (exAnte.minutes !== null && exAnte.minutes > CRITERION_TARGET_MINUTES) {
+          appendUserMessage(session, `【dsh-workplan·判据告警】子任务 ${subtaskId} 的事前预估为 ${exAnte.minutes} 分钟，`
+            + `超过判据层完成目标 ${CRITERION_TARGET_MINUTES} 分钟（Q4-B）。请事前拆分工作，或向用户申请例外批准并留痕（criterionApproval）；`
+            + '预估未报齐时只显示部分和，不得视为「简单判据达标」。')
+        }
+      }
+    } catch (error: any) {
+      record.errors = [...(record.errors ?? []), `${subtaskId} 判据告警写入失败：${truncate(String(error?.message ?? error), 200)}`].slice(-20)
+    }
+    /*
      * [2.3.0][T1] 预估上报 → 告知用户（用户要求 1 的前半段闭环）：专家的开工
      * 预告落档后，插件立即向主会话推送一条即时通知，明确「请把此预期执行
      * 时间告知用户」；新预告覆盖旧预告（每条新预告各通知一次，与「开工预告」
@@ -5403,7 +5751,8 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
           + `预估执行时间 ${Number(notice?.declaredMinutes)} 分钟`
           + (reason ? `（${reason}）` : '')
           + `；请把此预期执行时间告知用户。若执行中超时，请主 Agent 放宽（extendMs）`
-          + '并告知专家最新时限，连续两次超时则由主 Agent 接手未完成部分（已完成产物只读保护，禁止丢弃）。')
+          + '并告知专家最新时限，连续两次超时则由主 Agent 接手未完成部分（已完成产物只读保护，禁止丢弃）。',
+          undefined, { allowBanned: true })
       } catch (error: any) {
         record.errors = [...(record.errors ?? []), `${subtaskId} 预估上报通知写入失败：${truncate(String(error?.message ?? error), 200)}`].slice(-20)
       }
@@ -5446,6 +5795,40 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         subtaskId,
         error: `extendMs 必须是正整数毫秒：${String(extendMsArg)}`,
         hint: '请传入 1 以上的整数毫秒；放宽永远有界（累计 ≤ 初始协商上限 × 1），超出请转新轮续跑或转 escalate 请主 Agent 裁决。',
+      }
+    }
+    /*
+     * [SCv2-T4][Q1-B/C05/C06] extendMs 用户批准闸（判据 v2 生效计划专用）：
+     * 第一次超时不再自动放宽——未携带合格用户批准留痕（criterionApproval）一律
+     * 拒绝（EXTEND_NEEDS_USER_APPROVAL），批准时间晚于当前时刻 likewise 拒绝
+     * （C-4 推荐 A：批准仅在本次尝试结算前有效，事后追认无效）。
+     * 未生效计划（历史/在途，Q5-A/D-1）保持 2.3.0 旧行为，既有回归零改动。
+     * 留痕 5 项：任务 ID（subtaskId）、批准原文/来源（reason/source）、批准时间
+     * （at）、放宽后分钟数（extendedMinutes，事务内回填）、适用范围（scope）。
+     */
+    const criterionActive = criterionV2Active(record.plan?.createdAt)
+    let criterionApproval: ReturnType<typeof sanitizeCriterionException> = null
+    if (hasExtend && criterionActive) {
+      criterionApproval = sanitizeCriterionException(args?.criterionApproval)
+      if (!criterionApproval) {
+        return {
+          ok: false,
+          code: 'EXTEND_NEEDS_USER_APPROVAL',
+          planId: record.plan.planId,
+          subtaskId,
+          error: '判据 v2 已对该计划生效：extendMs 放宽必须先取得用户明确批准并留痕（Q1-B），本次调用未携带合格的 criterionApproval。',
+          hint: '请先向用户申请例外批准，再随 extendMs 传 criterionApproval={ approvedBy:"user", at:<批准时间 epoch 毫秒>, reason:<批准原文/来源>, scope:"task"|"plan" }（5 项留痕：任务 ID、批准原文/来源、批准时间、放宽后分钟数、适用范围；无留痕＝未批准）。未获批准时不得放宽：按判据层未达标处理，用 dsh_workplan_replan(replace) 转接替子任务只补缺口。',
+        }
+      }
+      if (criterionApproval.at > Date.now()) {
+        return {
+          ok: false,
+          code: 'EXTEND_APPROVAL_INVALID_TIME',
+          planId: record.plan.planId,
+          subtaskId,
+          error: `criterionApproval.at（${criterionApproval.at}）晚于当前时刻：批准必须在本次尝试结算前取得，事后追认无效（C-4 推荐 A）。`,
+          hint: '请使用用户实际批准的时间（epoch 毫秒，Asia/Shanghai 展示）；结算后只能批准接替行，不能追改本次判定。',
+        }
       }
     }
     /*
@@ -5650,6 +6033,31 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       }
       extension = extended
       /*
+       * [SCv2-T4][Q1-B/C08] 批准留痕落行（criterionException，最终定名）：
+       * 放宽后分钟数由本次 extendMs 回填；timeJournal 追加 action:'criterion-exception'
+       * 审计条目。回放白名单已追加 criterionException，刷新/重启不丢批准记录。
+       */
+      if (criterionActive && criterionApproval) {
+        const extendRow = record.statuses.find((item: any) => item?.subtaskId === subtaskId)
+        if (extendRow) {
+          extendRow.criterionException = {
+            ...criterionApproval,
+            extendedMs: extendMsArg,
+            extendedMinutes: Math.round((extendMsArg / 60000) * 100) / 100,
+          }
+          const approvalJournal = Array.isArray(extendRow.timeJournal) ? extendRow.timeJournal : []
+          approvalJournal.push({
+            at: Date.now(),
+            action: 'criterion-exception',
+            by: 'user',
+            extendMs: extendMsArg,
+            scope: criterionApproval.scope,
+            reason: truncate(criterionApproval.reason, 300),
+          })
+          extendRow.timeJournal = approvalJournal.slice(-20)
+        }
+      }
+      /*
        * [2.3.0][T1] 用户要求 1 后半段：放宽成功后必须把「最新执行时间」告知
        * 专家，同时附「必须在保证工作质量的前提下高效率执行」硬要求，让专家
        * 有准备（收到通知继续当前工作，不重新开始）。投递失败不回滚延期——
@@ -5689,6 +6097,8 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
             }
           : {}),
         ...(hasTimeNotice ? { timeNotice: written?.timeNotice ?? null } : {}),
+        // [SCv2-T4] 批准留痕随纯时限事务回执下发（仅生效计划且本次携带批准时）。
+        ...(criterionActive && criterionApproval ? { criterionException: written?.criterionException ?? null } : {}),
         timeJournal: Array.isArray(written?.timeJournal) ? written.timeJournal.slice(-10) : [],
         stats: snapshot.stats,
         deliveryReady: readiness.ready,
@@ -5708,6 +6118,44 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
      * sanitised by `applyStatus`, persisted in the durable update message and
      * replayed. Omitted fields keep their previous values.
      */
+    /*
+     * [SCv2-T4][Q1-B/S-Q1-3] 人工改判 done 的判据闸（仅生效计划）：
+     * 未达标且无用户批准 ⇒ CRITERION_UNMET 拒绝（不得以 done 收尾）；
+     * 随调用携带 criterionApproval 或行上已有有效批准 ⇒ 记例外后放行。
+     * 这是「复核改判」恢复路径的判据边界：恢复也必须经用户批准留痕。
+     */
+    let manualCriterionFields: any = null
+    if (status === 'done' && criterionActive) {
+      const settledAt = Date.now()
+      let leaderForCriterion: any = null
+      try { leaderForCriterion = deriveLeaderEstimate(current) } catch { leaderForCriterion = null }
+      const exAnte = criterionExAnte(current, leaderForCriterion)
+      const approval = sanitizeCriterionException(args?.criterionApproval)
+        ?? sanitizeCriterionException(current?.criterionException)
+      const evaluation = evaluateCriterion({
+        exAnteMinutes: exAnte.minutes,
+        exAnteComplete: exAnte.complete,
+        wallClockMs: attemptWallClockMsOf({ startedAt: current?.startedAt, finishedAt: current?.finishedAt ?? settledAt }),
+        exception: approval,
+        settledAt,
+      })
+      if (!evaluation.canBeDone) {
+        return {
+          ok: false,
+          code: 'CRITERION_UNMET',
+          planId: record.plan.planId,
+          subtaskId,
+          criterionResult: evaluation.criterionResult,
+          reasons: evaluation.reasons,
+          error: `判据层未达标（criterion-overrun），不得以 done 收尾：${evaluation.reasons.join('；')}`,
+          hint: '唯一例外＝用户明确批准并留痕：向用户申请后随本次调用传 criterionApproval={ approvedBy:"user", at, reason, scope }；或改用 dsh_workplan_replan(replace) 生成接替子任务只补缺口（已完成产物只读保护）。',
+        }
+      }
+      manualCriterionFields = {
+        criterionResult: evaluation.criterionResult,
+        ...(approval && evaluation.exceptionRecorded ? { criterionException: approval } : {}),
+      }
+    }
     const evidencePatch: any = {}
     if (args?.verification !== undefined) evidencePatch.verification = args.verification
     if (args?.acceptance !== undefined) evidencePatch.acceptance = args.acceptance
@@ -5776,6 +6224,12 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         options: writtenRow?.options,
         instruction: writtenRow?.instruction,
         instructionSeq: writtenRow?.instructionSeq,
+        // [T7] C1 白名单：仅四态（开始/完成/受阻/待指示）注入一行关键进度；
+        // instructed（指示已下发恢复执行）等过程改判文本置空。标题取自计划
+        // 定义（渲染输入，不进 durable 载荷）。
+        keyProgress: writtenRow?.closure === 'escalated'
+          || (['in_progress', 'done', 'blocked'].includes(String(status)) && writtenRow?.closure !== 'instructed'),
+        title: flattenSubtasks(record.plan).find((entry: any) => entry.subtask?.id === subtaskId)?.subtask?.title,
       }))
       /*
        * [2.2.9][T3][M4] 人工改判的这条 durable update 消息本身就是「完成已
@@ -6454,10 +6908,19 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       ...missingArtifacts.map((ref: any) => `  - 缺失产物待补：${truncate(String(ref ?? ''), 200)}`),
       '  - 生效建议：插件源码改动需用户手动重启 dsh web 生效，无需安装；Agent 不得自行重启或安装（D8）',
     ]
+    /*
+     * [3.0.0][用户要求 11] 部门负责人的汇总报告完成后必须直接交给主 Agent：
+     * 完成通知里原样带上 departmentSummary 的 JSON（不经二次概括、不裁剪），
+     * 主 Agent 收到即可直接汇总最终成果（用户要求 12）。
+     */
+    const departmentSummaryBlock = row?.departmentSummary && typeof row.departmentSummary === 'object'
+      ? ['部门汇总报告（JSON，直接交给主 Agent）：', JSON.stringify(row.departmentSummary)]
+      : []
     const text = truncate([
       `[dsh-workplan] 子任务 ${String(subtask?.id ?? '')} 已完成并结算：${summary}；${acceptanceCount}；用时 ${elapsed}`,
       conclusion,
       ...(acceptanceLines.length > 0 ? ['逐条验收结论：', ...acceptanceLines] : []),
+      ...departmentSummaryBlock,
       ...todoLines,
     ].join('\n'), 4000)
     const ref = `${record?.plan?.planId ?? 'plan'}:${record?.dispatchedAt ?? 0}`
@@ -6491,8 +6954,31 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         pushRecordError(record, `完成汇报留痕写入失败（通知投递结果=${String(delivery?.status ?? 'unknown')}）：${error instanceof Error ? error.message : String(error)}`)
       }
     }
+    /*
+     * [T7] C1/C2/C3：注入正文裁剪为一行关键进度（ID＋完成状态＋验收计数＋
+     * 用时＋D7 结论＋摘要＋needs/缺失产物计数＋下一步）；逐条验收全文与待办
+     * 清单只保留在 channelJournal completion 留痕（按需通道：journal／reports
+     * 产物／dsh_workplan_status），不再默认注入模型上下文。
+     */
+    /*
+     * [T9][F1/F2] C1 必含字段补齐「子任务标题」；C2 禁止注入回报正文——summary
+     * 只保留在 channelJournal completion 留痕与既有全量 text 里，不再拼进模型
+     * 可见通知；回报正文里的 <!-- WORKPLAN_EVIDENCE... --> 证据块因此不会进入
+     * 上下文（此前 summary 截 160 字仍可能把证据 JSON 头部带进模型可见面）。
+     */
+    const titleText = truncate(String(subtask?.title ?? '').replace(/\s+/g, ' ').trim(), 60)
+    const keyText = capKeyProgressText([
+      `【关键进度】${String(subtask?.id ?? '')} 完成`,
+      ...(titleText ? [`标题：${titleText}`] : []),
+      acceptanceCount,
+      `用时 ${elapsed}`,
+      truncate(conclusion, 160),
+      ...(needs.length > 0 ? [`跨部门需求 ${needs.length} 条待处置（dsh_workplan_handoff list）`] : []),
+      ...(missingArtifacts.length > 0 ? [`缺失产物 ${missingArtifacts.length} 项待补`] : []),
+      '下一步：主 Agent 核验证据与验收后整合（按需：dsh_workplan_status／结算文件）',
+    ].join('｜'))
     try {
-      appendUserMessage(session, text)
+      appendUserMessage(session, keyText)
     } catch (error) {
       ctx.logger?.warn?.(
         `dsh-workplan: 完成即时通知写入失败 ${String(subtask?.id ?? '')}：`
@@ -6608,7 +7094,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       else if (!rootAgent) deliveryError = '根会话 agent 解析失败，无法向负责人会话投递完成汇报'
       else {
         try {
-          messageId = String(await service.sendMessage(rootAgent, headChildId, [{ type: 'text', text: body }], {}) ?? '')
+          messageId = String(await service.sendMessage(rootAgent, headChildId, [{ type: 'text', text: body }], { signal: new AbortController().signal }) ?? '') // [T11] 缺陷②：完成汇报携带有效 signal，消除 throwIfAborted
         } catch (error: any) {
           deliveryError = truncate(error instanceof Error ? error.message : String(error), 500)
         }
@@ -6618,7 +7104,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         planId: String(record?.plan?.planId ?? ''),
         subtaskId,
         kind: 'completion',
-        from: { sessionId: String(member?.childId ?? ''), role: member?.role === 'expert' ? 'expert' : 'member', member: String(member?.member ?? '') },
+        from: { sessionId: String(member?.childId ?? ''), role: 'expert', member: String(member?.member ?? '') },
         to: { sessionId: headChildId, role: 'head' },
         body,
         data: { status: 'done' },
@@ -6676,6 +7162,15 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
   }
 
   function finishRound(record: any, session: any) {
+    /*
+     * [2.5.5][T10] 结算前先合并落盘缓冲的台账事件：本轮最后一批非关键更新
+     * 不能因为「后面没有别的消息」而滞留内存（刷新/重启即丢）。
+     */
+    try {
+      flushPendingWorkplanUpdates(session)
+    } catch (error) {
+      ctx.logger?.warn?.(`dsh-workplan: 合并台账落盘失败：${error instanceof Error ? error.message : String(error)}`)
+    }
     const ref = `${record.plan?.planId ?? 'plan'}:${record.dispatchedAt ?? 0}`
     if (!record.resultWritten) {
       /*
@@ -6718,11 +7213,14 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       }
     } else {
       /*
-       * 旧日志 / 上一次写失败的重试：结果消息已在，但仍有 done 行没到
-       * reported。幂等补齐，不重复追加消息。
+       * [2.2.9][T3][M4] 旧日志 / 上一次写失败的重试：结果消息已在，但仍有
+       * 本轮完成、未回报的 done 行（closure==='done'）。幂等补齐，不重复追加
+       * 消息。判据与 deriveReportPending（runtime.ts:245 严格口径
+       * `status==='done' && closure==='done'`）收敛为同一套：旧日志
+       * closure=null 的历史 done 行本来就已回报过，不在此补标。
        */
       const pending = (record.statuses ?? []).some((item: any) =>
-        item?.status === 'done' && item?.closure !== 'reported')
+        item?.status === 'done' && item?.closure === 'done')
       if (pending) {
         markReported(record, session, ref)
         // [2.2.9][T3][M4] 镜像按派生回填：部分标记失败时不谎报「已回报」。
@@ -7053,7 +7551,8 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     planId: string
     subtaskId: string
     // [T8] completion 复用同一留痕入口（T5 冻结契约 §5：叶子→head 完成汇报）。
-    kind: 'escalation' | 'instruction' | 'completion'
+    // [T6] estimate 复用同一留痕入口（T6 冻结契约 §4：叶子→head 开工预估）。
+    kind: 'escalation' | 'instruction' | 'completion' | 'estimate'
     from: any
     to: any
     body: string
@@ -7063,6 +7562,29 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     const message = { v: 1, id: makeDeptMessageId(), ts: Date.now(), ...fields }
     const written = appendDeptMessage(message)
     return { id: message.id, result: written }
+  }
+
+  /*
+   * [T6][契约v1 §3/§5] 叶子开工预估的读侧消毒（与 plan.ts sanitizeDelegateEstimate
+   * 同一判据，G1 双侧接线）：declaredMinutes 正整数分钟（Number.isInteger 且
+   * 1..10080，不做字符串强转）、at 正数、delivery 枚举 sent/failed；reason ≤300、
+   * messageId ≤200 均可选。任一必填非法 ⇒ 整个 estimate 视为未登记（null）。
+   * 重派读档门禁与 self_effort 幂等判据据此判定「预估已登记」。
+   */
+  function sanitizeLeafEstimate(value: any): { declaredMinutes: number; reason?: string; at: number; messageId?: string; delivery: 'sent' | 'failed' } | null {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+    const minutes = value.declaredMinutes
+    if (!Number.isInteger(minutes) || minutes < 1 || minutes > 10080) return null
+    const at = Number(value.at)
+    if (!Number.isFinite(at) || at <= 0) return null
+    if (value.delivery !== 'sent' && value.delivery !== 'failed') return null
+    return {
+      declaredMinutes: minutes,
+      ...(typeof value.reason === 'string' && value.reason.trim() ? { reason: truncate(value.reason.trim(), 300) } : {}),
+      at,
+      ...(typeof value.messageId === 'string' && value.messageId ? { messageId: truncate(value.messageId, 200) } : {}),
+      delivery: value.delivery,
+    }
   }
 
   /**
@@ -7125,7 +7647,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     let messageId = ''
     let deliveryError = ''
     try {
-      messageId = String(await service.sendMessage(agent, headChildId, [{ type: 'text', text: body }], {}) ?? '')
+      messageId = String(await service.sendMessage(agent, headChildId, [{ type: 'text', text: body }], { signal: new AbortController().signal }) ?? '') // [T11] 缺陷②：请示上报携带有效 signal，消除 throwIfAborted
     } catch (error: any) {
       deliveryError = truncate(error instanceof Error ? error.message : String(error), 500)
     }
@@ -7135,7 +7657,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       planId: record.plan.planId,
       subtaskId: row.subtaskId,
       kind: 'escalation',
-      from: { sessionId: String(agent?.session?.id ?? ''), role: member.role === 'expert' ? 'expert' : 'member', member: member.member },
+      from: { sessionId: String(agent?.session?.id ?? ''), role: 'expert', member: member.member },
       to: { sessionId: headChildId, role: 'head' },
       body,
       data: { options, needs },
@@ -7159,6 +7681,11 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         delegates: written?.delegates ?? delegates,
         revision,
         note: `第三层成员 ${member.member} 提交请示（待指示）`,
+        // [T7] C1 白名单：第三层请示=待指示事件，注入一行关键进度（含阻塞原因）。
+        keyProgress: true,
+        stateLabel: '待指示（第三层）',
+        question,
+        title: flattenSubtasks(record.plan).find((entry: any) => entry.subtask?.id === row.subtaskId)?.subtask?.title,
       }))
       // 辅助用户可见通知（不替代 sendMessage 投递）：负责人当下看到谁在等谁。
       const leader = (ctx as any).sessions?.get?.(headChildId)
@@ -7303,6 +7830,9 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         escalatedAt: now,
         escalationSeq: revision,
         revision,
+        // [T7] C1 白名单：第一层请示=待指示事件，注入一行关键进度。
+        keyProgress: true,
+        title: flattenSubtasks(record.plan).find((entry: any) => entry.subtask?.id === row.subtaskId)?.subtask?.title,
       }))
       // [2.2.7] 中断即报：请示同样要让用户当下看到「有人卡在哪、等什么决定」，
       // 结构化 update 消息是给回放/主 Agent 的，这条纯文本是给用户的。
@@ -7674,7 +8204,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         subtaskId,
         kind: 'instruction',
         from: { sessionId: session.id, role: 'head' },
-        to: { sessionId: childId, role: target.role === 'expert' ? 'expert' : 'member', member: target.member },
+        to: { sessionId: childId, role: 'expert', member: target.member },
         body,
         ...(inReplyTo ? { data: { inReplyTo } } : {}),
         delivery: { status: 'failed', code: 'DELIVERY_FAILED', error: errorText, latencyMs: Date.now() - startedAt },
@@ -7697,7 +8227,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       subtaskId,
       kind: 'instruction',
       from: { sessionId: session.id, role: 'head' },
-      to: { sessionId: childId, role: target.role === 'expert' ? 'expert' : 'member', member: target.member },
+      to: { sessionId: childId, role: 'expert', member: target.member },
       body,
       ...(inReplyTo ? { data: { inReplyTo } } : {}),
       delivery: { status: 'sent', ...(messageId ? { messageId } : {}), latencyMs },
@@ -7837,10 +8367,14 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
           status: 'blocked',
           closure: 'blocked',
           blockedKind: 'no-ack',
+          progress: 100,
           error: message,
           summary: `未完成：${message}`,
           finishedAt: Date.now(),
         })
+        // [2.5.6] 与第一层 scheduleInstructionAck 对齐：no-ack 收束必须写入
+        // 错误台账（主行 recordSubtaskError 同款），不留「静默 blocked」。
+        recordSubtaskError(record, subtaskId, message, { timedOut: false })
       } catch {
         // Entry already left instructed.
       }
@@ -8018,19 +8552,29 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     const leaderId = childSession.header?.parentSession
     const leaderSession = leaderId ? (ctx as any).sessions?.get?.(leaderId) : null
     const rootId = leaderSession?.header?.parentSession
-    if (!rootId) {
-      return { ok: false, code: 'SELF_EFFORT_NOT_LEAF', error: 'self_effort 仅限第三层专家/组员叶子会话调用（父会话必须是部门负责人会话）：负责人经 review 配置整体档，根会话用主计划派发。' }
-    }
-    let record = state.records.get(rootId)
-    if (!record?.plan) {
+    let record = rootId ? state.records.get(rootId) : undefined
+    if (!record?.plan && rootId) {
       const rootSession = (ctx as any).sessions?.get?.(rootId)
       if (rootSession) {
         try { record = reconstructFromSession(rootSession) } catch (error) { pushRecordError({ errors: [] } as any, error) }
       }
     }
-    const row = (record?.statuses ?? []).find((item: any) => Array.isArray(item?.delegates) && item.delegates.some((d: any) => d?.childId === childSession.id))
+    let row = (record?.statuses ?? []).find((item: any) => Array.isArray(item?.delegates) && item.delegates.some((d: any) => d?.childId === childSession.id))
+    /*
+     * [T11] 血缘懒加载回退（治本，缺陷①）：重启早期负责人会话可能尚未载入
+     * ctx.sessions，rootId 取不到会在旧逻辑里被误报 SELF_EFFORT_NOT_LEAF。
+     * 此处不直接拒绝，改按 childId 扫描既有台账定位归属计划（与 rootId 路径
+     * reconstructFromSession 回退同范式）。只有真正未被任何部门行登记为叶子的
+     * 会话（根会话/负责人自调用）才命中下方 NOT_LEAF 拒绝——安全边界不变。
+     */
     if (!record?.plan || !row) {
-      return { ok: false, code: 'SELF_EFFORT_NOT_LEAF', error: '找不到与本子会话关联的第三层台账（childId 未登记）：self_effort 仅限部门负责人派出的专家/组员叶子会话调用。' }
+      for (const candidate of state.records.values()) {
+        const candidateRow = (candidate?.statuses ?? []).find((item: any) => Array.isArray(item?.delegates) && item.delegates.some((d: any) => d?.childId === childSession.id))
+        if (candidate?.plan && candidateRow) { record = candidate; row = candidateRow; break }
+      }
+    }
+    if (!record?.plan || !row) {
+      return { ok: false, code: 'SELF_EFFORT_NOT_LEAF', error: '找不到与本子会话关联的第三层台账（childId 未登记）：self_effort 仅限部门负责人派出的全球顶尖专家叶子会话调用。' }
     }
     const member = row.delegates.find((d: any) => d?.childId === childSession.id)
     if (member.status === 'done') return { ok: false, code: 'ALREADY_DONE', error: '该成员已结算，不能再自配等级。' }
@@ -8062,10 +8606,59 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         code: missing ? 'DEEP_THINK_MISSING' : 'DEEP_THINK_INCOMPLETE',
         subtaskId: String(row.subtaskId),
         member: member.member,
-        error: `执行前两轮深度思考产物${missing ? '缺失' : '不合格'}：专家/组员开始执行自己的任务前，必须先全面、全盘、深入梳理、研究、思考自己的任务（第一轮），再基于第一轮完成好的所有结果再全面、全盘、深入地开展梳理、研究和思考，理清具体如何一步步以最高效率、少走弯路、完美完成自己任务的方法、流程和步骤（第二轮），最后才按此执行。请在 self_effort 一并携带 deepThink={ problemAnalysis[], approach[], approachBasis[] }。${leafDeepThinkCheck.error ?? ''}`,
+        error: `执行前两轮深度思考产物${missing ? '缺失' : '不合格'}：全球顶尖专家开始执行自己的任务前，必须先全面、全盘、深入梳理、研究、思考自己的任务（第一轮），再基于第一轮完成好的所有结果再全面、全盘、深入地开展梳理、研究和思考，理清具体如何一步步以最高效率、少走弯路、完美完成自己任务的方法、流程和步骤（第二轮），最后才按此执行。请在 self_effort 一并携带 deepThink={ problemAnalysis[], approach[], approachBasis[] }。${leafDeepThinkCheck.error ?? ''}`,
       }
     }
     const leafDeepThink = leafDeepThinkCheck.deepThink!
+    /*
+     * [T6][D9] 开工前预估硬门禁（T6 冻结契约 §2，校验顺序最后一项：
+     * reasoningEffort→complexityRationale→deepThink→timeNotice）。timeNotice=
+     * { declaredMinutes: 正整数分钟(1..10080), reason?: ≤300 }。缺交=ESTIMATE_MISSING；
+     * 非对象/非整数/越界=ESTIMATE_INVALID；error 必须含 D9 原话＋形状说明。拒绝一律
+     * 不登记、不投递、不接续（A1）。预估登记后经 T5 通道送达部门负责人（§4）才准
+     * 接续 phase-1——「没有告知部门负责人预估时间，先拦截」。
+     */
+    const D9_ESTIMATE = '你必须自己预估时间，汇报给对应负责人后，才可以重试或继续执行'
+    const rawTimeNotice = args?.timeNotice
+    if (rawTimeNotice === undefined) {
+      return {
+        ok: false,
+        code: 'ESTIMATE_MISSING',
+        subtaskId: String(row.subtaskId),
+        member: member.member,
+        error: `开工前预估缺失：${D9_ESTIMATE}。请在 self_effort 一并携带 timeNotice={ declaredMinutes: 正整数分钟（1..10080）, reason?: 可选理由（≤300 字符） }。`,
+      }
+    }
+    if (!rawTimeNotice || typeof rawTimeNotice !== 'object' || Array.isArray(rawTimeNotice)) {
+      return {
+        ok: false,
+        code: 'ESTIMATE_INVALID',
+        subtaskId: String(row.subtaskId),
+        member: member.member,
+        error: `开工前预估形状非法：timeNotice 必须是对象 { declaredMinutes: 正整数分钟（1..10080）, reason? }，现值 ${JSON.stringify(rawTimeNotice) ?? String(rawTimeNotice)}。${D9_ESTIMATE}。`,
+      }
+    }
+    const rawMinutes = (rawTimeNotice as any).declaredMinutes
+    if (!Number.isInteger(rawMinutes) || rawMinutes < 1 || rawMinutes > 10080) {
+      return {
+        ok: false,
+        code: 'ESTIMATE_INVALID',
+        subtaskId: String(row.subtaskId),
+        member: member.member,
+        error: `开工前预估非法：declaredMinutes 必须是正整数分钟（Number.isInteger 且 1..10080），现值 ${JSON.stringify(rawMinutes) ?? String(rawMinutes)}。${D9_ESTIMATE}。`,
+      }
+    }
+    const rawEstimateReason = (rawTimeNotice as any).reason
+    if (rawEstimateReason !== undefined && typeof rawEstimateReason !== 'string') {
+      return {
+        ok: false,
+        code: 'ESTIMATE_INVALID',
+        subtaskId: String(row.subtaskId),
+        member: member.member,
+        error: `开工前预估非法：reason 可选但必须是字符串（trim 后 ≤300 字符），现值类型 ${typeof rawEstimateReason}。${D9_ESTIMATE}。`,
+      }
+    }
+    const estimateReason = typeof rawEstimateReason === 'string' && rawEstimateReason.trim() ? truncate(rawEstimateReason.trim(), 300) : ''
     const modelSelection = resolveModelSelection(ctx, { agent })
     const model = typeof modelSelection?.model === 'string' && modelSelection.model.trim() ? modelSelection.model.trim() : null
     const correction = correctEffortForModel(raw, model)
@@ -8089,21 +8682,93 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
           ...(patch.delegates === undefined ? {} : { delegates: written?.delegates }),
           ...(patch.delegateSelfEfforts === undefined ? {} : { delegateSelfEfforts: written?.delegateSelfEfforts }),
           ...(patch.delegateDeepThinks === undefined ? {} : { delegateDeepThinks: written?.delegateDeepThinks }),
+          // [T6][契约v1 §3] 预估台账随 durable workplan-update 回放（重启不丢）。
+          ...(patch.delegateEstimates === undefined ? {} : { delegateEstimates: written?.delegateEstimates }),
           revision: written?.revision ?? revision,
         }))
       } catch (error) { pushRecordError(record, error) }
       return written
     }
     const currentRow = () => record.statuses.find((item: any) => item?.subtaskId === subtaskId)
+    // [T6][契约v1 §4] 预估读档（幂等判据）：已 sent ⇒ 不重复投递；failed/缺失 ⇒
+    // 本次投递。读侧消毒与 plan.ts sanitizeDelegateEstimate 同口径（正整数分钟才算已登记）。
+    const priorEstimate = sanitizeLeafEstimate((currentRow()?.delegateEstimates as any)?.[member.member])
+      ?? sanitizeLeafEstimate((currentRow()?.delegates ?? []).find((d: any) => d?.childId === childSession.id)?.estimate)
+    const estimateAlreadySent = priorEstimate?.delivery === 'sent'
+    const estimateDraft: { declaredMinutes: number; reason?: string; at: number; messageId?: string; delivery: 'sent' | 'failed' } = estimateAlreadySent
+      ? priorEstimate!
+      : { declaredMinutes: rawMinutes, ...(estimateReason ? { reason: estimateReason } : {}), at: Date.now(), delivery: 'failed' }
     const registerList = (currentRow()?.delegates ?? row.delegates)
       .map((d: any) => (d?.childId === childSession.id
-        ? { ...d, selfEffort, ...(correction.adjusted ? { selfEffortRequested: raw } : {}), complexityRationale: truncate(rationale, 300), deepThink: leafDeepThink, status: 'running', error: null }
+        ? { ...d, selfEffort, ...(correction.adjusted ? { selfEffortRequested: raw } : {}), complexityRationale: truncate(rationale, 300), deepThink: leafDeepThink, estimate: estimateDraft, status: 'running', error: null }
         : d))
     const stash = { ...(currentRow()?.delegateSelfEfforts ?? {}), [member.member]: selfEffort }
     // [2.5.2] 两轮思考产物与自配档同为任务级配置：delegates[].deepThink +
     // delegateDeepThinks 双通道落档，重置保留、durable 回放（G1 双侧接线）。
     const deepThinkStash = { ...(currentRow()?.delegateDeepThinks ?? {}), [member.member]: leafDeepThink }
-    persistSelf({ delegates: registerList, delegateSelfEfforts: stash, delegateDeepThinks: deepThinkStash })
+    // [T6][契约v1 §3] 预估双通道：delegates[].estimate + delegateEstimates（任务级
+    // 配置，重置保留、durable 回放），与 selfEffort/deepThink 同范式。
+    const estimateStash = { ...(currentRow()?.delegateEstimates ?? {}), [member.member]: estimateDraft }
+    persistSelf({ delegates: registerList, delegateSelfEfforts: stash, delegateDeepThinks: deepThinkStash, delegateEstimates: estimateStash })
+    /*
+     * [T6][D9][契约v1 §4] 预估送达部门负责人：登记之后、interrupt/接续之前。
+     * 路由 row.childId（部门行负责人会话），缺失回退 leaderId；两者皆缺 ⇒
+     * ESTIMATE_DELIVERY_FAILED（显式，不静默）。投递失败 ⇒ delivery:'failed' 已落档
+     * ＋显式报错，不接续 phase-1；重试只重投 failed（sent 幂等跳过，不重复投递）。
+     * 留痕 kind='estimate' 走 channelJournal 统一入口；journal 写失败不掩盖投递结果
+     * （ok:true 附 journal:{ok:false,...}，同 escalateDelegateLeaf journalInfo 口径）。
+     */
+    let estimateFinal = estimateDraft
+    let estimateJournalInfo: any = {}
+    if (!estimateAlreadySent) {
+      const headChildId = typeof row.childId === 'string' && row.childId ? row.childId : (typeof leaderId === 'string' ? leaderId : '')
+      const estimateBody = `【第三层开工预估｜${member.member} → 部门负责人】子任务 ${subtaskId} 成员 ${member.member} 开工前预估：执行本人任务约需 ${rawMinutes} 分钟（整数分钟）。理由：${estimateReason || '无'}。该预估已登记，平台即将以自配档接续其正式执行。`
+      const estimateStartedAt = Date.now()
+      let estimateMessageId = ''
+      let estimateDeliveryError = ''
+      if (!headChildId) {
+        estimateDeliveryError = '部门行未登记负责人会话（childId 缺失）且父会话 leaderId 缺失，无法投递预估'
+      } else {
+        const estimateService: any = (ctx as any).subagents
+        if (!estimateService || typeof estimateService.sendMessage !== 'function') {
+          estimateDeliveryError = '当前部署没有可用的 subagent 服务，无法投递预估'
+        } else {
+          try {
+            estimateMessageId = String(await estimateService.sendMessage(agent, headChildId, [{ type: 'text', text: estimateBody }], { signal: new AbortController().signal }) ?? '') // [T11] 缺陷②：预估投递携带有效 signal，消除 throwIfAborted
+          } catch (error: any) {
+            estimateDeliveryError = truncate(error instanceof Error ? error.message : String(error), 500)
+          }
+        }
+      }
+      const estimateLatencyMs = Date.now() - estimateStartedAt
+      const estimateDelivery: 'sent' | 'failed' = estimateDeliveryError ? 'failed' : 'sent'
+      estimateFinal = { ...estimateDraft, delivery: estimateDelivery, ...(estimateMessageId ? { messageId: estimateMessageId } : {}) }
+      const estimateList = (currentRow()?.delegates ?? [])
+        .map((d: any) => (d?.childId === childSession.id ? { ...d, estimate: estimateFinal } : d))
+      const estimateMap = { ...(currentRow()?.delegateEstimates ?? {}), [member.member]: estimateFinal }
+      persistSelf({ delegates: estimateList, delegateEstimates: estimateMap })
+      const estimateJournal = channelJournal({
+        planId: record.plan.planId,
+        subtaskId,
+        kind: 'estimate',
+        from: { sessionId: String(childSession.id), role: 'expert', member: member.member },
+        to: { sessionId: headChildId, role: 'head' },
+        body: estimateBody,
+        data: { declaredMinutes: rawMinutes, ...(estimateReason ? { reason: estimateReason } : {}) },
+        delivery: { status: estimateDelivery, ...(estimateMessageId ? { messageId: estimateMessageId } : {}), latencyMs: estimateLatencyMs, ...(estimateDeliveryError ? { code: 'DELIVERY_FAILED', error: estimateDeliveryError } : {}) },
+      })
+      estimateJournalInfo = estimateJournal.result.ok ? {} : { journal: { ok: false, code: estimateJournal.result.code, error: estimateJournal.result.error } }
+      if (estimateDeliveryError) {
+        return {
+          ok: false,
+          code: 'ESTIMATE_DELIVERY_FAILED',
+          subtaskId,
+          member: member.member,
+          error: `预估投递失败（预估已以 delivery:'failed' 落档，未接续执行）：${estimateDeliveryError}。请重试 self_effort（携带完整原子对：reasoningEffort＋complexityRationale＋deepThink＋timeNotice），重试将重新投递。`,
+          ...estimateJournalInfo,
+        }
+      }
+    }
     /*
      * [2.5.2][T4b][D1] 负责人 agent 解析必须先于 interrupt，且用宿主同款安全
      * 访问器。根因（reports/D1-D2-root-cause-diagnosis.md §1）：旧实现在
@@ -8140,14 +8805,23 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       }
     } catch { /* 中断失败不阻断接续 */ }
     const departmentLabel = DEPARTMENTS[row.department as keyof typeof DEPARTMENTS]?.zh ?? String(row.department ?? '部门')
-    const fullTask = (Array.isArray(row.consolidation?.assignments) ? row.consolidation.assignments : [])
-      .find((a: any) => a?.member === member.member)?.task ?? member.task
+    const assignment = (Array.isArray(row.consolidation?.assignments) ? row.consolidation.assignments : [])
+      .find((a: any) => a?.member === member.member)
+    const fullTask = assignment?.task ?? member.task
+    /*
+     * [3.0.0][用户要求 6] 质量要求随 phase-1 任务书一起交给专家：优先取 review
+     * 登记的分工表原文（含质量要求），缺省时取成员记录，再缺省为空数组
+     * （由提示词侧 renderQualityRequirementsBlock 如实显示「未交代」）。
+     */
+    const qualityRequirements = Array.isArray(assignment?.qualityRequirements) && assignment.qualityRequirements.length > 0
+      ? assignment.qualityRequirements
+      : (Array.isArray((member as any)?.qualityRequirements) ? (member as any).qualityRequirements : [])
     const rulesBrief = buildLlmRulesBrief({ model, effort: selfEffort, requested: correction.adjusted ? raw : null, correctionReason: correction.reason ?? null, tier: 'delegate', memberName: member.member, memberRole: member.role })
     const promptText = buildDelegateePrompt({
       departmentLabel,
       leaderSubtaskId: subtaskId,
       leaderSubtaskTitle: String(row.title ?? ''),
-      member: { member: member.member, role: member.role, task: fullTask, effort: selfEffort },
+      member: { member: member.member, role: 'expert', task: fullTask, qualityRequirements, effort: selfEffort },
       rulesBrief,
       cwd: typeof childSession.header?.cwd === 'string' ? childSession.header.cwd : '',
       leadSessionId: leaderId,
@@ -8197,6 +8871,10 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       activation.result.then(async (outcome: any) => {
         try {
           const completed = outcome?.stopReason === 'completed'
+          // [3.0.0] F10：专家汇报入口强制核验（adjudicateExpertReport），
+          // 未过即退回（failed + F10 拒因），绝不记 done。
+          const f10 = completed ? adjudicateExpertReport(outcome) : { ok: true as const }
+          const settledDone = completed && f10.ok
           const current = (record.statuses ?? []).find((item: any) => item?.subtaskId === subtaskId)
           const list = (Array.isArray(current?.delegates) ? current.delegates : [])
             .map((item: any) => (item?.childId === newChildId
@@ -8204,7 +8882,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
               // 子对象存在即请示未答复，不得覆盖成 done/failed（契约v1 权威形状）。
               ? (item?.escalation
                 ? item
-                : { ...item, status: completed ? 'done' : 'failed', closure: null, summary: truncate(resultText(outcome), 300), error: completed ? null : truncate(String(outcome?.diagnostic ?? `子会话结束状态 ${outcome?.stopReason}`), 300), finishedAt: Date.now() })
+                : { ...item, status: settledDone ? 'done' : 'failed', closure: null, summary: truncate(resultText(outcome), 300), error: settledDone ? null : truncate(f10.ok ? String(outcome?.diagnostic ?? `子会话结束状态 ${outcome?.stopReason}`) : f10.rejection, 300), finishedAt: Date.now() })
               : item))
           const revision = Number(current?.revision ?? 0) + 1
           record.statuses = applyStatus(record.statuses, subtaskId, { delegates: list, revision, updatedBy: 'child' })
@@ -8226,6 +8904,10 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       ...(correction.adjusted ? { clamped: { requested: raw, corrected: selfEffort, reason: correction.reason } } : {}),
       childId: newChildId,
       delegates: written?.delegates ?? continuedList,
+      // [T6][契约v1 §2/§4] 成功回执附预估（declaredMinutes/reason?/delivery）；
+      // 留痕写失败不掩盖投递结果（journal:{ok:false,...}，同 escalateDelegateLeaf 口径）。
+      estimate: { declaredMinutes: estimateFinal.declaredMinutes, ...(estimateFinal.reason ? { reason: estimateFinal.reason } : {}), delivery: estimateFinal.delivery },
+      ...estimateJournalInfo,
       hint: `自配档 \`${selfEffort}\` 已登记并以该档接续 phase-1（继续勿重做）。请执行正式任务，完成后把结论回报部门负责人会话。`,
     }
   }
@@ -8241,7 +8923,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       return {
         ok: false,
         code: 'NOT_LEADER_SESSION',
-        error: '只有「部门负责人子会话」可以使用 dsh_workplan_delegate：根会话请用 dsh_workplan_dispatch 派发主计划；第三层专家/组员是叶子层，不得再派发（用户要求 4：只有一层下级）。',
+        error: '只有「部门负责人子会话」可以使用 dsh_workplan_delegate：根会话请用 dsh_workplan_dispatch 派发主计划；第三层全球顶尖专家是叶子层，不得再派发（用户要求 4：只有一层下级）。',
       }
     }
     let record = state.records.get(parentId)
@@ -8259,7 +8941,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       return {
         ok: false,
         code: 'NO_PLAN',
-        error: '父会话没有可关联的计划。若你是第三层专家/组员（叶子层）：不得再派发，完成自身任务后把结论回报部门负责人即可。',
+        error: '父会话没有可关联的计划。若你是第三层全球顶尖专家（叶子层）：不得再派发，完成自身任务后把结论回报部门负责人即可。',
       }
     }
     const row = (record.statuses ?? []).find((item: any) => item?.childId === childSession.id)
@@ -8273,11 +8955,19 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     if (row.status === 'done') {
       return { ok: false, code: 'ALREADY_DONE', subtaskId: row.subtaskId, error: '该子任务已完成，不能再派发第三层。' }
     }
-    const action = ['review', 'dispatch', 'status'].includes(args?.action) ? String(args.action) : ''
+    const action = ['review', 'dispatch', 'direct', 'status'].includes(args?.action) ? String(args.action) : ''
     if (!action) {
-      return { ok: false, code: 'INVALID_ACTION', error: 'action 必须是 review（提交全面梳理产物）/ dispatch（派发给顶尖专家与组员）/ status（查看梳理与下级进度）' }
+      return { ok: false, code: 'INVALID_ACTION', error: 'action 必须是 review（提交全面梳理产物）/ dispatch（派发给本部门全球顶尖专家）/ direct（low 任务负责人亲自执行登记）/ status（查看梳理与下级进度）' }
     }
     const subtaskId = String(row.subtaskId)
+    // [2.5.5][T3] D1 兜底：任务行记录等级。计划形状＝stages[].subtasks[]（不存在
+    // record.plan.subtasks 平铺数组），复用 findSubtaskById（本文件 :1547）。
+    // 五档消毒：非法/缺失一律 undefined（视同未配置），不把脏值传进判定链。
+    const plannedRow = findSubtaskById(record.plan, subtaskId)
+    const taskRowEffort = typeof plannedRow?.reasoningEffort === 'string'
+      && REASONING_EFFORTS.includes(plannedRow.reasoningEffort)
+      ? plannedRow.reasoningEffort
+      : undefined
     const modelSelection = resolveModelSelection(ctx, { agent })
     const model = typeof modelSelection?.model === 'string' && modelSelection.model.trim() ? modelSelection.model.trim() : null
     const parentSession = (ctx as any).sessions?.get?.(parentId)
@@ -8311,7 +9001,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
      * 放行记录并入各自动作既有的 persist 补丁（review 登记/dispatch 台账），
      * 避免同一动作二次 persist 造成 revision 竞争。
      */
-    const recordGate = (gateAction: 'review' | 'dispatch', ok: boolean, code?: string | null) => {
+    const recordGate = (gateAction: 'review' | 'dispatch' | 'direct', ok: boolean, code?: string | null) => {
       const prior = Array.isArray(row.gateAudit) ? row.gateAudit : []
       const entry = { at: Date.now(), action: gateAction, ok, code: ok ? null : String(code ?? 'UNKNOWN') }
       return persist({ gateAudit: [...prior, entry].slice(-20) })
@@ -8329,11 +9019,111 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         // [2.5.4][T3R1] 门禁审计对负责人可见（A3：拒绝/放行记录可复核）。
         gateAudit: Array.isArray(row.gateAudit) ? row.gateAudit : [],
         delegates,
-        hint: !row.consolidation
-          ? '尚未提交梳理产物：先调用 action="review"（用户要求 4 的硬门禁）。'
-          : delegates.length === 0
-            ? '梳理产物已登记，可调用 action="dispatch" 正式派发给顶尖专家与组员。'
-            : '第三层已派发；各下级结论会送回本会话，收齐后汇总核验，再写最终结果块。若有成员 closure=escalated（待指示），必须当轮用 dsh_workplan_instruct（subtaskId=本部门行 ID，多个成员同时请示时加 member）答复，不要沉默略过。',
+        // [T7][lead-decisions J2] 负责人时长聚合：与看板/模型面同一读时派生纯函数
+        // （J1 冻结结构；null＝无下属分工/replanned 旧行/越界 fail-closed，J8/R8）。
+        leaderEstimate: deriveLeaderEstimate(row),
+        // [2.5.5][T3] low 直执分支（派生判据，不新增持久化标记）：effortOverride='low'
+        // 且分工表为空/缺失 ⇒ low 直执；复杂任务被钳制到 low 的行（assignments 非空）
+        // 不命中，避免误导（规格 §5.6）。
+        hint: row.effortOverride === 'low' && (!Array.isArray((row.consolidation as any)?.assignments) || (row.consolidation as any).assignments.length === 0)
+          ? 'low 任务（含视同 low）：禁止第三层下派，负责人亲自执行；两轮思考产物经 action="direct" 登记（已登记则直接执行）。'
+          : !row.consolidation
+            ? '尚未提交梳理产物：先调用 action="review"（用户要求 4 的硬门禁）。'
+            : delegates.length === 0
+              ? '梳理产物已登记，可调用 action="dispatch" 正式派发给本部门全球顶尖专家。'
+              : '第三层已派发；各下级结论会送回本会话，收齐后汇总核验，再写最终结果块。若有成员 closure=escalated（待指示），必须当轮用 dsh_workplan_instruct（subtaskId=本部门行 ID，多个成员同时请示时加 member）答复，不要沉默略过。',
+      }
+    }
+
+    /*
+     * [2.5.5][T3] 用户裁决 D2/D4：low 任务负责人亲自执行登记（direct）。
+     * low（含视同 low）任务禁止第三层下派——planDelegations 禁派闸对 review/dispatch
+     * 一律硬拒（DELEGATE_LOW_TASK_FORBIDDEN）；负责人亲自执行，两轮深度思考产物经
+     * 本动作登记（复用 validateMainDeepThink，与主 Agent/叶子/review 同一 40/40/20
+     * 判据）。登记 effortOverride='low' ⇒ phase-0 结算闸（runSubtaskAttempt 内
+     * SELF_EFFORT_MISSING 分支）只查 effortOverride 非空，逻辑零改动即可接续。
+     * 防旁路（规格 §5.8）：不收 consolidation/分工表；只接受 reasoningEffort='low'
+     * （缺省默认 low）；已有复杂分工表的行不得降级；下级 running 中不得改走；
+     * 叶子调用在上方调用者边界命中 NOT_LEADER_SESSION/NO_PLAN。无任何例外通道（D5）。
+     */
+    if (action === 'direct') {
+      if (Array.isArray(row.delegates) && row.delegates.some((item: any) => item?.status === 'running')) {
+        recordGate('direct', false, 'DELEGATE_ALREADY_RUNNING')
+        return {
+          ok: false,
+          code: 'DELEGATE_ALREADY_RUNNING',
+          subtaskId,
+          error: '第三层仍在派发中（有下级 running）：不能改走 low 直执。先等当前下级结算（action="status" 查看进度）。',
+        }
+      }
+      const priorAssignments = Array.isArray((row.consolidation as any)?.assignments) ? (row.consolidation as any).assignments : []
+      if (priorAssignments.length > 0) {
+        recordGate('direct', false, 'DELEGATE_DIRECT_CONFLICT')
+        return {
+          ok: false,
+          code: 'DELEGATE_DIRECT_CONFLICT',
+          subtaskId,
+          error: '本行已登记非空分工表（复杂流程已启动）：不得降级改走 low 直执。复杂任务请继续 review/dispatch；low 禁派闸只拦 low/视同 low 任务。',
+        }
+      }
+      if (args?.consolidation !== undefined && args?.consolidation !== null) {
+        recordGate('direct', false, 'DELEGATE_DIRECT_ASSIGNMENTS_FORBIDDEN')
+        return {
+          ok: false,
+          code: 'DELEGATE_DIRECT_ASSIGNMENTS_FORBIDDEN',
+          subtaskId,
+          error: 'direct 不接受 consolidation/分工表（low 任务禁止下派，用户裁决 D2）：只提交 deepThink={problemAnalysis[],approach[],approachBasis[]}（40/40/20 字判据）与可选 reasoningEffort="low"。',
+        }
+      }
+      const think = validateMainDeepThink(args?.deepThink)
+      if (!think.ok || !think.deepThink) {
+        const code = think.code === 'MAIN_DEEP_THINK_MISSING' ? 'DELEGATE_DIRECT_THINK_MISSING' : 'DELEGATE_DIRECT_THINK_INCOMPLETE'
+        recordGate('direct', false, code)
+        return {
+          ok: false,
+          code,
+          subtaskId,
+          error: `${think.error ?? '两轮深度思考产物缺失或不合格。'}（direct 登记与主 Agent/叶子同一判据：problemAnalysis 合计 ≥40 字、approach 合计 ≥40 字、approachBasis 合计 ≥20 字。）`,
+        }
+      }
+      const directEffortRaw = args?.reasoningEffort
+      if (directEffortRaw !== undefined && directEffortRaw !== null && directEffortRaw !== 'low') {
+        recordGate('direct', false, 'DELEGATE_DIRECT_EFFORT_INVALID')
+        return {
+          ok: false,
+          code: 'DELEGATE_DIRECT_EFFORT_INVALID',
+          subtaskId,
+          error: `direct 只接受 reasoningEffort="low"（缺失默认 low）；"${String(directEffortRaw)}" 不被接受。复杂任务（medium/high/xhigh/max）请走 review+dispatch（≥8 人闸），direct 不是复杂任务通道。`,
+        }
+      }
+      const hadEffortOverride = typeof row.effortOverride === 'string' && row.effortOverride.length > 0
+      const written = persist({
+        consolidation: {
+          problemAnalysis: think.deepThink.problemAnalysis,
+          approach: think.deepThink.approach,
+          approachBasis: think.deepThink.approachBasis,
+          assignments: [], // 空分工表＝直执标记（派生判据，规格 §5.6）
+          taskReasoningEffort: 'low',
+          submittedAt: Date.now(),
+        },
+        effortOverride: 'low',
+        gateAudit: [...(Array.isArray(row.gateAudit) ? row.gateAudit : []), { at: Date.now(), action: 'direct', ok: true, code: null }].slice(-20),
+      })
+      // 中断镜像 review 的 stall-fix 口径：仅「本次登记前尚无 effortOverride」
+      // （真正的 phase-0→登记转变）才中断；phase-1 重新 direct 只更新产物。
+      try {
+        if (!hadEffortOverride && typeof (ctx as any).subagents?.interruptByParent === 'function') {
+          (ctx as any).subagents.interruptByParent(childSession.id, parentId, 'continuable')
+        }
+      } catch { /* 中断失败不影响登记；接续由 runSubtaskAttempt 保证 */ }
+      return {
+        ok: true,
+        planId: record.plan.planId,
+        subtaskId,
+        action: 'direct',
+        effortOverride: 'low',
+        consolidation: written?.consolidation ?? null,
+        hint: 'low 直执已登记（durable，刷新后门禁依然生效）：平台将以 low 档接续本会话进入 phase-1。负责人亲自执行本任务，禁止再调用 review/dispatch（low 禁派闸会硬拒）；完成后按三阶段契约提交证据与结论。',
       }
     }
 
@@ -8344,12 +9134,15 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
           ok: false,
           code: 'MISSING_CONSOLIDATION',
           subtaskId,
-          error: 'review 必须携带 consolidation：{ problemAnalysis[], constraints[]?, unknowns[]?, approach[], approachBasis[], assignments[{member, role:"expert"|"member", task, reasoningEffort}] }——两轮深度思考产物（第一轮全面、全盘、深入梳理研究思考自己的任务=problemAnalysis；第二轮基于第一轮全部结果理清方法、流程、步骤=approach，依据对应=approachBasis）+ 分工表（至少 1 名顶尖专家 + 1 名组员）。',
+          error: 'review 必须携带 consolidation：{ problemAnalysis[], constraints[]?, unknowns[]?, approach[], approachBasis[], assignments[{member, role:"expert", task, qualityRequirements[], reasoningEffort}] }——两轮深度思考产物（第一轮全面、全盘、深入梳理研究思考自己的任务=problemAnalysis；第二轮基于第一轮全部结果理清方法、流程、步骤=approach，依据对应=approachBasis）+ 分工表（至少 1 名、最多 12 名本部门全球顶尖专家；组员角色已取消；每项任务必须极简并附质量要求）。',
         }
       }
       // [2.5.0][R2×R4] 重新 review 未再配整体等级时，继承行上已持久化的
       // effortOverride（重置不清除的任务级配置），全程贯穿不丢。
-      const preview = planDelegations({ consolidation: input, model, taskEffortFallback: row.effortOverride })
+      // [2.5.5][T3] 防注入：钳制前声明记忆只由平台写入，review 新输入不得携带
+      // （否则 {taskReasoningEffort:'low', taskReasoningEffortDeclared:'max'} 可绕过禁派闸）。
+      const { taskReasoningEffortDeclared: _stripped, ...reviewInput } = input
+      const preview = planDelegations({ consolidation: reviewInput, model, taskEffortFallback: row.effortOverride, taskRowEffort })
       if (!preview.ok) {
         // [2.5.4][T3R1] 门禁拒绝留痕（A3）：薄产物/缺产物都记入 gateAudit。
         recordGate('review', false, preview.code ?? 'DELEGATE_CONSOLIDATION_INVALID')
@@ -8374,6 +9167,9 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
           assignments: input.assignments,
           // [2.5.0] 整体任务等级随梳理产物留档，dispatch 读回时同口径消费。
           ...(preview.taskEffort ? { taskReasoningEffort: preview.taskEffort } : {}),
+          // [2.5.5][T3] 钳制前声明记忆随梳理产物留档：dispatch 读回时防
+          // 「非 qwen medium 钳制后 low」误杀复杂声明（规格 §3.4）。
+          ...(preview.taskEffortDeclared ? { taskReasoningEffortDeclared: preview.taskEffortDeclared } : {}),
           submittedAt: Date.now(),
         },
         // [2.5.0] 用户要求 2：负责人配置的整体等级写入状态行，本任务每次
@@ -8420,7 +9216,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     const consolidation = isRecord(row.consolidation) ? row.consolidation : null
     // [2.5.0][R2×R4] dispatch 读回梳理产物时，整体等级缺失同样回落行上
     // effortOverride（durable 回放/重置后依然全程贯穿）。
-    const delegationPlan = planDelegations({ consolidation, model, taskEffortFallback: row.effortOverride })
+    const delegationPlan = planDelegations({ consolidation, model, taskEffortFallback: row.effortOverride, taskRowEffort })
     if (!delegationPlan.ok) {
       // [2.5.4][T3R1] 分派门禁拒绝留痕（A3）：未梳理/薄产物一律记录拒因。
       recordGate('dispatch', false, delegationPlan.code ?? 'DELEGATE_CONSOLIDATION_MISSING')
@@ -8484,9 +9280,19 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
        */
       const stashedThink = sanitizeMainDeepThink((row.delegateDeepThinks as any)?.[assignment.member])
         ?? sanitizeMainDeepThink(prior?.deepThink)
-      const leafPhaseZero = !priorSelf || !stashedThink
-      const selfContinuation = priorSelf && stashedThink
-        ? `【自配档接续·两轮思考读档】你的自配推理等级 \`${priorSelf}\` 与执行前两轮深度思考产物均已登记生效（成员自配为权威）。继续勿重做：直接执行正式任务，不要重新评估复杂度、不要重复提交思考产物。正式执行必须严格按你第二轮理清的方法、流程、步骤进行（你的第一轮产物：${stashedThink.problemAnalysis.join('；').slice(0, 200)}…；你的第二轮产物：${stashedThink.approach.join('；').slice(0, 300)}…），全程少走弯路：先查历史教训、先验证再动手、不重复试错。`
+      /*
+       * [T6][D9][契约v1 §5] 预估读档门禁：已登记且已送达（delivery='sent'）的预估
+       * 才算门禁通过。未预估、或预估投递失败（failed）⇒ 回 phase-0 补交完整原子对
+       * （self_effort 重试只重投 failed，sent 幂等不重投）。D9 唯一权威：「汇报给对应
+       * 负责人后，才可以重试或继续执行」——failed 若放行 phase-1 将永远无人补投，
+       * 故门禁以 sent 为准（正整数 declaredMinutes 才算已登记，消毒同 plan.ts 口径）。
+       */
+      const stashedEstimate = sanitizeLeafEstimate((row.delegateEstimates as any)?.[assignment.member])
+        ?? sanitizeLeafEstimate(prior?.estimate)
+      const registeredEstimate = stashedEstimate?.delivery === 'sent' ? stashedEstimate : null
+      const leafPhaseZero = !priorSelf || !stashedThink || !registeredEstimate
+      const selfContinuation = priorSelf && stashedThink && registeredEstimate
+        ? `【自配档接续·两轮思考读档】你的自配推理等级 \`${priorSelf}\` 与执行前两轮深度思考产物均已登记生效（成员自配为权威）。继续勿重做：直接执行正式任务，不要重新评估复杂度、不要重复提交思考产物。正式执行必须严格按你第二轮理清的方法、流程、步骤进行（你的第一轮产物：${stashedThink.problemAnalysis.join('；').slice(0, 200)}…；你的第二轮产物：${stashedThink.approach.join('；').slice(0, 300)}…），全程少走弯路：先查历史教训、先验证再动手、不重复试错。你的开工预估已登记并送达部门负责人（约 ${registeredEstimate.declaredMinutes} 分钟，整数分钟），无需重复上报。`
         : (priorSelf
           ? `【自配档接续】你的自配推理等级 \`${priorSelf}\` 已登记生效（成员自配为权威）。继续勿重做：直接执行正式任务，不要重新评估复杂度。`
           : '')
@@ -8535,6 +9341,10 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
           activation.result.then(async (outcome: any) => {
             try {
               const completed = outcome?.stopReason === 'completed'
+              // [3.0.0] F10：专家汇报入口强制核验（adjudicateExpertReport），
+              // 未过即退回（failed + F10 拒因），绝不记 done。
+              const f10 = completed ? adjudicateExpertReport(outcome) : { ok: true as const }
+              const settledDone = completed && f10.ok
               const current = (record.statuses ?? []).find((item: any) => item?.subtaskId === subtaskId)
               const list = (Array.isArray(current?.delegates) ? current.delegates : [])
                 .map((item: any) => (item?.childId === settledChildId
@@ -8548,10 +9358,10 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
                     ? item
                     : {
                         ...item,
-                        status: completed ? 'done' : 'failed',
+                        status: settledDone ? 'done' : 'failed',
                         closure: null,
                         summary: truncate(resultText(outcome), 300),
-                        error: completed ? null : truncate(String(outcome?.diagnostic ?? `子会话结束状态 ${outcome?.stopReason}`), 300),
+                        error: settledDone ? null : truncate(f10.ok ? String(outcome?.diagnostic ?? `子会话结束状态 ${outcome?.stopReason}`) : f10.rejection, 300),
                         finishedAt: Date.now(),
                       })
                   : item))
@@ -8608,7 +9418,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       taskEffort: delegationPlan.taskEffort,
       effortOverride: written?.effortOverride ?? row.effortOverride ?? null,
       ...(rejected.length ? { rejected: rejected.map((item) => ({ member: item.member, error: item.error })) } : {}),
-      hint: '第三层已派发（一层下级、叶子层，第四层会被硬拒）。每位专家/组员的完成结论会送回本会话（delivery=caller）；收齐后由你汇总核验，再写最终结果块。用 action="status" 查看进度。成员遇阻会经 dsh_workplan_escalate 在你这里落「待指示」（delegates[].closure=escalated）：必须当轮用 dsh_workplan_instruct（subtaskId=本部门行 ID，多个成员同时请示时加 member）答复，投递成功后该成员恢复执行。',
+      hint: '第三层已派发（一层下级、叶子层，第四层会被硬拒）。每位全球顶尖专家的完成结论会送回本会话（delivery=caller）；收齐后由你汇总核验，再写最终结果块。用 action="status" 查看进度。成员遇阻会经 dsh_workplan_escalate 在你这里落「待指示」（delegates[].closure=escalated）：必须当轮用 dsh_workplan_instruct（subtaskId=本部门行 ID，多个成员同时请示时加 member）答复，投递成功后该成员恢复执行。',
     }
   }
 
@@ -9947,7 +10757,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     statusTool,
     followupTool,
     escalateTool,
-    // [2.3.9][T4b] 第三层派发（部门负责人专用）：review 梳理门禁 → dispatch 专家/组员。
+    // [2.3.9][T4b] 第三层派发（部门负责人专用）：review 梳理门禁 → dispatch 全球顶尖专家。
     delegateTool,
     verifyTool: verifySubtask,
     lessonsTool,
@@ -10004,7 +10814,17 @@ function resolveModelSelection(ctx: any, payload: any) {
 
 async function maybePlan(ctx: any, state: any, payload: any, downstream: any, options: any) {
   const session = payload.agent?.session
-  if (!session || !isRootSession(session)) return downstream
+  if (!session) return downstream
+  /*
+   * [2.5.5][T10] 每个 pre-step 先把该会话缓冲的台账合并落盘：合并闸把有界延迟
+   * 从「整轮」缩短到一个 step，进程崩溃最多丢当前 step 未落盘的台账。
+   */
+  try {
+    flushPendingWorkplanUpdates(session)
+  } catch {
+    /* 合并失败不拦规划：下一次落盘/结算再试。 */
+  }
+  if (!isRootSession(session)) return downstream
   if (payload.step !== 1) return downstream
   // [2.5.5][T3] pre-step 窗口标记：规划/自动派发的头前通知一律暂存（治本）。
   enterPreHeadWindow(session)
@@ -10027,7 +10847,8 @@ async function maybePlan(ctx: any, state: any, payload: any, downstream: any, op
    *
    * `agent/turn-stopping` must only object on turns whose plan belongs to the
    * user's actual request. A plan left paused in an earlier turn must not turn
-   * every later "谢谢/进度如何" turn into a forced 20-minute dispatch, so the
+   * every later "谢谢/进度如何" turn into a forced dispatch（现行轮次预算默认
+   * 关闭，TOTAL_TIMEOUT_MS=0；此处只拦「带真实任务文本的轮次」），so the
    * stop gate reads this marker and stays silent on social or status turns.
    */
   if (!state.activeTurns) state.activeTurns = new Map()
@@ -10211,6 +11032,14 @@ async function maybePlan(ctx: any, state: any, payload: any, downstream: any, op
    * appendUserMessage 发一条【规划预告】。预估与 runPlanner 同源：同一个
    * normalisePlannerWindow 解析出的实际窗口（含配置/环境变量覆盖）。
    */
+  /*
+   * [3.0.0][用户要求 2] 从接收到用户任何任务开始，会话内必须输出固定文案
+   * 「任务正在分配中，请稍等一下......」。逐字冻结文案来自 v3-contract，
+   * 与用户原文逐字一致（6 个半角点），不得拼接、不得改写。
+   * 位置：任何规划动作之前（含规划预告之前），保证用户先看到「正在分配」。
+   * deferUntilHead：受保护系统头未落地前暂存，落地后按序补发（2.5.5 治本）。
+   */
+  appendUserMessage(session, STATUS_ASSIGNING_TEXT, undefined, { deferUntilHead: true })
   appendUserMessage(session, buildPlanningPreAnnouncement(
     normalisePlannerWindow(options?.limits?.plannerTimeoutMs ?? options?.plannerTimeoutMs, PLANNER_TIMEOUT_MS),
     PLANNER_MAX_ATTEMPTS,
@@ -10222,6 +11051,44 @@ async function maybePlan(ctx: any, state: any, payload: any, downstream: any, op
    * 文案组装与频率硬规则全部在 createPlannerProgressReporter / plannerProgressLines
    * （plan.ts，可独立回归）；这里只注入宿主交互面。
    */
+  /*
+   * [3.0.0][用户要求 1 / 2 治本 —— 依据 T4 根因报告（reports/T4b-会话内容丢失根因报告-20261114.md）]
+   *
+   * 缺陷实证（T4，3497 个会话 / 4034 轮对照）：宿主在 pre-step 之前就认领
+   * 用户消息，人类 user/message 只在首个 model step 内部落盘；而本插件在
+   * pre-step 里 `await runPlanner`，把这一步推迟到分钟级（含规划轮的轮次
+   * p50=58.4s、p90=250s，不含的 p50=0.04s）。这段时间里会话日志没有任何
+   * 可渲染的任务正文，屏幕上唯一副本是客户端回声，而客户端在收到回执后
+   * 无条件退休该回声——于是「切走会话再切回」就看不到用户刚输入的任务。
+   *
+   * 治本：pre-step 不再等待规划。先同步放行本步（模型立即看到「正在分配」
+   * 的注入说明，不会自己去执行用户任务），规划转后台继续：计划一成即经唯一
+   * 合规写入器 appendUserMessage 写入会话并按既有路径自动派发。这样首 step
+   * 在秒级启动 → 宿主立即落盘人类消息、暂存的通知按序补发，任务正文与固定
+   * 文案都在切会话前后稳定可见。
+   *
+   * 中止语义不变：仍沿用本步的 payload.signal（宿主只在 cancel/中断时 abort
+   * 该信号，正常收尾不 abort），用户中断时后台规划与以前一样静默退出。
+   * 幂等：同一会话已有规划在跑时直接放行本步，不会重复规划。
+   */
+  const deliver = (messages: any[]) => {
+    for (const message of messages) {
+      try {
+        /*
+         * 后台路径没有 pre-step 的返回值可用，只能写进会话（append-only）。
+         * deferUntilHead 由 appendUserMessage 自身按「受保护系统头是否已落地」
+         * 判定，与本步的窗口标记无关，因此不会写出头前 surface。
+         */
+        appendUserMessage(session, message)
+      } catch (error) {
+        pushRecordError(planningRecord, error)
+      }
+    }
+  }
+  if (!state.planningInFlight) state.planningInFlight = new Map()
+  if (state.planningInFlight.has(session.id)) return downstream
+  state.planningInFlight.set(session.id, planningStartedAt)
+  const runPlanningInBackground = async (): Promise<void> => {
   let plannerAttempt = 1
   const onPlannerProgress = createPlannerProgressReporter({
     signal: payload.signal,
@@ -10294,7 +11161,35 @@ async function maybePlan(ctx: any, state: any, payload: any, downstream: any, op
        * 终态进度从内存里挤掉（旧实现中止路径不写记录，此行为保持不变）。
        */
       if (existing?.plan) state.records.set(session.id, existing)
-      return downstream
+      return
+    }
+    /*
+     * [3.0.1] 规划守卫判定「只有用户能答复」（CLARIFY_NEEDED）：与规划前的
+     * C1–C4 澄清闸同一条出口——写 clarify 记录、把问题原样转给用户、本轮回合
+     * 直接结束。不降级、不生成计划、不派发；用户的下一条答复会带着答案重新
+     * 进入规划。在降级路径之前拦截，否则这里会把「等用户」误报成「分解失败」。
+     */
+    if (error instanceof PlanError && error.code === 'CLARIFY_NEEDED') {
+      const createdAt = Date.now()
+      state.records.set(session.id, {
+        planId: null,
+        plan: null,
+        title: '任务信息不足（先澄清）',
+        degraded: false,
+        clarify: true,
+        error: error.message,
+        statuses: [],
+        phase: 'clarify',
+        errors: [truncate(error.message, 1000)],
+        createdAt,
+        updatedAt: createdAt,
+        createdTurn: payload.turn,
+      })
+      return enterDecision(downstream, [buildClarifyMessage({
+        rule: 'AUDIT',
+        reason: error.message,
+        question: typeof error.details === 'string' && error.details.trim() !== '' ? error.details : '',
+      })])
     }
     const planId = `wp-${randomUUID()}`
     const createdAt = Date.now()
@@ -10321,7 +11216,7 @@ async function maybePlan(ctx: any, state: any, payload: any, downstream: any, op
       updatedAt: createdAt,
       createdTurn: payload.turn,
     })
-    return enterDecision(downstream, [message])
+    return deliver([message])
   } finally {
     // [2.5.2] 无论成功/降级/中止，规划结束即停心跳，绝不残留定时器。
     planningHeartbeat.stop()
@@ -10330,7 +11225,7 @@ async function maybePlan(ctx: any, state: any, payload: any, downstream: any, op
   if (payload.signal.aborted) {
     // [2.2.5][T5] 计划已生成但回合被中止：同中止分支，恢复旧记录再静默退出。
     if (existing?.plan) state.records.set(session.id, existing)
-    return downstream
+    return
   }
   const planId = `wp-${randomUUID()}`
   const createdAt = Date.now()
@@ -10364,10 +11259,6 @@ async function maybePlan(ctx: any, state: any, payload: any, downstream: any, op
    * plan 模式不自动派发；显式 `autoDispatch:false` 保留 plan-first。
    */
   const autoDispatched = !planMode && options?.autoDispatch !== false
-  if (autoDispatched) {
-    record.dispatchedAt = Date.now()
-    state.startAutoDispatch?.(record, session, payload.agent)
-  }
   /*
    * Plan-first: commit the plan with this step and let the main Agent call
    * dsh_workplan_dispatch. Dispatching here would hide the plan until every
@@ -10388,7 +11279,22 @@ async function maybePlan(ctx: any, state: any, payload: any, downstream: any, op
     planMode,
     autoDispatched,
   })
-  if (!planMode) return enterDecision(downstream, [planMessage])
+  /*
+   * [3.0.0][顺序] 必须先让计划可见，再开跑、再发「分配完成」：
+   * 用户要求 4 的文案由 dispatchPlan 在真正开跑时写入，若自动派发抢在计划
+   * 消息之前，用户会先看到「分配完成」再看到计划（T6 设计复核 D2）。因此这里
+   * 先 deliver 计划消息，再启动自动派发。
+   */
+  if (!planMode) {
+    deliver([planMessage])
+    if (autoDispatched) {
+      record.dispatchedAt = Date.now()
+      // [T7] C3 整轮预算：自动派发同样重置（与显式派发同口径）。
+      resetRoundInjectionBudget(session, `${record.plan.planId}:${record.dispatchedAt}`)
+      state.startAutoDispatch?.(record, session, payload.agent)
+    }
+    return
+  }
   /*
    * Plan mode is a planning-only collaboration state: the plugin must still
    * decompose the task and show the plan, but it must not start department
@@ -10405,8 +11311,32 @@ async function maybePlan(ctx: any, state: any, payload: any, downstream: any, op
     }],
     source: { kind: 'workplan', form: 'notice', summary: 'plan 模式：计划已生成，等待用户审阅后派发' },
   }
-  return enterDecision(downstream, [planMessage, note])
+    return deliver([planMessage, note])
+  }
+  void (async () => {
+    try {
+      await runPlanningInBackground()
+    } catch (error) {
+      pushRecordError(planningRecord, error)
+    } finally {
+      state.planningInFlight.delete(session.id)
+    }
+  })()
+  /*
+   * 同步注入给本步模型的说明：先等计划，不要自己动手做用户的活。文案复用
+   * 用户逐字冻结的 STATUS_ASSIGNING_TEXT，不另造第二份固定文案。
+   */
+  return enterDecision(downstream, [makeUserMessage(
+    /*
+     * [3.0.0][不重复] 固定文案已由上面的 appendUserMessage(STATUS_ASSIGNING_TEXT)
+     * 写入会话，这里只给本步模型一条行为说明——绝不第二次复述同一句固定文案，
+     * 否则用户会看到两条一模一样的「任务正在分配中」。
+     */
+    '（dsh-workplan：任务分解已在后台生成中，计划一生成就立即显示在本会话并自动派发；现在请不要自己动手执行用户任务，也不要提前收尾，先简短告知用户正在分配。）',
+    { kind: 'workplan', form: 'notice', summary: '任务分解已转为后台生成' },
+  )])
 }
+
 
 export function plannerOutputSchema() {
   return {

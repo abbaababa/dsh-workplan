@@ -65,8 +65,9 @@ function makePlan(planId: string) {
       rationale: '',
       checkpoint: '',
       subtasks: [
-        { id: 'T1', title: '部门任务一', department: 'engineering', role: '负责人', objective: 'o', method: [], inputs: [], outputs: [], acceptance: ['a'], risk: '', dependsOn: [] },
-        { id: 'T2', title: '部门任务二', department: 'design', role: '负责人', objective: 'o', method: [], inputs: [], outputs: [], acceptance: ['a'], risk: '', dependsOn: [] },
+        // [2.5.5] 夹具适配：本文件测双向通道，不测低档禁派；任务行声明 high 放行第三层派发。
+        { id: 'T1', title: '部门任务一', department: 'engineering', role: '负责人', objective: 'o', method: [], inputs: [], outputs: [], acceptance: ['a'], risk: '', dependsOn: [], reasoningEffort: 'high' },
+        { id: 'T2', title: '部门任务二', department: 'design', role: '负责人', objective: 'o', method: [], inputs: [], outputs: [], acceptance: ['a'], risk: '', dependsOn: [], reasoningEffort: 'high' },
       ],
     }],
   }
@@ -498,8 +499,8 @@ const consolidation = {
   approach: ['专家做核心实现：先确认入口再最小改动，并附聚焦单测自测', '组员做自测：逐条核对验收标准并落盘留证'],
   approachBasis: ['第二轮分工的方法、流程、步骤基于第一轮完成好的全部结果：质量与时间的主要矛盾决定专家承担核心实现、组员承担自测与证据。'],
   assignments: [
-    { member: 'Expert-A', role: 'expert', task: '实现核心逻辑并自测', reasoningEffort: 'medium' },
-    { member: 'Member-B', role: 'member', task: '补充回归用例', reasoningEffort: 'low' },
+    { member: 'Expert-A', role: 'expert', task: '实现核心逻辑并自测', reasoningEffort: 'medium', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
+    { member: 'Member-B', role: 'expert', task: '补充核心路径回归用例', reasoningEffort: 'low', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
   ],
 }
 

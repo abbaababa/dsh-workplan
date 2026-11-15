@@ -18,8 +18,23 @@
  *    本门禁只负责把「其它门禁都过了、但格式仍不合规」的 done 退回。
  */
 
-/** 格式规范版本，随规范内容变更递增。 */
-export const COMM_FORMAT_VERSION = 1
+import {
+  checkDepartmentSummary,
+  checkExpertReport,
+  renderDepartmentSummarySpec,
+  renderExpertReportSpec,
+} from './v3-contract.js'
+
+/**
+ * 格式规范版本，随规范内容变更递增。
+ *
+ * [3.0.0] 1 → 2：用户 2026-11-14 第 7、10 条要求为结果格式增加了两条
+ * 结构化精简契约（F10 专家 JSON 汇报、F11 部门 JSON 汇总）。F1–F9 的
+ * 文本与判据一字未改（只增不改），新增条目由调用方按接收者层级开关：
+ * 专家结果查 F10，部门负责人结果查 F11，未声明层级时两条都不查
+ * （历史回放与其它调用点零回归）。
+ */
+export const COMM_FORMAT_VERSION = 2
 
 /** 单条不合规项。 */
 export interface CommFormatViolation {
@@ -75,6 +90,16 @@ export const COMM_FORMAT_SPEC = Object.freeze({
     Object.freeze({ id: 'F9', category: 'integrity',
       description: '不得编造、虚构或伪造任何证据、文件路径、命令输出或验收结果；无法确认的项目必须写 unverified',
       rationale: '虚假证据一旦通过交付门禁，用户拿到的就是不可信的成品' }),
+    /*
+     * [3.0.0] F10/F11：用户 2026-11-14 第 7、10 条要求。F1–F9 是 2.1.0 起的
+     * 冻结条目，本次只增不改；两条新条目按接收者层级启用（见 check 的 tier）。
+     */
+    Object.freeze({ id: 'F10', category: 'report',
+      description: '专家（第三层执行者）结果必须包含 report 对象，只允许 keyResults/keyInfo/importantInfo/leadRequirements 四个字符串数组字段，至少各有 1 条非空内容（keyInfo/important 可为空数组但须存在），每数组最多 6 条、每条最多 200 字符，内部与跨字段不得出现重复表述',
+      rationale: '用户要求 7：专家成果必须非常精简地汇报给部门负责人，只要关键信息、关键成果、重要信息和负责人要求的东西，并以 JSON mode 结构化输出' }),
+    Object.freeze({ id: 'F11', category: 'report',
+      description: '部门负责人结果必须包含 departmentSummary 对象，只允许 keyResults/keyInfo/importantInfo/sources 四个字符串数组字段，keyResults 至少 1 条非空、sources 必须覆盖本部门全部已派发专家，每数组最多 6 条、每条最多 200 字符，内部与跨字段不得出现重复表述',
+      rationale: '用户要求 8/10/11：部门负责人必须全面汇总全部专家汇报，汇总报告必须精简、禁止累赘重复，并以 JSON mode 结构化直接交回主 Agent' }),
   ]),
   /*
    * [2.2.0][T3/O-2c] 结果块可选字段（方案 §2.4：「模板增加 timeSpentMinutes、
@@ -101,11 +126,16 @@ export const COMM_FORMAT_SPEC = Object.freeze({
  * @param parsed - 已解析的证据块 payload（parseEvidenceBlock 的 payload，可为 null）
  * @param rawOutput - 子 Agent 原始输出全文
  * @param expectedAcceptanceCount - 计划定义的验收标准条数
+ * @param options.tier - 接收者层级：'expert' 追加 F10（专家 JSON 汇报），
+ *        'leader' 追加 F11（部门 JSON 汇总）；省略则两条都不查（历史回放、
+ *        旧调用点零回归）
+ * @param options.expectedExperts - 本部门已派发的专家名单（F11 覆盖度核对用）
  */
 export function checkCommFormatCompliance(
   parsed: any,
   rawOutput: string,
   expectedAcceptanceCount: number,
+  options: { tier?: 'leader' | 'expert'; expectedExperts?: readonly string[] } = {},
 ): CommFormatCheckResult {
   const violations: CommFormatViolation[] = []
   const text = typeof rawOutput === 'string' ? rawOutput : ''
@@ -198,20 +228,48 @@ export function checkCommFormatCompliance(
       message: 'status 为 blocked 但 question 为空：须写清卡在哪一步、已尝试什么、需要谁做什么决定' })
   }
 
+  /*
+   * F10/F11（用户 2026-11-14 第 7、10、11 条）：按接收者层级启用。
+   * 只拦 done 路径——受阻结果已有更针对性的诊断（F8/三阶段），
+   * 不再叠加精简性条目，避免一条 blocked 被反复退回在格式上。
+   */
+  if (options.tier === 'expert' && parsed.status === 'done') {
+    const report = checkExpertReport(parsed.report)
+    for (const item of report.violations) {
+      violations.push({ ruleId: 'F10', category: 'report', message: item })
+    }
+  }
+  if (options.tier === 'leader' && parsed.status === 'done') {
+    const summary = checkDepartmentSummary(parsed.departmentSummary, options.expectedExperts ?? [])
+    for (const item of summary.violations) {
+      violations.push({ ruleId: 'F11', category: 'report', message: item })
+    }
+  }
+
   return { compliant: violations.length === 0, violations, version: COMM_FORMAT_VERSION }
 }
 
 /**
  * 把格式规范渲染为嵌入子 Agent 提示词的文本。
  * 这是「派发工作时附带统一沟通交流格式要求」的具体实现。
+ *
+ * @param tier - 接收者层级：'expert' 附带专家 JSON 汇报契约（F10），
+ *        'leader' 附带部门 JSON 汇总契约（F11）；省略时两条都不带。
  */
-export function renderCommFormatSpec(): string {
+export function renderCommFormatSpec(tier?: 'leader' | 'expert'): string {
   const lines: string[] = [
     '沟通交流格式规范（v' + String(COMM_FORMAT_VERSION) + '，主 Agent 与部门人员双方认可的结果格式契约）：',
   ]
-  for (const req of COMM_FORMAT_SPEC.requirements) {
+  const scoped = tier === 'expert'
+    ? COMM_FORMAT_SPEC.requirements.filter((req: any) => req.id !== 'F11')
+    : tier === 'leader'
+      ? COMM_FORMAT_SPEC.requirements.filter((req: any) => req.id !== 'F10')
+      : COMM_FORMAT_SPEC.requirements
+  for (const req of scoped) {
     lines.push(`- 【${req.id}】${req.description}`)
   }
+  if (tier === 'expert') lines.push('', renderExpertReportSpec())
+  if (tier === 'leader') lines.push('', renderDepartmentSummarySpec())
   lines.push('不合规的后果：主 Agent 收到结果后按本规范逐条核验；任一不合规，结果立刻退回，你将收到列明不合规条目的退回通知，须全部修正后重新提交完整结果。')
   return lines.join('\n')
 }

@@ -212,7 +212,7 @@ test('result message tells the model how to recover a blocked plan', () => {
   const text = messageTextOf(message)
   assert.match(text, /再次调用 dsh_workplan_dispatch/)
   assert.match(text, new RegExp(`剩余续跑额度 ${MAX_PLAN_RESUMES} 次`))
-  assert.match(text, /"resumeAvailable":true/)
+  assert.match(text, /受阻项可再次调用 dsh_workplan_dispatch 从受阻处续跑/)
 
   const exhausted = buildResultMessage({
     planId: plan.planId,
@@ -226,7 +226,7 @@ test('result message tells the model how to recover a blocked plan', () => {
   const exhaustedText = messageTextOf(exhausted)
   assert.match(exhaustedText, /不会再自动重跑/)
   assert.match(exhaustedText, /直接接手完成/)
-  assert.match(exhaustedText, new RegExp(`"resumeCount":${MAX_PLAN_RESUMES}`))
+  assert.match(exhaustedText, new RegExp(`已用尽自动续跑额度（${MAX_PLAN_RESUMES}/${MAX_PLAN_RESUMES}）`))
 })
 
 /* ------------------------------------------------------------------ */

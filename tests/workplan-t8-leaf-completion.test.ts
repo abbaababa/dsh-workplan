@@ -39,6 +39,7 @@ import {
   createStatuses,
   parseResultMessage,
   parseUpdateMessage,
+  flushPendingWorkplanUpdates,
 } from '../src/plan.js'
 import { createWorkplanRuntime, reconstructFromSession } from '../src/runtime.js'
 import { readDeptMessages } from '../src/dept-journal.js'
@@ -81,9 +82,11 @@ function consolidationFor(names: string[]) {
     ...(names.length >= 8 ? { taskReasoningEffort: 'medium' } : {}),
     assignments: names.map((member, index) => ({
       member,
-      role: member.startsWith('专家') ? 'expert' : 'member',
+      // [3.0.0] 组员角色取消：第三层只允许专家；质量要求必填（用户要求 3/6）。
+      role: 'expert',
       task: `单一目标任务 ${index + 1}：产出可独立验收的证据`,
       reasoningEffort: 'medium',
+      qualityRequirements: ['必须给出可复核的命令输出或文件证据'],
     })),
   }
 }
@@ -104,7 +107,8 @@ function makePlan(planId: string) {
       rationale: '',
       checkpoint: '',
       subtasks: [
-        { id: 'T1', title: '部门任务', department: 'engineering', role: '负责人', objective: 'o', method: [], inputs: [], outputs: [], acceptance: ['a'], risk: '', dependsOn: [] },
+        // [2.5.5] 夹具适配：本文件测叶子完成即时汇报，不测低档禁派；任务行声明 high 放行第三层派发。
+        { id: 'T1', title: '部门任务', department: 'engineering', role: '负责人', objective: 'o', method: [], inputs: [], outputs: [], acceptance: ['a'], risk: '', dependsOn: [], reasoningEffort: 'high' },
       ],
     }],
   }
@@ -131,6 +135,13 @@ function doneOutcome(marker: string) {
       { criterion: 'c2', result: 'pass', evidence: 'e2' },
     ],
     artifacts: [`reports/wp-member-${marker}-T8.json`],
+    // [3.0.0] F10：专家汇报须为合规 JSON（keyResults/keyInfo/importantInfo/leadRequirements）。
+    report: {
+      keyResults: [`${marker} 关键成果一`],
+      keyInfo: [`${marker} 关键信息一`],
+      importantInfo: [`${marker} 重要情报一`],
+      leadRequirements: [`${marker} 领导要求一`],
+    },
   }
   const text = `${marker} 完成摘要：定向测试证据。\n<!-- WORKPLAN_EVIDENCE:START -->\n${JSON.stringify(evidence)}\n<!-- WORKPLAN_EVIDENCE:END -->`
   return { stopReason: 'completed', output: [{ type: 'text', text }] }
@@ -256,7 +267,8 @@ test('A1 八人定向：8 条 completion 留痕 to=原分派负责人，sendMess
     assert.equal(msg.subtaskId, 'T1', 'subtaskId 必须是负责人所在计划行 ID')
     assert.equal(msg.from.sessionId, `leaf-${i + 1}`)
     assert.equal(msg.from.member, name)
-    assert.equal(msg.from.role, i < 4 ? 'expert' : 'member')
+    // [3.0.0][用户要求 9] 组员角色取消：第三层汇报角色一律 expert。
+    assert.equal(msg.from.role, 'expert')
     assert.equal(msg.to.sessionId, HEAD, '接收方必须是原分派负责人会话（row.childId）')
     assert.equal(msg.to.role, 'head')
     assert.notEqual(msg.to.sessionId, ROOT, '根会话不得成为叶子完成汇报接收方')
@@ -281,6 +293,7 @@ test('A1 八人定向：8 条 completion 留痕 to=原分派负责人，sendMess
   // 负责人会话收到辅助纯文本通知；根会话只有 durable update，没有完成汇报文本。
   const headTexts = eventTexts(h.headSession).filter((text) => text.includes('已完成并结算'))
   assert.equal(headTexts.length, 8, '负责人会话必须收到 8 条辅助可见通知')
+  flushPendingWorkplanUpdates(h.rootSession)
   const rootTexts = eventTexts(h.rootSession)
   assert.equal(rootTexts.filter((text) => text.includes('已完成并结算') || text.includes('第三层完成汇报')).length, 0, '根会话不得误收叶子完成汇报')
   assert.ok(rootTexts.some((text) => text.includes('workplan-update')), '根会话仍收到 durable workplan-update（回放不丢）')
@@ -434,7 +447,8 @@ test('附加：report 标记 applyStatus→durable update→reconstructFromSessi
   const report = { state: 'sent', at: 1_700_000_000_000, ref: `${planId}:1000` }
   const delegates = MEMBER_NAMES.map((member, index) => ({
     member,
-    role: index < 4 ? 'expert' : 'member',
+    // [3.0.0][用户要求 9] 组员角色取消：写入侧只允许 expert（历史 member 读取侧归一）。
+    role: 'expert',
     task: '单一目标任务',
     effort: 'medium',
     childId: `leaf-${index + 1}`,
@@ -546,9 +560,12 @@ test('A5 根会话回归：主计划 async 轮次完成仍即时通知根会话�
     '本轮应结算并写入结果消息',
   )
   const texts = eventTexts(session)
-  const noticeIndex = texts.findIndex((text) => text.includes('[dsh-workplan] 子任务 T1 已完成并结算'))
-  const resultIndex = texts.findIndex((text) => text.includes('DSH-WORKPLAN-RESULT'))
+  const noticeIndex = texts.findIndex((text) => text.includes('【关键进度】T1 完成'))
+  /* [T9] 结果消息自 T7 起用 durable 信封承载 JSON，正文不再含文本标记；
+   * 以 parseResultMessage 识别结果消息，索引仍与 eventTexts 一一对应。 */
+  const resultIndex = session.events.findIndex((event: any) => event.type === 'user/message' && parseResultMessage(event.data))
   assert.ok(noticeIndex >= 0, '根会话既有完成即时通知必须仍在（A5 零回归）')
+  assert.ok(texts[noticeIndex].includes('标题：根回归'), 'C1/F1：完成通知必须携带子任务标题')
   assert.ok(resultIndex >= 0)
   assert.ok(noticeIndex < resultIndex, '即时通知必须先于整轮结果消息（不等待整轮结束）')
   assert.equal(texts.filter((text) => text.includes('第三层完成汇报')).length, 0, '叶子完成汇报通道不得泄漏到根会话')

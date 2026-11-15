@@ -224,7 +224,7 @@ function noticeTexts(session: any): string[] {
   return out
 }
 
-const completionNotices = (session: any) => noticeTexts(session).filter((text) => text.includes('已完成并结算'))
+const completionNotices = (session: any) => noticeTexts(session).filter((text) => text.includes('【关键进度】'))
 const roundEnded = (session: any) => session.events.some((event: any) => event.type === 'user/message' && parseResultMessage(event.data))
 
 /** 按派发顺序逐个释放假子会话（并行/串行派发都适用）。 */
@@ -252,14 +252,14 @@ test('A1+A3：wait 模式三部门分别完成，主会话各收 1 条独立汇�
   const notices = completionNotices(session)
   assert.equal(notices.length, 3, 'A1：三个部门各恰 1 条独立即时汇报（wait 模式同样触发）')
   for (const id of ['T1', 'T2', 'T3']) {
-    const mine = notices.filter((text) => text.includes(`子任务 ${id} `))
+    const mine = notices.filter((text) => text.includes(`【关键进度】${id} 完成`))
     assert.equal(mine.length, 1, `A1：${id} 只能有 1 条独立汇报`)
     const text = mine[0]
     assert.ok(text.includes('验收结论：1/1 通过'), 'A3：明确验收结论')
     assert.ok(text.includes('完美完成（验收 1/1 全部 pass，structured）'), 'D7：达到行级判据才声称完美完成')
-    assert.ok(text.includes('逐条验收结论：') && text.includes(`${id} 交付物存在 → pass`), 'A3：逐条验收结论（criterion＋result）')
-    assert.ok(text.includes('待主 Agent 执行事项：'), 'A3：待主 Agent 执行事项段')
-    assert.ok(text.includes('手动重启 dsh web') && text.includes('不得自行重启或安装'), 'A3/D8：生效建议（手动重启、不安装）')
+    assert.ok(text.includes(`标题：${id} 交付`), 'C1/F1：通知必须携带子任务标题')
+    assert.ok(!text.includes('逐条验收结论：'), 'C2：验收全文不得注入可见通知')
+    assert.ok(!text.includes('<!-- WORKPLAN_EVIDENCE'), 'C2/F2：回报正文与证据块不得注入')
     assert.ok(!text.includes('<!-- DSH-WORKPLAN'), '纯文本通知不得带 workplan 标记（回放纯读）')
   }
 
@@ -274,6 +274,11 @@ test('A1+A3：wait 模式三部门分别完成，主会话各收 1 条独立汇�
     assert.equal(message.data.acceptanceCount, 1)
     assert.equal(message.delivery.status, 'sent')
     assert.ok(['T1', 'T2', 'T3'].includes(message.subtaskId))
+    /* C2：逐条验收正文不进模型可见面，但必须仍在 completion 留痕里「按需可查」。 */
+    const body = String(message.body ?? '')
+    assert.ok(body.includes('逐条验收结论：') && body.includes(`${message.subtaskId} 交付物存在 → pass`), 'A3：逐条验收结论保留在 completion 留痕')
+    assert.ok(body.includes('待主 Agent 执行事项：'), 'A3：待办段保留在 completion 留痕')
+    assert.ok(body.includes('手动重启 dsh web') && body.includes('不得自行重启或安装'), 'A3/D8：生效建议保留在 completion 留痕')
   }
 
   /* 幂等：即时通知 + finishRound 批量补齐后仍各 1 条；重启/刷新回放是纯读。 */
@@ -317,7 +322,7 @@ test('A2：wait 模式结果块缺失但盘上备份新鲜且归属匹配 ⇒ �
   assert.ok((record?.errors ?? []).some((line: string) => line.includes('已采纳盘上结算备份')), '采纳来源留档')
   const notices = completionNotices(session)
   assert.equal(notices.length, 1, 'A2：备份采纳路径同样触发即时汇报（wait 模式）')
-  assert.ok(notices[0].includes('子任务 T1') && notices[0].includes('验收结论：1/1 通过'))
+  assert.ok(notices[0].includes('【关键进度】T1 完成') && notices[0].includes('验收结论：1/1 通过'))
   const journaled: any = readDeptMessages(plan.planId, { kind: 'completion' })
   assert.equal(journaled.ok, true)
   assert.equal(journaled.messages.length, 1)
@@ -349,12 +354,12 @@ test('D7 反例：unverified/空验收/缺失产物都保留结算通知但明�
     assert.ok(text.includes('未达完美完成判据：'), '必须显式写明缺口')
     assert.ok(!text.includes('完美完成（验收'), '绝不声称完美完成')
   }
-  const t1 = notices.find((text) => text.includes('子任务 T1 '))!
+  const t1 = notices.find((text) => text.includes('【关键进度】T1 完成'))!
   assert.ok(t1.includes('证据等级为 unverified') || t1.includes('验收未全部 pass'), 'T1：unverified 缺口可见')
-  const t2 = notices.find((text) => text.includes('子任务 T2 '))!
+  const t2 = notices.find((text) => text.includes('【关键进度】T2 完成'))!
   assert.ok(t2.includes('未提供验收项') || t2.includes('证据等级为'), 'T2：空验收/legacy 缺口可见')
-  const t3 = notices.find((text) => text.includes('子任务 T3 '))!
-  assert.ok(t3.includes('缺少声明产物') && t3.includes('缺失产物待补'), 'T3：缺失产物进入缺口与待办段')
+  const t3 = notices.find((text) => text.includes('【关键进度】T3 完成'))!
+  assert.ok(t3.includes('缺少声明产物') && /缺失产物 \d+ 项待补/.test(t3), 'T3：缺失产物进入缺口与待办段')
 })
 
 /* ------------------------------------------------------------------ *
@@ -369,7 +374,7 @@ test('D6：通知写失败置 reportPending＋failed 留痕（不静默）；恢
   let failNotice = true
   session.append = (type: string, data: any) => {
     const text = typeof data === 'string' ? data : String(data?.content?.[0]?.text ?? '')
-    if (failNotice && type === 'user/message' && text.includes('已完成并结算')) throw new Error('log full')
+    if (failNotice && type === 'user/message' && text.includes('【关键进度】T1 完成')) throw new Error('log full')
     return originalAppend(type, data)
   }
   await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
@@ -404,5 +409,5 @@ test('D6：通知写失败置 reportPending＋failed 留痕（不静默）；恢
   const journal: any = readDeptMessages(plan.planId, { kind: 'completion' })
   assert.ok(journal.messages.some((message: any) => message.subtaskId === 'T1' && message.delivery.status === 'failed'), 'failed 留痕保留可审计')
   assert.ok(journal.messages.some((message: any) => message.subtaskId === 'T2' && message.delivery.status === 'sent'), '恢复后 T2 正常投递并留 sent 痕')
-  assert.ok(completionNotices(session).some((text) => text.includes('子任务 T2 ')), '恢复后 T2 的即时汇报正常落盘')
+  assert.ok(completionNotices(session).some((text) => text.includes('【关键进度】T2 完成')), '恢复后 T2 的即时汇报正常落盘')
 })

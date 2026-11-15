@@ -17,7 +17,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { createWorkplanRuntime } from '../src/runtime.js'
-import { createStatuses } from '../src/plan.js'
+import { createStatuses, flushPendingWorkplanUpdates } from '../src/plan.js'
 
 function makePlan() {
   return {
@@ -30,7 +30,9 @@ function makePlan() {
       id: 'S1',
       name: '实施',
       subtasks: [
-        { id: 'T1', title: '部门任务', department: 'engineering', dependsOn: [] },
+        // [T10][E-A] 夹具适配：计划行声明复杂档，通过 2.5.5 low 禁派闸（未配置视同 low）；
+        // 行档位不进入 declaredEffort ⇒ 不触发 ≥8 人闸，2 人分工与既有断言保持不变。
+        { id: 'T1', title: '部门任务', department: 'engineering', dependsOn: [], reasoningEffort: 'high' },
       ],
     }],
   }
@@ -101,8 +103,8 @@ const goodConsolidation = (efforts: { expert: string; member: string }) => ({
   approach: ['专家做核心实现：先确认入口再最小改动，并附聚焦单测自测', '组员做自测：逐条核对验收标准并落盘留证'],
   approachBasis: ["第二轮分工的方法、流程、步骤基于第一轮完成好的全部结果：质量与时间的主要矛盾决定专家承担核心实现、组员承担自测与证据，约束决定不改无关文件。"],
   assignments: [
-    { member: 'Expert-A', role: 'expert', task: '实现核心逻辑并自测', reasoningEffort: efforts.expert },
-    { member: 'Member-B', role: 'member', task: '补充回归用例', reasoningEffort: efforts.member },
+    { member: 'Expert-A', role: 'expert', task: '实现核心逻辑并自测', reasoningEffort: efforts.expert, qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
+    { member: 'Member-B', role: 'expert', task: '补充核心路径回归用例', reasoningEffort: efforts.member, qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
   ],
 })
 
@@ -155,7 +157,7 @@ test('delegateTool：review 缺 problemAnalysis / assignments ⇒ 拒绝并给�
   const { runtime, leaderAgent } = makeRuntime('qwen3.8-flash')
   const noAnalysis = await runtime.delegateTool(leaderAgent, {
     action: 'review',
-    consolidation: { assignments: [{ member: 'A', role: 'expert', task: 't', reasoningEffort: 'low' }] },
+    consolidation: { assignments: [{ member: 'A', role: 'expert', task: '读取目标文件并写出一份结论', reasoningEffort: 'low', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] }] },
   })
   assert.equal(noAnalysis.ok, false)
   assert.match(noAnalysis.error, /problemAnalysis/)
@@ -169,18 +171,18 @@ test('delegateTool：review 缺 problemAnalysis / assignments ⇒ 拒绝并给�
   assert.match(noAssignments.error, /assignments/)
 })
 
-test('delegateTool：分工表只有专家没有组员（或反之）⇒ DELEGATE_ROLE_MIX_REQUIRED', async () => {
+test('delegateTool：组员角色取消后，非 expert 角色入参 ⇒ DELEGATE_ASSIGNMENT_INVALID', async () => {
   const { runtime, leaderAgent } = makeRuntime('qwen3.8-flash')
   const result = await runtime.delegateTool(leaderAgent, {
     action: 'review',
     consolidation: {
       // [2.5.4][T3R1] 补足字数，使拒因落在被测的角色配比（断言意图不变）。
       problemAnalysis: ['现状：部门任务需要拆给专家与组员；目标是保质保量完成；约束是不改无关文件；主要矛盾是质量与时间。'],
-      assignments: [{ member: 'A', role: 'expert', task: 't', reasoningEffort: 'low' }],
+      assignments: [{ member: 'A', role: 'worker', task: '读取目标文件并写出一份结论', reasoningEffort: 'low', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] }],
     },
   })
   assert.equal(result.ok, false)
-  assert.equal(result.code, 'DELEGATE_ROLE_MIX_REQUIRED')
+  assert.equal(result.code, 'DELEGATE_ASSIGNMENT_INVALID')
   assert.match(result.error, /全球顶尖专家/)
 })
 
@@ -202,6 +204,7 @@ test('delegateTool：qwen 模型上 review 通过；越界档 max→xhigh 钳制
   const row = record.statuses[0]
   assert.ok(row.consolidation, 'consolidation 必须写入状态行')
   assert.equal(row.consolidation.assignments.length, 2)
+  flushPendingWorkplanUpdates(rootSession)
   const durable = rootSession.events.filter((e: any) => e.type === 'user/message')
   assert.ok(durable.length >= 1, 'review 必须写 durable workplan-update 消息')
   assert.match(JSON.stringify(durable[durable.length - 1]), /workplan-update/)
@@ -217,14 +220,18 @@ test('delegateTool：非 qwen 模型上 medium→low、xhigh→high 钳制；max
       approach: ['专家做复杂任务：先确认入口再最小改动，并附聚焦单测自测', '组员做轻度任务：逐条核对验收标准并落盘留证'],
       approachBasis: ['第二轮分工基于第一轮梳理：任务复杂度差异决定专家承担复杂任务、组员承担轻度任务。'],
       assignments: [
-        { member: 'E', role: 'expert', task: '复杂任务', reasoningEffort: 'max' },
-        { member: 'M', role: 'member', task: '轻度任务', reasoningEffort: 'medium' },
+        { member: 'E', role: 'expert', task: '承担复杂核心任务', reasoningEffort: 'max', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
+        { member: 'M', role: 'expert', task: '承担轻度辅助任务', reasoningEffort: 'medium', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
       ],
     },
   })
   assert.equal(result.ok, true, JSON.stringify(result))
-  const expert = result.members.find((m: any) => m.role === 'expert')
-  const member = result.members.find((m: any) => m.role === 'member')
+  /*
+   * [3.0.0][用户要求 9] 组员角色取消：两名成员 role 都是 expert，按成员名定位
+   * （原来按 role 区分 expert/member），断言的钳制语义一字不变。
+   */
+  const expert = result.members.find((m: any) => m.member === 'E')
+  const member = result.members.find((m: any) => m.member === 'M')
   assert.equal(expert.effort, 'max', '非 qwen 家族 max 合法，原样')
   assert.equal(member.effort, 'low', '非 qwen 家族 medium 越界，钳制为 low')
   assert.equal(result.clamped.length, 1)

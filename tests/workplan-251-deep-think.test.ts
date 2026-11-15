@@ -83,6 +83,8 @@ function makePlan() {
         id: 'T1', title: '部门任务', department: 'engineering', role: '资深架构师',
         objective: '完成机制改造', method: ['改代码'], inputs: [], outputs: ['补丁'],
         acceptance: ['有单测证据'], risk: '无', dependsOn: [],
+        // [2.5.5] 夹具适配：本文件测两轮产物闸，不测低档禁派；任务行声明 high 放行第三层派发。
+        reasoningEffort: 'high',
       }],
     }],
   }
@@ -97,8 +99,8 @@ function consolidation(overrides: any = {}) {
     approach: ['专家做核心实现：先确认入口再最小改动，并附聚焦单测自测', '组员做自测：逐条核对验收标准并落盘留证'],
     approachBasis: ['第二轮分工的方法、流程、步骤基于第一轮全部梳理结果：质量与时间矛盾决定专家做核心实现、组员做自测。'],
     assignments: [
-      { member: 'Expert-A', role: 'expert', task: '实现核心逻辑并自测', reasoningEffort: 'xhigh' },
-      { member: 'Member-B', role: 'member', task: '补充回归用例', reasoningEffort: 'low' },
+      { member: 'Expert-A', role: 'expert', task: '实现核心逻辑并自测', reasoningEffort: 'xhigh', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
+      { member: 'Member-B', role: 'expert', task: '补充核心路径回归用例', reasoningEffort: 'low', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
     ],
     ...overrides,
   }
@@ -137,14 +139,14 @@ test('部门负责人任务书（二级）注入两轮深度思考协议与执�
   assert.match(prompt, /最后才基于第二轮的方法、流程、步骤开始具体执行与再分配/)
 })
 
-test('专家/组员任务书（三级）注入两轮深度思考协议——两种角色同一口径', () => {
-  for (const role of ['expert', 'member'] as const) {
+test('专家任务书（三级）注入两轮深度思考协议——组员角色已取消，仅专家口径', () => {
+  for (const role of ['expert'] as const) {
     const rulesBrief = buildLlmRulesBrief({ model: 'qwen3.8-flash', effort: 'xhigh', tier: 'delegate', memberName: 'X', memberRole: role })
     const prompt = buildDelegateePrompt({
       departmentLabel: '工程',
       leaderSubtaskId: 'T1',
       leaderSubtaskTitle: '部门任务',
-      member: { member: 'X', role, task: '单项工作', effort: 'xhigh' },
+      member: { member: 'X', role, task: '单项工作', effort: 'xhigh', qualityRequirements: ['必须给出命令输出'] },
       rulesBrief,
       cwd: '/tmp',
     })
@@ -207,8 +209,14 @@ test('approachBasis 非数组 ⇒ 明确拒因', () => {
 
 /* ---------- 3. 负责人再分配硬门禁同口径 ---------- */
 
+/*
+ * [2.5.5] 夹具适配：以下单元用例验证两轮产物闸，不测「low 禁派」；按判定链
+ * 给任务行补 taskRowEffort='high' 放行第三层派发，复杂档判定不受影响。
+ */
+const pd = (args: any) => planDelegations({ taskRowEffort: 'high', ...args })
+
 test('缺第二轮方法流程步骤（approach）⇒ DELEGATE_CONSOLIDATION_INCOMPLETE', () => {
-  const result = planDelegations({ consolidation: consolidation({ approach: [] }), model: 'qwen3.8-flash' })
+  const result = pd({ consolidation: consolidation({ approach: [] }), model: 'qwen3.8-flash' })
   assert.equal(result.ok, false)
   assert.equal(result.code, 'DELEGATE_CONSOLIDATION_INCOMPLETE')
   assert.match(result.error!, /第二轮/)
@@ -216,7 +224,7 @@ test('缺第二轮方法流程步骤（approach）⇒ DELEGATE_CONSOLIDATION_INC
 })
 
 test('有第二轮但缺依据（approachBasis）⇒ DELEGATE_CONSOLIDATION_INCOMPLETE', () => {
-  const result = planDelegations({ consolidation: consolidation({ approachBasis: [] }), model: 'qwen3.8-flash' })
+  const result = pd({ consolidation: consolidation({ approachBasis: [] }), model: 'qwen3.8-flash' })
   assert.equal(result.ok, false)
   assert.equal(result.code, 'DELEGATE_CONSOLIDATION_INCOMPLETE')
   assert.match(result.error!, /approachBasis/)
@@ -224,24 +232,29 @@ test('有第二轮但缺依据（approachBasis）⇒ DELEGATE_CONSOLIDATION_INCO
 })
 
 test('两轮产物齐全 ⇒ 放行，approachBasis 随梳理产物返回', () => {
-  const result = planDelegations({ consolidation: consolidation(), model: 'qwen3.8-flash' })
+  const result = pd({ consolidation: consolidation(), model: 'qwen3.8-flash' })
   assert.equal(result.ok, true, JSON.stringify(result))
   assert.equal(result.consolidation!.approachBasis.length, 1)
   assert.match(result.consolidation!.approachBasis[0], /基于第一轮/)
 })
 
-test('旧拒因顺序不变：problemAnalysis → assignments → 角色配比 先于两轮产物闸', () => {
-  const noAnalysis = planDelegations({ consolidation: { assignments: consolidation().assignments }, model: 'qwen3.8-flash' })
+test('旧拒因顺序不变：problemAnalysis → assignments 先于两轮产物闸', () => {
+  const noAnalysis = pd({ consolidation: { assignments: consolidation().assignments }, model: 'qwen3.8-flash' })
   assert.match(noAnalysis.error!, /problemAnalysis/)
   // [2.5.4][T3R1] 补足字数，使拒因落在被测的 assignments 缺口（断言意图不变）。
-  const noAssignments = planDelegations({ consolidation: { problemAnalysis: ['现状：部门任务需要拆给专家与组员；目标是保质保量完成；约束是不改无关文件；主要矛盾是质量与时间。'] }, model: 'qwen3.8-flash' })
+  const noAssignments = pd({ consolidation: { problemAnalysis: ['现状：部门任务需要拆给专家与组员；目标是保质保量完成；约束是不改无关文件；主要矛盾是质量与时间。'] }, model: 'qwen3.8-flash' })
   assert.match(noAssignments.error!, /assignments/)
-  const expertOnly = planDelegations({
-    // [2.5.4][T3R1] 补足字数，使拒因落在被测的角色配比（断言意图不变）。
-    consolidation: { problemAnalysis: ['现状：部门任务需要拆给专家与组员；目标是保质保量完成；约束是不改无关文件；主要矛盾是质量与时间。'], assignments: [{ member: 'A', role: 'expert', task: 't', reasoningEffort: 'low' }] },
+  /*
+   * [3.0.0][用户要求 9] 角色配比闸已取消：分工表只有专家是合法形态。
+   * 该断言改为验证「两轮深度思考产物闸仍在既有拒因之后生效」，
+   * 分工表本身合格时拒因必须落在缺 approach 上。
+   */
+  const expertOnly = pd({
+    consolidation: { problemAnalysis: ['现状：部门任务需要拆给专家与组员；目标是保质保量完成；约束是不改无关文件；主要矛盾是质量与时间。'], assignments: [{ member: 'A', role: 'expert', task: '读取目标文件并写出一份结论', reasoningEffort: 'low', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] }] },
     model: 'qwen3.8-flash',
   })
-  assert.equal(expertOnly.code, 'DELEGATE_ROLE_MIX_REQUIRED')
+  assert.equal(expertOnly.code, 'DELEGATE_CONSOLIDATION_INCOMPLETE')
+  assert.match(expertOnly.error!, /approach/)
 })
 
 /* ---------- 4. 持久化与回放 ---------- */

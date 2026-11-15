@@ -22,7 +22,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { createWorkplanRuntime, reconstructFromSession } from '../src/runtime.js'
-import { applyStatus, buildPlanMessage, buildUpdateMessage, createStatuses } from '../src/plan.js'
+import { applyStatus, buildPlanMessage, buildUpdateMessage, createStatuses, flushPendingWorkplanUpdates } from '../src/plan.js'
 import { planDelegations } from '../src/llm-rules.js'
 import {
   MIN_PLANNING_APPROACH_CHARS,
@@ -46,7 +46,8 @@ function makePlan() {
     stages: [{
       id: 'S1',
       name: '实施',
-      subtasks: [{ id: 'T1', title: '部门任务', department: 'engineering', dependsOn: [] }],
+      // [2.5.5] 夹具适配：本文件测质量闸/等级继承，不测禁派闸；任务行声明 high 即放行第三层派发。
+      subtasks: [{ id: 'T1', title: '部门任务', department: 'engineering', dependsOn: [], reasoningEffort: 'high' }],
     }],
   }
 }
@@ -104,8 +105,8 @@ function makeRuntime(model = 'qwen3.8-flash') {
 }
 
 const assignments2 = () => [
-  { member: 'Expert-A', role: 'expert', task: '实现核心逻辑并自测' },
-  { member: 'Member-B', role: 'member', task: '整理验收证据清单' },
+  { member: 'Expert-A', role: 'expert', task: '实现核心逻辑并自测', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
+  { member: 'Member-B', role: 'expert', task: '整理验收证据清单', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
 ]
 
 /** 恰好达标夹具：problemAnalysis 20+20=40、approach 20+20=40、approachBasis 20。 */
@@ -131,6 +132,15 @@ function richConsolidation(overrides: any = {}) {
   })
 }
 
+/*
+ * [2.5.5] 夹具适配：以下单元用例验证的是深度梳理质量闸与等级继承，不是
+ * 「low 禁派」闸；按门禁判定链（src/llm-rules.ts banDeclared）给任务行补
+ * taskRowEffort='high' 即放行第三层派发，且不改变复杂档判定（人数闸仍只由
+ * consolidation.taskReasoningEffort / taskEffortFallback 决定）。
+ * 断言意图零删改：只补前置数据。
+ */
+const pd = (args: any) => planDelegations({ taskRowEffort: 'high', ...args })
+
 /* ---------- G0 判据单一事实源 ---------- */
 
 test('G0：质量闸下限与主 Agent/叶子同一事实源（40/40/20）', () => {
@@ -143,7 +153,7 @@ test('G0：质量闸下限与主 Agent/叶子同一事实源（40/40/20）', () 
 
 test('G1 单元：缺 consolidation ⇒ DELEGATE_CONSOLIDATION_MISSING', () => {
   for (const input of [null, undefined]) {
-    const result = planDelegations({ consolidation: input as any, model: 'qwen3.8-flash' })
+    const result = pd({ consolidation: input as any, model: 'qwen3.8-flash' })
     assert.equal(result.ok, false)
     assert.equal(result.code, 'DELEGATE_CONSOLIDATION_MISSING')
     assert.match(result.error!, /梳理/)
@@ -153,42 +163,42 @@ test('G1 单元：缺 consolidation ⇒ DELEGATE_CONSOLIDATION_MISSING', () => {
 /* ---------- G2/G3/G4 单元：合计字数下限与恰好达标 ---------- */
 
 test('G2 单元：problemAnalysis 合计 39 字 ⇒ INCOMPLETE；多项求和同判据；恰好 40 放行', () => {
-  const thin = planDelegations({ consolidation: boundaryConsolidation({ problemAnalysis: [ch(39)] }), model: 'qwen3.8-flash' })
+  const thin = pd({ consolidation: boundaryConsolidation({ problemAnalysis: [ch(39)] }), model: 'qwen3.8-flash' })
   assert.equal(thin.ok, false)
   assert.equal(thin.code, 'DELEGATE_CONSOLIDATION_INCOMPLETE')
   assert.match(thin.error!, /problemAnalysis/)
   assert.match(thin.error!, /40/)
   // 合计=各项长度之和：19+20=39 仍拒（不是逐项判）。
-  const split = planDelegations({ consolidation: boundaryConsolidation({ problemAnalysis: [ch(19), ch(20)] }), model: 'qwen3.8-flash' })
+  const split = pd({ consolidation: boundaryConsolidation({ problemAnalysis: [ch(19), ch(20)] }), model: 'qwen3.8-flash' })
   assert.equal(split.ok, false)
   assert.equal(split.code, 'DELEGATE_CONSOLIDATION_INCOMPLETE')
   // 20+20=40 恰好达标。
-  const exact = planDelegations({ consolidation: boundaryConsolidation(), model: 'qwen3.8-flash' })
+  const exact = pd({ consolidation: boundaryConsolidation(), model: 'qwen3.8-flash' })
   assert.equal(exact.ok, true, JSON.stringify(exact))
 })
 
 test('G3 单元：approach 合计 39 字 ⇒ INCOMPLETE；恰好 40 放行', () => {
-  const thin = planDelegations({ consolidation: boundaryConsolidation({ approach: [ch(39)] }), model: 'qwen3.8-flash' })
+  const thin = pd({ consolidation: boundaryConsolidation({ approach: [ch(39)] }), model: 'qwen3.8-flash' })
   assert.equal(thin.ok, false)
   assert.equal(thin.code, 'DELEGATE_CONSOLIDATION_INCOMPLETE')
   assert.match(thin.error!, /approach/)
   assert.match(thin.error!, /40/)
-  const exact = planDelegations({ consolidation: boundaryConsolidation({ approach: [ch(20), ch(20)] }), model: 'qwen3.8-flash' })
+  const exact = pd({ consolidation: boundaryConsolidation({ approach: [ch(20), ch(20)] }), model: 'qwen3.8-flash' })
   assert.equal(exact.ok, true, JSON.stringify(exact))
 })
 
 test('G4 单元：approachBasis 合计 19 字 ⇒ INCOMPLETE；恰好 20 放行', () => {
-  const thin = planDelegations({ consolidation: boundaryConsolidation({ approachBasis: [ch(19)] }), model: 'qwen3.8-flash' })
+  const thin = pd({ consolidation: boundaryConsolidation({ approachBasis: [ch(19)] }), model: 'qwen3.8-flash' })
   assert.equal(thin.ok, false)
   assert.equal(thin.code, 'DELEGATE_CONSOLIDATION_INCOMPLETE')
   assert.match(thin.error!, /approachBasis/)
   assert.match(thin.error!, /20/)
-  const exact = planDelegations({ consolidation: boundaryConsolidation({ approachBasis: [ch(20)] }), model: 'qwen3.8-flash' })
+  const exact = pd({ consolidation: boundaryConsolidation({ approachBasis: [ch(20)] }), model: 'qwen3.8-flash' })
   assert.equal(exact.ok, true, JSON.stringify(exact))
 })
 
 test('G5 单元：恰好达标（40/40/20）⇒ ok，分工与缺省等级正常', () => {
-  const result = planDelegations({ consolidation: boundaryConsolidation(), model: 'qwen3.8-flash' })
+  const result = pd({ consolidation: boundaryConsolidation(), model: 'qwen3.8-flash' })
   assert.equal(result.ok, true, JSON.stringify(result))
   assert.equal(result.members.length, 2)
   assert.deepEqual(result.members.map((m: any) => m.effort), ['low', 'low'])
@@ -196,18 +206,18 @@ test('G5 单元：恰好达标（40/40/20）⇒ ok，分工与缺省等级正常
 })
 
 test('G6 单元：空白不计字（先 trim 再求和）；空数组按缺交拒；合格富产物放行', () => {
-  const spaces = planDelegations({ consolidation: boundaryConsolidation({ problemAnalysis: [' '.repeat(60)] }), model: 'qwen3.8-flash' })
+  const spaces = pd({ consolidation: boundaryConsolidation({ problemAnalysis: [' '.repeat(60)] }), model: 'qwen3.8-flash' })
   assert.equal(spaces.ok, false)
   assert.equal(spaces.code, 'DELEGATE_CONSOLIDATION_INCOMPLETE')
-  const padded = planDelegations({ consolidation: boundaryConsolidation({ problemAnalysis: [ch(39) + '   '] }), model: 'qwen3.8-flash' })
+  const padded = pd({ consolidation: boundaryConsolidation({ problemAnalysis: [ch(39) + '   '] }), model: 'qwen3.8-flash' })
   assert.equal(padded.ok, false)
   assert.match(padded.error!, /39/)
   for (const overrides of [{ problemAnalysis: [] }, { approach: [] }, { approachBasis: [] }]) {
-    const empty = planDelegations({ consolidation: boundaryConsolidation(overrides), model: 'qwen3.8-flash' })
+    const empty = pd({ consolidation: boundaryConsolidation(overrides), model: 'qwen3.8-flash' })
     assert.equal(empty.ok, false)
     assert.equal(empty.code, 'DELEGATE_CONSOLIDATION_INCOMPLETE')
   }
-  const rich = planDelegations({ consolidation: richConsolidation(), model: 'qwen3.8-flash' })
+  const rich = pd({ consolidation: richConsolidation(), model: 'qwen3.8-flash' })
   assert.equal(rich.ok, true, JSON.stringify(rich))
 })
 
@@ -224,6 +234,7 @@ test('G1 运行时：未提交梳理直接 dispatch ⇒ MISSING，gateAudit 记�
   assert.equal(last.action, 'dispatch')
   assert.equal(last.ok, false)
   assert.equal(last.code, 'DELEGATE_CONSOLIDATION_MISSING')
+  flushPendingWorkplanUpdates(rootSession)
   assert.match(JSON.stringify(rootSession.events), /gateAudit/, '拒绝留痕必须随 durable workplan-update 落盘')
 })
 
@@ -338,21 +349,21 @@ test('G7 durable：合格产物读回后 dispatch 放行（同一回放口径）
 
 test('G8 单元：taskEffortFallback 继承（复杂档 ≥8 人）、显式优先、家族钳制、无配置回落 low', () => {
   const model = 'qwen3.8-flash'
-  const inherited = planDelegations({ consolidation: richConsolidation({ assignments: gateMembers(8) }), model, taskEffortFallback: 'xhigh' })
+  const inherited = pd({ consolidation: richConsolidation({ assignments: gateMembers(8) }), model, taskEffortFallback: 'xhigh' })
   assert.equal(inherited.ok, true, JSON.stringify(inherited))
   assert.equal(inherited.taskEffort, 'xhigh')
   assert.deepEqual(inherited.members.map((m: any) => m.effort), Array(8).fill('xhigh'))
-  // 显式配置优先于回落源；low 非复杂 ⇒ 2 人即可。
-  const explicit = planDelegations({ consolidation: richConsolidation({ taskReasoningEffort: 'low' }), model, taskEffortFallback: 'xhigh' })
-  assert.equal(explicit.ok, true, JSON.stringify(explicit))
-  assert.equal(explicit.taskEffort, 'low')
+  // [2.5.5] 显式 low ⇒ 禁止第三层下派（用户裁决 D1–D5）：本用例锁定该新契约。
+  const explicit = pd({ consolidation: richConsolidation({ taskReasoningEffort: 'low' }), model, taskEffortFallback: 'xhigh' })
+  assert.equal(explicit.ok, false)
+  assert.equal(explicit.code, 'DELEGATE_LOW_TASK_FORBIDDEN')
   // 回落源同样按家族钳制并留痕（qwen high→medium）。
-  const clamped = planDelegations({ consolidation: richConsolidation({ assignments: gateMembers(8) }), model, taskEffortFallback: 'high' })
+  const clamped = pd({ consolidation: richConsolidation({ assignments: gateMembers(8) }), model, taskEffortFallback: 'high' })
   assert.equal(clamped.ok, true, JSON.stringify(clamped))
   assert.equal(clamped.taskEffort, 'medium')
   assert.equal(clamped.taskEffortClamped?.requested, 'high')
   // 无整体配置回落 low 的旧行为不变。
-  const none = planDelegations({ consolidation: richConsolidation(), model })
+  const none = pd({ consolidation: richConsolidation(), model })
   assert.deepEqual(none.members.map((m: any) => m.effort), ['low', 'low'])
 })
 
@@ -394,6 +405,7 @@ test('G9：拒绝→放行审计随 durable 回放可复核（顺序保持、有
   assert.equal(accepted.ok, true, JSON.stringify(accepted))
   const dispatched = await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
   assert.equal(dispatched.ok, true, JSON.stringify(dispatched))
+  flushPendingWorkplanUpdates(rootSession)
   const rebuilt: any = reconstructFromSession(rootSession)
   const row = rebuilt.statuses.find((item: any) => item.subtaskId === 'T1')
   assert.ok(Array.isArray(row.gateAudit) && row.gateAudit.length >= 3, '回放后审计记录仍在')

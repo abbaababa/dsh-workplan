@@ -10,6 +10,14 @@
 import { createHash, randomUUID } from 'node:crypto'
 
 import { DEPARTMENT_CAPABILITIES, DEPARTMENT_EXPERT_STANDARD, departmentCapability } from './departments.js'
+// [SCv2-T4] 判据层单一真源（Q1–Q7 用户 2026-11-13 裁决 B/B/B/B/A/A/B）：
+// 只引入判据层常量/消毒/派生，运行层常量与公式不在本模块改动（Q7-B 红线）。
+import {
+  CRITERION_TARGET_MINUTES,
+  CRITERION_RESULTS,
+  attemptWallClockMsOf,
+  sanitizeCriterionException,
+} from './criterion.js'
 import { MAX_TASK_ANCHOR_CHARS } from './understanding.js'
 import { isMappingDigest, verifyMappingDigest } from './supersede-digest.js'
 import { phaseSummaryLine, sanitizeMainDeepThink, threePhasePromptLines, validatePhaseEvidence } from './three-phase.js'
@@ -24,6 +32,17 @@ import {
   renderCommFormatRejection,
   renderCommFormatSpec,
 } from './comm-format.js'
+// [3.0.0] 用户 2026-11-14 第 1/2/3/4/8/10/11 条的纯逻辑契约（零依赖模块）：
+// 两条会话固定文案、质量要求渲染、部门汇总契约。
+import {
+  STATUS_ASSIGNED_TEXT,
+  STATUS_ASSIGNING_TEXT,
+  diceSimilarity,
+  isQualityGatePlan,
+  normalizeQualityRequirements,
+  renderDepartmentSummarySpec,
+  renderQualityRequirementsBlock,
+} from './v3-contract.js'
 
 export const PLAN_VERSION = 1
 
@@ -148,7 +167,7 @@ export const CLOSURES = Object.freeze([
   'replanned',
 ])
 /** Why a `blocked` / `escalated` row stopped. Read by the dashboard and result message. */
-export const BLOCKED_KINDS = Object.freeze(['failed', 'timeout', 'no-ack', 'escalated', 'comm-format'])
+export const BLOCKED_KINDS = Object.freeze(['failed', 'timeout', 'no-ack', 'escalated', 'comm-format', 'criterion-overrun'])
 /**
  * [1.11.0] 合法闭环迁移（T4 §4 的 19 条，M1）。
  *
@@ -211,6 +230,18 @@ export const LIKELIHOODS = Object.freeze(['low', 'medium', 'high'])
 export const REASONING_EFFORTS = Object.freeze(['low', 'medium', 'high', 'xhigh', 'max'])
 export const DEFAULT_REASONING_EFFORT = 'high'
 
+/**
+ * [3.0.0][用户要求 9] 部门组员角色已取消——分工表/看板第三层只允许「全球顶尖专家」。
+ *
+ * 写入侧一律归一到 `expert`：历史计划与历史 journal 里可能存着 `role:'member'`
+ * （append-only，不迁移、不改写），若继续按「非 expert 即 member」兜底，
+ * 一次状态回写就会把已取消的角色重新写进存档，等于没取消。读取侧对
+ * `member` 的兼容由 dept-journal 的只读枚举保留，与本函数互不影响。
+ */
+export function normalizeDeptRole(_role: unknown): 'expert' {
+  return 'expert'
+}
+
 /*
  * [2.3.9][T3] LLM 家族静态规则（用户 2026-11-10 强制要求 1/2，主 Agent 权威口径）。
  *
@@ -269,13 +300,24 @@ export function effortForComplexity(family: ModelFamily | null, complexity: Task
   return COMPLEXITY_EFFORT_BY_FAMILY[family][complexity]
 }
 
-/** 集合内最高档（强度序与 runtime EFFORT_STRENGTH_ORDER 同源）；空集合返回 null。 */
+/**
+ * [3.0.0] 推理强度序单一真源（off < minimal < low < medium < high < xhigh < max）。
+ *
+ * 旧实现有三份逐字相同的副本（plan.ts 内联数组 / llm-rules.ts STATIC_STRENGTH_ORDER /
+ * runtime.ts EFFORT_STRENGTH_ORDER），改一处漏两处必然分叉。此处导出为唯一真源：
+ * llm-rules 已改从本模块导入；runtime.ts 的副本请同样改为
+ * `import { EFFORT_STRENGTH_ORDER } from './plan.js'`（由主代理转告 runtime 负责人）。
+ */
+export const EFFORT_STRENGTH_ORDER: readonly string[] = Object.freeze(
+  ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+)
+
+/** 集合内最高档（强度序见 EFFORT_STRENGTH_ORDER）；空集合返回 null。 */
 export function highestEffortOf(levels: readonly string[] | null): string | null {
   if (!levels || levels.length === 0) return null
-  const order = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
   let best: string | null = null
   for (const id of levels) {
-    if (best === null || order.indexOf(id) > order.indexOf(best)) best = id
+    if (best === null || EFFORT_STRENGTH_ORDER.indexOf(id) > EFFORT_STRENGTH_ORDER.indexOf(best)) best = id
   }
   return best
 }
@@ -822,6 +864,42 @@ function readSubtasks(value: any, stageIndex: any, errors: any) {
       push(errors, `${base}.estimateMinutes`, '必须是 1-240 的整数（仅防离谱值：越界或非整数拒绝、不改写；该字段可选，缺失合法）')
     }
     /*
+     * [SCv2-T4][Q2-B/C09/C10] 估时 >10 软门禁（GAP-1 消解：用户裁决 Q2=B 明确
+     * 「缺失时不拒绝（软门禁）」，AC-Q3-1 的「不存在超 10 无说明行」按「必须被
+     * 标记点名、不得显示达标」实现，不做硬拒绝——硬拒绝会推翻既有回归
+     * tests/time-estimate-negotiation.test.ts B2/O-2b（90/240 必须通过）。
+     * 1–240 区间与拒因文案零改动；叶子 1..10080 五处定义一处不改（C13 红线）。
+     * splitReason（拆分说明）/ estimateConfirm（用户确认留痕）二者其一即可
+     * 消除「需补说明」标记；标记只观测、不阻断（estimateOverCriterion /
+     * estimateNeedsJustification 仅在触发时下发，旧计划载荷逐字不变）。
+     */
+    if (source.splitReason !== undefined && source.splitReason !== null && typeof source.splitReason !== 'string') {
+      push(errors, `${base}.splitReason`, '必须是字符串（拆分说明：为什么不能拆到 ≤10 分钟；可选字段，缺失合法）')
+    }
+    const splitReasonText = typeof source.splitReason === 'string' ? source.splitReason.trim() : ''
+    let estimateConfirm: { confirmed: boolean; by?: string; at?: number; reason?: string } | null = null
+    if (source.estimateConfirm !== undefined && source.estimateConfirm !== null) {
+      if (!isRecord(source.estimateConfirm) || typeof source.estimateConfirm.confirmed !== 'boolean') {
+        push(errors, `${base}.estimateConfirm`, '必须是对象 { confirmed: boolean, by?, at?, reason? }（用户确认留痕，可选字段，缺失合法）')
+      } else {
+        const confirmAt = Number(source.estimateConfirm.at)
+        estimateConfirm = {
+          confirmed: source.estimateConfirm.confirmed,
+          ...(typeof source.estimateConfirm.by === 'string' && source.estimateConfirm.by.trim() !== ''
+            ? { by: truncate(source.estimateConfirm.by.trim(), 200) }
+            : {}),
+          ...(Number.isFinite(confirmAt) && confirmAt > 0 ? { at: confirmAt } : {}),
+          ...(typeof source.estimateConfirm.reason === 'string' && source.estimateConfirm.reason.trim() !== ''
+            ? { reason: truncate(source.estimateConfirm.reason.trim(), 800) }
+            : {}),
+        }
+      }
+    }
+    const estimateOverCriterion = estimateOk && estimateValue > CRITERION_TARGET_MINUTES
+    const estimateNeedsJustification = estimateOverCriterion
+      && splitReasonText === ''
+      && !(estimateConfirm && estimateConfirm.confirmed === true)
+    /*
      * [2.2.0][T3/O-3a] per-subtask 协商上限（timeoutMs，毫秒）可选透传。
      *
      * 方案 §2.2：「timeoutMs（可选）｜本子任务的协商上限；缺省由 estimateMinutes
@@ -854,6 +932,15 @@ function readSubtasks(value: any, stageIndex: any, errors: any) {
     if (hasEffort && !effortOk) {
       push(errors, `${base}.reasoningEffort`, '必须是 low / medium / high / xhigh / max 之一（可选字段，缺失时回落 high；非法值拒绝，不改写）')
     }
+    /*
+     * [3.0.0][用户要求 3] qualityRequirements：数组或单个字符串均可，空项丢弃、
+     * 去重、按 8 条 × 400 字符截断；全部为空则视为缺失（不拒绝）。
+     */
+    const qualityRequirements = normalizeQualityRequirements(source.qualityRequirements)
+    if (source.qualityRequirements !== undefined && source.qualityRequirements !== null
+      && !Array.isArray(source.qualityRequirements) && typeof source.qualityRequirements !== 'string') {
+      push(errors, `${base}.qualityRequirements`, '必须是字符串数组（主 Agent 对结果的质量要求；新计划必填：派发时缺失的子任务将被直接拒发 DISPATCH_QUALITY_REQUIREMENTS_MISSING，须 replan 补齐后重派；旧计划缺失合法，回落验收标准）')
+    }
     return {
       id: readString(source.id, `${base}.id`, 1, 16, errors),
       title: readString(source.title, `${base}.title`, 1, 200, errors),
@@ -872,6 +959,12 @@ function readSubtasks(value: any, stageIndex: any, errors: any) {
        */
       dependsOn: readStringArray(source.dependsOn, `${base}.dependsOn`, { min: 0, max: MAX_SUBTASKS - 1, itemMax: 16 }, errors),
       acceptance: readStringArray(source.acceptance, `${base}.acceptance`, { min: 1, max: 8, itemMax: 800 }, errors),
+      /*
+       * [3.0.0][用户要求 3] 主 Agent 派发给部门负责人时附带的「结果质量要求」。
+       * 新计划由规划器逐条写出；缺失时不拒绝（旧计划与回放零回归），由
+       * buildChildPrompt 回落为「验收标准即质量要求」并在块标题里如实写明来源。
+       */
+      ...(qualityRequirements.length > 0 ? { qualityRequirements } : {}),
       risk: readString(source.risk, `${base}.risk`, 1, 1000, errors),
       /*
        * [1.12.0] Optional: why this department was chosen. The planner prompt
@@ -892,6 +985,11 @@ function readSubtasks(value: any, stageIndex: any, errors: any) {
        * [1.7.0] 历史记录。
        */
       ...(estimateOk ? { estimateMinutes: estimateValue } : {}),
+      // [SCv2-T4][Q2-B] 软门禁标记与留痕：仅在触发/存在时下发（旧计划载荷不变）。
+      ...(estimateOverCriterion ? { estimateOverCriterion: true } : {}),
+      ...(estimateNeedsJustification ? { estimateNeedsJustification: true } : {}),
+      ...(splitReasonText !== '' ? { splitReason: truncate(splitReasonText, 800) } : {}),
+      ...(estimateConfirm ? { estimateConfirm } : {}),
       ...(timeoutOk ? { timeoutMs: timeoutValue } : {}),
       // [2.2.7][T4/五档] 缺省回落保持 high（DEFAULT_REASONING_EFFORT，D1 决策）：
       // 白名单由三档扩为五档（low / medium / high / xhigh / max）后，high 仍是
@@ -1208,6 +1306,20 @@ export function validatePlan(raw: any, options?: { allowedEfforts?: readonly str
     risks: readRisks(source.risks, errors),
     verification: readVerification(source.verification, errors),
     practiceLoop: readPracticeLoop(source.practiceLoop, errors),
+  }
+  /*
+   * [3.0.0] 质量要求必填门禁（用户要求 3/6，与派发期 checkSubtaskQualityRequirements
+   * 同口径）：激活时刻（v3-contract QUALITY_GATE_ACTIVATED_AT）之后创建的新计划，
+   * 读档/回放重新走 validatePlan 时，缺失 qualityRequirements 的子任务直接拒绝；
+   * 激活时刻前的历史计划由 isQualityGatePlan 豁免（createdAt 缺失/非法一律视为
+   * 旧计划放行），零回归。
+   */
+  if (isQualityGatePlan(source)) {
+    for (const { subtask } of flattenSubtasks(plan)) {
+      if (!Array.isArray(subtask.qualityRequirements) || subtask.qualityRequirements.length === 0) {
+        errors.push(`子任务 ${subtask.id}（${subtask.title}）缺 qualityRequirements：激活时刻后的新计划必填质量要求（与派发期门禁同口径 DISPATCH_QUALITY_REQUIREMENTS_MISSING），须 replan 补齐后重派`)
+      }
+    }
   }
   checkPlanGraph(plan, errors)
   if (errors.length > 0) return { ok: false, errors, notes: normalized.notes }
@@ -1581,25 +1693,28 @@ export function buildPlannerPrompt(taskText: any, cwd: any, conversationContext:
     '- department 必须从下面的部门中选择一个；必须同时写 departmentRationale（1-2 句，引用该部门职责与任务要素），department 与 rationale 不一致的计划视为不合格。',
     '- method、outputs、acceptance 必须是非空数组；inputs 可以为空，未知写“待确认”。',
     '- unknowns 和 assumptions 必须如实列出；没有就写空数组，不能把假设写成事实。',
-    '- 子任务必须可独立执行、可验收；不要为了凑数拆无意义任务。',
+    '- 子任务必须可独立执行、可验收；不要为了凑数拆无意义任务；10 分钟内（判据层完成目标）不能完美完成的任务必须在规划阶段事前拆小（拆分优先），不得以「要完美完成」为由保留大任务。',
     // [2.5.0] 用户要求 3：分解必须更简单。部门负责人拥有本部门内再分配权限
     // （dsh_workplan_delegate），会把子任务再拆给多名顶尖专家与组员，因此
     // 主计划层保持单一目标/单一主产物的简单子任务，执行细节下沉到部门内分工。
-    '- 分解必须更简单（用户强制要求）：每个子任务只写单一目标、单一主产物、可独立验收的一件事；不要把多个交付物压进同一个子任务。部门负责人接到子任务后，会用 dsh_workplan_delegate 把它再拆成更简单的单项工作，分配给本部门多名相关领域全球顶尖专家与组员共同承担——所以主计划子任务保持简单清晰即可，执行细节由部门内分工细化，不要越俎代庖替部门预拆全部细节。',
-    '- 子任务由部门负责人子 Agent 牵头执行：负责人拥有本部门内的再分配权限（dsh_workplan_delegate，先 review 提交两轮深度思考产物后 dispatch 派给本部门专家与组员），但没有主计划派发权限、不能重启服务、不能安装或升级依赖。禁止把「调用 dsh_workplan_dispatch」「重启/停止 dsh web」「安装或升级插件」这类只有主 Agent 才能执行的动作写进子任务；确实需要时，写成“给出结论或建议，由主 Agent 执行”。',
-    '- 单个子任务无须在 10 分钟内完成——10 分钟只是拆步规模建议，不是完成期限、也不构成承诺；实际时长由执行专家开工预告协商决定，不设固定完成时间；动手重的任务要拆成多个小步，避免整条计划被一个慢子任务拖住。',
+    '- 分解必须更简单（用户强制要求）：每个子任务只写单一目标、单一主产物、可独立验收的一件事；不要把多个交付物压进同一个子任务。部门负责人接到子任务后，会用 dsh_workplan_delegate 把它再拆成更简单的单项工作，分配给本部门多名相关领域全球顶尖专家共同承担（部门组员角色已按用户要求 9 取消）——所以主计划子任务保持简单清晰即可，执行细节由部门内分工细化，不要越俎代庖替部门预拆全部细节。再分配同样遵守拆分优先：部门负责人须把本行再拆到每项 10 分钟内，并把本行全部叶子的开工预估之和控制在 ≤10 分钟；预估未报齐时只显示部分和，不得视为达标。',
+    '- 子任务由部门负责人子 Agent 牵头执行：负责人拥有本部门内的再分配权限（dsh_workplan_delegate，先 review 提交两轮深度思考产物后 dispatch 派给本部门专家（只保留 expert 角色）），但没有主计划派发权限、不能重启服务、不能安装或升级依赖。禁止把「调用 dsh_workplan_dispatch」「重启/停止 dsh web」「安装或升级插件」这类只有主 Agent 才能执行的动作写进子任务；确实需要时，写成“给出结论或建议，由主 Agent 执行”。',
+    '- 判据层（完成目标 ≤10 分钟，默认必须达成）：每个子任务都要在 10 分钟内做完；10 分钟内做不完的任务必须在规划阶段事前拆小，不得以「要完美完成」为由保留大任务。',
+    '- 运行层安全兜底（不是固定交付期限、不构成对外承诺，也不构成「允许慢」的许可）：单次执行时限＝clamp(estimateMinutes×2.0, 1 秒, 120 分钟)，到点走安全兜底结算保证不丢产物；确需超过 10 分钟的唯一合法例外是用户明确批准并留痕（任务 ID、批准原文/来源、批准时间、放宽后分钟数、适用范围；无留痕＝未批准）；未获批准的超时不得以 done 收尾，记「判据违规（criterion-overrun）」并转新子任务续做。',
+    '- 生效时点（不回溯）：本判据自用户 2026-11-13 裁决（B/B/B/B/A/A/B）生效；运行态判定自补丁部署＋用户重启＋复核通过后新创建的计划起执行；此前已验收为 done 的历史任务与在途计划按旧规则，不重判、不重跑、不改验收结论。',
     // [2.3.2][D2-P2] 半角/逗号/括号自检硬约束：与解析层兜底（P0）互为防线，中文模型全角标点高发。
     '- JSON 只允许半角标点（, : " { } [ ]）；对象与数组的相邻成员之间必须有逗号；输出前自检括号成对、每个字符串以半角"闭合。',
     '- 不要输出 Markdown 代码围栏、解释或前后缀；只输出一个 JSON 对象。',
     '',
     '本轮时间预算（硬事实，请据此规划规模）：',
     totalMinutes > 0
-      ? `- 一轮总预算约 ${totalMinutes} 分钟（安全兜底，不是交付期限）；单个子任务规模参考 ${childMinutes} 分钟量级（仅供参考、非承诺，实际时长由执行专家开工预告协商决定）；同时最多 ${concurrency} 个子任务并行。`
+      ? `- 一轮总预算约 ${totalMinutes} 分钟（运行层安全兜底，不是交付期限）；判据层完成目标 ≤10 分钟；运行层规模参考 ${childMinutes} 分钟量级（仅供参考、非承诺，实际时长由执行专家开工预告协商决定），两个数字分属两层、不得混读；同时最多 ${concurrency} 个子任务并行。`
       : `- 本轮不设固定总预算；单个子任务按自身 estimateMinutes 与协商截止/延期执行；同时最多 ${concurrency} 个子任务并行。`,
     resumes > 0
       ? `- 受阻后自动续跑额度 ${resumes} 次；需要时计划会暂停并在下一轮继续。`
       : '- 自动续跑额度为 0；计划不会因轮次预算被暂停。',
-    '- 每个子任务必须写 estimateMinutes（整数 1-240，宁可估高）：你预估它需要多少分钟。宁可估高，不要估低。取值必须是整数，越界或非整数会被校验拒绝（仅防离谱值），缺失不报错。',
+    '- [3.0.0][用户要求 3/5] 每个子任务必须写 qualityRequirements（1-8 条字符串）：这是主 Agent 派给部门负责人时随任务书一起下达的「结果质量要求」，写清成果必须达到什么要求、什么算合格。缺失质量要求的子任务在派发时会被系统直接拒发（DISPATCH_QUALITY_REQUIREMENTS_MISSING，不启动部门 Agent），必须 replan 补齐后重新派发。同时子任务必须是简单到 1+1=2 的单项工作：一个目标、一个主产物、一项可独立验收；不要在一个子任务里塞并列的多件事（出现「并且/同时/另外/还要/以及/分别/顺便」或多句并列时应拆成多个子任务）。',
+    '- 每个子任务必须写 estimateMinutes（整数 1-240，宁可估高）：你预估它需要多少分钟。宁可估高，不要估低。取值必须是整数，越界或非整数会被校验拒绝（仅防离谱值），缺失不报错。估时与判据是两层：estimateMinutes 区间保留 1-240（不压缩到 10），宁可估高是事前信号、不是免责；estimateMinutes >10 的子任务必须同时写拆分说明（为什么不能拆到 ≤10 分钟）或用户确认留痕——缺失不拒绝（软门禁），但状态与回报必须标记「需补拆分说明或用户确认」，且不得显示「简单判据达标」。',
     /*
      * [2.2.0][T13/推理等级] 子 Agent 必须自决推理等级，禁止继承主 Agent。
      * 用户规则原文见 plan.ts 顶部 REASONING_EFFORTS 注释；五档映射与五个示例
@@ -1670,6 +1785,7 @@ export function buildPlannerPrompt(taskText: any, cwd: any, conversationContext:
     '          "inputs": ["输入；未知写待确认"],',
     '          "outputs": ["输出/交付物"],',
     '          "dependsOn": [],',
+    '          "qualityRequirements": ["必填：主 Agent 对这条任务结果的质量要求（可检查，1-8 条；缺失该子任务将被拒发）"],',
     '          "acceptance": ["可测试的验收标准"],',
     '          "risk": "主要风险",',
     '          "estimateMinutes": 5,',
@@ -1825,7 +1941,207 @@ function schedulePreHeadFlush(session: any) {
  * the protected system head exists (see surfaceHeadExists / flushPreHeadNotices),
  * so replay-after-restart validation can never see a pre-head user/message.
  */
-export function appendUserMessage(session: any, payload: any, source?: any, opts?: { deferUntilHead?: boolean }) {
+/*
+ * ================= [T7] 关键进度注入收敛（用户 2026-11-13 23:23 裁决） =================
+ * 基线：reports/T6_requirements_acceptance_baseline.md（C1–C6）＋
+ * reports/T5_keyprogress_spec.md；信封载体＝用户 2026-11-14 10:04 批准的选项 A
+ * （基线 §8）：全量 JSON 信封移入消息既有元数据位 source.durable（additive
+ * 可选键），不重命名/删除任何现有字段、旧消息零迁移、parse 先读元数据回退旧
+ * 文本标记。本闸门只做三件事：
+ *  1) 事件过滤：C2 禁止清单（心跳/预告/预估上报等过程通知）整条不注入；
+ *     durable 信封类消息（update/replan/cancel/result/change）的可见文本由
+ *     各自 builder 裁剪，信封随 source.durable 落盘保证回放兼容（C4）。
+ *  2) 单条上限 500 字符（C3）：超出截断＋按需查询指针；截断优先级由 builder
+ *     保证（状态/阻塞原因/下一步在前，标题等修饰在后）。
+ *  3) 整轮累计上限 4000 字符（C3）：roundKey=`planId:dispatchedAt`，派发时
+ *     resetRoundInjectionBudget 显式重置；达上限后新事件压缩为极简一行。
+ * 豁免（运营必需，非进度通知）：计划定义消息（含 PLAN_MARKER，用户必须看到
+ * 计划全文且回放依赖）、workplan-change（用户变更原文）、指示/followup 等
+ * P2 运营消息（不经本闸门）。工具返回一律不裁（按需通道，C4/F8）。
+ */
+export const KEY_PROGRESS_SINGLE_LIMIT = 500
+export const KEY_PROGRESS_ROUND_LIMIT = 4000
+const KEY_PROGRESS_POINTER = '（详见按需查询：dsh_workplan_status／计划台账／reports 产物）'
+const KEY_PROGRESS_BUDGET_POINTER = '（本轮注入预算用尽，详见按需查询：dsh_workplan_status／reports 产物）'
+
+const roundInjectionBudget = new WeakMap<object, { roundKey: string; used: number }>()
+
+/** 派发开轮时重置整轮注入预算（runtime.dispatchPlan / 自动派发各调一次）。 */
+export function resetRoundInjectionBudget(session: any, roundKey: string) {
+  if (!session || typeof session !== 'object') return
+  roundInjectionBudget.set(session, { roundKey: String(roundKey ?? ''), used: 0 })
+}
+
+function roundBudgetOf(session: any) {
+  let budget = roundInjectionBudget.get(session)
+  if (!budget) {
+    budget = { roundKey: '', used: 0 }
+    roundInjectionBudget.set(session, budget)
+  }
+  return budget
+}
+
+/** 单条 500 字符上限：超出截断并附按需查询指针（truncate 的 … 计入长度）。 */
+export function capKeyProgressText(text: string) {
+  if (text.length <= KEY_PROGRESS_SINGLE_LIMIT) return text
+  return truncate(text, KEY_PROGRESS_SINGLE_LIMIT - KEY_PROGRESS_POINTER.length) + KEY_PROGRESS_POINTER
+}
+
+/*
+ * C2 禁止清单（前缀逐字来自现有 builder 文案，F2 37/37 分类表 B 类）：
+ * 派发/规划心跳、规划/派发预告、专家预估上报、规划失败重试过程通知。
+ * 最终失败仍由 buildDegradedMessage 另行提示，不在此列。
+ */
+const BANNED_NOTICE_PREFIXES = [
+  '【派发执行中】',
+  '【规划预告】',
+  '【规划进行中】',
+  '【派发预告】',
+  '【dsh-workplan·专家预估上报】',
+  '【自动分解】第 ',
+]
+export function isBannedProgressNotice(text: string) {
+  return BANNED_NOTICE_PREFIXES.some((prefix) => text.startsWith(prefix))
+}
+
+/* 信封已迁至 source.durable 的 kind：可见文本由 builder 负责，闸门只做上限。 */
+const DURABLE_ENVELOPE_KINDS = new Set([
+  'workplan-update', 'workplan-replan', 'workplan-cancel', 'workplan-result', 'workplan-change',
+])
+
+/*
+ * ============ [2.5.5][T10] 非关键 workplan-update 合并闸（用户 2026-11-14 裁决 A） ============
+ * 现象（用户截图 IMG_0472/IMG_0473）：一个 7 子任务的计划跑完，对话里堆了 37 条
+ * 「上下文注入 · workplan-update · 【状态改判】…」卡片；每条都是空可见文本的台账
+ * 事件，模型上下文里没有正文，但每一条都作为独立 user/message 事件落盘、被界面
+ * 逐条渲染成卡片，把对话刷满。
+ *
+ * 治本：这类事件是台账，不是对话。对话里只需要「关键节点」（keyProgress===true，
+ * 由 buildUpdateMessage 写出真实一行文案）。非关键台账事件先进入按 session 的
+ * 有界缓冲，在下列任一时机合并成**一条**汇总消息落盘：
+ *   - 下一条可落盘消息到来之前（保序，回放顺序与原逐条追加一致）；
+ *   - 缓冲静默 PENDING_UPDATE_FLUSH_MS（当前 20s；崩溃前最多丢一个静默窗口的台账，而不是整轮）；
+ *   - 条数 / 体积达到上限（防止单条消息过大）；
+ *   - 本轮结算 finishRound 之前。
+ * 回放侧 parseUpdateMessages 把汇总消息里的 updates 数组按序逐条返回，语义与
+ * 逐条落盘完全等价（reconstructFromSession 仍是唯一的应用者）。
+ */
+export const PENDING_UPDATE_COUNT_LIMIT = 100
+export const PENDING_UPDATE_SIZE_LIMIT = 200_000
+const PENDING_UPDATE_FLUSH_MS = 20_000
+
+interface PendingUpdateBuffer {
+  planId: string
+  updates: any[]
+  size: number
+  dropped: number
+}
+
+const pendingUpdateBuffers = new WeakMap<object, PendingUpdateBuffer>()
+const pendingUpdateTimers = new WeakMap<object, ReturnType<typeof setTimeout>>()
+const flushingUpdateSessions = new WeakSet<object>()
+
+function pendingBufferOf(session: any): PendingUpdateBuffer {
+  let buffer = pendingUpdateBuffers.get(session)
+  if (!buffer) {
+    buffer = { planId: '', updates: [], size: 0, dropped: 0 }
+    pendingUpdateBuffers.set(session, buffer)
+  }
+  return buffer
+}
+
+/** 缓冲里还有多少条未落盘的台账事件（测试/诊断用）。 */
+export function pendingWorkplanUpdateCount(session: any) {
+  const buffer = session && typeof session === 'object' ? pendingUpdateBuffers.get(session) : undefined
+  return buffer ? buffer.updates.length : 0
+}
+
+function schedulePendingUpdateFlush(session: any) {
+  if (typeof setTimeout !== 'function') return
+  if (pendingUpdateTimers.has(session)) return
+  const timer = setTimeout(() => {
+    pendingUpdateTimers.delete(session)
+    try {
+      flushPendingWorkplanUpdates(session)
+    } catch {
+      /* 定时补发失败不抛：下一次 append / 结算会再试，台账不静默消失。 */
+    }
+  }, PENDING_UPDATE_FLUSH_MS)
+  if (typeof (timer as any)?.unref === 'function') (timer as any).unref()
+  pendingUpdateTimers.set(session, timer)
+}
+
+/**
+ * 把一条「空可见文本的 workplan-update」放进缓冲。
+ * @returns true 表示已缓冲（调用方不得再 append）；false 表示不是可缓冲事件。
+ */
+function tryBufferWorkplanUpdate(session: any, message: any) {
+  const durable = message?.source?.durable
+  if (!isRecord(durable) || durable.kind !== 'workplan-update') return false
+  if (Array.isArray(durable.updates)) return false
+  if (messageText(message).trim() !== '') return false
+  const buffer = pendingBufferOf(session)
+  if (!buffer.planId && typeof durable.planId === 'string') buffer.planId = durable.planId
+  buffer.updates.push(durable)
+  try {
+    buffer.size += JSON.stringify(durable).length
+  } catch {
+    buffer.size += 512
+  }
+  while (buffer.updates.length > PENDING_UPDATE_COUNT_LIMIT) {
+    buffer.updates.shift()
+    buffer.dropped += 1
+  }
+  if (buffer.updates.length > 0 && (buffer.updates.length >= PENDING_UPDATE_COUNT_LIMIT || buffer.size >= PENDING_UPDATE_SIZE_LIMIT)) {
+    flushPendingWorkplanUpdates(session)
+  } else {
+    schedulePendingUpdateFlush(session)
+  }
+  return true
+}
+
+/**
+ * 把缓冲的台账事件合并成一条汇总 user/message 落盘（保序）。
+ * 无缓冲时返回 undefined；内部经 appendUserMessage，因此同样受单条/整轮上限约束。
+ */
+export function flushPendingWorkplanUpdates(session: any) {
+  if (!session || typeof session !== 'object') return undefined
+  const buffer = pendingUpdateBuffers.get(session)
+  if (!buffer || buffer.updates.length === 0) return undefined
+  const updates = buffer.updates
+  const planId = buffer.planId || (typeof updates[updates.length - 1]?.planId === 'string' ? updates[updates.length - 1].planId : '')
+  const tail = updates
+    .slice(-6)
+    .map((item: any) => `${String(item?.subtaskId ?? '计划级')}→${String(item?.status ?? '更新')}`)
+    .join('；')
+  const more = updates.length > 6 ? `；另 ${updates.length - 6} 条` : ''
+  const dropped = buffer.dropped > 0 ? `；早期 ${buffer.dropped} 条已丢弃` : ''
+  const text = capKeyProgressText(`【进度归档】${updates.length} 条台账更新已合并（${tail}${more}${dropped}）`)
+  const summary = truncate(`【进度归档】${updates.length} 条台账更新已合并落盘`, 120)
+  const message = makeUserMessage(text, {
+    kind: 'workplan-update',
+    form: 'notice',
+    summary,
+    durable: { kind: 'workplan-update', version: PLAN_VERSION, planId, updates, merged: true, at: Date.now() },
+  })
+  if (userMessageShapeProblem(message) !== null) return undefined
+  flushingUpdateSessions.add(session)
+  try {
+    const appended = appendUserMessage(session, message)
+    /* 只有真正落盘才清空缓冲：append 抛错时下次 flush 重试，台账不静默消失。 */
+    if (pendingUpdateBuffers.get(session) === buffer) pendingUpdateBuffers.delete(session)
+    const timer = pendingUpdateTimers.get(session)
+    if (timer) {
+      clearTimeout(timer as any)
+      pendingUpdateTimers.delete(session)
+    }
+    return appended
+  } finally {
+    flushingUpdateSessions.delete(session)
+  }
+}
+
+export function appendUserMessage(session: any, payload: any, source?: any, opts?: { deferUntilHead?: boolean; allowBanned?: boolean }) {
   if (!session || typeof session.append !== 'function') return undefined
   let message = payload
   if (typeof payload === 'string') {
@@ -1834,6 +2150,47 @@ export function appendUserMessage(session: any, payload: any, source?: any, opts
   }
   const problem = userMessageShapeProblem(message)
   if (problem !== null) throw new Error(`dsh-workplan: refusing to append malformed user/message (${problem})`)
+  /*
+   * [2.5.5][T10] 合并闸（在收敛闸门之前）：
+   *  - 非关键台账（空可见文本的 workplan-update）→ 进缓冲，本次不落盘；
+   *  - 其它任何消息落盘前，先把缓冲合并成一条汇总消息（保序），再落本条。
+   * 关键节点（keyProgress===true，文本非空）不缓冲、文案不变。
+   */
+  if (!flushingUpdateSessions.has(session)) {
+    if (tryBufferWorkplanUpdate(session, message)) return undefined
+    try {
+      flushPendingWorkplanUpdates(session)
+    } catch {
+      /* 汇总落盘失败不得拖垮本条关键消息：缓冲保留，下一次落盘/结算再试。 */
+    }
+  }
+  /*
+   * [T7] 收敛闸门（形状校验之后、头前暂存之前——暂存队列绕过闸门直接
+   * append，所以过滤与计数必须在这里完成，flushPreHeadNotices 补写的已是
+   * 裁剪后消息）。durable 信封类（update/replan/cancel/result/change）的
+   * 可见文本由 builder 裁剪；空文本 durable 事件仍必须 append（回放台账）。
+   */
+  const noticeKind = String(message?.source?.kind ?? '')
+  const originalText = messageText(message)
+  const durableEnvelope = DURABLE_ENVELOPE_KINDS.has(noticeKind)
+  // C2：过程通知整条不注入。allowBanned 仅供「用户显式要求必须送达」的
+  // 必需通知（如 2.3.0 用户要求 1 的专家预估上报）走专用豁免；禁用清单本身
+  // 保持不变，isBannedProgressNotice 的语义不变。
+  if (!opts?.allowBanned && !durableEnvelope && originalText && isBannedProgressNotice(originalText)) return undefined
+  // 计划定义（PLAN_MARKER）与用户变更原文（workplan-change）豁免上限。
+  const exemptFromCap = noticeKind === 'workplan-change' || originalText.includes(PLAN_MARKER_BEGIN)
+  if (originalText.length > 0 && !exemptFromCap) {
+    const budget = roundBudgetOf(session)
+    let capped: string
+    if (budget.used >= KEY_PROGRESS_ROUND_LIMIT) {
+      // 极简一行：首行（关键进度行以 ID+状态开头）＋按需指针；不静默丢失。
+      capped = truncate(originalText.split('\n')[0] ?? '', 80) + KEY_PROGRESS_BUDGET_POINTER
+    } else {
+      capped = capKeyProgressText(originalText)
+    }
+    budget.used += capped.length
+    if (capped !== originalText) message = { ...message, content: [{ type: 'text', text: capped }] }
+  }
   /*
    * [2.5.5][治本·前置闸] 受保护系统头（首个 system/message）落地前的 surface
    * 写入一律暂存、头后按序补发。覆盖两类来源：① 调用方显式 opts.deferUntilHead
@@ -2098,14 +2455,19 @@ export function buildPhaseZeroLeaderPrompt(input: { subtaskId?: string; title?: 
     `你是「${input.departmentLabel ?? '部门'}」部门的执行负责人，当前处于 phase-0（先配置后开工，low 档启动）。`,
     `你的子任务：${input.subtaskId ?? ''} ${input.title ?? ''}`,
     `任务目标：${input.objective ?? '（未记录）'}`,
-    '本阶段唯一职责：全面评估你接到任务的复杂度，然后调用 dsh_workplan_delegate(action="review") 提交两轮深度思考产物（第一轮任务深研 + 第二轮方法流程步骤 + 依据 approachBasis）与分工表，并在 consolidation.taskReasoningEffort 里配置你自己的整体推理等级（轻度=low；qwen 中等=medium、非 qwen 中等=high；qwen 非常复杂=xhigh、非 qwen 非常复杂=max）。',
+    '本阶段唯一职责：全面评估你接到任务的复杂度，然后调用 dsh_workplan_delegate(action="review") 提交两轮深度思考产物（第一轮任务深研 + 第二轮方法流程步骤 + 依据 approachBasis）与分工表，并在 consolidation.taskReasoningEffort 里配置你自己的整体推理等级（轻度=low；qwen 中等=medium、非 qwen 中等=high；qwen 非常复杂=xhigh、非 qwen 非常复杂=max）。若评估为 low（轻度）或未配置：禁止下派——不要提交分工表，改经 dsh_workplan_delegate(action="direct") 登记两轮思考产物（deepThink，40/40/20 字，可选 reasoningEffort="low"），平台以 low 档接续你亲自执行。',
     '不要执行任务本身，不要派发下级（review 登记前 dispatch 会被硬门禁拒绝）。提交 review 后结束本回合；平台会立即以你的自配档接续本会话进入 phase-1（正式分配流程）。',
   ].join('\n')
 }
 
 /** [2.5.0][自配档] phase-0→phase-1 接续块（负责人）：携带 phase-0 产物+继续勿重做。 */
-export function buildPhaseZeroContinuationHint(effort: string, phaseZeroOutput: string) {
-  return `【phase-0→phase-1 接续——继续勿重做】你已在 phase-0 完成复杂度评估并配置整体推理等级 \`${effort}\`（effortOverride 已登记，重试/续跑全程生效）。平台已按你的自配档接续本会话；phase-0 输出：${truncate(String(phaseZeroOutput ?? ''), 600) || '（无）'}。直接进入正式分配流程（review 已登记则 dispatch，未登记先补齐 review），不要重新评估复杂度，不要重做 phase-0 已完成的工作。`
+export function buildPhaseZeroContinuationHint(effort: string, phaseZeroOutput: string, lowDirect = false) {
+  // [2.5.5][T3] W11：low 直执行（effortOverride='low' 且分工表为空）时指路 direct 亲自执行；
+  // 缺省 false，既有调用零影响（调用点派生量由 runtime 传入）。
+  const nextStep = lowDirect
+    ? 'low 任务亲自执行：禁止 review/dispatch（low 禁派闸）；两轮思考产物未登记先经 action="direct" 补齐，然后直接执行任务'
+    : '直接进入正式分配流程（review 已登记则 dispatch，未登记先补齐 review）'
+  return `【phase-0→phase-1 接续——继续勿重做】你已在 phase-0 完成复杂度评估并配置整体推理等级 \`${effort}\`（effortOverride 已登记，重试/续跑全程生效）。平台已按你的自配档接续本会话；phase-0 输出：${truncate(String(phaseZeroOutput ?? ''), 600) || '（无）'}。${nextStep}，不要重新评估复杂度，不要重做 phase-0 已完成的工作。`
 }
 
 export function buildBudgetWarning(plan: any, totalBudgetMinutes = 0, maxResumes = MAX_PLAN_RESUMES) {
@@ -2121,7 +2483,7 @@ export function buildBudgetWarning(plan: any, totalBudgetMinutes = 0, maxResumes
    * 把预估标注为仅供参考/非承诺」：凡 buildBudgetWarning 有输出必带该标注，
    * 计划消息经 warning 路径同享，不再按超预算与否吞掉）。
    */
-  const advisory = '（子任务 estimateMinutes 预估仅供参考，非承诺；实际时长协商决定：由执行专家开工预告协商，不设固定完成时间。）'
+  const advisory = '（子任务 estimateMinutes 预估仅供参考，非承诺；判据层完成目标 ≤10 分钟，默认必须达成、超出须用户明确批准并留痕；运行层安全兜底由执行专家开工预告协商决定，不设固定交付期限、不构成对外承诺。）'
   // [2.2.5] 0 = 本轮不设固定总预算：只保留“预估仅供参考”的标注，不再输出
   // “超过本轮预算/需要 N 轮”的提示，避免与“不强制限制”的目标矛盾。
   if (budget === 0 || minutes <= budget) return advisory
@@ -2132,7 +2494,7 @@ export function buildBudgetWarning(plan: any, totalBudgetMinutes = 0, maxResumes
       + `预计需要约 ${rounds} 轮（续跑额度 ${maxResumes} 次）。`,
     advisory,
     '建议：拆成多轮，或减少同时进行的子任务。',
-    ...(missing ? ['（部分子任务缺少 estimateMinutes，已按每项 15 分钟默认值估算。）'] : []),
+    ...(missing ? ['（部分子任务缺少 estimateMinutes，已按运行层预算默认值每项 15 分钟估算。）'] : []),
   ].join('\n')
 }
 
@@ -2152,8 +2514,22 @@ export function buildPlanMessage(plan: any, options: any = {}) {
     options.totalBudgetMinutes ?? 0,
     options.maxResumes ?? MAX_PLAN_RESUMES,
   )
+  /*
+   * [3.0.0][用户要求 1] 用户刚才输入的任务内容必须能在会话内看到。
+   *
+   * 事故现象（用户 2026-11-14）：在等待任务分配期间切换会话、再切回来，
+   * 一开始输入的任务内容在会话里看不到了——用户失去对自己需求的可见性。
+   * 计划消息是持久化的会话事件（plan 卡片 + 这条 user/message 都落盘），
+   * 因此把任务原文逐字带进本条消息的可见文本：无论渲染层把首条用户消息
+   * 如何处理，任务内容都还在会话里、且与 taskAnchor 同一来源、同一哈希。
+   */
+  const taskAnchorText = typeof plan?.taskAnchor?.text === 'string' ? plan.taskAnchor.text.trim() : ''
+  const taskTextBlock = taskAnchorText === ''
+    ? []
+    : ['用户刚才输入的任务原文（只读锚点，与你最初的输入逐字一致）：', truncate(taskAnchorText, 4000)]
   const text = [
     summary,
+    ...(taskTextBlock.length > 0 ? ['', ...taskTextBlock] : []),
     /*
      * [2.2.0][T3/O-5b/E2] 计划消息中的预估一律标注「非承诺」（方案 §1⑤ O-5b：
      * 「预估一律标注『仅供参考，实际时长由执行专家预告协商』」；验收 E2）。
@@ -2420,6 +2796,13 @@ export function buildResultMessage(result: any) {
     review.push(`- 声明产物缺失：${missingArtifacts.slice(0, 10).join('；')}`)
   }
   /*
+   * [T9] review[] 明细随 durable 信封落盘（C2「按需可查」）：可见正文收敛为
+   * 一行关键进度，但未验证/自检失败/旧格式/缺失产物/待指示等证据核对明细
+   * 不得「构造后无人使用」成为死代码；parseResultMessage 优先读 durable，
+   * 主 Agent 与回放可按需取回逐项内容。
+   */
+  const envelope = review.length > 0 ? { ...payload, review } : payload
+  /*
    * [1.8.7] 未完成时不能再命令「给出最终答复」。
    *
    * 事故（session-99984ebd…，2026-10-31 12:02）：预算到点返回 10/13，本条消息
@@ -2457,41 +2840,52 @@ export function buildResultMessage(result: any) {
     : paused
       ? `本轮执行预算用尽，剩余 ${Number(result.stats?.pending ?? 0)} 项未完成（不是失败、未计入续跑额度）：再次调用 dsh_workplan_dispatch 即可从剩下的步骤继续，已完成的不重跑。`
       : `剩余 ${remaining} 项子任务还没有完成：再次调用 dsh_workplan_dispatch 即可继续跑，已完成的不重跑。`
-  const lines = [
-    summary,
-    '',
-    '各部门子任务结果如下，请主 Agent：',
-    '1. 核对每个完成项的证据与验收标准；',
-    '2. 处理受阻项，必要时向用户确认；',
-    ...(cancelled
-      ? [
-          `3. 【已取消但未完成，禁止交付】计划只完成 ${doneCount}/${totalCount}，剩余 ${remaining} 项（取消只停止执行，不等于完成）：不要调用 present，不要写“已完成/最终版/已交付”，不要给出收尾性最终答复，不要声称未验证的完成。`,
-          '4. 不要再调用 dsh_workplan_dispatch（计划已取消，不会启动任何部门 Agent）。如需继续这项工作，请向用户确认后重新生成计划。答复开头必须写「未完成：剩余 N 项与原因」。',
-        ]
-      : incomplete
-        ? [
-            `3. 【未完成，禁止交付】计划只完成 ${doneCount}/${totalCount}，还有 ${remaining} 项没做完：不要调用 present 交付当前产物，不要写“已完成/最终版/已交付”，也不要给出收尾性最终答复，不要声称未验证的完成。`,
-            `4. ${recovery}`,
-          ]
-        : evidenceBlocked
-          ? [
-              `3. 【证据未通过，禁止交付】计划 ${doneCount}/${totalCount} 虽已全部 done，但以下证据缺口未通过：${shownBlockers}${deliveryBlockers.length > 8 ? '…' : ''}。不要调用 present，不要写“已完成/最终版/已交付”，不要给出收尾性最终答复，不要声称未验证的完成。`,
-              '4. 先用 dsh_workplan_update 为这些子任务补齐 verification=\'structured\' 与 acceptance（每项 result=\'pass\'，并附证据），或把对应子任务改回 blocked 并写明原因；缺口补齐、deliveryReady 变为 true 之后 present 才会放行。',
-            ]
-          : ['3. 给出最终答复，不要声称未验证的完成。']),
-    ...(review.length > 0 ? ['', '验收核对：', ...review] : []),
-    ...(needs.length > 0
-      ? ['', '跨部门待转达（子 Agent 提出的需求；用 dsh_workplan_handoff 逐条 assign/resolve/close，未处置会拦住交付）：', ...needs.slice(0, 10).map((line: string) => `- ${line}`)]
-      : []),
-    '',
-    RESULT_MARKER_BEGIN,
-    JSON.stringify(payload),
-    RESULT_MARKER_END,
-  ]
-  return makeUserMessage(lines.join('\n'), {
+  /*
+   * [T7] 可见文本收敛（C1b/C3）＋信封载体迁移（选项 A）：轮结果只注入一行
+   * 计划级关键进度——完成 X/Y、deliveryReady、剩余项 ID 与原因、待指示、
+   * 下一步；全量 statuses/证据核对/跨部门需求明细随 source.durable 落盘，
+   * 主 Agent 用 dsh_workplan_status／dsh_workplan_handoff 按需获取。
+   * 偏离留痕：设计书原定「非终态过程轮不注入摘要」，实现改为每轮一行——
+   * 轮结束是主 Agent 续跑/交付决策的触发事件（async 派发唯一通知源），
+   * 整条置空会使在途编排停摆（违反 C4 在途行为不变）；一行 ≤500 字符，
+   * 体积相对旧版（可达数千字符）仍收敛 >90%。
+   */
+  const remainingRows = statuses.filter((item: any) => item?.status !== 'done')
+  const remainingIds = remainingRows.map((item: any) => String(item?.subtaskId ?? '')).filter((id: string) => id !== '')
+  const firstReason = truncate(String(remainingRows[0]?.error ?? remainingRows[0]?.question ?? remainingRows[0]?.summary ?? '').replace(/\s+/g, ' ').trim(), 80)
+  const nextAction = cancelled
+    ? '已取消：禁止交付、不再派发'
+    : (!incomplete && readiness?.ready === true)
+      ? '全部完成且可交付：核对证据后 present'
+      : evidenceBlocked
+        ? `证据未通过（缺口 ${deliveryBlockers.length} 处）：用 dsh_workplan_update 补齐后再交付`
+        : escalations.length > 0
+          ? '先答复待指示项（instruct）再续跑'
+          : '再次 dsh_workplan_dispatch 续跑（已完成不重跑）'
+  const keyParts = [summary.replace(/^【部门执行结果】/, '【关键进度·计划级】')]
+  keyParts.push(`deliveryReady=${readiness ? String(readiness.ready) : '未知'}`)
+  if (remainingIds.length > 0) {
+    keyParts.push(`剩余 ${remainingIds.length} 项：${remainingIds.slice(0, 6).join('、')}${remainingIds.length > 6 ? '…' : ''}${firstReason ? `（首个原因：${firstReason}）` : ''}`)
+  }
+  if (escalations.length > 0) keyParts.push(`待指示：${escalationIds}（先 instruct 答复）`)
+  if (needs.length > 0) keyParts.push(`跨部门需求 ${needs.length} 条待处置（dsh_workplan_handoff list）`)
+  /*
+   * [T9] 旧多行正文里的两条决策必需信息必须在「一行关键进度」里保活：
+   * ①未就绪时显式禁止 present（不能只靠回合收尾 steer：结果消息可能是模型
+   *   当轮唯一读到的通知）；②受阻/暂停/未完成时披露续跑额度与恢复指引
+   *   （旧正文的「剩余续跑额度 N 次」「不会再自动重跑→直接接手」不得丢失）。
+   * 取消是终态，不附恢复指引（否则等于教模型对已取消计划再次派发）。
+   */
+  const notDeliverable = cancelled || incomplete || (readiness !== null && readiness.ready === false)
+  if (notDeliverable) keyParts.push('禁止交付：不要调用 present')
+  if (!cancelled && (incomplete || blocked > 0 || paused)) keyParts.push(`恢复指引：${truncate(recovery, 200)}`)
+  keyParts.push(`下一步：${nextAction}`)
+  const keyText = capKeyProgressText(keyParts.join('｜'))
+  return makeUserMessage(keyText, {
     kind: 'workplan-result',
     form: 'notice',
     summary,
+    durable: envelope,
   })
 }
 
@@ -2612,6 +3006,9 @@ export function parseWorkplanMessage(message: any) {
 }
 
 export function parseResultMessage(message: any) {
+  /* [T7] 先读元数据信封（source.durable，选项 A），回退旧文本标记。 */
+  const durable = message?.source?.durable
+  if (isRecord(durable) && durable.kind === 'workplan-result') return durable
   const body = extractBetween(messageText(message), RESULT_MARKER_BEGIN, RESULT_MARKER_END)
   if (!body) return null
   try {
@@ -2651,28 +3048,17 @@ export function buildCancelMessage(planId: any, reason: any = '用户取消', te
     reason: String(reason || '用户取消'),
     cancelledAt: Date.now(),
   }
-  const lines = [
-    summary,
-    '',
-    '这次任务分解已取消。取消只停止后续执行，不会把未完成项标成完成；已完成项保留原记录。',
-    /*
-     * [1.8.13] Cancel is not a delivery permit. The old text stopped at "不会
-     * 标成完成" and never told the model what that means for the reply, so the
-     * T5-C snapshot could cancel 1/3 and then present. The same readiness
-     * predicate now rejects that present, and this message states the output
-     * contract so the model does not try.
-     */
-    '取消不等于完成：如仍有未完成项或证据缺口，不要调用 present，不要写“已完成/最终版/已交付”；',
-    '答复开头必须写「未完成：剩余 N 项（列出 ID）与原因」。',
-    '',
-    CANCEL_MARKER_BEGIN,
-    JSON.stringify(payload),
-    CANCEL_MARKER_END,
-  ]
-  return makeUserMessage(lines.join('\n'), {
+  /*
+   * [T7] 可见文本收敛＋信封迁移（选项 A）：取消是计划级终态事件（C1b），
+   * 保留一行关键进度与「取消≠完成」输出契约；全量信封随 source.durable
+   * 落盘，parseCancelMessage 先读元数据回退旧文本标记（旧消息零迁移）。
+   */
+  const keyText = capKeyProgressText(`${summary}｜取消≠完成：未完成项不得交付、不得声称完成；不要调用 present；答复开头须写「未完成：剩余 N 项（列出 ID）与原因」（按需：dsh_workplan_status）`)
+  return makeUserMessage(keyText, {
     kind: 'workplan-cancel',
     form: 'notice',
     summary,
+    durable: payload,
   })
 }
 
@@ -2712,25 +3098,20 @@ function buildSupersededMessage(planId: any, reason: any, terminal: any) {
     supersededAt,
     supersededBy: by,
   }
-  const lines = [
-    summary,
-    '',
-    '这次任务分解的责任已转移给一个可验证的承接计划。被取代不等于完成：',
-    '原计划的记录与计数原样保留，未完成项永远不会因为这次转移而变成完成。',
-    '交付时只能使用承接计划通过交付就绪检查的产物；原计划不作为完成证据。',
-    '',
-    CANCEL_MARKER_BEGIN,
-    JSON.stringify(payload),
-    CANCEL_MARKER_END,
-  ]
-  return makeUserMessage(lines.join('\n'), {
+  /* [T7] 可见文本收敛＋信封迁移（选项 A）：取代是计划级终态事件（C1b）。 */
+  const keyText = capKeyProgressText(`${summary}｜被取代≠完成：原计划记录原样保留，未完成项不会因转移变成完成；交付只用承接计划通过就绪检查的产物（按需：dsh_workplan_status）`)
+  return makeUserMessage(keyText, {
     kind: 'workplan-cancel',
     form: 'notice',
     summary,
+    durable: payload,
   })
 }
 
 export function parseCancelMessage(message: any) {
+  /* [T7] 先读元数据信封（source.durable，选项 A），回退旧文本标记。 */
+  const durable = message?.source?.durable
+  if (isRecord(durable) && durable.kind === 'workplan-cancel') return durable
   const body = extractBetween(messageText(message), CANCEL_MARKER_BEGIN, CANCEL_MARKER_END)
   if (!body) return null
   try {
@@ -2761,34 +3142,14 @@ export function normaliseCriterion(value: any) {
 /**
  * [2.0.4] 两条验收描述的相似度（0–1）。
  *
- * 用字符二元组 Dice 系数而不是编辑距离：中文短句里「逐项」「一致性」这类
+ * [3.0.0] 算法实现统一以 v3-contract 的 diceSimilarity 为单一真源
+ * （字符二元组 Dice 系数而不是编辑距离：中文短句里「逐项」「一致性」这类
  * 词被增删时，二元组重合度比字符级编辑距离更接近人的判断，也不需要引入
- * 任何依赖。空串与单字返回 0，交给调用方的长度门槛处理。
+ * 任何依赖）；本函数保留为兼容别名，调用方阈值语义不变（此处 ≥0.7）。
  */
 export function criterionSimilarity(a: string, b: string) {
   if (!a || !b) return 0
-  if (a === b) return 1
-  const grams = (text: string) => {
-    const chars = Array.from(text)
-    const out = new Map<string, number>()
-    for (let i = 0; i + 1 < chars.length; i += 1) {
-      const gram = chars[i] + chars[i + 1]
-      out.set(gram, (out.get(gram) ?? 0) + 1)
-    }
-    return out
-  }
-  const left = grams(a)
-  const right = grams(b)
-  let leftTotal = 0
-  let rightTotal = 0
-  for (const count of left.values()) leftTotal += count
-  for (const count of right.values()) rightTotal += count
-  if (leftTotal === 0 || rightTotal === 0) return 0
-  let overlap = 0
-  for (const [gram, count] of left) {
-    overlap += Math.min(count, right.get(gram) ?? 0)
-  }
-  return (2 * overlap) / (leftTotal + rightTotal)
+  return diceSimilarity(a, b)
 }
 
 /**
@@ -3435,7 +3796,7 @@ export interface AdjudicateResult {
   [extra: string]: unknown
 }
 
-export function adjudicateResult({ output, strict = true, expectedAcceptance = [], requirePhases = true }: any): AdjudicateResult {
+export function adjudicateResult({ output, strict = true, expectedAcceptance = [], requirePhases = true, formatTier, expectedExperts = [] }: any): AdjudicateResult {
   const text = typeof output === 'string' ? output : ''
   const parsed = parseEvidenceBlock(text)
   if (!strict) {
@@ -3676,6 +4037,13 @@ export function adjudicateResult({ output, strict = true, expectedAcceptance = [
       payload,
       text,
       Array.isArray(expectedAcceptance) ? expectedAcceptance.length : 0,
+      /*
+       * [3.0.0] F10/F11 按接收者层级启用：计划行（部门负责人）的结果必须带
+       * departmentSummary（用户要求 10/11），专家结果必须带 report（用户要求 7）。
+       * 调用方不声明层级时两条都不查（历史回放零回归）。
+       */
+      { tier: formatTier === 'expert' ? 'expert' : formatTier === 'leader' ? 'leader' : undefined,
+        expectedExperts: Array.isArray(expectedExperts) ? expectedExperts : [] },
     )
   if (!commFormat.compliant) {
     return {
@@ -3701,6 +4069,13 @@ export function adjudicateResult({ output, strict = true, expectedAcceptance = [
     acceptance,
     artifacts,
     needs,
+    /*
+     * [3.0.0][用户要求 7/10/11] 两级精简 JSON 随判定结果落行：
+     * 专家汇报 report（F10）与部门汇总 departmentSummary（F11）。只透传
+     * 已通过格式门禁的对象，未提供时不下发（旧回放零回归）。
+     */
+    ...(isRecord(payload?.report) ? { report: payload.report } : {}),
+    ...(isRecord(payload?.departmentSummary) ? { departmentSummary: payload.departmentSummary } : {}),
     error: null,
     phases: phaseCheck?.phases ?? null,
     phaseSummary: phaseCheck?.phases ? phaseSummaryLine(phaseCheck.phases) : null,
@@ -3788,6 +4163,9 @@ export function buildUpdateMessage(update: any) {
     ...(update.delegateSelfEfforts === undefined ? {} : { delegateSelfEfforts: update.delegateSelfEfforts }),
     // [2.5.2] 叶子执行前两轮思考台账随 durable workplan-update 回放（G1 双侧）。
     ...(update.delegateDeepThinks === undefined ? {} : { delegateDeepThinks: update.delegateDeepThinks }),
+    // [T6][契约v1 §3] 叶子开工前预估台账随 durable workplan-update 回放（G1 双侧）：
+    // 刷新/重启后重派读档仍能判定「预估已登记」，8 人预估逐键可查（A2）。
+    ...(update.delegateEstimates === undefined ? {} : { delegateEstimates: update.delegateEstimates }),
     // [2.5.0] 负责人配置的整体任务等级（用户要求 2「全程应用」）同样随
     // durable workplan-update 回放：重启后派发链仍优先读它，不回落旧档。
     ...(update.effortOverride === undefined ? {} : { effortOverride: update.effortOverride }),
@@ -3795,35 +4173,65 @@ export function buildUpdateMessage(update: any) {
     at: update.at ?? Date.now(),
   }
   /*
-   * [2.5.1] 主 Agent 两轮深度思考产物登记（计划级，subtaskId=null）不是
-   * 状态改判：专属文案，避免渲染成「【状态改判】null → undefined」误导会话。
-   * 载荷与回放口径不变（workplan-update + mainDeepThink/mainDeepThinkPlanId）。
+   * [T7] 可见文本收敛（C1/C2/C3）＋信封载体迁移（用户批准选项 A，基线 §8）：
+   * - 全量 JSON 信封移入 source.durable（additive 可选键），payload 字段一个
+   *   不改；parseUpdateMessage 先读元数据、回退旧文本标记（旧消息零迁移）。
+   * - 白名单事件（update.keyProgress===true，由调用方按 C1 四态认定）注入
+   *   一行关键进度：ID＋新状态＋阻塞原因（受阻/待指示时）＋下一步＋标题，
+   *   单条 ≤500 字符（capKeyProgressText）。
+   * - 其余过程改判（进度/证据/台账登记等）与主 Agent 深度思考登记：可见
+   *   文本置空，信封仍随事件落盘——回放台账不丢（C4），模型上下文零噪音。
+   * - update.keyProgress/title/stateLabel 只是渲染输入，不进 payload。
    */
   if (update.mainDeepThink !== undefined && update.subtaskId == null) {
     const summary = truncate('【两轮深度思考已登记】主 Agent 已完成第一轮任务深研与第二轮方法、流程、步骤（含依据），后续执行按此进行；续跑/重启自动读档，无需重复提交。', 300)
-    const lines = [
-      summary,
-      '',
-      UPDATE_MARKER_BEGIN,
-      JSON.stringify(payload),
-      UPDATE_MARKER_END,
-    ]
-    return makeUserMessage(lines.join('\n'), { kind: 'workplan-update', form: 'notice', summary })
+    return makeUserMessage('', { kind: 'workplan-update', form: 'notice', summary, durable: payload })
   }
   const summary = truncate(`【状态改判】${update.subtaskId} → ${update.status}`, 300)
-  const lines = [
-    summary,
-    '',
-    '这条记录是主 Agent 的人工改判，刷新/重启后按同一顺序回放，不会丢失。',
-    '',
-    UPDATE_MARKER_BEGIN,
-    JSON.stringify(payload),
-    UPDATE_MARKER_END,
-  ]
-  return makeUserMessage(lines.join('\n'), { kind: 'workplan-update', form: 'notice', summary })
+  let text = ''
+  if (update.keyProgress === true) {
+    const closure = typeof update.closure === 'string' ? update.closure : ''
+    const status = typeof update.status === 'string' ? update.status : ''
+    const stateLabel = typeof update.stateLabel === 'string' && update.stateLabel.trim() !== ''
+      ? update.stateLabel.trim()
+      : closure === 'escalated' ? '待指示'
+        : status === 'done' ? '完成'
+          : status === 'blocked' ? '受阻'
+            : status === 'in_progress' ? '开始'
+              : status === 'pending' ? '待执行' : (status || '状态变化')
+    // [T7] 待指示认定：closure=escalated（第一层）或调用方显式 stateLabel
+    // 含「待指示」（第三层请示：行状态可能仍是 in_progress，语义以请示为准）。
+    const awaiting = closure === 'escalated' || String(update.stateLabel ?? '').includes('待指示')
+    const reason = awaiting || status === 'blocked'
+      ? String(update.question ?? update.note ?? update.error ?? '').replace(/\s+/g, ' ').trim()
+      : ''
+    const nextStep = awaiting
+      ? '等待指示：用 dsh_workplan_instruct 答复后恢复执行'
+      : status === 'blocked'
+        ? '主 Agent 裁决：续跑／接手／放弃（dsh_workplan_dispatch／update）'
+        : status === 'done'
+          ? '主 Agent 核验证据与验收后整合（按需：dsh_workplan_status／结算文件）'
+          : '继续执行（按需：dsh_workplan_status）'
+    const title = typeof update.title === 'string' ? update.title.replace(/\s+/g, ' ').trim() : ''
+    // 截断优先级（C3）：状态/阻塞原因/下一步在前，标题等修饰信息最后。
+    const parts = [`【关键进度】${update.subtaskId} ${stateLabel}`]
+    if (reason) parts.push(`原因：${truncate(reason, 200)}`)
+    parts.push(`下一步：${nextStep}`)
+    if (title) parts.push(truncate(title, 60))
+    text = capKeyProgressText(parts.join('｜'))
+  }
+  return makeUserMessage(text, { kind: 'workplan-update', form: 'notice', summary, durable: payload })
 }
 
 export function parseUpdateMessage(message: any) {
+  /*
+   * [T7] 先读元数据信封（source.durable，选项 A），回退旧文本标记：
+   * 旧会话消息零迁移，新旧两种载体都能回放全量台账（C4/AC-4）。
+   */
+  const durable = message?.source?.durable
+  /* [2.5.5][T10] 合并汇总信封由 parseUpdateMessages 展开，单条解析不接管。 */
+  if (isRecord(durable) && Array.isArray(durable.updates)) return null
+  if (isRecord(durable) && durable.kind === 'workplan-update') return durable
   const body = extractBetween(messageText(message), UPDATE_MARKER_BEGIN, UPDATE_MARKER_END)
   if (!body) return null
   try {
@@ -3833,6 +4241,22 @@ export function parseUpdateMessage(message: any) {
   } catch {
     return null
   }
+}
+
+/**
+ * [2.5.5][T10] 回放用：把一条事件展开成 0..N 条 workplan-update。
+ *
+ * 合并汇总消息的 `source.durable.updates` 按写入顺序返回（保序等价于逐条
+ * 追加）；普通消息返回 `[parseUpdateMessage(...)]` 或空数组。回放侧只需把
+ * 原来的「单条应用」代码块包一层 `for`，语义不变。
+ */
+export function parseUpdateMessages(message: any): any[] {
+  const durable = message?.source?.durable
+  if (isRecord(durable) && Array.isArray(durable.updates)) {
+    return durable.updates.filter((item: any) => isRecord(item))
+  }
+  const single = parseUpdateMessage(message)
+  return single ? [single] : []
 }
 
 /**
@@ -4318,8 +4742,14 @@ export function applyStatus(statuses: any, subtaskId: any, patch: any) {
           .slice(0, 12)
           .map((item: any) => ({
             member: truncate(String(item?.member ?? ''), 80),
-            role: item?.role === 'expert' ? 'expert' : 'member',
+            role: normalizeDeptRole(item?.role),
             task: truncate(String(item?.task ?? ''), 800),
+            /*
+             * [3.0.0][用户要求 3/6] 质量要求是分工表的必填项，必须随梳理产物
+             * 一起持久化：否则 review 通过、dispatch 读回时字段丢失，会被新闸
+             * 二次拒绝（自查发现：消毒白名单漏字段＝派发放行后立刻卡死）。
+             */
+            qualityRequirements: normalizeQualityRequirements(item?.qualityRequirements),
             /*
              * [2.5.0] 未显式配档的下级不得在这里被物化成 'low'：dispatch 读回
              * 梳理产物时，缺失档位须保持缺失，才能继承负责人配置的整体任务
@@ -4335,6 +4765,12 @@ export function applyStatus(statuses: any, subtaskId: any, patch: any) {
         // [2.5.0] 负责人配置的整体任务等级随梳理产物留档（非法值丢弃不入库）。
         ...(REASONING_EFFORTS.includes(patch.consolidation.taskReasoningEffort)
           ? { taskReasoningEffort: patch.consolidation.taskReasoningEffort }
+          : {}),
+        // [2.5.5][T3] 钳制前声明记忆随梳理产物留档（非法值丢弃不入库）；
+        // 仅供 low 禁派闸消费，dispatch 读回时防「钳制后 low」误杀复杂声明。
+        ...(typeof patch.consolidation.taskReasoningEffortDeclared === 'string'
+          && REASONING_EFFORTS.includes(patch.consolidation.taskReasoningEffortDeclared)
+          ? { taskReasoningEffortDeclared: patch.consolidation.taskReasoningEffortDeclared }
           : {}),
         submittedAt: numberOrNull(patch.consolidation.submittedAt) ?? Date.now(),
       }
@@ -4383,8 +4819,10 @@ export function applyStatus(statuses: any, subtaskId: any, patch: any) {
       .slice(0, 12)
       .map((item: any) => ({
         member: truncate(String(item?.member ?? ''), 80),
-        role: item?.role === 'expert' ? 'expert' : 'member',
+        role: normalizeDeptRole(item?.role),
         task: truncate(String(item?.task ?? ''), 300),
+        // [3.0.0][用户要求 3/6] 第三层任务书从 delegates 读质量要求，同样不得丢。
+        qualityRequirements: normalizeQualityRequirements(item?.qualityRequirements),
         effort: REASONING_EFFORTS.includes(item?.effort) ? item.effort : 'low',
         ...(item?.requested && item.requested !== item.effort ? { requested: String(item.requested) } : {}),
         // [2.5.0][自配档] 叶子自配档（权威）与钳制留痕/复杂度依据。
@@ -4393,6 +4831,9 @@ export function applyStatus(statuses: any, subtaskId: any, patch: any) {
         ...(typeof item?.complexityRationale === 'string' && item.complexityRationale.trim() ? { complexityRationale: truncate(item.complexityRationale.trim(), 300) } : {}),
         // [2.5.2] 叶子执行前两轮深度思考产物（与自配档同为任务级配置）。
         ...(sanitizeMainDeepThink(item?.deepThink) ? { deepThink: sanitizeMainDeepThink(item?.deepThink) } : {}),
+        // [T6][契约v1 §3] 叶子开工前预估（与 selfEffort/deepThink 同为任务级配置）：
+        // fail-closed 消毒见 sanitizeDelegateEstimate；非法整体丢弃，8 人预估全部存活（A2）。
+        ...(sanitizeDelegateEstimate(item?.estimate) ? { estimate: sanitizeDelegateEstimate(item?.estimate) } : {}),
         childId: typeof item?.childId === 'string' ? truncate(item.childId, 200) : null,
         status: ['running', 'done', 'failed', 'timeout', 'rejected', 'blocked'].includes(item?.status) ? item.status : 'running',
         summary: typeof item?.summary === 'string' ? truncate(item.summary, 300) : '',
@@ -4445,7 +4886,7 @@ export function applyStatus(statuses: any, subtaskId: any, patch: any) {
     else if (isRecord(patch.delegateSelfEfforts)) {
       const entries = Object.entries(patch.delegateSelfEfforts)
         .filter(([, value]) => typeof value === 'string' && REASONING_EFFORTS.includes(value))
-        .slice(0, 6)
+        .slice(0, 12)
       next.delegateSelfEfforts = Object.fromEntries(entries.map(([key, value]) => [truncate(String(key), 80), value]))
     } else {
       throw new PlanError('delegateSelfEfforts 必须是 member→档位 对象或 null', 'INVALID_DELEGATE_SELF_EFFORTS')
@@ -4463,10 +4904,30 @@ export function applyStatus(statuses: any, subtaskId: any, patch: any) {
       const entries = Object.entries(patch.delegateDeepThinks)
         .map(([key, value]) => [truncate(String(key), 80), sanitizeMainDeepThink(value)] as const)
         .filter(([, value]) => value !== null)
-        .slice(0, 6)
+        .slice(0, 12)
       next.delegateDeepThinks = Object.fromEntries(entries)
     } else {
       throw new PlanError('delegateDeepThinks 必须是 member→两轮思考产物 对象或 null', 'INVALID_DELEGATE_DEEP_THINKS')
+    }
+  }
+  /*
+   * [T6][契约v1 §3] 叶子开工前预估台账（member→预估对象）：任务级配置，尝试
+   * 重置保留（与 delegateSelfEfforts/delegateDeepThinks 同语义）；重派读档据此
+   * 判定「预估已登记」。逐成员经 sanitizeDelegateEstimate 消毒（非法丢弃），
+   * 非法形状抛 INVALID_DELEGATE_ESTIMATES（与 delegateSelfEfforts 同错误码口径）。
+   * 上限 12 与 delegates slice(0,12)/MAX_COMPLEX_DELEGATE_MEMBERS 对齐：契约 A2
+   * 要求 8 人预估全部存活，不得沿用旧台账的 6 人截断。
+   */
+  if (patch.delegateEstimates !== undefined) {
+    if (patch.delegateEstimates === null) next.delegateEstimates = null
+    else if (isRecord(patch.delegateEstimates)) {
+      const entries = Object.entries(patch.delegateEstimates)
+        .map(([key, value]) => [truncate(String(key), 80), sanitizeDelegateEstimate(value)] as const)
+        .filter(([, value]) => value !== null)
+        .slice(0, 12)
+      next.delegateEstimates = Object.fromEntries(entries)
+    } else {
+      throw new PlanError('delegateEstimates 必须是 member→预估对象 或 null', 'INVALID_DELEGATE_ESTIMATES')
     }
   }
   /*
@@ -4477,7 +4938,7 @@ export function applyStatus(statuses: any, subtaskId: any, patch: any) {
    */
   if (patch.gateAudit !== undefined) {
     next.gateAudit = (Array.isArray(patch.gateAudit) ? patch.gateAudit : [])
-      .filter((item: any) => isRecord(item) && (item.action === 'review' || item.action === 'dispatch') && typeof item.ok === 'boolean')
+      .filter((item: any) => isRecord(item) && (item.action === 'review' || item.action === 'dispatch' || item.action === 'direct') && typeof item.ok === 'boolean')
       .map((item: any) => ({
         at: numberOrNull(item.at) ?? Date.now(),
         action: item.action,
@@ -4657,6 +5118,19 @@ export function applyStatus(statuses: any, subtaskId: any, patch: any) {
       if (Object.keys(thinkMap).length > 0) next.delegateDeepThinks = thinkMap
     }
     /*
+     * [T6][契约v1 §3] 叶子开工前预估同为任务级配置：重置时把 delegates 已登记
+     * 的 estimate 收进 delegateEstimates 保留（显式 patch 优先），重派读档据此
+     * 判定「预估已登记」，未预估者仍被门禁拦回 phase-0（A1）。
+     */
+    if (patch.delegateEstimates === undefined) {
+      const estimateMap: Record<string, any> = { ...(isRecord(next.delegateEstimates) ? next.delegateEstimates : {}) }
+      for (const item of Array.isArray(current.delegates) ? current.delegates : []) {
+        const sanitized = item ? sanitizeDelegateEstimate(item.estimate) : null
+        if (item && typeof item.member === 'string' && sanitized) estimateMap[item.member] = sanitized
+      }
+      if (Object.keys(estimateMap).length > 0) next.delegateEstimates = estimateMap
+    }
+    /*
      * [2.5.0] effortOverride 不在重置清除之列：它是负责人为「整个任务」
      * 配置的等级（用户要求 2 全程应用），不是上一次尝试的痕迹——重试/续跑
      * 的新负责人仍须沿用它，除非本人重新 review 配置新值。
@@ -4794,6 +5268,20 @@ export interface StatusEntry {
   readonly finishedAt: number | null
   readonly summary: string
   readonly error: string | null
+  /** [T7] 读时派生的负责人时长聚合（不持久化）；省略/null＝无下属分工或已排除（J8/R8）。 */
+  readonly leaderEstimate?: LeaderEstimateSummary | null
+  /**
+   * [SCv2-T4] 判据层字段（用户 2026-11-13 裁决 B/B/B/B/A/A/B；定名清单见
+   * reports/simple-criterion-v2-fields.md）。criterionResult/criterionException/
+   * criterionViolations 为持久化字段（回放白名单已追加透传）；attemptWallClockMs
+   * 与 leaderEstimateOverCriterion 为读时派生（不持久化）。全部可选：未生效的
+   * 历史/在途计划载荷逐字不变（Q5-A 不回溯）。
+   */
+  readonly criterionResult?: 'met' | 'unmet' | 'exception-approved' | null
+  readonly criterionException?: import('./criterion.js').CriterionException | null
+  readonly criterionViolations?: ReadonlyArray<Record<string, unknown>>
+  readonly attemptWallClockMs?: number | null
+  readonly leaderEstimateOverCriterion?: boolean
   readonly [extra: string]: unknown
 }
 
@@ -4844,6 +5332,116 @@ function stringOr(value: unknown, fallback: string): string {
   return typeof value === 'string' ? value : fallback
 }
 
+/*
+ * [T6][契约v1 §3] 叶子开工前预估子对象消毒（fail-closed）：declaredMinutes
+ * 必须是正整数分钟（Number.isInteger 且 1..10080，不做字符串强转）、at 正数、
+ * delivery 枚举 sent/failed；reason ≤300（trim 后落档）、messageId ≤200 均可选。
+ * 必填缺失/非法 ⇒ 整个 estimate 丢弃（返回 null），绝不入库脏值——与 T5 通道
+ * 子对象同口径。delegates[].estimate、delegateEstimates 台账、重置保留收集
+ * 三处共用，与写入侧（runtime.ts selfEffortTool）同一判据（G1 双侧接线）。
+ */
+function sanitizeDelegateEstimate(value: any) {
+  if (!isRecord(value)) return null
+  const minutes = value.declaredMinutes
+  if (!Number.isInteger(minutes) || minutes < 1 || minutes > 10080) return null
+  const at = Number(value.at)
+  if (!Number.isFinite(at) || at <= 0) return null
+  if (value.delivery !== 'sent' && value.delivery !== 'failed') return null
+  return {
+    declaredMinutes: minutes,
+    ...(typeof value.reason === 'string' && value.reason.trim() ? { reason: truncate(value.reason.trim(), 300) } : {}),
+    at,
+    ...(typeof value.messageId === 'string' && value.messageId ? { messageId: truncate(value.messageId, 200) } : {}),
+    delivery: value.delivery,
+  }
+}
+
+/**
+ * [T7][lead-decisions J1] 负责人任务时长聚合输出（冻结结构，读时派生、绝不持久化）。
+ *
+ * totalMinutes＝全部下属最新 delivery='sent' 预估 declaredMinutes 的算术和（D3：
+ * 不加负责人自身梳理/汇总耗时）；reported/expected＝已上报/应上报人数；
+ * missing＝未上报或消毒为 null 的成员；failed＝已上报但 delivery='failed' 的成员。
+ * 仅 reported===expected 时才可表述「负责人任务时长＝全部下属预估之和」的完整等式，
+ * 否则必须按「部分和（X/Y）」标注（J1/spec §4 方案 A）。
+ */
+export interface LeaderEstimateSummary {
+  readonly totalMinutes: number
+  readonly reported: number
+  readonly expected: number
+  readonly missing: string[]
+  readonly failed: string[]
+}
+
+/*
+ * [T7][spec R5/F4] 班子作用域（roster）：以当前 delegates 为准——第三层 dispatch
+ * 不裁剪 delegateEstimates（runtime.ts:8767 已核实），被移出班子的残留键不计入；
+ * 行重置后 delegates 清空、尚未重派的过渡期按台账键集合（任务级配置保留语义下
+ * 的唯一已知班子），重派后立即以新 delegates 收敛。成员名去重（R1 每成员至多
+ * 计一次）；上限 12 与写侧消毒 slice(0,12) 对齐（F4：不得私改上限）。
+ * 纯读辅助：非法 map 形状在此宽容为空（严格 fail-closed 判定在 deriveLeaderEstimate）。
+ */
+export function leaderEstimateRoster(row: any): string[] {
+  const delegates = Array.isArray(row?.delegates) ? row.delegates : []
+  const members: string[] = []
+  for (const entry of delegates) {
+    const member = entry && typeof entry.member === 'string' ? entry.member : ''
+    if (member !== '' && !members.includes(member)) members.push(member)
+  }
+  if (members.length > 0) return members.slice(0, 12)
+  const map = isRecord(row?.delegateEstimates) ? row.delegateEstimates : {}
+  return Object.keys(map).slice(0, 12)
+}
+
+/*
+ * [T7][lead-decisions J1-J8][rules-spec §2/§5] 负责人任务时长＝全部下属开工预估之和。
+ *
+ * 读时派生纯函数（J2/A15：不新增任何持久化字段/存储），口径逐条：
+ * - R2/D9：只计每成员最新 delivery==='sent' 的预估；failed/缺失/消毒为 null 一律
+ *   不计入，如实进缺口清单（绝不拿 0 或猜测值凑等式）；
+ * - R6：读档先 map 后 delegates[].estimate，与 self_effort 幂等（runtime.ts:8187）
+ *   和重派门禁（runtime.ts:8655）完全一致；
+ * - J3：消毒复用 sanitizeDelegateEstimate（与 sanitizeLeafEstimate 同一判据，
+ *   G1 双侧接线），不另写第二套；
+ * - R1：map 键唯一＋整对象替换，天然只计最新一条；F5：journal 仅供审计，严禁参和；
+ * - F6/J8：纯读派生，不反写台账，绝不写回 row.timeNotice/timeJournal（O-2a 自报通道不变）；
+ * - R8：closure='replanned' 旧行退出 live，返回 null（台账仍随行透传供追溯）；
+ * - J8：空 roster（无 delegates 且台账空）⇒ null（「无下属分工」，不得输出 0 分钟
+ *   暗示即刻完成）；和必须 Number.isSafeInteger（理论上界 12×10080=120960），
+ *   越界 fail-closed 返回 null 拒绝展示（模型可读面另附异常标注）；
+ * - F2/A9：delegateEstimates 整体形状非法 ⇒ 沿用写侧同款 INVALID_DELEGATE_ESTIMATES
+ *   显式传播，绝不在非法 map 上静默求和（挂载读路径消费的都是写侧已消毒落档值）。
+ */
+export function deriveLeaderEstimate(row: any): LeaderEstimateSummary | null {
+  const rawMap = row?.delegateEstimates
+  if (rawMap !== undefined && rawMap !== null && !isRecord(rawMap)) {
+    throw new PlanError('delegateEstimates 必须是 member→预估对象 或 null', 'INVALID_DELEGATE_ESTIMATES')
+  }
+  if (row?.closure === 'replanned') return null
+  const roster = leaderEstimateRoster(row)
+  if (roster.length === 0) return null
+  const map = isRecord(rawMap) ? rawMap : {}
+  const delegates = Array.isArray(row?.delegates) ? row.delegates : []
+  let totalMinutes = 0
+  let reported = 0
+  const missing: string[] = []
+  const failed: string[] = []
+  for (const member of roster) {
+    const estimate = sanitizeDelegateEstimate(map[member])
+      ?? sanitizeDelegateEstimate(delegates.find((entry: any) => entry?.member === member)?.estimate)
+    if (estimate && estimate.delivery === 'sent') {
+      totalMinutes += estimate.declaredMinutes
+      reported += 1
+    } else if (estimate && estimate.delivery === 'failed') {
+      failed.push(member)
+    } else {
+      missing.push(member)
+    }
+  }
+  if (!Number.isSafeInteger(totalMinutes)) return null
+  return { totalMinutes, reported, expected: roster.length, missing, failed }
+}
+
 /**
  * Structurally normalise one entry without touching the clock.
  *
@@ -4883,6 +5481,33 @@ export function normaliseStatusEntry(entry: any): StatusEntry {
    * 界面按 status 原样展示，与旧版完全一致。
    */
   const closure = CLOSURES.includes(source.closure) ? source.closure : null
+  /*
+   * [T7][lead-decisions J2/G2] 负责人时长聚合挂载荷行：读时派生纯函数，不持久化
+   * （A15）。serialisePlan 是实时/回放共用出口且经 derivePlanSnapshot 走本函数，
+   * 看板载荷与模型可读面（modelStatusLines 挂同一函数）构造上同源。
+   * null（空 roster/replanned 旧行/越界 fail-closed）⇒ 省略字段，客户端整行隐藏（J8）。
+   */
+  const leaderEstimate = deriveLeaderEstimate(source)
+  /*
+   * [SCv2-T4][Q6-A/C29] 单次尝试墙钟读时派生：只认 startedAt/finishedAt 时间戳，
+   * 缺失（含预算重置清空）⇒ null「未验证」，绝不按 0 分钟展示。pending 行无计时。
+   * [SCv2-T4][Q4-B/C21/C22] 超判据布尔由服务端下发（客户端严禁算术）：
+   * 有叶子＝预估之和 >10；无叶子直做＝负责人自身开工预估 >10（D-2 推荐 A）。
+   * [SCv2-T4][C08] 判据持久化字段 fail-closed 消毒：非法值降级为 null/剔除，
+   * 绝不把脏值透传给看板/模型（与 noticeChannel 同纪律）。
+   */
+  const attemptWallClockMs = status === 'pending' ? null : attemptWallClockMsOf(source)
+  const criterionException = sanitizeCriterionException(source.criterionException)
+  const criterionResult = CRITERION_RESULTS.includes(source.criterionResult) ? source.criterionResult : null
+  const criterionViolations = Array.isArray(source.criterionViolations)
+    ? source.criterionViolations.filter((item: any) => item !== null && typeof item === 'object' && !Array.isArray(item)).slice(-20)
+    : null
+  const exAnteForOver = leaderEstimate
+    ? { minutes: leaderEstimate.totalMinutes }
+    : (source.timeNotice && Number.isFinite(Number(source.timeNotice.declaredMinutes))
+      ? { minutes: Number(source.timeNotice.declaredMinutes) }
+      : null)
+  const leaderEstimateOverCriterion = exAnteForOver !== null && exAnteForOver.minutes > CRITERION_TARGET_MINUTES
   return {
     ...source,
     subtaskId: stringOr(source.subtaskId, ''),
@@ -4899,6 +5524,18 @@ export function normaliseStatusEntry(entry: any): StatusEntry {
     summary: stringOr(source.summary, ''),
     error,
     ...(lastError ? { lastError } : {}),
+    // [T7][J1 冻结结构] 仅非 null 时下发；缺失＝无下属分工/已排除，客户端整行隐藏。
+    ...(leaderEstimate ? { leaderEstimate } : {}),
+    /*
+     * [SCv2-T4] 判据层字段挂载：源字段存在才覆盖（消毒后值），不存在则保持
+     * 缺省——旧计划/未生效计划载荷逐字不变（Q5-A）。attemptWallClockMs 与
+     * leaderEstimateOverCriterion 为读时派生，仅在非 null/true 时下发。
+     */
+    ...(source.criterionResult !== undefined ? { criterionResult } : {}),
+    ...(source.criterionException !== undefined ? { criterionException } : {}),
+    ...(source.criterionViolations !== undefined ? { criterionViolations } : {}),
+    ...(attemptWallClockMs !== null ? { attemptWallClockMs } : {}),
+    ...(leaderEstimateOverCriterion ? { leaderEstimateOverCriterion: true } : {}),
   }
 }
 
@@ -5023,6 +5660,12 @@ export function deriveAggregates(statuses: readonly StatusEntry[], expectedTotal
  * a single payload cannot disagree.
  */
 export function derivePlanSnapshot(raw: any, expectedTotal?: number): PlanSnapshot {
+  /*
+   * [T6][契约v1 §3] 预估透传按现有 delegates/stash 口径补齐：normaliseStatusEntry
+   * 以 `...source` 整行展开，delegates[].estimate 与 delegateEstimates 随行进入
+   * 快照（与 delegateSelfEfforts/delegateDeepThinks 同一路径，无独立白名单可漏）；
+   * 消毒唯一权威在写侧 applyStatus，读侧不重复消毒、不丢字段。
+   */
   const statuses = normaliseStatuses(raw)
   const { stats, departments } = deriveAggregates(statuses, expectedTotal)
   return { statuses, stats, departments }
@@ -5760,6 +6403,17 @@ export function buildChildPrompt({
   const anchorBlock = anchorText
     ? [`用户原要求（只读锚点，不得改写；sha256 ${String(plan.taskAnchor.sha256 ?? '').slice(0, 12)}…）：`, truncate(anchorText, 4000)]
     : []
+  /*
+   * [3.0.0][用户要求 3] 主 Agent 对该任务结果的「质量要求」必须随任务书一起下达，
+   * 让部门负责人明确知道什么算合格。新计划由规划器逐条写出；旧计划缺失时
+   * 回落为「验收标准即质量要求」，并在标题里如实标明来源，绝不空着。
+   */
+  const authoredQuality = normalizeQualityRequirements((subtask as any)?.qualityRequirements)
+  const qualitySource = authoredQuality.length > 0 ? '主 Agent' : '主 Agent（本计划未单列质量要求，等价于下列验收标准）'
+  const qualityBlock = renderQualityRequirementsBlock(
+    authoredQuality.length > 0 ? authoredQuality : (Array.isArray(subtask?.acceptance) ? subtask.acceptance : []),
+    qualitySource,
+  )
   const contradiction = plan?.contradictions?.primary?.statement ?? '（未记录）'
   const stageName = stage?.name ?? '（未命名阶段）'
   const stageGoal = stage?.goal ?? '（未记录目标）'
@@ -5864,6 +6518,7 @@ export function buildChildPrompt({
     `输入：${Array.isArray(subtask.inputs) && subtask.inputs.length ? subtask.inputs.join('；') : '无明确输入'}`,
     `输出：${(subtask.outputs ?? []).join('；') || '（未指定）'}`,
     `验收标准（按编号逐条回应，编号不可省略）：${(subtask.acceptance ?? []).map((item: any, index: number) => `A${index + 1} ${String(item)}`).join('；') || '（未指定）'}`,
+    qualityBlock,
     `风险：${subtask.risk}`,
     '',
     '依赖子任务的已知结果：',
@@ -5900,10 +6555,12 @@ export function buildChildPrompt({
     // + 更简单的多人分工。与 llm-rules.ts buildLlmRulesBrief 同一口径。
     '本部门再分配权限与推理等级配置（用户强制要求，平台机制保障）：',
     // [2.5.4][T4] D1/D2 人数口径同步（与 llm-rules.ts buildLlmRulesBrief 同源逐字一致）
-    '- 你是本子任务的部门负责人，拥有再分配权限：先用 dsh_workplan_delegate(action="review") 提交两轮深度思考产物（第一轮全面、全盘、深入梳理研究思考自己的任务=problemAnalysis；第二轮基于第一轮全部结果理清方法、流程、步骤=approach；依据对应=approachBasis）与分工表，再用 action="dispatch" 把任务分配给本部门多名相关领域全球顶尖专家（expert）与本部门组员（member）（各至少 1 名；非复杂任务（low/未配置）最多 6 人；复杂任务（medium/high/xhigh/max）合计不少于 8 人且最多 12 人，少于 8 人硬性阻断）；未提交梳理产物前 dispatch 会被平台硬门禁拒绝。',
+    '- 你是本子任务的部门负责人，拥有再分配权限：先用 dsh_workplan_delegate(action="review") 提交两轮深度思考产物（第一轮全面、全盘、深入梳理研究思考自己的任务=problemAnalysis；第二轮基于第一轮全部结果理清方法、流程、步骤=approach；依据对应=approachBasis）与分工表，再用 action="dispatch" 把任务分配给本部门多名相关领域全球顶尖专家（角色只保留 expert，部门组员已按用户要求 9 取消，至少 1 名；low/未配置任务禁止下派——负责人亲自执行，两轮思考产物经 dsh_workplan_delegate(action="direct") 登记（40/40/20 字判据，可选 reasoningEffort="low"）；复杂任务（medium/high/xhigh/max）合计不少于 8 人且最多 12 人，少于 8 人硬性阻断）；未提交梳理产物前 dispatch 会被平台硬门禁拒绝。',
     '- 分配必须更简单：每位下级只承担单一目标、单一主产物、可独立验收的一项工作；任务描述完整自包含，让下级拿到就能做，不要把多个交付物压给同一个人。',
-    '- 先配置后开工（平台硬规则）：你以 phase-0（low 档）启动，唯一职责是评估你接到任务的复杂度，并在 consolidation.taskReasoningEffort 里配置你自己的整体推理等级（轻度=low；qwen 中等=medium、非 qwen 中等=high；qwen 非常复杂=xhigh、非 qwen 非常复杂=max）；登记后平台立即以你的自配档接续本会话进入 phase-1（派活/协调/验收/重试决策整个分配过程全程用自配档，重试/续跑不丢）。分工表 per-member 档仅为建议：每位专家/组员必须在 phase-0 经 self_effort 按自己分到的单项任务复杂度自配自己的等级，成员自配为权威，越界档由平台按当前模型家族合法集合自动钳制并留痕。',
-    '- 第三层专家/组员是叶子层：他们不得再派生第四层；下级结论会送回本会话，收齐后由你汇总核验，再写最终结果块。用 action="status" 随时查看梳理登记与下级进度。',
+    '- 先配置后开工（平台硬规则）：你以 phase-0（low 档）启动，唯一职责是评估你接到任务的复杂度，并在 consolidation.taskReasoningEffort 里配置你自己的整体推理等级（轻度=low；qwen 中等=medium、非 qwen 中等=high；qwen 非常复杂=xhigh、非 qwen 非常复杂=max）；登记后平台立即以你的自配档接续本会话进入 phase-1（派活/协调/验收/重试决策整个分配过程全程用自配档，重试/续跑不丢）。分工表 per-expert 档仅为建议：每位专家必须在 phase-0 经 self_effort 按自己分到的单项任务复杂度自配自己的等级，专家自配为权威，越界档由平台按当前模型家族合法集合自动钳制并留痕。low（轻度）/未配置任务禁止下派：负责人亲自执行，两轮思考产物经 action="direct" 登记；复杂任务才走 review+dispatch。',
+    '- 第三层专家是叶子层：他们不得再派生第四层；下级结论会送回本会话，收齐后由你汇总核验（必须覆盖全部已派发专家，不得只汇总一部分），再写最终结果块。用 action="status" 随时查看梳理登记与下级进度。',
+    // [T6][契约v1 §6] 负责人须知：下属开工预估即时送达 + 留痕 + 未上报拦截（时长求和归 T7，此处不实现）。
+    '- 下属经 self_effort 上报的开工预估（整数分钟）会即时送达你会话并留痕（kind=estimate）；未上报者被平台拦截开工。',
     '',
     /*
      * [2.2.0][T3/O-2a] 柔性时长协商协议（方案 §2.6 #3：「开工前预告、超预期
@@ -5916,9 +6573,9 @@ export function buildChildPrompt({
      * 预告在目标解析阶段必然失败。现在改为：注入真实父会话 id + 用宿主
      * 契约里的字段名 + 明确失败后的确定性重试与留痕，不再有「猜目标」的余地。
      */
-    '柔性时长协商协议（不设固定完成时间；时间是协商出来的安全兜底，不是固定交付期限）：',
+    '柔性时长协商协议（判据层：完成目标 ≤10 分钟，默认必须达成，超出须用户明确批准并留痕；运行层安全兜底：时间是协商出来的安全兜底，不是固定交付期限、不构成对外承诺）：',
     noticeTargetLine,
-    `- 开工前先报预估时长（预计完成本子任务要多久就报多久）：用 \`${noticeCall}\` 报预估完成时长，新预估覆盖旧预估；预估仅供参考、非承诺，实际时长协商决定。`,
+    `- 开工前先报预估时长（预计完成本子任务要多久就报多久）：用 \`${noticeCall}\` 报预估完成时长，新预估覆盖旧预估；预估仅供参考、非承诺，实际时长协商决定；本次计时口径＝单次尝试墙钟（本子会话从启动到结算），每次尝试独立计，续跑/重试不累加；你的预估会累加到部门行的 ≤10 分钟判据目标。`,
     `- 发现预计将超预估时，立即用同一个目标报新预估并申请延期（说明还要多久、为什么），不要等超时才预警。`,
     `- 完成即回报：用同一个目标报核心结论（做了什么、证据/文件、验收结果），不要等整轮结束。`,
     ...(noticeTarget
@@ -5971,8 +6628,14 @@ export function buildChildPrompt({
      * 规范文本与主 Agent 核验结果用的是同一份数据（src/comm-format.ts），
      * 「附带的要求」与「核验的尺子」由此不可能长成两个版本。
      */
-    renderCommFormatSpec(),
-    '提交前自查（强制）：逐条对照上面《沟通交流格式规范》F1–F9，确认全部满足后再提交；'
+    /*
+     * [3.0.0][用户要求 8/10/11] 部门汇总契约：负责人必须全面汇总本部门全部专家
+     * 汇报，但汇总本身必须精简、禁止累赘重复，并以 JSON 直接交回主 Agent。
+     * 契约文本与门禁（F11）同一事实源。
+     */
+    renderDepartmentSummarySpec(),
+    renderCommFormatSpec('leader'),
+    '提交前自查（强制）：逐条对照上面《沟通交流格式规范》F1–F11，确认全部满足后再提交；'
       + '主 Agent 收到结果后按同一份规范逐条核验，任一不合规即立刻退回，你会收到列明不合规条目的退回通知，'
       + '须逐条修正、重新自查通过后再重新提交完整结果。',
   ].join('\n'))

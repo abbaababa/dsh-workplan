@@ -53,19 +53,26 @@ export function withSelfEfforts(record: any): any {
 
 /** 叶子台账预登记 delegates[].selfEffort + delegateSelfEfforts，模拟「已自配」。
  * [2.5.2] 同步预登记执行前两轮思考产物（delegates[].deepThink + delegateDeepThinks），
- * 模拟「已自配+已思考」读档直接 phase-1；缺思考产物会被路由回 phase-0 补齐。 */
+ * 模拟「已自配+已思考」读档直接 phase-1；缺思考产物会被路由回 phase-0 补齐。
+ * [T6] 同步预登记开工预估（delegates[].estimate + delegateEstimates 双通道，
+ * delivery:'sent'、at>0、整数分钟）：新重派门禁 registeredEstimate 要求 sent，
+ * 缺预估会被路由回 phase-0；期望 phase-0 的用例不得经本 helper 预登记。 */
 export function withLeafSelfEfforts(record: any, effort = 'medium'): any {
   for (const row of Array.isArray(record?.statuses) ? record.statuses : []) {
     if (!Array.isArray(row?.delegates) || row.delegates.length === 0) continue
     const stash: Record<string, string> = { ...(row.delegateSelfEfforts ?? {}) }
     const thinkStash: Record<string, any> = { ...(row.delegateDeepThinks ?? {}) }
+    const estimateStash: Record<string, any> = { ...(row.delegateEstimates ?? {}) }
     row.delegates = row.delegates.map((member: any) => {
       stash[member.member] = member.selfEffort ?? effort
       thinkStash[member.member] = member.deepThink ?? MAIN_DEEP_THINK_FIXTURE
-      return { ...member, selfEffort: member.selfEffort ?? effort, deepThink: member.deepThink ?? MAIN_DEEP_THINK_FIXTURE }
+      const estimate = member.estimate ?? { declaredMinutes: 15, at: 1_700_000_000_000, delivery: 'sent' }
+      estimateStash[member.member] = estimate
+      return { ...member, selfEffort: member.selfEffort ?? effort, deepThink: member.deepThink ?? MAIN_DEEP_THINK_FIXTURE, estimate }
     })
     row.delegateSelfEfforts = stash
     row.delegateDeepThinks = thinkStash
+    row.delegateEstimates = estimateStash
   }
   return record
 }

@@ -221,7 +221,12 @@ test('规划器被要求：不得把只有主 Agent 能做的动作写进子任�
   assert.match(prompt, /没有主计划派发权限/)
   assert.match(prompt, /再分配权限/)
   assert.match(prompt, /只有主 Agent 才能执行/)
-  assert.match(prompt, /10 分钟内完成/)
+  // [SCv2-T4] 基线修复（改动前基线即红：旧断言依赖已废止的 R1 政策句字面量
+  // 「无须在 10 分钟内完成」的子串）。按 Q1-B/AC-Q1-5 改双向断言：判据层目标句
+  // 必须命中；与裁决相反的绝对否定不得再出现。测试主意图（主 Agent 专属动作
+  // 禁令）不变。
+  assert.match(prompt, /完成目标 ≤10 分钟/)
+  assert.doesNotMatch(prompt, /无须在 10 分钟内完成/)
 })
 
 test('子 Agent 提示明确说明没有主计划派发权限、不能重启服务，但拥有本部门再分配权限', () => {

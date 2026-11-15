@@ -1,0 +1,112 @@
+{
+  "time": "2026-11-13T05:58:48.588Z",
+  "node": "v26.9.0",
+  "lib": "/Users/open/Documents/Stocks/plugins/dsh-workplan/patches/r3-session-search/patched-v4/lib/index.js",
+  "libSha256": "b925823e3ed3830dfda75c15129a4cf5307dff94b4e3cc9ea70b8bb5eecd46f7",
+  "expect": "fixed",
+  "verdict": true,
+  "results": [
+    {
+      "id": "S1",
+      "name": "abort mid-reconciliation keeps incremental progress",
+      "checks": [
+        {
+          "id": "S1.1",
+          "criterion": "aborted round rejects with SESSION_QUERY_ABORTED",
+          "pass": true,
+          "evidence": "outcome=SESSION_QUERY_ABORTED, coldReads=3"
+        },
+        {
+          "id": "S1.2",
+          "criterion": "incremental progress survives the first abort (indexed sessions > 0)",
+          "pass": true,
+          "evidence": "indexedAfterAbort1=2/12"
+        },
+        {
+          "id": "S1.3",
+          "criterion": "second abort does not reset progress to zero (no zero-progress dead loop)",
+          "pass": true,
+          "evidence": "indexedAfterAbort2=4/12, outcome2=SESSION_QUERY_ABORTED, coldReadsRound2=3"
+        },
+        {
+          "id": "S1.4",
+          "criterion": "un-aborted search eventually indexes and returns all 12 sessions",
+          "pass": true,
+          "evidence": "returned=12/12, totalColdReads=14"
+        },
+        {
+          "id": "S1.5",
+          "criterion": "no redundant full-corpus re-reads across retries (totalColdReads <= 14)",
+          "pass": true,
+          "evidence": "totalColdReads=14 (baseline signature: 18 = 3+3+12 full restarts)"
+        }
+      ]
+    },
+    {
+      "id": "S2",
+      "name": "live-owned revision churn does not fail reconciliation",
+      "checks": [
+        {
+          "id": "S2.1",
+          "criterion": "search succeeds while the live-owned archive revision keeps changing",
+          "pass": true,
+          "evidence": "returned=7 items, listCalls=2"
+        },
+        {
+          "id": "S2.2",
+          "criterion": "all 6 stable cold sessions are searchable despite live churn",
+          "pass": true,
+          "evidence": "found=6/6"
+        }
+      ]
+    },
+    {
+      "id": "S3",
+      "name": "control: static corpus searches correctly",
+      "checks": [
+        {
+          "id": "S3.1",
+          "criterion": "static corpus: search returns all 5 sessions",
+          "pass": true,
+          "evidence": "returned=5/5"
+        },
+        {
+          "id": "S3.2",
+          "criterion": "static corpus: every hit snippet contains the search token",
+          "pass": true,
+          "evidence": "snippetsWithMarker=5/5"
+        },
+        {
+          "id": "S3.3",
+          "criterion": "static corpus: within-session event search finds the unique token",
+          "pass": true,
+          "evidence": "eventHits=1"
+        },
+        {
+          "id": "S3.4",
+          "criterion": "warm re-search reuses the index (zero additional cold reads)",
+          "pass": true,
+          "evidence": "coldReadsDelta=0, warmHits=5/5"
+        }
+      ]
+    },
+    {
+      "id": "S4",
+      "name": "corrupt archive is isolated from healthy sessions",
+      "checks": [
+        {
+          "id": "S4.1",
+          "criterion": "search succeeds even though one archive is corrupt (failure isolation)",
+          "pass": true,
+          "evidence": "returned=6 items"
+        },
+        {
+          "id": "S4.2",
+          "criterion": "all 6 healthy sessions remain searchable",
+          "pass": true,
+          "evidence": "found=6/6"
+        }
+      ]
+    }
+  ]
+}

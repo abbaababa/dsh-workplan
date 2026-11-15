@@ -24,7 +24,6 @@ window.__ModuleLoader__.load({
         "groupEnded": "已结束",
         "groupLiveHint": "还没结束，正在或即将推进",
         "groupDoneHint": "已全部完成并收尾",
-        "groupEndedHint": "这一轮已经停了，没有东西在跑；说「续跑」可继续推进",
         "groupCollapse": "收起",
         "groupExpand": "展开",
         "groupNeeds": "需处理",
@@ -95,9 +94,9 @@ window.__ModuleLoader__.load({
           "closed": "无需动作"
         },
         "handoffs": "跨部门需求",
-        "delegates": "第三层（专家/组员）",
+        "delegates": "第三层（全球顶尖专家）",
         "delegateExpert": "专家",
-        "delegateMember": "组员",
+        "delegateMember": "专家",
         "delegateStatus": {
           "running": "执行中",
           "done": "已完成",
@@ -248,6 +247,11 @@ window.__ModuleLoader__.load({
         "noticeChannelAwaiting": "等待观测",
         "noticeChannelNotObserved": "未观测到送达",
         "reason": "原因",
+        "leaderEstimateFull": "负责人任务时长＝全部下属开工预估之和：{minutes} 分钟（{reported}/{expected} 已上报）｜判据层完成目标 ≤10 分钟：达标须同时满足事前预估之和与事后单次尝试墙钟均 ≤10 分钟",
+        "leaderEstimatePartial": "下属开工预估部分和：{minutes} 分钟（{reported}/{expected} 已上报{gaps}）｜预估未报齐只显示部分和，不得视为「简单判据达标」（判据层完成目标 ≤10 分钟）",
+        "leaderEstimateOver": "⚠ 超简单判据：事前预估 {minutes} 分钟 > 10 分钟完成目标——请事前拆分，或经用户明确批准并留痕（无留痕＝未批准，不得视为达标）",
+        "leaderEstimateMissing": "，缺：{names}",
+        "leaderEstimateFailed": "，报送失败：{names}",
       },
       "en": {
         "groupLive": "In progress",
@@ -308,6 +312,7 @@ window.__ModuleLoader__.load({
           "paused": "Paused (budget spent)",
           "degraded": "Planning failed",
           "cancelled": "Cancelled",
+          "superseded": "Taken over by another plan",
           "ended": "Ended (resumable)"
         },
         "status": {
@@ -476,6 +481,11 @@ window.__ModuleLoader__.load({
         "noticeChannelAwaiting": "Awaiting observation",
         "noticeChannelNotObserved": "Delivery not observed",
         "reason": "reason",
+        "leaderEstimateFull": "Leader task duration = sum of all delegate start estimates: {minutes} min ({reported}/{expected} reported) | Criterion layer: completion target <= 10 min, met only when both the ex-ante estimate sum and the ex-post single-attempt wall clock are <= 10 min",
+        "leaderEstimatePartial": "Partial sum of delegate start estimates: {minutes} min ({reported}/{expected} reported{gaps}) | Estimates incomplete: partial sum only, never a met criterion (completion target <= 10 min)",
+        "leaderEstimateOver": "OVER criterion: ex-ante estimate {minutes} min > 10 min completion target - split the work or obtain explicit user approval with an audit trail (no trail = not approved, never a met criterion)",
+        "leaderEstimateMissing": ", missing: {names}",
+        "leaderEstimateFailed": ", delivery failed: {names}",
       }
     }
 
@@ -1623,7 +1633,9 @@ window.__ModuleLoader__.load({
      *   - 计划定义：estimateMinutes（预估）、timeoutMs（协商上限）、reasoningEffort（推理等级）；
      *   - 状态行：startedAt/deadlineAt（协商截止）、timeJournal（延期/预告历史）、
      *     timeNotice（开工预告）、timeWarning（到点预警）、noticeChannel（子→主通道是否送达）、
-     *     pendingAdjudication（到点后的待裁决标记）。
+     *     pendingAdjudication（到点后的待裁决标记）；
+     *     [T7] leaderEstimate（负责人时长聚合，服务端读时派生：全员 sent 表述完整等式，
+     *     否则部分和＋缺口名单；null/缺失整块不渲染，客户端严禁求和）。
      *
      * 客户端不推导状态机、不补造字段：任何字段缺失就少显示一行；全部缺失整块不渲染，
      * 绝不出现 undefined / [object Object]。
@@ -1653,7 +1665,20 @@ window.__ModuleLoader__.load({
       const warning = item?.timeWarning && typeof item.timeWarning === 'object' ? item.timeWarning : null
       const channel = item?.noticeChannel && typeof item.noticeChannel === 'object' ? item.noticeChannel : null
       const pending = item?.pendingAdjudication === true
-      if (!estimate && !ceiling && !deadlineAt && !notice && !warning && !channel && !pending && extensions.length === 0) {
+      /*
+       * [T7][J2/J6] 负责人任务时长聚合：只渲染服务端下发的 leaderEstimate
+       * （plan.ts deriveLeaderEstimate 读时派生，经 serialisePlan→derivePlanSnapshot
+       * 同源下发）。客户端严禁求和、不推导状态机：reported===expected 仅作
+       * 措辞选择（J1：全员 sent 才表述完整等式）。totalMinutes=0 合法（F3
+       * 部分和 0），故用 ≥0 守卫而非 positiveNumber；字段缺失/null（J8 空
+       * roster／replanned 旧行／越界 fail-closed）⇒ 不渲染本块。
+       */
+      const leaderEstimate = item?.leaderEstimate && typeof item.leaderEstimate === 'object' ? item.leaderEstimate : null
+      const leaderExpected = leaderEstimate && Number.isInteger(leaderEstimate.expected) && leaderEstimate.expected > 0 ? leaderEstimate.expected : null
+      const leaderReported = leaderEstimate && Number.isInteger(leaderEstimate.reported) && leaderEstimate.reported >= 0 ? leaderEstimate.reported : null
+      const leaderMinutes = leaderEstimate && Number.isFinite(Number(leaderEstimate.totalMinutes)) && Number(leaderEstimate.totalMinutes) >= 0 ? Number(leaderEstimate.totalMinutes) : null
+      const leaderShown = leaderEstimate !== null && leaderExpected !== null && leaderReported !== null && leaderMinutes !== null
+      if (!estimate && !ceiling && !deadlineAt && !notice && !warning && !channel && !pending && extensions.length === 0 && !leaderShown) {
         return null
       }
       const remainingMs = deadlineAt ? Math.max(0, deadlineAt - Date.now()) : null
@@ -1695,6 +1720,29 @@ window.__ModuleLoader__.load({
         notes.push(`${t('noticeChannel')}：${stateText}${reason}`)
       }
       if (pending) notes.push(`${t('pendingAdjudication')}：${t('pendingAdjudicationHint')}`)
+      /*
+       * [T7][J1 方案 A] 全员 sent（reported===expected）才表述完整等式
+       * 「负责人任务时长＝全部下属开工预估之和」；否则必须按「部分和（X/Y）」
+       * 标注并如实列出缺口名单。名单 join 只是展示拼接，不是求和；数值全部
+       * 来自服务端下发的 leaderEstimate，客户端不做任何算术。
+       */
+      if (leaderShown) {
+        const missingNames = Array.isArray(leaderEstimate.missing) ? leaderEstimate.missing.filter((name: any) => typeof name === 'string' && name !== '') : []
+        const failedNames = Array.isArray(leaderEstimate.failed) ? leaderEstimate.failed.filter((name: any) => typeof name === 'string' && name !== '') : []
+        const gaps = (missingNames.length > 0 ? fill(t('leaderEstimateMissing'), { names: missingNames.join('、') }) : '')
+          + (failedNames.length > 0 ? fill(t('leaderEstimateFailed'), { names: failedNames.join('、') }) : '')
+        notes.push(leaderReported === leaderExpected
+          ? fill(t('leaderEstimateFull'), { minutes: leaderMinutes, reported: leaderReported, expected: leaderExpected })
+          : fill(t('leaderEstimatePartial'), { minutes: leaderMinutes, reported: leaderReported, expected: leaderExpected, gaps }))
+        /*
+         * [SCv2-T4][Q4-B/C21] 超判据告警：只读服务端下发的布尔
+         * leaderEstimateOverCriterion（normaliseStatusEntry 派生），客户端
+         * 严禁自行算术（client.ts 既定约定）。部分和 >10 同样告警（AC-Q4-2）。
+         */
+        if (item?.leaderEstimateOverCriterion === true) {
+          notes.push(fill(t('leaderEstimateOver'), { minutes: leaderMinutes }))
+        }
+      }
       return h('div', { className: 'dsh-wp-time' },
         h('div', { className: 'dsh-wp-time-title' }, t('timeNegotiation')),
         facts.length > 0
@@ -1809,7 +1857,7 @@ window.__ModuleLoader__.load({
           : null,
         /*
          * [2.3.9][T4b] 第三层派发看板（用户要求 4/5）：部门负责人分配给
-         * 顶尖专家/组员的每位下级、其推理等级（含越界钳制留痕）与实时状态
+         * 全球顶尖专家的每位下级、其推理等级（含越界钳制留痕）与实时状态
          * 必须对用户与主 Agent 可见，否则「第三层派给了谁、跑没跑完」只存在
          * 负责人子会话里。数据源 = 状态行 delegates（applyStatus 消毒 +
          * durable workplan-update 回放，刷新/重启不丢），客户端不推导状态。

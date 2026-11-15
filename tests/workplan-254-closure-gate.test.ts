@@ -86,7 +86,10 @@ test('① 2.5.3 头前通知前置闸导出仍在（回归复核）', () => {
     eventAt(i: number) { return ev[i] },
     get seq() { return ev.length },
   }
-  appendUserMessage(session, '【规划预告】x', undefined, { deferUntilHead: true })
+  // 示例文案改用未被 C2 禁用清单命中的中性文案：本用例只验证「头前暂存 +
+  // 按序补发」的时序契约，与具体文案无关；原 '【规划预告】x' 已被 C2 整条
+  // 禁用（见 key-progress-trimming-u3 U3-4a），用它会让用例在闸门前就被丢弃。
+  appendUserMessage(session, '预公告 x', undefined, { deferUntilHead: true })
   assert.equal(ev.length, 0)
   session.append('system/message', { message: { role: 'system', content: [{ type: 'text', text: 's' }] } }, { surfaceOp: 'append' })
   appendUserMessage(session, '【任务分解】y')

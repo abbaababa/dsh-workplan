@@ -7,10 +7,13 @@
  *     correctEffortForModel 在非 qwen 系会把 medium 钳到 low，按钳制后判会静默豁免。
  * D2：复杂任务合计 <8 直接阻断分派（code=DELEGATE_HEADCOUNT_MIN）；上限放宽到 12
  *     （12 为实现取值）；非复杂保持 6 人上限 + 原有静默截断，旧行为零变化。
+ * [2.5.5][T3] 夹具适配（负责人裁决，门禁实现与夹具适配同批交付）：D1–D3 low/未配置
+ *     禁派后，A3/A4/边界的 low 子案改断言 DELEGATE_LOW_TASK_FORBIDDEN＋direct 指路；
+ *     提示词同步改 W1 新串。复杂档各案与拒因顺序断言意图零删改。
  *
  * 拒因顺序（新闸放最后，既有 8 道完全不变）：
  *   CONSOLIDATION_MISSING → problemAnalysis INCOMPLETE → assignments 空 INCOMPLETE
- *   → TASK_EFFORT_INVALID → ASSIGNMENT_INVALID → ROLE_MIX_REQUIRED
+ *   → TASK_EFFORT_INVALID → ASSIGNMENT_INVALID → DELEGATE_EXPERTS_REQUIRED
  *   → approach/approachBasis INCOMPLETE → DELEGATE_HEADCOUNT_MIN。
  *
  * 持久化边界（负责人补充说明 2）：强制点在 review 入口（宿主把钳制后值写回
@@ -38,6 +41,8 @@ function assignmentsOf(count: number, role: 'mixed' | 'expert' | 'member' = 'mix
     member: `成员${i + 1}`,
     role: role === 'mixed' ? (i === 0 ? 'expert' : 'member') : role,
     task: `单一目标子任务 ${i + 1}（单一主产物、可独立验收）`,
+    // [3.0.0][用户要求 3/6] 质量要求必填（2.5.4 夹具补字段，判定意图零删改）
+    qualityRequirements: ['必须给出可复核的命令输出或文件证据'],
   }))
 }
 
@@ -88,29 +93,33 @@ test('A2：复杂 8 人 → ok 且 members=8；9 人 → ok 且 members=9', () =
   assert.equal(nine.members.length, 9)
 })
 
-test('A3：low 2 人过；low 7 人截断为 6 过（旧行为）；未配置整体档 2 人过', () => {
+// [2.5.5][T3] D1–D3 夹具适配（原则②）：本子案意图本就是 low/未配置下派行为——
+// 旧「放行/截断」断言改为新拒因 DELEGATE_LOW_TASK_FORBIDDEN＋direct 指路（裁决要求的新行为）。
+test('A3：low 2 人 / low 7 人 / 未配置 2 人均 ⇒ DELEGATE_LOW_TASK_FORBIDDEN（D1–D3 禁派，旧放行行为废止）', () => {
   const low2 = planWith('low', 2, null)
-  console.log(`[254-min-headcount] A3 low 2人 → ok=${low2.ok} members=${low2.members.length}`)
-  assert.equal(low2.ok, true)
-  assert.equal(low2.members.length, 2)
+  console.log(`[254-min-headcount] A3 low 2人 → ok=${low2.ok} code=${low2.code}`)
+  assert.equal(low2.ok, false)
+  assert.equal(low2.code, 'DELEGATE_LOW_TASK_FORBIDDEN')
+  assert.match(low2.error!, /direct/, '拒因须指路 direct 登记')
   const low7 = planWith('low', 7, null)
-  console.log(`[254-min-headcount] A3 low 7人 → ok=${low7.ok} members=${low7.members.length}（截断 6）`)
-  assert.equal(low7.ok, true)
-  assert.equal(low7.members.length, 6)
+  console.log(`[254-min-headcount] A3 low 7人 → ok=${low7.ok} code=${low7.code}（禁派先于截断）`)
+  assert.equal(low7.ok, false)
+  assert.equal(low7.code, 'DELEGATE_LOW_TASK_FORBIDDEN')
   const none = planWith(undefined, 2, null)
-  console.log(`[254-min-headcount] A3 未配置 2人 → ok=${none.ok} members=${none.members.length}`)
-  assert.equal(none.ok, true)
-  assert.equal(none.members.length, 2)
+  console.log(`[254-min-headcount] A3 未配置 2人 → ok=${none.ok} code=${none.code}（视同 low）`)
+  assert.equal(none.ok, false)
+  assert.equal(none.code, 'DELEGATE_LOW_TASK_FORBIDDEN')
 })
 
-test('A4：复杂枚举恰为 {medium,high,xhigh,max}——四档 7 人均拦、low 7 人不拦', () => {
+test('A4：复杂枚举恰为 {medium,high,xhigh,max}——四档 7 人均拦、low 7 人禁派拦', () => {
   for (const tier of COMPLEX_TIERS) {
     assert.equal(planWith(tier, 7, null).code, 'DELEGATE_HEADCOUNT_MIN')
   }
+  // [2.5.5][T3] D1–D3 适配（原则②）：low 7 人旧「不拦截断 6」改为禁派硬拒。
   const low7 = planWith('low', 7, null)
-  console.log(`[254-min-headcount] A4 low 7人 → ok=${low7.ok}（不拦，截断 6）`)
-  assert.equal(low7.ok, true)
-  assert.equal(low7.members.length, 6)
+  console.log(`[254-min-headcount] A4 low 7人 → ok=${low7.ok} code=${low7.code}（禁派）`)
+  assert.equal(low7.ok, false)
+  assert.equal(low7.code, 'DELEGATE_LOW_TASK_FORBIDDEN')
   // 非法档不属于复杂集，仍按原位置报 TASK_EFFORT_INVALID（先于人数闸）。
   const invalid = planWith('ultra', 7, null)
   console.log(`[254-min-headcount] A4 ultra 7人 → code=${invalid.code}（非法档原拒因）`)
@@ -144,7 +153,7 @@ test('边界：qwen 模型 + 声明 high → 复杂 7 人拦（实际档位被�
   assert.equal(plan.code, 'DELEGATE_HEADCOUNT_MIN')
 })
 
-test('边界：复杂 12 人过；13 人截断 12 过；非复杂 8 人截断 6 过', () => {
+test('边界：复杂 12 人过；13 人截断 12 过；非复杂（low）8 人禁派拦', () => {
   const twelve = planWith('max', 12, null)
   console.log(`[254-min-headcount] 边界 复杂12人 → ok=${twelve.ok} members=${twelve.members.length}`)
   assert.equal(twelve.ok, true)
@@ -153,20 +162,21 @@ test('边界：复杂 12 人过；13 人截断 12 过；非复杂 8 人截断 6 
   console.log(`[254-min-headcount] 边界 复杂13人 → ok=${thirteen.ok} members=${thirteen.members.length}（截断 12）`)
   assert.equal(thirteen.ok, true)
   assert.equal(thirteen.members.length, 12)
+  // [2.5.5][T3] D1–D3 适配（原则②）：low 8 人旧「截断 6 过」改为禁派硬拒。
   const nonComplex8 = planWith('low', 8, null)
-  console.log(`[254-min-headcount] 边界 非复杂8人 → ok=${nonComplex8.ok} members=${nonComplex8.members.length}（截断 6）`)
-  assert.equal(nonComplex8.ok, true)
-  assert.equal(nonComplex8.members.length, 6)
+  console.log(`[254-min-headcount] 边界 low 8人 → ok=${nonComplex8.ok} code=${nonComplex8.code}（禁派）`)
+  assert.equal(nonComplex8.ok, false)
+  assert.equal(nonComplex8.code, 'DELEGATE_LOW_TASK_FORBIDDEN')
 })
 
-test('边界：复杂 8 人全 expert → ROLE_MIX_REQUIRED（先于人数门禁）', () => {
+test('边界：复杂 8 人全 expert → 放行（组员角色已取消，配比闸不复存在）', () => {
   const plan = planDelegations({
     consolidation: consolidation({ taskReasoningEffort: 'max', assignments: assignmentsOf(8, 'expert') }),
     model: null,
   })
-  console.log(`[254-min-headcount] 边界 复杂8人全expert → code=${plan.code}`)
-  assert.equal(plan.ok, false)
-  assert.equal(plan.code, 'DELEGATE_ROLE_MIX_REQUIRED')
+  console.log(`[254-min-headcount] 边界 复杂8人全expert → ok=${plan.ok} code=${plan.code}`)
+  assert.equal(plan.ok, true)
+  assert.equal(plan.members.length, 8)
 })
 
 test('拒因顺序回归：复杂 7 人但缺梳理产物时，旧拒因先于人数闸', () => {
@@ -192,10 +202,12 @@ test('拒因顺序回归：复杂 7 人但缺梳理产物时，旧拒因先于�
   assert.ok(noBasis.error!.includes('approachBasis'))
 })
 
-test('提示词同步：负责人任务书人数口径改为非复杂≤6 / 复杂≥8 且 ≤12（D1/D2）', () => {
+test('提示词同步：负责人任务书人数口径改为 low 禁派＋direct 直执 / 复杂≥8 且 ≤12（D1/D2＋T3 W1）', () => {
   const brief = buildLlmRulesBrief({ tier: 'department', model: QWEN })
   console.log('[254-min-headcount] 提示词同步断言')
-  assert.ok(brief.includes('非复杂任务（low/未配置）最多 6 人'))
+  // [2.5.5][T3] W1 文案同步（原则③）：与 src/llm-rules.ts 负责人告知块逐字一致。
+  assert.ok(brief.includes('low/未配置任务禁止下派——负责人亲自执行，两轮思考产物经 dsh_workplan_delegate(action="direct") 登记（40/40/20 字判据，可选 reasoningEffort="low"）'))
   assert.ok(brief.includes('复杂任务（medium/high/xhigh/max）合计不少于 8 人且最多 12 人，少于 8 人硬性阻断'))
+  assert.ok(!brief.includes('非复杂任务（low/未配置）最多 6 人'), '旧「非复杂≤6 人」表述须已移除')
   assert.ok(!brief.includes('各至少 1 名，最多 6 人'), '旧「最多 6 人」表述须已移除')
 })

@@ -173,7 +173,7 @@ test('已取消计划的结果消息不再教继续派发', () => {
   })
   const text = String(message?.content?.[0]?.text ?? '')
   assert.match(text, /已取消/)
-  assert.match(text, /不要再调用 dsh_workplan_dispatch/)
+  assert.match(text, /也不要再次派发/)
   assert.doesNotMatch(text, /再次调用 dsh_workplan_dispatch 即可继续跑/)
 })
 
