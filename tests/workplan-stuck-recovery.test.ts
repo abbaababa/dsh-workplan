@@ -245,6 +245,7 @@ test('watchdog fires when the child log stops growing and stays quiet when it gr
   let seq = 0
   let heartbeat = 0
   const quiet = createProgressWatchdog({
+    enforceTimeouts: true,
     getSeq: () => seq,
     idleMs: 120,
     hardMs: 5000,
@@ -260,6 +261,7 @@ test('watchdog fires when the child log stops growing and stays quiet when it gr
   let grownSeq = 0
   let grew = 0
   const alive = createProgressWatchdog({
+    enforceTimeouts: true,
     getSeq: () => {
       grownSeq += 1
       return grownSeq
@@ -316,7 +318,7 @@ test('describeError never renders an object as [object Object]', () => {
 /* 5. End-to-end: dispatch, stall, resume, cancel */
 /* ------------------------------------------------------------------ */
 
-test('a stalled child blocks only itself, then a re-dispatch resumes the plan', async () => {
+test('旧 idle/单次窗口到点不再把子任务判卡住；只有显式取消才收束', async () => {
   const plan = makePlan()
   const session = makeSession()
   const record = makeRecord(plan)
@@ -326,52 +328,33 @@ test('a stalled child blocks only itself, then a re-dispatch resumes the plan', 
       calls += 1
       return hangingChild()
     },
-    // A frozen session log is what "wedged" looks like from the outside.
     { 'child-hang': { seq: 0 } },
   )
   const runtime = createWorkplanRuntime(ctx, {
-    // Idle window strictly inside the ceiling, so the stall path (and its single
-    // retry) is what is exercised, not the absolute ceiling.
-    idleTimeoutMs: 500,
-    childTimeoutMs: 5000,
-    totalTimeoutMs: 20000,
+    idleTimeoutMs: 300,
+    childTimeoutMs: 500,
+    totalTimeoutMs: 800,
     maxResumes: 2,
     strictEvidence: false,
   })
   runtime.state.records.set(session.id, record)
   const agent = { session, options: {} }
+  const running = runtime.dispatchTool(agent, { deepThink: MAIN_DEEP_THINK_FIXTURE }, new AbortController().signal)
+  await new Promise((resolve) => setTimeout(resolve, 1_200))
 
-  const blocked = await runtime.dispatchTool(agent, { deepThink: MAIN_DEEP_THINK_FIXTURE,}, new AbortController().signal)
-  assert.equal(blocked.ok, true)
-  const blockedStats = derivePlanSnapshot(record.statuses).stats
-  assert.equal(blockedStats.blocked, 2, 'T1 stalls and its dependent T2 must be blocked with it')
-  assert.equal(blockedStats.done, 0)
-  assert.equal(record.phase, 'blocked')
-  assert.ok(record.errors.some((line: string) => /无进展|上限/.test(line)), 'the failure must be described in words')
-  assert.ok(calls >= 2, 'a stalled child is retried once before being blocked')
-  assert.ok(!JSON.stringify(record.errors).includes('[object Object]'))
+  const stats = derivePlanSnapshot(record.statuses).stats
+  assert.equal(stats.blocked, 0, '旧 idle/上限都不再产生 blocked')
+  assert.equal(stats.inProgress, 1, '任务仍在真实执行')
+  assert.equal(calls, 1, '不因旧窗口自动重试')
+  assert.notEqual(record.phase, 'blocked')
+  assert.ok(!(record.errors ?? []).some((line: string) => /无进展|上限|CHILD_TIMEOUT/.test(line)))
 
-  // Second dispatch must actually run again instead of silently doing nothing.
-  const resumed = await (async () => {
-    ctx.subagents.startActivation = () => doneChild('续跑完成')
-    return runtime.dispatchTool(agent, { deepThink: MAIN_DEEP_THINK_FIXTURE,}, new AbortController().signal)
-  })()
-  assert.equal(resumed.ok, true)
-  assert.equal(derivePlanSnapshot(record.statuses).stats.done, 2)
-  assert.equal(record.phase, 'done')
-  assert.equal(record.resumeCount, 1)
-  assert.ok(record.errors.some((line: string) => /第 1 次续跑/.test(line)))
-  // [2.2.7] 中断即报新增【dsh-workplan·执行中断】纯文本通知（stalled 子任务会触发）；
-  // 本断言只数「轮级结果消息」：排除中断通知后，两次派发仍各写 1 条。
-  // [2.3.10][T2] 派发前预告【派发预告】是用户要求1新增的会话 notice（同一 planId
-  // 幂等只发一次），不是轮级结果消息——按本断言本意一并排除。
-  // [2.5.2] 主 Agent 两轮深度思考登记【两轮深度思考已登记】是首次派发门禁的
-  // 计划级 notice（同一计划只登记一次），同样不是轮级结果消息——按本意排除。
-  // [T9][用户要求6] wait 模式也推部门完成即时汇报（纯文本、不带 workplan 标记），
-  // 原按文本排除法会把完成通知计入；改用生产解析器只数轮级结果消息——断言意图
-  // （每次派发恰写 1 条持久结果消息）零删改，且不再受新增 notice 种类影响。
-  const resultOnly = (ev: any) => ev.type === 'user/message' && Boolean(parseResultMessage(ev.data))
-  assert.equal(session.events.filter(resultOnly).length, 2, 'each dispatch writes one durable result message')
+  const cancelled = await runtime.cancelPlan({ session }, { reason: '测试显式取消' })
+  assert.equal(cancelled.ok, true)
+  assert.equal(cancelled.abortedRunning, true)
+  const settled = await running
+  assert.equal(settled.ok, true)
+  assert.equal(record.phase, 'cancelled', '显式取消仍能终止无时限长任务')
 })
 
 test('re-dispatching a blocked plan with no resume budget left fails loudly', async () => {
@@ -418,21 +401,24 @@ test('cancel stops a running dispatch instead of being refused', async () => {
   assert.ok(record.errors.some((line: string) => /第 2 次续跑|已取消|取消/.test(line)) || record.phase === 'cancelled')
 })
 
-test('a dispatch promise that never settles cannot answer "already running" forever', async () => {
+test('长时间运行的 dispatch 不再被墙钟判“已卡住”，而是如实返回 running', async () => {
   const plan = makePlan()
   const session = makeSession()
   const record = makeRecord(plan)
   record.dispatchPromise = new Promise(() => {})
-  record.dispatchStartedAt = Date.now() - 30 * 60 * 1000
+  // 40 分钟远超旧 20 天？这里故意用 40 分钟：旧实现有“预算+宽限”逃逸，
+  // 新契约必须以活跃 promise 为唯一事实，不能按 startedAt 墙钟判 wedged。
+  record.dispatchStartedAt = Date.now() - 40 * 60 * 1000
   const ctx = makeCtx(() => doneChild())
-  // [2.2.5] 默认不设整轮预算；本用例专门验证“旧派发卡住”的失效判定，
-  // 因此显式给一个 60s 预算，让 staleAfter = 预算 + 2 分钟仍可触发。
-  const runtime = createWorkplanRuntime(ctx, { totalTimeoutMs: 60000 })
+  const runtime = createWorkplanRuntime(ctx, { totalTimeoutMs: 60_000 })
   runtime.state.records.set(session.id, record)
 
-  const result = await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE,}, new AbortController().signal)
-  assert.equal(result.ok, false)
-  assert.equal(result.stale, true)
-  assert.match(String(result.error), /判定为已卡住/)
-  assert.match(String(result.hint), /直接接手/)
+  const result = await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
+  assert.equal(result.ok, true)
+  assert.equal(result.alreadyRunning, true)
+  assert.equal(result.running, true)
+  assert.equal(result.stale, undefined, '活跃派发永不被墙钟判 stale')
+  assert.match(String(result.hint), /仍在执行|查看实时状态/)
+  const status = await runtime.statusTool({ session }, {})
+  assert.equal(status?.running, true, '状态工具也持续报告 running')
 })

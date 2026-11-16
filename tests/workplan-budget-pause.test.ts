@@ -22,9 +22,7 @@ import {
   buildChildPrompt,
   buildPlannerPrompt,
   buildResultMessage,
-  canResumePlan,
   computeStats,
-  createStatuses,
   derivePlanSnapshot,
   parseResultMessage,
 } from '../src/plan.js'
@@ -96,8 +94,13 @@ function makeSession() {
   }
 }
 
-function hangingChild() {
-  return { childId: 'child-hang', result: new Promise(() => {}), dispose: async () => {} }
+async function waitFor(check: () => boolean, timeoutMs = 5_000) {
+  const end = Date.now() + timeoutMs
+  while (Date.now() < end) {
+    if (check()) return true
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  return false
 }
 
 function quickChild(text = '完成') {
@@ -116,70 +119,61 @@ function makeCtx(startActivation: any) {
   }
 }
 
-test('计划预算到点是一次暂停：未完成的保持 pending，阶段 paused，文案说明可续跑', async () => {
+test('旧整轮/单次预算到点不再暂停：任务仍 in_progress，只有显式取消才收束', async () => {
   const plan = makePlan()
   const record = makeRecord(plan)
   const session = makeSession()
-  const ctx = makeCtx(() => hangingChild())
-  const result = await dispatchPlan(ctx, record, {
+  let release!: (value: any) => void
+  const gate = new Promise<any>((resolve) => { release = resolve })
+  const controller = new AbortController()
+  controller.signal.addEventListener('abort', () => release({ stopReason: 'cancelled', output: [] }), { once: true })
+  const ctx = makeCtx(() => ({ childId: 'child-hang', result: gate, dispose: async () => {} }))
+  const dispatch = dispatchPlan(ctx, record, {
     agent: { session, options: {} },
-    signal: new AbortController().signal,
-    idleTimeoutMs: 60000,
-    childTimeoutMs: 60000,
+    signal: controller.signal,
+    idleTimeoutMs: 60_000,
+    childTimeoutMs: 500,
     totalTimeoutMs: 400,
-    // 假子会话只回散文，没有证据块；本文件只验证预算/暂停/续跑。
     strictEvidence: false,
   })
 
-  assert.ok(result)
-  assert.equal(record.phase, 'paused', 'budget exhaustion must not look like a failure')
-  /*
-   * Counts are derived from the status list (1.4.3 removed the cached
-   * `record.stats`), so the assertions read the same derivation the dashboard
-   * and the model-facing result use.
-   */
-  const paused = derivePlanSnapshot(record.statuses)
-  assert.equal(paused.stats.blocked, 0, 'nothing failed: the round simply ended')
-  assert.equal(paused.stats.done, 0)
-  assert.equal(paused.stats.pending, 2, 'unfinished subtasks stay pending so the next dispatch picks them up')
-  assert.equal(paused.stats.inProgress, 0, 'no child may be left marked in progress')
-  /*
-   * A reset must clear the companions of the aborted attempt, not just flip the
-   * status: `{status:'pending', progress:100, childId:'…'}` was exactly the
-   * “还没开始 but 100 %” contradiction reported against 1.4.2.
-   */
-  for (const item of paused.statuses) {
-    assert.equal(item.progress, 0, `${item.subtaskId} 重置后进度必须是 0`)
-    assert.equal(item.childId, null, `${item.subtaskId} 重置后不得保留 childId`)
-    assert.equal(item.startedAt, null, `${item.subtaskId} 重置后不得保留 startedAt`)
-  }
-  assert.match(String(record.error), /本轮执行预算（\d+ 分钟）已到/)
-  assert.match(String(record.error), /续跑/)
-  assert.ok(!JSON.stringify(record.statuses).includes('总执行超时'), 'the killed child must not be recorded as a task failure')
+  assert.ok(await waitFor(() => record.statuses.some((item: any) => item.status === 'in_progress'), 5_000))
+  await new Promise((resolve) => setTimeout(resolve, 900))
+  const row = record.statuses.find((item: any) => item.subtaskId === 'T1')
+  assert.equal(row?.status, 'in_progress', '旧预算到点后任务继续，不暂停/不标 blocked')
+  assert.notEqual(record.phase, 'paused', '不再有预算暂停阶段')
+  assert.equal(record.phase, 'executing')
+  assert.equal(row?.deadlineAt ?? null, null, '不写执行截止')
+  assert.ok(!(record.errors ?? []).some((line: string) => /本轮执行预算|总执行超时/.test(line)), '不再产生预算失败文案')
+
+  controller.abort()
+  const result = await dispatch
+  assert.ok(result, '显式取消仍能收束本轮')
+  assert.notEqual(record.phase, 'paused')
+  assert.equal(row?.timeoutCount ?? 0, 0)
 })
 
-test('再次派发会接着跑剩余子任务，已完成的不重跑', async () => {
+test('旧预算配置不再影响正常完成：两项做完仍是一次 done', async () => {
   const plan = makePlan()
   const record = makeRecord(plan)
   const session = makeSession()
   let calls = 0
   const ctx = makeCtx(() => {
     calls += 1
-    return hangingChild()
+    return quickChild('完成')
   })
-  const options = { agent: { session, options: {} }, signal: new AbortController().signal, idleTimeoutMs: 60000, childTimeoutMs: 60000, totalTimeoutMs: 400, strictEvidence: false }
-  await dispatchPlan(ctx, record, options)
-  assert.equal(record.phase, 'paused')
-
-  ctx.subagents.startActivation = () => quickChild('续跑完成')
-  await dispatchPlan(ctx, record, { ...options, totalTimeoutMs: 5000 })
-  assert.equal(derivePlanSnapshot(record.statuses).stats.done, 2, 'both subtasks finish on the second dispatch')
-  /*
-   * [1.5.2] 全部子任务完成即终态，不再等结果消息把它「晋升」成 done。
-   * 旧断言固化的是 `integrating`，那正是「14/14、100%、正在收尾」的来源：
-   * 结果消息写失败或本轮根本不派发时，计划会永远停在收尾态。
-   */
-  assert.equal(record.phase, 'done', 'all subtasks done is itself the terminal condition')
+  const result = await dispatchPlan(ctx, record, {
+    agent: { session, options: {} },
+    signal: new AbortController().signal,
+    idleTimeoutMs: 60_000,
+    childTimeoutMs: 500,
+    totalTimeoutMs: 400,
+    strictEvidence: false,
+  })
+  assert.ok(result)
+  assert.equal(calls, 2, '每个真实任务只启动一次')
+  assert.equal(derivePlanSnapshot(record.statuses).stats.done, 2)
+  assert.equal(record.phase, 'done', '正常完成不因旧预算字段被暂停')
 })
 
 test('paused 阶段能从结果消息回放出来（刷新后不退回“正在做”）', () => {
@@ -221,12 +215,10 @@ test('规划器被要求：不得把只有主 Agent 能做的动作写进子任�
   assert.match(prompt, /没有主计划派发权限/)
   assert.match(prompt, /再分配权限/)
   assert.match(prompt, /只有主 Agent 才能执行/)
-  // [SCv2-T4] 基线修复（改动前基线即红：旧断言依赖已废止的 R1 政策句字面量
-  // 「无须在 10 分钟内完成」的子串）。按 Q1-B/AC-Q1-5 改双向断言：判据层目标句
-  // 必须命中；与裁决相反的绝对否定不得再出现。测试主意图（主 Agent 专属动作
-  // 禁令）不变。
-  assert.match(prompt, /完成目标 ≤10 分钟/)
-  assert.doesNotMatch(prompt, /无须在 10 分钟内完成/)
+  // 执行时限取消：规划器必须明确无执行截止，且不得再写 10 分钟目标/判据。
+  assert.match(prompt, /不设置整轮或单个子任务执行截止/)
+  assert.match(prompt, /estimateMinutes 只用于协调/)
+  assert.doesNotMatch(prompt, /完成目标 ≤10 分钟|≤10 分钟完成/)
 })
 
 test('子 Agent 提示明确说明没有主计划派发权限、不能重启服务，但拥有本部门再分配权限', () => {
@@ -259,25 +251,22 @@ test('子 Agent 提示明确说明没有主计划派发权限、不能重启服�
  * so the card promised nothing could be resumed), and the result payload did
  * not carry `phase`, so a refresh replayed the pause as `executing`.
  */
-test('预算暂停后仍算可续跑，且续跑不消耗自动续跑额度', async () => {
+test('旧预算字段不消耗自动续跑额度，也不影响正常完成', async () => {
   const plan = makePlan()
   const record = makeRecord(plan)
   const session = makeSession()
-  const ctx = makeCtx(() => hangingChild())
-  const options = { agent: { session, options: {} }, signal: new AbortController().signal, idleTimeoutMs: 60000, childTimeoutMs: 60000, totalTimeoutMs: 400, strictEvidence: false }
-  await dispatchPlan(ctx, record, options)
-  assert.equal(record.phase, 'paused')
-
-  const decision = canResumePlan(record, 4)
-  assert.equal(decision.resume, true, 'a paused plan with pending work can be dispatched again')
-  assert.equal(decision.failed, 2)
-  assert.equal(record.resumeCount ?? 0, 0, 'a pause must not be charged against the resume budget')
-
-  ctx.subagents.startActivation = () => quickChild('续跑完成')
-  await dispatchPlan(ctx, record, { ...options, totalTimeoutMs: 5000 })
-  // [1.5.2] 续跑把最后两项做完后，计划当场就是 done（不再停在 integrating）。
+  const ctx = makeCtx(() => quickChild('完成'))
+  const result = await dispatchPlan(ctx, record, {
+    agent: { session, options: {} },
+    signal: new AbortController().signal,
+    idleTimeoutMs: 60_000,
+    childTimeoutMs: 500,
+    totalTimeoutMs: 400,
+    strictEvidence: false,
+  })
+  assert.ok(result)
   assert.equal(record.phase, 'done')
-  assert.equal(record.resumeCount ?? 0, 0, 'continuing after a pause stays outside the resume budget')
+  assert.equal(record.resumeCount ?? 0, 0, '正常完成不消耗续跑额度')
 })
 
 test('结果消息自带阶段，刷新后能原样回放暂停', () => {
@@ -309,22 +298,23 @@ test('结果消息自带阶段，刷新后能原样回放暂停', () => {
   assert.equal(replayed!.resumeAvailable, true, 'a paused plan must be advertised as resumable')
 })
 
-test('预算到点不把被杀子任务的超时写进失败清单', async () => {
+test('旧预算字段不写“总执行超时/预算已到”失败清单', async () => {
   const plan = makePlan()
   const record = makeRecord(plan)
   const session = makeSession()
-  const ctx = makeCtx(() => hangingChild())
+  const ctx = makeCtx(() => quickChild('完成'))
   await dispatchPlan(ctx, record, {
     agent: { session, options: {} },
     signal: new AbortController().signal,
-    idleTimeoutMs: 60000,
-    childTimeoutMs: 60000,
+    idleTimeoutMs: 60_000,
+    childTimeoutMs: 500,
     totalTimeoutMs: 400,
     strictEvidence: false,
   })
   const lines = (record.errors ?? []).join('\n')
-  assert.equal(/总执行超时/.test(lines), false, 'the round budget is not a subtask failure')
-  assert.match(lines, /本轮执行预算（\d+ 分钟）已到/)
+  assert.equal(/总执行超时/.test(lines), false)
+  assert.equal(/本轮执行预算/.test(lines), false, '不存在预算暂停失败')
+  assert.equal(record.phase, 'done')
 })
 
 

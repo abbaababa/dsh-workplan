@@ -29,7 +29,24 @@ import { seedLeaderSelfEffort } from './helpers/self-effort-contract.js'
 const eventLoopAnchor = setInterval(() => {}, 1_000)
 const dropEventLoopAnchor = setTimeout(() => clearInterval(eventLoopAnchor), 60_000)
 dropEventLoopAnchor.unref?.()
-after(() => clearInterval(eventLoopAnchor))
+const liveRuntimes: Array<{ runtime: any; session: any }> = []
+after(async () => {
+  for (const { runtime, session } of liveRuntimes) {
+    try {
+      await runtime.cancelPlan({ session }, { reason: '测试收尾：停止所有仍在等待的假子会话' })
+    } catch {
+      // 收尾失败不能掩盖测试结果；下面的 dispatchPromise 仍会等待/超时。
+    }
+    const pending = runtime.state.records.get(session.id)?.dispatchPromise
+    if (pending) {
+      await Promise.race([
+        pending.catch(() => undefined),
+        new Promise((resolve) => setTimeout(resolve, 1_000)),
+      ])
+    }
+  }
+  clearInterval(eventLoopAnchor)
+})
 
 function makePlan() {
   return {
@@ -97,6 +114,7 @@ function makeRuntime() {
   const statuses: any = createStatuses(plan)
   const record: any = { plan, statuses, updatedAt: 0, errors: [], notices: [] }
   runtime.state.records.set(session.id, record)
+  liveRuntimes.push({ runtime, session })
   const rootAgent = { session, options: {} }
   return { runtime, record, session, spawned, rootAgent, plan, ctx }
 }

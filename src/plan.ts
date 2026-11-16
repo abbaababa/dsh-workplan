@@ -10,10 +10,8 @@
 import { createHash, randomUUID } from 'node:crypto'
 
 import { DEPARTMENT_CAPABILITIES, DEPARTMENT_EXPERT_STANDARD, departmentCapability } from './departments.js'
-// [SCv2-T4] 判据层单一真源（Q1–Q7 用户 2026-11-13 裁决 B/B/B/B/A/A/B）：
-// 只引入判据层常量/消毒/派生，运行层常量与公式不在本模块改动（Q7-B 红线）。
+// 历史判据字段只做读取消毒；不再派生或传播时间完成门槛。
 import {
-  CRITERION_TARGET_MINUTES,
   CRITERION_RESULTS,
   attemptWallClockMsOf,
   sanitizeCriterionException,
@@ -874,7 +872,7 @@ function readSubtasks(value: any, stageIndex: any, errors: any) {
      * estimateNeedsJustification 仅在触发时下发，旧计划载荷逐字不变）。
      */
     if (source.splitReason !== undefined && source.splitReason !== null && typeof source.splitReason !== 'string') {
-      push(errors, `${base}.splitReason`, '必须是字符串（拆分说明：为什么不能拆到 ≤10 分钟；可选字段，缺失合法）')
+      push(errors, `${base}.splitReason`, '必须是字符串（可选的历史拆分说明，缺失合法；与执行时限无关）')
     }
     const splitReasonText = typeof source.splitReason === 'string' ? source.splitReason.trim() : ''
     let estimateConfirm: { confirmed: boolean; by?: string; at?: number; reason?: string } | null = null
@@ -895,10 +893,6 @@ function readSubtasks(value: any, stageIndex: any, errors: any) {
         }
       }
     }
-    const estimateOverCriterion = estimateOk && estimateValue > CRITERION_TARGET_MINUTES
-    const estimateNeedsJustification = estimateOverCriterion
-      && splitReasonText === ''
-      && !(estimateConfirm && estimateConfirm.confirmed === true)
     /*
      * [2.2.0][T3/O-3a] per-subtask 协商上限（timeoutMs，毫秒）可选透传。
      *
@@ -915,7 +909,7 @@ function readSubtasks(value: any, stageIndex: any, errors: any) {
       && Number.isFinite(timeoutValue)
       && timeoutValue > 0
     if (hasTimeout && !timeoutOk) {
-      push(errors, `${base}.timeoutMs`, '必须是正数毫秒（协商上限，可选字段，缺失合法）')
+      push(errors, `${base}.timeoutMs`, '必须是正数毫秒（旧计划的历史字段，可选；不会形成执行截止）')
     }
     /*
      * [2.2.0][T13/推理等级] 子任务自带的推理等级（可选，仅 low / medium / high / xhigh / max）。
@@ -985,9 +979,7 @@ function readSubtasks(value: any, stageIndex: any, errors: any) {
        * [1.7.0] 历史记录。
        */
       ...(estimateOk ? { estimateMinutes: estimateValue } : {}),
-      // [SCv2-T4][Q2-B] 软门禁标记与留痕：仅在触发/存在时下发（旧计划载荷不变）。
-      ...(estimateOverCriterion ? { estimateOverCriterion: true } : {}),
-      ...(estimateNeedsJustification ? { estimateNeedsJustification: true } : {}),
+      // splitReason / estimateConfirm 仅作历史兼容，不再派生任何时间判据或软门禁。
       ...(splitReasonText !== '' ? { splitReason: truncate(splitReasonText, 800) } : {}),
       ...(estimateConfirm ? { estimateConfirm } : {}),
       ...(timeoutOk ? { timeoutMs: timeoutValue } : {}),
@@ -1655,11 +1647,6 @@ export function buildPlannerPrompt(taskText: any, cwd: any, conversationContext:
   const departments = DEPARTMENT_CAPABILITIES
     .map((entry) => `- ${entry.id}（${entry.zh} / ${entry.en}）：职责 ${entry.responsibilities.join('；')}；典型产物 ${entry.outputs.join('；')}`)
     .join('\n')
-  const rawTotalMinutes = Number(budget?.totalMinutes)
-  const totalMinutes = Number.isFinite(rawTotalMinutes) && rawTotalMinutes > 0
-    ? Math.max(1, Math.round(rawTotalMinutes))
-    : 0
-  const childMinutes = Math.max(1, Math.round(Number(budget?.childMinutes) || 15))
   const concurrency = Math.max(1, Number(budget?.concurrency) || MAX_CONCURRENT)
   const resumes = Number.isFinite(Number(budget?.maxResumes)) ? Number(budget.maxResumes) : MAX_PLAN_RESUMES
   const task = truncate(taskText, 16000)
@@ -1693,28 +1680,24 @@ export function buildPlannerPrompt(taskText: any, cwd: any, conversationContext:
     '- department 必须从下面的部门中选择一个；必须同时写 departmentRationale（1-2 句，引用该部门职责与任务要素），department 与 rationale 不一致的计划视为不合格。',
     '- method、outputs、acceptance 必须是非空数组；inputs 可以为空，未知写“待确认”。',
     '- unknowns 和 assumptions 必须如实列出；没有就写空数组，不能把假设写成事实。',
-    '- 子任务必须可独立执行、可验收；不要为了凑数拆无意义任务；10 分钟内（判据层完成目标）不能完美完成的任务必须在规划阶段事前拆小（拆分优先），不得以「要完美完成」为由保留大任务。',
+    '- 子任务必须可独立执行、可验收；按单一目标、单一主产物和清晰验收边界拆分，不得按分钟数强行切分，也不得为了凑数拆无意义任务。',
     // [2.5.0] 用户要求 3：分解必须更简单。部门负责人拥有本部门内再分配权限
     // （dsh_workplan_delegate），会把子任务再拆给多名顶尖专家与组员，因此
     // 主计划层保持单一目标/单一主产物的简单子任务，执行细节下沉到部门内分工。
-    '- 分解必须更简单（用户强制要求）：每个子任务只写单一目标、单一主产物、可独立验收的一件事；不要把多个交付物压进同一个子任务。部门负责人接到子任务后，会用 dsh_workplan_delegate 把它再拆成更简单的单项工作，分配给本部门多名相关领域全球顶尖专家共同承担（部门组员角色已按用户要求 9 取消）——所以主计划子任务保持简单清晰即可，执行细节由部门内分工细化，不要越俎代庖替部门预拆全部细节。再分配同样遵守拆分优先：部门负责人须把本行再拆到每项 10 分钟内，并把本行全部叶子的开工预估之和控制在 ≤10 分钟；预估未报齐时只显示部分和，不得视为达标。',
+    '- 分解必须更简单（用户强制要求）：每个子任务只写单一目标、单一主产物、可独立验收的一件事；不要把多个交付物压进同一个子任务。部门负责人接到子任务后，会用 dsh_workplan_delegate 把它再拆成更简单的单项工作，分配给本部门多名相关领域全球顶尖专家共同承担（部门组员角色已按用户要求 9 取消）——所以主计划子任务保持简单清晰即可，执行细节由部门内分工细化，不要越俎代庖替部门预拆全部细节。再分配只按工作边界与验收拆分；预估可汇总用于协调，但不设分钟上限，也不影响达标判定。',
     '- 子任务由部门负责人子 Agent 牵头执行：负责人拥有本部门内的再分配权限（dsh_workplan_delegate，先 review 提交两轮深度思考产物后 dispatch 派给本部门专家（只保留 expert 角色）），但没有主计划派发权限、不能重启服务、不能安装或升级依赖。禁止把「调用 dsh_workplan_dispatch」「重启/停止 dsh web」「安装或升级插件」这类只有主 Agent 才能执行的动作写进子任务；确实需要时，写成“给出结论或建议，由主 Agent 执行”。',
-    '- 判据层（完成目标 ≤10 分钟，默认必须达成）：每个子任务都要在 10 分钟内做完；10 分钟内做不完的任务必须在规划阶段事前拆小，不得以「要完美完成」为由保留大任务。',
-    '- 运行层安全兜底（不是固定交付期限、不构成对外承诺，也不构成「允许慢」的许可）：单次执行时限＝clamp(estimateMinutes×2.0, 1 秒, 120 分钟)，到点走安全兜底结算保证不丢产物；确需超过 10 分钟的唯一合法例外是用户明确批准并留痕（任务 ID、批准原文/来源、批准时间、放宽后分钟数、适用范围；无留痕＝未批准）；未获批准的超时不得以 done 收尾，记「判据违规（criterion-overrun）」并转新子任务续做。',
-    '- 生效时点（不回溯）：本判据自用户 2026-11-13 裁决（B/B/B/B/A/A/B）生效；运行态判定自补丁部署＋用户重启＋复核通过后新创建的计划起执行；此前已验收为 done 的历史任务与在途计划按旧规则，不重判、不重跑、不改验收结论。',
+    '- 执行无时限：部门负责人和全球顶尖专家没有总时长、单次时长、空闲或回执硬截止；不要设置 timeoutMs，不要按分钟数拆任务，也不要把预估或实际耗时作为 done 的验收条件。用户显式取消、真实错误与证据/质量门禁仍须保留。',
     // [2.3.2][D2-P2] 半角/逗号/括号自检硬约束：与解析层兜底（P0）互为防线，中文模型全角标点高发。
     '- JSON 只允许半角标点（, : " { } [ ]）；对象与数组的相邻成员之间必须有逗号；输出前自检括号成对、每个字符串以半角"闭合。',
     '- 不要输出 Markdown 代码围栏、解释或前后缀；只输出一个 JSON 对象。',
     '',
-    '本轮时间预算（硬事实，请据此规划规模）：',
-    totalMinutes > 0
-      ? `- 一轮总预算约 ${totalMinutes} 分钟（运行层安全兜底，不是交付期限）；判据层完成目标 ≤10 分钟；运行层规模参考 ${childMinutes} 分钟量级（仅供参考、非承诺，实际时长由执行专家开工预告协商决定），两个数字分属两层、不得混读；同时最多 ${concurrency} 个子任务并行。`
-      : `- 本轮不设固定总预算；单个子任务按自身 estimateMinutes 与协商截止/延期执行；同时最多 ${concurrency} 个子任务并行。`,
+    '本轮资源与执行方式：',
+    `- 不设置整轮或单个子任务执行截止；estimateMinutes 只用于协调，不能派生 timeoutMs 或延期机制；同时最多 ${concurrency} 个子任务并行。`,
     resumes > 0
       ? `- 受阻后自动续跑额度 ${resumes} 次；需要时计划会暂停并在下一轮继续。`
       : '- 自动续跑额度为 0；计划不会因轮次预算被暂停。',
     '- [3.0.0][用户要求 3/5] 每个子任务必须写 qualityRequirements（1-8 条字符串）：这是主 Agent 派给部门负责人时随任务书一起下达的「结果质量要求」，写清成果必须达到什么要求、什么算合格。缺失质量要求的子任务在派发时会被系统直接拒发（DISPATCH_QUALITY_REQUIREMENTS_MISSING，不启动部门 Agent），必须 replan 补齐后重新派发。同时子任务必须是简单到 1+1=2 的单项工作：一个目标、一个主产物、一项可独立验收；不要在一个子任务里塞并列的多件事（出现「并且/同时/另外/还要/以及/分别/顺便」或多句并列时应拆成多个子任务）。',
-    '- 每个子任务必须写 estimateMinutes（整数 1-240，宁可估高）：你预估它需要多少分钟。宁可估高，不要估低。取值必须是整数，越界或非整数会被校验拒绝（仅防离谱值），缺失不报错。估时与判据是两层：estimateMinutes 区间保留 1-240（不压缩到 10），宁可估高是事前信号、不是免责；estimateMinutes >10 的子任务必须同时写拆分说明（为什么不能拆到 ≤10 分钟）或用户确认留痕——缺失不拒绝（软门禁），但状态与回报必须标记「需补拆分说明或用户确认」，且不得显示「简单判据达标」。',
+    '- 每个子任务必须写 estimateMinutes（整数 1-240，如实预估）：只用于安排协调与告知用户，仅供参考、非承诺；不会派生执行截止，不会因超过预估算超时，也不影响 done 验收。取值整数与范围校验仅防止离谱输入，缺失不报错。',
     /*
      * [2.2.0][T13/推理等级] 子 Agent 必须自决推理等级，禁止继承主 Agent。
      * 用户规则原文见 plan.ts 顶部 REASONING_EFFORTS 注释；五档映射与五个示例
@@ -2443,7 +2426,7 @@ export function buildDispatchPreAnnouncement(plan: any) {
   const total = flattenSubtasks(plan).length
   if (total === 0) return ''
   const minutes = Math.max(1, estimatePlanMinutes(plan))
-  return `【派发预告】本次分配 ${total} 个子任务，预计执行约 ${minutes} 分钟（口径：按各子任务 estimateMinutes 与并发度的下界估算。预估仅供参考，非承诺；实际时长由执行专家开工预告协商决定）。`
+  return `【派发预告】本次分配 ${total} 个子任务，预计执行约 ${minutes} 分钟（口径：按各子任务 estimateMinutes 与并发度的下界估算。预估仅供参考，非承诺；实际时长以真实执行为准，不形成执行截止或完成验收门槛）。`
 }
 
 /**
@@ -2471,31 +2454,10 @@ export function buildPhaseZeroContinuationHint(effort: string, phaseZeroOutput: 
 }
 
 export function buildBudgetWarning(plan: any, totalBudgetMinutes = 0, maxResumes = MAX_PLAN_RESUMES) {
-  const minutes = estimatePlanMinutes(plan)
-  const rawBudget = Number(totalBudgetMinutes)
-  const budget = Number.isFinite(rawBudget) && rawBudget > 0 ? Math.max(1, Math.round(rawBudget)) : 0
-  /*
-   * [2.2.0][T3/O-5b] 固定预算措辞改为「预估仅供参考，非承诺；实际时长协商
-   * 决定」（方案 §2.6 #5 的目标措辞；O-5b 三处承诺禁令之一）：预算提示只讲
-   * 估算与轮次，不构成任何固定交付承诺。
-   *
-   * 标注行是输出的固定组成部分——预算内也返回（验收 E2「预算预告/计划消息
-   * 把预估标注为仅供参考/非承诺」：凡 buildBudgetWarning 有输出必带该标注，
-   * 计划消息经 warning 路径同享，不再按超预算与否吞掉）。
-   */
-  const advisory = '（子任务 estimateMinutes 预估仅供参考，非承诺；判据层完成目标 ≤10 分钟，默认必须达成、超出须用户明确批准并留痕；运行层安全兜底由执行专家开工预告协商决定，不设固定交付期限、不构成对外承诺。）'
-  // [2.2.5] 0 = 本轮不设固定总预算：只保留“预估仅供参考”的标注，不再输出
-  // “超过本轮预算/需要 N 轮”的提示，避免与“不强制限制”的目标矛盾。
-  if (budget === 0 || minutes <= budget) return advisory
-  const rounds = Math.max(1, Math.ceil(minutes / budget))
-  const missing = flattenSubtasks(plan).some((entry: any) => !Number.isFinite(Number(entry.subtask?.estimateMinutes)))
-  return [
-    `⚠ 预算提示：本计划 ${flattenSubtasks(plan).length} 项，按其估计约需 ${minutes} 分钟 > 本轮 ${budget} 分钟，`
-      + `预计需要约 ${rounds} 轮（续跑额度 ${maxResumes} 次）。`,
-    advisory,
-    '建议：拆成多轮，或减少同时进行的子任务。',
-    ...(missing ? ['（部分子任务缺少 estimateMinutes，已按运行层预算默认值每项 15 分钟估算。）'] : []),
-  ].join('\n')
+  void plan
+  void totalBudgetMinutes
+  void maxResumes
+  return '（子任务 estimateMinutes 预估仅供参考、非承诺，只用于协调与告知；部门负责人和全球顶尖专家执行没有时限，预估或实际耗时均不影响完成验收。）'
 }
 
 export function buildPlanMessage(plan: any, options: any = {}) {
@@ -2547,9 +2509,11 @@ export function buildPlanMessage(plan: any, options: any = {}) {
      */
     options.planMode === true
       ? '下一步：当前处于 plan 模式，先把计划交给用户审阅；用户退出 plan 模式后，再调用 dsh_workplan_dispatch 执行。'
-      : options.autoDispatched === true
-        ? '下一步：计划已自动派发，部门 Agent 正在执行。不要重复调用 dsh_workplan_dispatch；用 dsh_workplan_status 查看进度，结果会在本轮结束时自动写入。'
-        : '下一步：必须调用 dsh_workplan_dispatch 派发本计划；只展示计划而不派发，部门 Agent 不会启动。',
+      : options.approvalHeld === true
+        ? '下一步：本计划处于「认可闸门」之下——任务要求先经用户认可再执行。在用户明确认可前不要派发（调用 dsh_workplan_dispatch 会被拒绝，也不会自动开跑）；用户认可后，调用 dsh_workplan_release 解除闸门并开跑。'
+        : options.autoDispatched === true
+          ? '下一步：计划已自动派发，部门 Agent 正在执行。不要重复调用 dsh_workplan_dispatch；用 dsh_workplan_status 查看进度，结果会在本轮结束时自动写入。'
+          : '下一步：必须调用 dsh_workplan_dispatch 派发本计划；只展示计划而不派发，部门 Agent 不会启动。',
     '',
     PLAN_MARKER_BEGIN,
     JSON.stringify(payload),
@@ -4125,6 +4089,11 @@ export function buildUpdateMessage(update: any) {
     ...(update.instruction === undefined ? {} : { instruction: update.instruction }),
     ...(update.instructionSeq === undefined ? {} : { instructionSeq: update.instructionSeq }),
     /*
+     * [3.0.1] 死锁自愈：复活指示随 durable workplan-update 回放——重启后行上
+     * 的 reviveInstruction 不丢，重建的子会话仍能收到这条指示。
+     */
+    ...(update.reviveInstruction === undefined ? {} : { reviveInstruction: update.reviveInstruction }),
+    /*
      * [1.11.0] 指示回执提醒也要能回放（T10 N4）。
      *
      * 否则刷新页面后「指示已发出、子会话还没动」这条事实只剩内存里的一份，
@@ -4156,6 +4125,13 @@ export function buildUpdateMessage(update: any) {
     // 消毒抬升，刷新/重启后续跑读档放行（G1：写入与消费双侧接线）。
     ...(update.mainDeepThink === undefined ? {} : { mainDeepThink: update.mainDeepThink }),
     ...(update.mainDeepThinkPlanId === undefined ? {} : { mainDeepThinkPlanId: update.mainDeepThinkPlanId }),
+    /*
+     * [3.0.1] 认可闸门（计划级）随 durable workplan-update 回放：刷新/重启后
+     * 「计划被按住、等用户认可」这条事实不丢，dispatch 门禁读档仍然生效；
+     * gateHistory 是只增审计（release 追加），同一回放口径。
+     */
+    ...(update.dispatchHold === undefined ? {} : { dispatchHold: update.dispatchHold }),
+    ...(update.gateHistory === undefined ? {} : { gateHistory: update.gateHistory }),
     ...(update.delegates === undefined ? {} : { delegates: update.delegates }),
     // [2.5.4][T3R1] 分派前深度梳理门禁审计（A3）随 durable workplan-update 回放：
     // 拒绝/放行记录刷新/重启后仍可复核，与 consolidation 同一回放口径。
@@ -4523,6 +4499,26 @@ export function applyStatus(statuses: any, subtaskId: any, patch: any) {
   if (patch.instructionSeq !== undefined) {
     next.instructionSeq = Number.isInteger(Number(patch.instructionSeq)) ? Number(patch.instructionSeq) : null
   }
+  /*
+   * [3.0.1] 死锁自愈留档：instruct 发现子会话失联时，指示不丢——登记为
+   * reviveInstruction 随行持久化，下一次 dispatch 重建子会话时由
+   * buildChildPrompt 带进新子提示词（与 instruction 同口径消毒；null 清除）。
+   */
+  if (patch.reviveInstruction !== undefined) {
+    if (patch.reviveInstruction === null) next.reviveInstruction = null
+    else if (isRecord(patch.reviveInstruction)) {
+      const text = truncate(String(patch.reviveInstruction.text ?? ''), MAX_INSTRUCTION_CHARS)
+      if (!text) throw new PlanError('reviveInstruction.text 不能为空', 'INVALID_INSTRUCTION')
+      next.reviveInstruction = {
+        text,
+        at: numberOrNull(patch.reviveInstruction.at) ?? Date.now(),
+        by: ['agent', 'system', 'child'].includes(patch.reviveInstruction.by) ? patch.reviveInstruction.by : 'agent',
+        reason: truncate(String(patch.reviveInstruction.reason ?? ''), 200) || null,
+      }
+    } else {
+      throw new PlanError('reviveInstruction 必须是对象或 null', 'INVALID_INSTRUCTION')
+    }
+  }
   if (patch.reportedAt !== undefined) next.reportedAt = numberOrNull(patch.reportedAt)
   /*
    * [2.2.0][T3/O-2c/O-3c] 柔性时长协商的留档字段（方案 §2.2/§2.4/§2.5）。
@@ -4545,7 +4541,7 @@ export function applyStatus(statuses: any, subtaskId: any, patch: any) {
     else {
       const value = Number(patch.timeoutMs)
       if (!Number.isFinite(value) || value <= 0) {
-        throw new PlanError('timeoutMs 必须是正数毫秒（协商上限）', 'INVALID_TIMEOUT_MS')
+        throw new PlanError('timeoutMs 必须是正数毫秒（历史字段；不会形成执行截止）', 'INVALID_TIMEOUT_MS')
       }
       next.timeoutMs = value
     }
@@ -5502,12 +5498,6 @@ export function normaliseStatusEntry(entry: any): StatusEntry {
   const criterionViolations = Array.isArray(source.criterionViolations)
     ? source.criterionViolations.filter((item: any) => item !== null && typeof item === 'object' && !Array.isArray(item)).slice(-20)
     : null
-  const exAnteForOver = leaderEstimate
-    ? { minutes: leaderEstimate.totalMinutes }
-    : (source.timeNotice && Number.isFinite(Number(source.timeNotice.declaredMinutes))
-      ? { minutes: Number(source.timeNotice.declaredMinutes) }
-      : null)
-  const leaderEstimateOverCriterion = exAnteForOver !== null && exAnteForOver.minutes > CRITERION_TARGET_MINUTES
   return {
     ...source,
     subtaskId: stringOr(source.subtaskId, ''),
@@ -5535,7 +5525,8 @@ export function normaliseStatusEntry(entry: any): StatusEntry {
     ...(source.criterionException !== undefined ? { criterionException } : {}),
     ...(source.criterionViolations !== undefined ? { criterionViolations } : {}),
     ...(attemptWallClockMs !== null ? { attemptWallClockMs } : {}),
-    ...(leaderEstimateOverCriterion ? { leaderEstimateOverCriterion: true } : {}),
+    // 历史超判据标记不再作为当前事实传播；预估仅供协调。
+    leaderEstimateOverCriterion: false,
   }
 }
 
@@ -6325,6 +6316,12 @@ export function buildChildPrompt({
   conversationContext = '',
   statuses = null,
   previousFailure = null,
+  /*
+   * [3.0.1] 死锁自愈：该行此前升级待指示、子会话失联后由主 Agent 登记了
+   * 复活指示（reviveInstruction）。重建子会话时必须把这条指示带进提示词，
+   * 否则新子会话不知道主 Agent 已经拍板的决定，又会把同一个问题再请示一遍。
+   */
+  reviveInstruction = null,
   lessonsBrief = '',
   /*
    * [2.2.0][T3/O-2a] 子→主预告通道的目标。
@@ -6425,6 +6422,18 @@ export function buildChildPrompt({
         `- 失败类型：${previousFailure.code ?? 'UNKNOWN'}${previousFailure.attempt ? `（第 ${previousFailure.attempt} 次尝试）` : ''}`,
         `- 失败说明：${truncate(String(previousFailure.message ?? '（无说明）'), 600)}`,
         '请针对上面这个原因调整做法，不要重复相同的失败路径；如果仍然无法完成，第一行输出 `BLOCKED: 原因` 并说明缺少什么。',
+      ].join('\n')
+    : ''
+  /*
+   * [3.0.1] 复活指示块：先于一切任务描述给出主 Agent 已拍板的决定。
+   * 这段来自主 Agent 对升级请示的答复（dsh_workplan_instruct），不是可选背景。
+   */
+  const reviveBlock = reviveInstruction && typeof reviveInstruction === 'object' && reviveInstruction.text
+    ? [
+        '',
+        '【主 Agent 指示（针对你此前的请示，已拍板，直接照做）】',
+        truncate(String(reviveInstruction.text), 2000),
+        '你此前因该问题升级待指示；子会话重建后以上述指示为准，不要重复请示同一问题。',
       ].join('\n')
     : ''
   /*
@@ -6529,6 +6538,7 @@ export function buildChildPrompt({
     ...(resumeHint ? [resumeHint] : []),
     ...(phaseZeroContinuation ? [phaseZeroContinuation] : []),
     ...(pendingInstruction ? [pendingInstruction] : []),
+    ...(reviveBlock ? [reviveBlock] : []),
     '',
     ...threePhasePromptLines(),
     ...(typeof lessonsBrief === 'string' && lessonsBrief.trim() !== ''
@@ -6573,28 +6583,17 @@ export function buildChildPrompt({
      * 预告在目标解析阶段必然失败。现在改为：注入真实父会话 id + 用宿主
      * 契约里的字段名 + 明确失败后的确定性重试与留痕，不再有「猜目标」的余地。
      */
-    '柔性时长协商协议（判据层：完成目标 ≤10 分钟，默认必须达成，超出须用户明确批准并留痕；运行层安全兜底：时间是协商出来的安全兜底，不是固定交付期限、不构成对外承诺）：',
+    '执行时间与进度沟通（部门负责人和全球顶尖专家均无执行硬截止）：',
     noticeTargetLine,
-    `- 开工前先报预估时长（预计完成本子任务要多久就报多久）：用 \`${noticeCall}\` 报预估完成时长，新预估覆盖旧预估；预估仅供参考、非承诺，实际时长协商决定；本次计时口径＝单次尝试墙钟（本子会话从启动到结算），每次尝试独立计，续跑/重试不累加；你的预估会累加到部门行的 ≤10 分钟判据目标。`,
-    `- 发现预计将超预估时，立即用同一个目标报新预估并申请延期（说明还要多久、为什么），不要等超时才预警。`,
-    `- 完成即回报：用同一个目标报核心结论（做了什么、证据/文件、验收结果），不要等整轮结束。`,
+    `- 开工前先报预估时长：用 \`${noticeCall}\` 报预估完成时长，新预估覆盖旧预估；预估仅供参考、非承诺，只用于协调和告知，不累加为任何时间判据，也不影响验收。`,
+    '- 发现预估明显变化时，用同一个目标更新预估并说明原因；无需申请延期，extendMs 已停用。平台不会仅因耗时、暂时无新事件或未及时回执而中止、判 blocked 或换人接手。',
+    '- 完成即回报：用同一个目标报核心结论（做了什么、证据/文件、验收结果），不要等整轮结束；长任务应及时落盘并列出已完成路径。',
     ...(noticeTarget
       ? [
         '- 失败后的确定性处理（禁止静默丢弃）：`send_message` 若返回错误（`is unavailable` / `UNAUTHORIZED` / 工具不存在），先在汇报首行原样记录 `noticeChannel: {"target":"' + noticeTarget + '","at":<毫秒时间戳>,"error":"<错误原文>"}`，再用**同一个** agent_id 重试一次；仍失败就继续把子任务做完，把这条记录留在结果里（供主 Agent 阅读；插件不解析这一行，通道结论以状态行观测为准）。**不得改用其它目标，也不得向任何非本轮父会话发送**——那是越权发送，会触发宿主 lineage 拒绝。',
       ]
       : []),
-    // [T3 扩展点·T6] 供 T6 在此行之后追加「完成即时通知」条款（O-1a 插件兜底通道语义）；上方三条款为 O-1a①+O-2a+O-4a 合并协议段（矩阵 Z1），既有条款不得删改。
-    // [2.2.0][T6/O-1a] 完成即时通知条款（插件兜底通道）：完成即报是第一通道（见上方「完成即回报」）；插件另设兜底——子任务结算成功后立即向主会话推送一条含子任务 ID、摘要、验收计数与用时的即时通知，不等待整轮结束。兜底不替代主动回报。
-    /*
-     * [2.3.0][T1] 超时放宽告知与二次超时接手条款（用户 2026-11-10 要求 1/2）：
-     * 预告会由插件自动转告主 Agent「请把预期时间告知用户」；超时后主 Agent
-     * 放宽时插件会把最新执行时限推送给你；连续两次超时改由主 Agent 接手，
-     * 因此专家任何时候都要把已完成内容及时落盘并在回报中列路径——已完成部分
-     * 会被登记为只读保护，禁止被丢弃。以下既有条款零删改。
-     */
-    '- 预估上报会被插件即时转告主 Agent（含「请把此预期执行时间告知用户」提示），主 Agent 会把你报的预估时间告知用户，让双方都有准备。',
-    '- 超时后主 Agent 放宽时，插件会向你的会话推送【延期告知】：内含最新执行时间与剩余余量，并要求你在保证工作质量的前提下高效率执行——收到通知继续当前工作，不要重新开始；已完成内容及时落盘。',
-    '- 连续两次超时后本行转为「主 Agent 接手」（takeoverRequired）：你已完成的产物会被登记为只读保护（禁止丢弃），主 Agent 只继续未完成部分；所以每个阶段都要及时落盘并在回报中列出已完成路径。',
+    '- 预估上报会被插件即时转告主 Agent（含「请把此预期执行时间告知用户」提示），主 Agent 会把你报的预估时间告知用户，让双方都有准备；实际完成与否只由真实结果和验收证据决定。',
     '',
     '遇阻上报（强制，先于继续动作）：',
     '- 出现以下任一情况，第一动作是上报，不是猜测、绕过或静默继续：缺少权限/输入/依赖产物；需求自相矛盾；无法验证；同一命令连续两次失败；需要主 Agent 决定方向。',

@@ -1,28 +1,19 @@
 /*
- * [1.10.6] T6 G1/G3/G4 的集成用例：硬超时到底会不会重试，以及重试前有没有
- * 真的核对过已落盘的产物。
- *
- * T6 的探针证明「策略说会、链路不会」：`shouldRetryAttempt(CHILD_TIMEOUT)`
- * 返回 true，但真实 dispatch 只启动了一次子 Agent。纯函数用例（只测
- * `shouldRetryAttempt`）因此一直是绿的，却拦不住这条断链——所以这里不测纯
- * 函数，而是用假子 Agent 跑完整个 `dispatchPlan`：
- *
- *  1) 硬超时 + 整轮预算充足 → 恰好再启动一次（activationCalls === 2），且第二次
- *     的提示词带着上一次失败（`CHILD_TIMEOUT`），不是原样重试；
- *  2) 超时后已落盘产物被改动 → 不启动第二次（activationCalls === 1），行标记
- *     `artifactConflict`，宁可停下来让人核对，也不覆盖别人的产物。
- *
- * 这两个断言一起才构成「自动续跑一次、而且不重复产出」的最小闭环：只加自动
- * 重试会把「停摆」换成「重复产出」，只加产物核对则永远不会重试。
+ * [执行时限取消][原 1.10.6 自动重试] 集成回归：
+ * 部门负责人/专家执行无时限后，旧 childTimeoutMs / totalTimeoutMs 到点既不能
+ * 杀任务，也不能触发自动重试或产物冲突误报。真正的安全边界仍然保留：
+ *  1) 旧窗口到点后只启动一次，任务继续，真实完成才结算；
+ *  2) 旧窗口不产生 artifactConflict、不改写磁盘产物；
+ *  3) 用户显式取消仍可立即收束，不会被“无时限”变成无法停止。
  */
 import test, { after } from 'node:test'
 import { selfEffortStatuses } from './helpers/self-effort-contract.js'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { createStatuses, derivePlanSnapshot } from '../src/plan.js'
+import { derivePlanSnapshot } from '../src/plan.js'
 import { dispatchPlan } from '../src/runtime.js'
 
 /*
@@ -93,16 +84,13 @@ function makeSession() {
   }
 }
 
-function hangingChild() {
-  return { childId: 'child-hang', result: new Promise(() => {}), dispose: async () => {} }
-}
-
-function quickChild(text = '完成') {
-  return {
-    childId: 'child-quick',
-    result: Promise.resolve({ stopReason: 'completed', output: [{ type: 'text', text }] }),
-    dispose: async () => {},
+async function waitFor(check: () => boolean, timeoutMs = 5_000) {
+  const end = Date.now() + timeoutMs
+  while (Date.now() < end) {
+    if (check()) return true
+    await new Promise((resolve) => setTimeout(resolve, 10))
   }
+  return false
 }
 
 function makeCtx(startActivation: any) {
@@ -113,7 +101,7 @@ function makeCtx(startActivation: any) {
   }
 }
 
-test('硬超时且预算充足时自动重试一次，第二次带着 CHILD_TIMEOUT 失败原因', async () => {
+test('旧 childTimeout 到点不再杀/不再自动重试；真实完成只启动一次', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'wp-auto-retry-'))
   mkdirSync(join(dir, 'out'), { recursive: true })
   try {
@@ -122,54 +110,50 @@ test('硬超时且预算充足时自动重试一次，第二次带着 CHILD_TIME
     const session = makeSession()
     const prompts: string[] = []
     let calls = 0
+    let release!: (value: any) => void
+    const gate = new Promise<any>((resolve) => { release = resolve })
     const ctx = makeCtx((spec: any) => {
       calls += 1
       prompts.push(String(spec?.prompt?.[0]?.text ?? ''))
-      if (calls === 1) {
-        // 第一次执行先落盘再「卡住」：真实事故里子 Agent 就是这样，产物已写出
-        // 但会话被上限掐断。
-        writeFileSync(join(dir, 'out/report.md'), '# first attempt\n')
-        return hangingChild()
-      }
-      return quickChild('完成')
+      writeFileSync(join(dir, 'out/report.md'), '# first attempt\n')
+      return { childId: 'child-hang', result: gate, dispose: async () => {} }
     })
 
-    const result = await dispatchPlan(ctx, record, {
+    const dispatch = dispatchPlan(ctx, record, {
       agent: { session, options: {} },
       signal: new AbortController().signal,
       cwd: dir,
       idleTimeoutMs: 60_000,
-      childTimeoutMs: 1_000,
-      // 远大于 120s 的重试下限：证明「有预算」分支被走到。
-      totalTimeoutMs: 400_000,
-      // 假子会话只回散文，没有证据块；本条只验证重试策略。
+      childTimeoutMs: 500,
+      totalTimeoutMs: 800,
       strictEvidence: false,
     })
+    assert.ok(await waitFor(() => calls === 1, 5_000), '任务应已启动')
+    await new Promise((resolve) => setTimeout(resolve, 1_000))
+    const running = record.statuses.find((item: any) => item.subtaskId === 'T1')
+    assert.equal(running?.status, 'in_progress', '旧单次/整轮窗口到点后仍在执行')
+    assert.equal(calls, 1, '不自动启动第二次')
 
+    release({ stopReason: 'completed', output: [{ type: 'text', text: '完成' }] })
+    const result = await dispatch
     assert.ok(result)
-    assert.equal(calls, 2, '硬超时只自动重试一次：第一次 + 第二次')
-    assert.equal(prompts.length, 2)
-    assert.match(prompts[1], /上一次尝试失败/, '第二次必须知道上一次失败，而不是原样重试')
-    assert.match(prompts[1], /CHILD_TIMEOUT/)
-
+    assert.equal(calls, 1, '真实完成全程只启动一次')
+    assert.equal(prompts.length, 1)
     const stats = derivePlanSnapshot(record.statuses).stats
-    assert.equal(stats.done, 1, '重试成功后应算完成，而不是继续挂着 blocked')
+    assert.equal(stats.done, 1)
     assert.equal(stats.blocked, 0)
     assert.equal(record.phase, 'done')
     const row = record.statuses.find((item: any) => item.subtaskId === 'T1')
     assert.equal(row?.status, 'done')
     assert.equal(row?.artifactConflict, undefined, '无冲突时不得留下 artifactConflict')
-    assert.ok(
-      record.errors.some((line: string) => /已核对产物无冲突，自动重试一次/.test(line)),
-      '重试这件事必须留痕，事后能看出发生过什么',
-    )
+    assert.ok(!record.errors.some((line: string) => /自动重试|CHILD_TIMEOUT/.test(line)), '不再产生超时重试留痕')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
 })
 
-test('重试前核对发现产物在超时后被改动：不覆盖、不重试、标记 artifactConflict', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'wp-auto-retry-conflict-'))
+test('旧超时窗口不产生 artifactConflict、不改写产物；显式取消仍立即收束', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'wp-auto-retry-cancel-'))
   try {
     const plan = makePlan(['out/report.md'])
     const record = makeRecord(plan)
@@ -177,54 +161,40 @@ test('重试前核对发现产物在超时后被改动：不覆盖、不重试�
     const target = join(dir, 'out/report.md')
     mkdirSync(join(dir, 'out'), { recursive: true })
     let calls = 0
-    const prompts: string[] = []
-    const ctx = makeCtx((spec: any) => {
+    let release!: (value: any) => void
+    const gate = new Promise<any>((resolve) => { release = resolve })
+    const controller = new AbortController()
+    const ctx = makeCtx(() => {
       calls += 1
-      prompts.push(String(spec?.prompt?.[0]?.text ?? ''))
-      if (calls > 1) return quickChild('不应该被调用')
-      // 第一次先落盘，再挂起等待上限。
       writeFileSync(target, '# first attempt\n')
-      return {
-        childId: 'child-hang',
-        result: new Promise(() => {}),
-        /*
-         * 关键时序：`dispose()` 在「超时回调取完快照」之后、「重试前复核」之前
-         * 执行（executeSubtask 的 finally → runSubtask 的剩余逻辑）。在这里改写
-         * 文件，模拟另一个写者在空窗期接手了同一份产物。
-         *
-         * 这正是能区分「超时那一刻取快照」与「两次快照背靠背取」的时序：旧实现
-         * 两次读取都在 dispose 之后，永远读不到差别；只有把第一次快照放进超时
-         * 回调里，才能发现文件已经变了。
-         */
-        dispose: async () => {
-          writeFileSync(target, '# rewritten by somebody else after the timeout\n')
-        },
-      }
+      return { childId: 'child-hang', result: gate, dispose: async () => {} }
     })
-
-    const result = await dispatchPlan(ctx, record, {
+    const dispatch = dispatchPlan(ctx, record, {
       agent: { session, options: {} },
-      signal: new AbortController().signal,
+      signal: controller.signal,
       cwd: dir,
       idleTimeoutMs: 60_000,
-      childTimeoutMs: 1_000,
-      totalTimeoutMs: 400_000,
+      childTimeoutMs: 500,
+      totalTimeoutMs: 800,
       strictEvidence: false,
     })
+    assert.ok(await waitFor(() => calls === 1, 5_000))
+    await new Promise((resolve) => setTimeout(resolve, 1_000))
+    const running = record.statuses.find((item: any) => item.subtaskId === 'T1')
+    assert.equal(running?.status, 'in_progress')
+    assert.equal(running?.artifactConflict, undefined, '不再因旧超时产生产物冲突标记')
+    assert.equal(calls, 1)
+    assert.equal(readFileSync(target, 'utf8'), '# first attempt\n', '执行期间产物未被改写')
 
+    controller.abort()
+    // 真实子 Agent 收 abort 后返回 cancelled；夹具需模拟宿主 result 同步收束。
+    release({ stopReason: 'cancelled', output: [] })
+    const result = await dispatch
     assert.ok(result)
-    assert.equal(calls, 1, '产物有变动时不得启动第二次执行')
-    assert.equal(prompts.length, 1)
-
+    assert.equal(calls, 1)
     const row = record.statuses.find((item: any) => item.subtaskId === 'T1')
-    assert.equal(row?.status, 'blocked', '超时仍然是 blocked，重试只负责补跑、不改判')
-    assert.deepEqual(row?.artifactConflict, ['out/report.md'])
-    assert.match(String(row?.error), /已跳过自动重试/)
-    assert.match(String(row?.error), /out\/report\.md/)
-    assert.ok(
-      record.errors.some((line: string) => /为避免覆盖已跳过自动重试/.test(line)),
-      '跳过重试的原因必须进入错误列表，主 Agent 才能看到',
-    )
+    assert.equal(row?.status, 'blocked', '显式取消仍按既有安全路径收束')
+    assert.notEqual(record.phase, 'running')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

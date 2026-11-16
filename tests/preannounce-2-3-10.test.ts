@@ -56,7 +56,9 @@ test('A2 派发预告：子任务数 + estimateMinutes 下界估算 + 非承诺�
   assert.match(text, /本次分配 2 个子任务/)
   assert.ok(text.includes(`预计执行约 ${expected} 分钟`))
   assert.match(text, /仅供参考，非承诺/)
-  assert.match(text, /实际时长由执行专家开工预告协商决定/)
+  assert.match(text, /实际时长以真实执行为准/)
+  assert.match(text, /不形成执行截止或完成验收门槛/)
+  assert.doesNotMatch(text, /协商决定|硬截止|必须按.*完成/)
 })
 
 test('派发预告：缺 estimateMinutes 按每项 15 分钟默认；空计划返回空串不发通知', () => {

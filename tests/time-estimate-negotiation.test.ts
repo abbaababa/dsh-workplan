@@ -1,36 +1,19 @@
 /*
- * [2.2.0][T2 红灯先行] 专家时长预告 + 预估去钳制 + 协商上限派生
- * —— 对应优化项 **O-2a / O-2b / O-3a / O-3b**。
- * 设计依据：docs/dsh-workplan_优化方案_20261107.md §1 ②③ 验收矩阵 B1/B2、C1/C3。
+ * 执行预估契约 —— 预估原样保留、旧 timeoutMs 只读、绝不派生执行截止。
  *
- * 断言点（阈值/公式/数值抄录方案原文，不改写）：
- *  - B2/O-2b：预估区间 **1–240 整数**——1、90、240 通过且原样保留（1-15 钳制不复存在），
- *    **0 与 241 被拒**（仅防离谱值，不是钳制）；
- *  - O-3a：子任务可选 **timeoutMs**（协商上限）原样透传（2.6 表 #1）；
- *  - O-3b/C3：缺省时 **协商上限 = clamp(预估分钟 × 2.0, MIN_CHILD_TIMEOUT_MS,
- *    MAX_CHILD_TIMEOUT_MS)**（方案 §2.2；MIN=1000ms / MAX=1800000ms 抄自
- *    src/runtime.ts:220-221），3 组边界样例：最小预告、乘积超 MAX、中间值；
- *  - B1/O-2a：派发提示词含「开工前先报预估时长」条款（新预估覆盖旧预估），
- *    且不含固定完成承诺。
- *
- * 现状（v2.1.7，红灯原因）：src/plan.ts:705-706 钳制
- * `Math.min(15, Math.max(1, Math.round(...)))`（90/240 被钳成 15；0/241 被钳成
- * 1/15 而不是被拒）；readSubtasks 不透传 timeoutMs；协商上限派生与 deadlineAt
- * 不存在；buildChildPrompt（src/plan.ts:4148-4369）全文无时间条款。
- *
- * 计时口径：派生值断言不依赖真实等待——运行中读状态行 deadlineAt（方案 §2.2
- * 状态行字段），假子会话由 deferred 门吊住，读完即放行。
+ * 新契约：
+ *  - estimateMinutes 仍限 1–240 整数，仅防离谱输入，不再被钳成 1–15；
+ *  - 旧计划 timeoutMs 可解析/回放，但不得转成 deadlineAt、timer 或 watchdog；
+ *  - 负责人/专家状态行固定 executionTimeLimit='none'、deadlineAt=null，
+ *    无论 estimateMinutes 或旧 timeoutMs 取什么值；
+ *  - 派发提示词要求开工前报预估（仅协调信息），明确无执行硬截止、预估不影响验收。
  */
 import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { buildChildPrompt, validatePlan } from '../src/plan.js'
-import { buildPlanMessage, parseResultMessage } from '../src/plan.js'
-import {
-  createWorkplanRuntime,
-  MIN_CHILD_TIMEOUT_MS,
-  MAX_CHILD_TIMEOUT_MS,
-} from '../src/runtime.js'
+import { buildPlanMessage } from '../src/plan.js'
+import { createWorkplanRuntime } from '../src/runtime.js'
 import { MAIN_DEEP_THINK_FIXTURE } from './helpers/main-deep-think.js'
 
 const eventLoopAnchor = setInterval(() => {}, 1_000)
@@ -180,98 +163,27 @@ test('O-3a：timeoutMs 作为 per-subtask 协商上限被原样透传', () => {
   )
 })
 
-test('O-3b/C3：协商上限 = clamp(预告分钟 × 2.0, MIN_CHILD_TIMEOUT_MS, MAX_CHILD_TIMEOUT_MS)——3 组边界样例', async () => {
-  /*
-   * 数值抄录方案原文：
-   *  - 安全系数 2.0（方案 §2.2/§6.5）；
-   *  - 钳制区间 [MIN_CHILD_TIMEOUT_MS, MAX_CHILD_TIMEOUT_MS]（方案 C3，
-   *    常量抄自 src/runtime.ts:220-221）。
-   * 三组样例：最小预告（1 分钟）、乘积超 MAX（240 分钟）、中间值（10 分钟）。
-   */
+test('无时限：estimateMinutes=1/10/240 均不派生 deadlineAt 或计时器', async () => {
   const samples = [
-    { label: '最小预告 1 分钟（下界不误伤）', estimateMinutes: 1 },
-    { label: '乘积超 MAX：预告 240 分钟（240×2.0=28800000ms 应钳到 MAX）', estimateMinutes: 240 },
-    { label: '中间值 10 分钟（区间内原样）', estimateMinutes: 10 },
+    { label: '最小预估 1 分钟', estimateMinutes: 1 },
+    { label: '中间值 10 分钟', estimateMinutes: 10 },
+    { label: '最大预估 240 分钟', estimateMinutes: 240 },
   ]
   for (const sample of samples) {
-    const derived = sample.estimateMinutes * 2.0 * 60_000
-    const expected = Math.min(MAX_CHILD_TIMEOUT_MS, Math.max(MIN_CHILD_TIMEOUT_MS, derived))
-    const subtask = baseSubtask({ estimateMinutes: sample.estimateMinutes })
-    const session: any = {
-      id: `session-derive-${sample.estimateMinutes}`,
-      header: { createdAt: 1000 },
-      events: [] as any[],
-      get seq() {
-        return this.events.length
-      },
-      append(type: string, data: any) {
-        this.events.push({ type, data })
-        return data
-      },
-      eventAt: (seq: number) => session.events[seq],
-    }
-    session.append('user/message', makePlanMessage(subtask))
-    const gate = deferred()
-    const ctx = {
-      logger: { warn() {} },
-      subagents: {
-        startActivation: async () => ({ childId: 'child-derive', result: gate.promise, dispose: async () => {} }),
-      },
-      sessions: { get: () => undefined, list: () => [], eventAt: () => undefined },
-    }
-    const runtime = createWorkplanRuntime(ctx, {
-      totalTimeoutMs: 60_000,
-      idleTimeoutMs: 30_000,
-      strictEvidence: false,
-    })
-    await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
-    const snapshot: any = await runtime.statusTool({ session }, {})
-    const row = (snapshot?.statuses ?? []).find((item: any) => item.subtaskId === 'T1')
-    assert.ok(
-      Number.isFinite(Number(row?.deadlineAt)) && Number.isFinite(Number(row?.startedAt)),
-      `待实现（O-3b/§2.2）：${sample.label}：运行中状态行应有协商截止 deadlineAt（= startedAt + clamp(预告分钟×2.0, ${MIN_CHILD_TIMEOUT_MS}, ${MAX_CHILD_TIMEOUT_MS})）`,
+    const run = await dispatchAndReadStatus(
+      baseSubtask({ estimateMinutes: sample.estimateMinutes }),
+      `session-no-deadline-${sample.estimateMinutes}`,
     )
-    assert.equal(
-      Number(row.deadlineAt) - Number(row.startedAt),
-      expected,
-      `${sample.label}：协商上限应为 ${expected}ms（公式 clamp(${sample.estimateMinutes}×2.0 分钟 = ${derived}ms, ${MIN_CHILD_TIMEOUT_MS}, ${MAX_CHILD_TIMEOUT_MS})）`,
-    )
-    gate.release(completed('完成'))
-    assert.ok(
-      await waitFor(() => session.events.some((event: any) => event.type === 'user/message' && parseResultMessage(event.data)), 10_000),
-      '本轮应收束',
-    )
+    assert.equal(run.row?.status, 'in_progress', `${sample.label}：应进入执行态`)
+    assert.equal(run.row?.executionTimeLimit, 'none', `${sample.label}：状态行必须声明无执行时限`)
+    assert.equal(run.row?.deadlineAt, null, `${sample.label}：预估不得派生 deadlineAt`)
+    assert.equal(run.row?.deadlineRemainingMs, null, `${sample.label}：不得显示剩余倒计时`)
+    assert.equal(run.row?.legacyDeadlineAt, null, `${sample.label}：本例无历史截止`)
+    assert.ok(await run.finish(), `${sample.label}：显式完成后本轮应收束`)
   }
 })
 
-/*
- * [SCv2-T6][C-Q1-09] TA-05 条件断言（AC-Q1-5 改写，预期来源 spec:76）：
- * B1 原「一律禁止 必须…分钟内完成」改为条件断言——判据层目标句允许且必需，
- * 但必须 N=10＋同行判据层/完成目标标签＋相邻行（±2）批准/例外通道；
- * 运行层固定截止（小时级承诺、截止点/时刻、15 分钟/步）仍然禁止。
- * 口径与 reports/simple-criterion-v2-text-assertions.py rule_ta05 逐字一致。
- */
-function ta05Holds(source: string): boolean {
-  const lines = String(source).split('\n')
-  const pattern = /必须在[^\n。]{0,12}分钟内(?:完成|交付)/g
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]
-    pattern.lastIndex = 0
-    let m: RegExpExecArray | null
-    while ((m = pattern.exec(line)) !== null) {
-      const seg = line.slice(Math.max(0, m.index - 6), m.index + m[0].length + 6)
-      const num = /(\d+)\s*分钟/.exec(seg)
-      const okNum = !!num && num[1] === '10'
-      const okLabel = /(判据层|完成目标)/.test(line)
-      const window = lines.slice(Math.max(0, i - 2), i + 3).join('\n')
-      const okExc = /(批准|例外)/.test(window)
-      if (!(okNum && okLabel && okExc)) return false
-    }
-  }
-  return true
-}
-
-test('B1/O-2a：派发提示词含「开工前先报预估时长」条款，且不含固定完成承诺（[SCv2-T6][C-Q1-09] TA-05 条件断言）', () => {
+test('B1/O-2a：派发提示词要求报预估，但明确无时限、预估不影响验收', () => {
   const subtask = baseSubtask({ estimateMinutes: 10 })
   const plan = {
     planId: 'wp-prompt',
@@ -288,50 +200,26 @@ test('B1/O-2a：派发提示词含「开工前先报预估时长」条款，且�
     cwd: '/tmp',
     conversationContext: '',
   })
-  assert.ok(
-    /开工前/.test(prompt) && /预估/.test(prompt) && /send_message/.test(prompt),
-    '待实现（O-2a/B1/2.6 表 #3）：buildChildPrompt 执行要求区需含「柔性时长协商协议」段——开工前 send_message(target:"lead") 报预估完成时长，新预估覆盖旧预估（方案 §2.3）',
-  )
-  // [SCv2-T6][C-Q1-09] 运行层固定承诺仍然禁止（小时级承诺/截止点时刻/15 分钟每步）；
-  // 分钟级「必须在 N 分钟内完成」改为 TA-05 条件断言（N=10 且带例外通道）。
+  assert.match(prompt, /开工前/, '保留开工前预估上报')
+  assert.match(prompt, /预估/, '保留预估信息登记')
+  assert.match(prompt, /send_message/, '保留 send_message 上报通道')
+  assert.match(prompt, /执行时间与进度沟通/, '提示词明确执行时间沟通段')
+  assert.match(prompt, /无执行硬截止/, '明确平台不设硬截止')
+  assert.match(prompt, /预估仅供参考/, '预估仅为协调信息，不是承诺')
+  assert.match(prompt, /不影响验收/, '预估与实际耗时不影响完成验收')
   assert.doesNotMatch(
     prompt,
-    /必须.{0,8}小时内(完成|交付)|截止.{0,8}(点|时刻)|15 分钟\/步/,
-    'B1：派发提示词不得出现运行层固定完成承诺（时间是协商出来的安全兜底，不是固定交付期限）',
+    /二次接手|协商上限|必须在[^\n。]{0,12}分钟内(?:完成|交付)/,
+    '不得残留二次接手、协商上限或按分钟完成话术',
   )
-  assert.ok(
-    ta05Holds(prompt),
-    'B1/TA-05（AC-Q1-5）：「必须在 N 分钟内完成」句式仅当 N=10＋判据层标签＋例外通道时允许（判据层目标句合法，运行层固定截止非法）',
-  )
+  assert.match(prompt, /extendMs 已停用/, '旧延期字段被明确标注停用，而非隐藏')
 })
 
 /*
- * [2.2.0][T9b] 隔离测试：**显式 subtask.timeoutMs 优先于 estimateMinutes 派生值**。
- *
- * 回归依据：docs/dsh-workplan_全量回归与全链路验证_20261107.md「偏差/风险」节
- * (2) 的首要遗留风险——既有 O-3b/C3 用例只覆盖「无显式 timeoutMs 时的派生」
- * （1/240/10 三组），没有「显式值与派生值不同、且显式值赢」的隔离断言，
- * 消费序第 ① 步（src/runtime.ts resolveSubtaskTimeoutMs：explicit → derived →
- * CHILD_TIMEOUT_MS）一旦被回退成「派生优先」，现网测试不会变红。
- *
- * 断言点（全部通过既有公开出口验证，不改源码可见性）：
- *  - 用例 A：estimateMinutes: 10（派生 10×2.0×60000 = 1,200,000ms）＋显式
- *    timeoutMs: 2,500,000 → 运行中状态行 deadlineAt − startedAt 必须是
- *    **2,500,000**（显式优先），而非派生值 1,200,000；
- *  - 用例 B：显式 timeoutMs: 9,000,000（超 MAX_CHILD_TIMEOUT_MS=7,200,000）
- *    → 必须钳制为 **7,200,000**（显式值也要过同一钳制窗口，防止显式值绕过
- *    [MIN_CHILD_TIMEOUT_MS, MAX_CHILD_TIMEOUT_MS] 的单次绝对上限）。
- *
- * 计时口径与同文件 O-3b/C3 用例一致：不等待真实超时，dispatch 后立刻读状态行
- * 的 startedAt/deadlineAt（同一时钟读数派生），读完即放行假子会话收束。
+ * 旧计划 timeoutMs 的只读兼容：字段仍可解析，但不得参与任何截止计算。
+ * 这是“旧配置不再复活计时器”的端到端观测。
  */
-
-/**
- * 派发一条单子任务计划，读取运行中状态行的协商窗口长度，并返回收束函数。
- * 仅复用本文件既有构造手法（planWithSubtask/baseSubtask/makePlanMessage/
- * deferred/completed/waitFor），不触碰源码导出面。
- */
-async function dispatchAndReadDeadline(subtask: any, sessionId: string) {
+async function dispatchAndReadStatus(subtask: any, sessionId: string) {
   const session: any = {
     id: sessionId,
     header: { createdAt: 1000 },
@@ -347,10 +235,14 @@ async function dispatchAndReadDeadline(subtask: any, sessionId: string) {
   }
   session.append('user/message', makePlanMessage(subtask))
   const gate = deferred()
+  let started = false
   const ctx = {
     logger: { warn() {} },
     subagents: {
-      startActivation: async () => ({ childId: 'child-timeout-priority', result: gate.promise, dispose: async () => {} }),
+      startActivation: async () => {
+        started = true
+        return { childId: 'child-no-deadline', result: gate.promise, dispose: async () => {} }
+      },
     },
     sessions: { get: () => undefined, list: () => [], eventAt: () => undefined },
   }
@@ -359,60 +251,45 @@ async function dispatchAndReadDeadline(subtask: any, sessionId: string) {
     idleTimeoutMs: 30_000,
     strictEvidence: false,
   })
-  await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
-  const snapshot: any = await runtime.statusTool({ session }, {})
-  const row = (snapshot?.statuses ?? []).find((item: any) => item.subtaskId === 'T1')
-  const offset = Number(row?.deadlineAt) - Number(row?.startedAt)
+  const dispatchP = runtime.dispatchTool(
+    { session, options: {} },
+    { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' },
+    new AbortController().signal,
+  )
+  assert.ok(await waitFor(() => started), 'T1 应已派发')
+  let row: any
+  const end = Date.now() + 5_000
+  while (Date.now() < end) {
+    const snapshot: any = await runtime.statusTool({ session }, {})
+    row = (snapshot?.statuses ?? []).find((item: any) => item.subtaskId === 'T1')
+    if (row?.startedAt) break
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
   return {
     row,
-    offset,
     finish: async () => {
       gate.release(completed('完成'))
-      return waitFor(
-        () => session.events.some((event: any) => event.type === 'user/message' && parseResultMessage(event.data)),
-        10_000,
-      )
+      await dispatchP
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      return true
     },
   }
 }
 
-test('[2.2.0][T9b] 显式 timeoutMs 优先于 estimateMinutes 派生值', async () => {
-  const estimateMinutes = 10
-  const derived = estimateMinutes * 2.0 * 60_000
-  const explicit = 2_500_000
-  assert.equal(derived, 1_200_000, '夹具前提：10 分钟派生值应为 1,200,000ms')
-  assert.notEqual(explicit, derived, '夹具前提：显式值必须与派生值不同，才能证明优先级')
-  const run = await dispatchAndReadDeadline(
-    baseSubtask({ estimateMinutes, timeoutMs: explicit }),
-    'session-timeout-explicit-wins',
-  )
-  assert.ok(
-    Number.isFinite(run.offset),
-    '运行中状态行应同时有 startedAt 与 deadlineAt（消费序断言的观测点）',
-  )
-  assert.equal(
-    run.offset,
-    explicit,
-    `显式 subtask.timeoutMs 必须优先：协商窗口应为 ${explicit}ms，而不是 estimateMinutes=${estimateMinutes} 派生的 ${derived}ms`,
-  )
-  assert.ok(await run.finish(), '本轮应收束')
-})
-
-test('[2.2.0][T9b] 显式 timeoutMs 超 MAX 也要被钳制到 7,200,000', async () => {
-  const explicit = 9_000_000
-  assert.ok(explicit > MAX_CHILD_TIMEOUT_MS, `夹具前提：${explicit}ms 必须大于 MAX_CHILD_TIMEOUT_MS=${MAX_CHILD_TIMEOUT_MS}`)
-  const run = await dispatchAndReadDeadline(
-    baseSubtask({ estimateMinutes: 10, timeoutMs: explicit }),
-    'session-timeout-explicit-clamped',
-  )
-  assert.ok(
-    Number.isFinite(run.offset),
-    '运行中状态行应同时有 startedAt 与 deadlineAt（钳制断言的观测点）',
-  )
-  assert.equal(
-    run.offset,
-    MAX_CHILD_TIMEOUT_MS,
-    `显式 timeoutMs=${explicit}ms 超上限时必须钳制为 ${MAX_CHILD_TIMEOUT_MS}ms（显式值不得绕过 [${MIN_CHILD_TIMEOUT_MS}, ${MAX_CHILD_TIMEOUT_MS}] 窗口）`,
-  )
-  assert.ok(await run.finish(), '本轮应收束')
+test('旧 timeoutMs 在 2.5M/9M 下都不生成 deadlineAt', async () => {
+  for (const sample of [
+    { explicit: 2_500_000, id: 'session-timeout-explicit-wins' },
+    { explicit: 9_000_000, id: 'session-timeout-explicit-clamped' },
+  ]) {
+    const run = await dispatchAndReadStatus(
+      baseSubtask({ estimateMinutes: 10, timeoutMs: sample.explicit }),
+      sample.id,
+    )
+    assert.equal(run.row?.status, 'in_progress', `timeoutMs=${sample.explicit} 旧字段不应阻止进入执行`)
+    assert.equal(run.row?.deadlineAt, null, `timeoutMs=${sample.explicit} 不得重新武装 deadlineAt`)
+    assert.equal(run.row?.deadlineRemainingMs, null, `timeoutMs=${sample.explicit} 不得显示倒计时`)
+    assert.equal(run.row?.executionTimeLimit, 'none', `timeoutMs=${sample.explicit} 下仍声明无时限`)
+    assert.equal(run.row?.legacyDeadlineAt, null, '新行没有历史截止')
+    assert.ok(await run.finish(), '显式完成真实收束本轮')
+  }
 })

@@ -30,13 +30,13 @@ function fakeRuntime() {
   }
 }
 
-test('dispatch 工具暴露 wait/async 两种模式，且超时覆盖计划预算', () => {
+test('dispatch 工具暴露 wait/async 两种模式，且不声明任何执行期限', () => {
   const dispatch = createDispatchTool(fakeRuntime())
   assert.equal(dispatch.name, 'dsh_workplan_dispatch')
   assert.deepEqual(dispatch.parameters.properties.mode.enum, ['wait', 'async'])
   assert.equal(dispatch.parameters.properties.mode.type, 'string')
   assert.equal(dispatch.parameters.additionalProperties, false)
-  assert.equal(dispatch.timeoutMs, 620_000, '工具超时必须比计划预算更长，否则派发中被宿主打断')
+  assert.equal('timeoutMs' in dispatch, false, '旧 totalTimeoutMs 配置不得恢复工具层截止')
 })
 
 test('status 工具是只读的，输出 schema 覆盖进度字段', () => {

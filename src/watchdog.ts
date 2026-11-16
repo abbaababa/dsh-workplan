@@ -164,6 +164,11 @@ export function createProgressWatchdog(input: {
   idleMs: number
   hardMs: number
   makeError: (reason: Exclude<TimeoutReason, null>) => Error
+  /**
+   * 是否执行时间上限。缺省 false：只观测进度与回执，不预警、不拒绝、不中止。
+   * 仅供独立历史测试显式传 true 复现旧工具语义；部门负责人/专家生产路径不得启用。
+   */
+  enforceTimeouts?: boolean
   pollMs?: number
   onProgress?: (info: { now: number; seq: number; elapsedMs: number }) => void
   onApproachingDeadline?: (info: ApproachingDeadlineInfo) => void
@@ -171,6 +176,7 @@ export function createProgressWatchdog(input: {
   now?: () => number
 }): ProgressWatchdog {
   const clock = input.now ?? (() => Date.now())
+  const enforceTimeouts = input.enforceTimeouts === true
   const pollMs = Math.max(10, Math.floor(input.pollMs ?? 2000))
   const startedAt = clock()
   let lastProgress = startedAt
@@ -254,6 +260,7 @@ export function createProgressWatchdog(input: {
         }
       }
     }
+    if (!enforceTimeouts) return
     warnApproachingDeadline(now)
     const reason = pickTimeoutReason({
       now,

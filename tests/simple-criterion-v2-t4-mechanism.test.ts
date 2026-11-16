@@ -56,17 +56,15 @@ const APPROVAL = { approvedBy: 'user', at: 1_500, reason: '用户批准原文：
 
 /* ---------------- D-1 生效边界（fail-closed） ---------------- */
 
-test('D-1：默认关闭；开关+起点+createdAt≥起点 三者齐备才生效（任一缺失一律旧规则）', () => {
-  assert.equal(criterionV2Active(2_000_000, {}), false, '未设置环境变量＝完全关闭（在途/历史零影响）')
-  assert.equal(criterionV2Active(2_000_000, { DSH_WORKPLAN_CRITERION_V2: '1' }), false, '缺起点＝不生效')
+test('D-1（执行时限取消）：开关、起点、createdAt 再齐全也不能激活 10 分钟判据', () => {
+  assert.equal(criterionV2Active(2_000_000, {}), false)
   const env = { DSH_WORKPLAN_CRITERION_V2: '1', DSH_WORKPLAN_CRITERION_V2_SINCE: '1000000' }
-  assert.equal(criterionV2Active(2_000_000, env), true, '起点后新创建计划生效')
-  assert.equal(criterionV2Active(999_999, env), false, '起点前创建（在途/历史）不生效，Q5-A 不回溯')
-  assert.equal(criterionV2Active(undefined, env), false, '创建时间缺失＝不生效')
-  assert.equal(criterionV2Active(2_000_000, { DSH_WORKPLAN_CRITERION_V2: '0', DSH_WORKPLAN_CRITERION_V2_SINCE: '1000000' }), false)
-  assert.equal(criterionV2Active(2_000_000, { DSH_WORKPLAN_CRITERION_V2: '1', DSH_WORKPLAN_CRITERION_V2_SINCE: 'abc' }), false, '非法起点＝不生效')
+  assert.equal(criterionV2Active(2_000_000, env), false)
+  assert.equal(criterionV2Active(999_999, env), false)
+  assert.equal(criterionV2Active(undefined, env), false)
   const iso = { DSH_WORKPLAN_CRITERION_V2: 'true', DSH_WORKPLAN_CRITERION_V2_SINCE: '2026-11-13T00:00:00Z' }
-  assert.equal(criterionV2Active(Date.parse('2026-11-13T00:00:01Z'), iso), true, 'ISO 起点可解析')
+  assert.equal(criterionV2Active(Date.parse('2026-11-13T00:00:01Z'), iso), false)
+  assert.equal(criterionV2Active(Number.MAX_SAFE_INTEGER, iso), false)
 })
 
 /* ---------------- Q1-B 批准留痕消毒 ---------------- */
@@ -154,31 +152,24 @@ function subtask(extra: any = {}) {
   return { id: 'T1', title: '验证', department: 'research', role: '分析', objective: '验证软门禁', method: ['样例'], inputs: [], outputs: ['报告'], dependsOn: [], acceptance: ['断言通过'], risk: '无', ...extra }
 }
 
-test('Q2-B/AC-Q2-1..3：1–240 保留、0/241 仍拒；>10 软标记不拒绝；说明/确认消除待补标记', () => {
-  for (const value of [1, 10, 90, 240]) {
+test('Q2-B（执行时限取消）：1–240 保留、0/241 仍拒；任何时长都不再打 10 分钟标记', () => {
+  for (const value of [1, 10, 11, 23, 90, 240]) {
     const res: any = validatePlan(planWithSubtask(subtask({ estimateMinutes: value })))
-    assert.equal(res.ok, true, `estimateMinutes=${value} 必须合法（B2/O-2b 回归守卫）`)
+    assert.equal(res.ok, true, `estimateMinutes=${value} 必须合法`)
     const row = res.plan.stages[0].subtasks[0]
     assert.equal(row.estimateMinutes, value, '原样保留，不改写')
-    if (value <= 10) assert.equal(row.estimateOverCriterion, undefined, '≤10 不打标（旧载荷逐字不变）')
+    assert.equal(row.estimateOverCriterion, undefined, '不再有超 10 分钟标记')
+    assert.equal(row.estimateNeedsJustification, undefined, '不要求补拆分说明')
   }
   for (const value of [0, 241, 1.5]) {
     const res: any = validatePlan(planWithSubtask(subtask({ estimateMinutes: value })))
     assert.equal(res.ok, false, `estimateMinutes=${value} 必须拒绝`)
   }
-  const over: any = validatePlan(planWithSubtask(subtask({ estimateMinutes: 11 })))
-  assert.equal(over.ok, true, 'GAP-1 消解：>10 软门禁，不硬拒绝（Q2=B 裁决优先）')
-  assert.equal(over.plan.stages[0].subtasks[0].estimateOverCriterion, true)
-  assert.equal(over.plan.stages[0].subtasks[0].estimateNeedsJustification, true, 'AC-Q2-2 标记可查询')
   const withReason: any = validatePlan(planWithSubtask(subtask({ estimateMinutes: 23, splitReason: '拆成骨架与断言两步' })))
-  assert.equal(withReason.ok, true)
-  assert.equal(withReason.plan.stages[0].subtasks[0].estimateNeedsJustification, undefined)
+  assert.equal(withReason.ok, true, '历史拆分说明仍可回放')
   assert.equal(withReason.plan.stages[0].subtasks[0].splitReason, '拆成骨架与断言两步')
-  const withConfirm: any = validatePlan(planWithSubtask(subtask({ estimateMinutes: 12, estimateConfirm: { confirmed: true, by: 'user' } })))
-  assert.equal(withConfirm.ok, true)
-  assert.equal(withConfirm.plan.stages[0].subtasks[0].estimateNeedsJustification, undefined)
   const badReason: any = validatePlan(planWithSubtask(subtask({ estimateMinutes: 12, splitReason: 42 })))
-  assert.equal(badReason.ok, false, 'splitReason 形状非法拒绝')
+  assert.equal(badReason.ok, false, 'splitReason 形状非法拒绝（数据卫生，不是时限门）')
   const badConfirm: any = validatePlan(planWithSubtask(subtask({ estimateMinutes: 12, estimateConfirm: { confirmed: 'yes' } })))
   assert.equal(badConfirm.ok, false, 'estimateConfirm 形状非法拒绝')
 })
@@ -198,21 +189,24 @@ test('Q7-B/AC-Q1-4/AC-Q7-2：运行层常量与派生公式逐字不变', () => 
 
 /* ---------------- 读时派生与消毒 ---------------- */
 
-test('C29/C08：normaliseStatusEntry 派生墙钟、消毒判据字段（非法值降级，不透了脏值）', () => {
+test('C29/C08：墙钟与历史判据字段只读消毒，执行时限固定为 none', () => {
   const entry = normaliseStatusEntry({ subtaskId: 'T1', status: 'done', startedAt: 1_000, finishedAt: 601_000, criterionResult: 'bogus', criterionException: { approvedBy: 'agent' }, timeNotice: { declaredMinutes: 12 } })
-  assert.equal(entry.attemptWallClockMs, 600_000)
+  assert.equal(entry.attemptWallClockMs, 600_000, '墙钟仅用于展示/审计')
   assert.equal(entry.criterionResult, null, '非法枚举降级 null')
   assert.equal(entry.criterionException, null, '非法批准消毒为 null')
-  assert.equal(entry.leaderEstimateOverCriterion, true, '直做 12 分钟超判据（服务端布尔）')
+  assert.equal(entry.leaderEstimateOverCriterion, false, '不再产生 10 分钟告警')
+  assert.equal(entry.deadlineAt ?? null, null, '旧截止不得重新武装')
   const ok = normaliseStatusEntry({ subtaskId: 'T1', status: 'done', criterionResult: 'exception-approved', criterionException: APPROVAL })
-  assert.equal(ok.criterionResult, 'exception-approved')
+  assert.equal(ok.criterionResult, 'exception-approved', '历史字段可回放')
   assert.deepEqual(ok.criterionException, APPROVAL)
   const pending = normaliseStatusEntry({ subtaskId: 'T1', status: 'pending', startedAt: 1_000, finishedAt: 601_000 })
   assert.equal(pending.attemptWallClockMs, undefined, 'pending 无计时')
   const lines = modelStatusLines([{ subtaskId: 'T1', status: 'blocked', startedAt: 1_000, finishedAt: 61_000, criterionResult: 'unmet', timeNotice: { declaredMinutes: 12 } }])
   assert.equal(lines[0].attemptWallClockMs, 60_000)
-  assert.equal(lines[0].criterionResult, 'unmet')
-  assert.equal(lines[0].leaderEstimateOverCriterion, true)
+  assert.equal(lines[0].criterionResult, 'unmet', '历史结果只读展示')
+  assert.equal(lines[0].leaderEstimateOverCriterion, false)
+  assert.equal(lines[0].executionTimeLimit, 'none')
+  assert.equal(lines[0].deadlineAt, null)
 })
 
 /* ---------------- 集成：真实 runtime ---------------- */
@@ -271,37 +265,29 @@ function withEnv(env: Record<string, string>, fn: () => Promise<void>) {
 }
 const completed = (text = '任务完成') => ({ stopReason: 'completed', output: [{ type: 'text', text }] })
 
-test('Q1-B/C05 集成：生效计划 extendMs 无批准⇒拒绝；有批准⇒放行并落 criterionException；未生效计划旧行为', async () => {
+test('C05 集成（新契约）：环境变量/时间再满足旧条件，extendMs 也只返回 TIME_LIMITS_DISABLED', async () => {
   await withEnv(ACTIVE_ENV, async () => {
     const { session, runtime, release, hasStarted } = makeRuntime(2_000_000, { childTimeoutMs: 60_000 })
     await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
     assert.ok(await waitFor(hasStarted, 5_000), 'T1 应已派发')
     const denied: any = await runtime.updateStatus({ session }, { subtaskId: 'T1', extendMs: 2_000, reason: '无批准放宽' })
-    assert.equal(denied.ok, false); assert.equal(denied.code, 'EXTEND_NEEDS_USER_APPROVAL')
-    const badActor: any = await runtime.updateStatus({ session }, { subtaskId: 'T1', extendMs: 2_000, criterionApproval: { ...APPROVAL, approvedBy: 'agent', at: Date.now() } })
-    assert.equal(badActor.ok, false, '主 Agent 自行批准无效')
-    const future: any = await runtime.updateStatus({ session }, { subtaskId: 'T1', extendMs: 2_000, criterionApproval: { ...APPROVAL, at: Date.now() + 100_000 } })
-    assert.equal(future.ok, false); assert.equal(future.code, 'EXTEND_APPROVAL_INVALID_TIME')
-    const ok: any = await runtime.updateStatus({ session }, { subtaskId: 'T1', extendMs: 2_000, criterionApproval: { ...APPROVAL, at: Date.now() - 1_000 } })
-    assert.equal(ok.ok, true, '用户批准留痕后放行')
-    assert.equal(ok.criterionException?.extendedMs, 2_000, '放宽后毫秒数回填')
+    assert.equal(denied.ok, false)
+    assert.equal(denied.code, 'TIME_LIMITS_DISABLED')
+    const approved: any = await runtime.updateStatus({ session }, {
+      subtaskId: 'T1', extendMs: 2_000,
+      criterionApproval: { ...APPROVAL, at: Date.now() - 1_000 },
+    })
+    assert.equal(approved.ok, false, '用户批准也不能复活已取消的时限')
+    assert.equal(approved.code, 'TIME_LIMITS_DISABLED')
     const row = await rowOf(runtime, session)
-    assert.equal(row.criterionException?.approvedBy, 'user')
-    assert.ok((row.timeJournal ?? []).some((item: any) => item.action === 'criterion-exception'), '审计条目落档')
-    release(completed())
-  })
-  // 未生效计划（createdAt 早于起点）：2.3.0 旧行为，无批准也放行（Q5-A/D-1）。
-  await withEnv(ACTIVE_ENV, async () => {
-    const { session, runtime, release, hasStarted } = makeRuntime(1_000, { childTimeoutMs: 60_000 })
-    await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
-    assert.ok(await waitFor(hasStarted, 5_000))
-    const legacy: any = await runtime.updateStatus({ session }, { subtaskId: 'T1', extendMs: 2_000 })
-    assert.equal(legacy.ok, true, '在途计划按旧规则（不回溯）')
+    assert.equal(row.deadlineAt ?? null, null)
+    assert.equal(row.criterionException ?? null, null, '不再写判据延期留痕')
+    assert.ok(!(row.timeJournal ?? []).some((item: any) => item.action === 'extend' || item.action === 'criterion-exception'))
     release(completed())
   })
 })
 
-test('Q3-B/§3.5 集成：生效计划 done 结算——无事前预估⇒unmet 不得 done；预估 5 分钟⇒met 可 done', async () => {
+test('Q3-B 集成（新契约）：无 timeNotice、无判据也可以 done，不再因时长被 blocked', async () => {
   await withEnv(ACTIVE_ENV, async () => {
     const { session, runtime, release, hasStarted } = makeRuntime(2_000_000, { childTimeoutMs: 60_000 })
     await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
@@ -309,51 +295,32 @@ test('Q3-B/§3.5 集成：生效计划 done 结算——无事前预估⇒unmet 
     release(completed())
     let row: any = null
     assert.ok(await waitFor(async () => { row = await rowOf(runtime, session); return row && row.status !== 'in_progress' && row.status !== 'pending' }, 10_000), '应已结算')
-    assert.equal(row.status, 'blocked', 'S-Q1-3：未批准超时/未达标不得以 done 收尾')
-    assert.equal(row.blockedKind, 'criterion-overrun')
-    assert.equal(row.criterionResult, 'unmet')
-    assert.ok((row.criterionViolations ?? []).length >= 1, '违规审计落行')
-    assert.match(String(row.error ?? ''), /criterion-overrun/)
-    assert.match(String(row.error ?? ''), /replan\(replace\)/, '文案指向接替行只补缺口')
-  })
-  await withEnv(ACTIVE_ENV, async () => {
-    const { session, runtime, release, hasStarted } = makeRuntime(2_000_000, { childTimeoutMs: 60_000 })
-    await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
-    assert.ok(await waitFor(hasStarted, 5_000))
-    const notice: any = await runtime.updateStatus({ session }, { subtaskId: 'T1', timeNotice: { declaredMinutes: 5, reason: '事前预估' } })
-    assert.equal(notice.ok, true)
-    release(completed())
-    let row: any = null
-    assert.ok(await waitFor(async () => { row = await rowOf(runtime, session); return row && row.status !== 'in_progress' && row.status !== 'pending' }, 10_000))
-    assert.equal(row.status, 'done', '事前 5≤10 且事后墙钟≤10 ⇒ met 可 done')
-    assert.equal(row.criterionResult, 'met')
+    assert.equal(row.status, 'done', '真实完成不因缺预估/超 10 分钟被阻断')
+    assert.notEqual(row.blockedKind, 'criterion-overrun')
+    assert.notEqual(row.criterionResult, 'unmet')
+    assert.equal((row.criterionViolations ?? []).length, 0, '不再生成时长违规审计')
+    assert.doesNotMatch(String(row.error ?? ''), /criterion-overrun/)
   })
 })
 
-test('Q7-B 分层集成：到点运行层 blocked 不变；判据层独立判定（预估 5⇒met 仍 blocked；无预估⇒unmet＋违规）', async () => {
-  await withEnv(ACTIVE_ENV, async () => {
-    const { session, runtime, hasStarted } = makeRuntime(2_000_000, { childTimeoutMs: 3_000 })
-    await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
-    assert.ok(await waitFor(hasStarted, 5_000))
-    // 派发后、到点前落档事前预估（派发会重置上一尝试的行字段——每次尝试独立，
-    // 与 Q6-A 一致；3s 窗口足够 updateStatus 落档，无竞态）。
-    await runtime.updateStatus({ session }, { subtaskId: 'T1', timeNotice: { declaredMinutes: 5 } })
-    let row: any = null
-    assert.ok(await waitFor(async () => { row = await rowOf(runtime, session); return row?.criterionResult != null }, 10_000), '到点应落判据结果')
-    assert.equal(row.status, 'blocked', '运行层兜底照旧（超时仍 blocked，不因判据 met 变 done）')
-    assert.equal(row.criterionResult, 'met', '判据层与运行层互不取代（S-Q7-2）')
-    assert.equal(row.pendingAdjudication, true, 'C16 待裁决事实标记保留')
-  })
-  await withEnv(ACTIVE_ENV, async () => {
-    const { session, runtime, hasStarted } = makeRuntime(2_000_000, { childTimeoutMs: 1_000 })
-    await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
-    assert.ok(await waitFor(hasStarted, 5_000))
-    let row: any = null
-    assert.ok(await waitFor(async () => { row = await rowOf(runtime, session); return row?.criterionResult != null }, 10_000))
-    assert.equal(row.criterionResult, 'unmet')
-    assert.ok((row.criterionViolations ?? []).length >= 1)
-    assert.match(String(row.error ?? ''), /criterion-overrun/)
-  })
+test('Q7-B 集成（新契约）：旧 1 秒窗口到点不 blocked、不落判据，真实完成仍 done', async () => {
+  const { session, runtime, release, hasStarted } = makeRuntime(2_000_000, { childTimeoutMs: 1_000 })
+  await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
+  assert.ok(await waitFor(hasStarted, 5_000))
+  await new Promise((resolve) => setTimeout(resolve, 1_300))
+  let row: any = await rowOf(runtime, session)
+  assert.equal(row.status, 'in_progress', '旧窗口到点仍执行')
+  assert.equal(row.deadlineAt ?? null, null)
+  assert.equal(row.criterionResult ?? null, null, '不再按时间落 met/unmet')
+  assert.equal((row.criterionViolations ?? []).length, 0)
+  assert.notEqual(row.blockedKind, 'criterion-overrun')
+  release(completed())
+  assert.ok(await waitFor(async () => {
+    row = await rowOf(runtime, session)
+    return row && row.status !== 'in_progress' && row.status !== 'pending'
+  }, 10_000), '真实完成应正常结算')
+  assert.equal(row.status, 'done')
+  assert.notEqual(row.blockedKind, 'criterion-overrun')
 })
 
 test('C08 回放：结果消息携带的判据字段经 reconstructFromSession 不丢（刷新/重启同源）', () => {

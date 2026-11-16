@@ -81,7 +81,7 @@ test('C-Q6-04（AC-Q6-2 边界）：预算重置清空时间戳 ⇒ null 未验�
   assert.ok(evaluation.reasons.some((r) => r.includes('wall-clock-unverified')), `reasons 必须含 wall-clock-unverified：${JSON.stringify(evaluation.reasons)}`)
 })
 
-test('C-Q6-05（AC-Q6-3 边界）：双尝试 6+6=12 分钟 ⇒ 每次独立计时不累计；两条独立结果各含自己的时间戳', async () => {
+test('C-Q6-05（新契约）：双尝试各 6 分钟只记真实耗时，不产生判据结果或违规', async () => {
   const results: any[] = []
   for (const attempt of [1, 2]) {
     await withEnv(ACTIVE_ENV, async () => {
@@ -94,13 +94,10 @@ test('C-Q6-05（AC-Q6-3 边界）：双尝试 6+6=12 分钟 ⇒ 每次独立计�
         h.release(completedWithEvidence())
         let row: any = null
         assert.ok(await waitFor(async () => { row = await rowOf(h.runtime, h.session); return row && row.status !== 'in_progress' && row.status !== 'pending' }, 15_000))
-        // ① 不判违规（每次独立，只认本次 startedAt/finishedAt）
-        assert.equal(row.criterionResult, 'met', `尝试 ${attempt} 独立判 met`)
-        assert.equal(row.status, 'done')
+        assert.equal(row.criterionResult ?? null, null, `尝试 ${attempt} 无生产判据结果`)
+        assert.equal(row.status, 'done', '证据齐全照常完成')
         assert.ok((row.criterionViolations ?? []).length === 0, '总时长 12>10 不累计判违规')
-        // ② 各自含自己的时间戳。实测口径：statusTool 投影含 startedAt 与派生
-        // attemptWallClockMs，不含 finishedAt（首跑调试确认，非缺陷）；墙钟由
-        // attemptWallClockMs 表达，两尝试 startedAt 互异即独立计时证据。
+        // 时间仍如实记录，只用于展示：投影含 startedAt 与派生的 attemptWallClockMs。
         assert.ok(Number.isFinite(Number(row.startedAt)), '本次尝试起点时间戳在场')
         assert.ok(row.attemptWallClockMs >= 6 * 60_000 && row.attemptWallClockMs < 6 * 60_000 + 10_000, '本次墙钟≈6 分钟')
         results.push(row)

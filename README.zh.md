@@ -3,7 +3,7 @@
 > **两个卖点，一句话：ISO/IEC 15408:2026 全套安全证据，5 条命令自己验；安装一条命令、零第三方运行时依赖。**
 
 [![verify](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml/badge.svg)](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml)
-[![version](https://img.shields.io/badge/version-2.5.2-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v2.5.2)
+[![version](https://img.shields.io/badge/version-3.0.1-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v3.0.1)
 
 给 **DeepSeek Harness（DSH）** 加一段「先拆计划 → 真派部门子 Agent 去做 → 左侧栏实时看进度」的能力。不装 App、不改 DSH 源码、不换页面。
 
@@ -69,7 +69,7 @@ grep -RInE "child_process|execSync|eval\(|writeFileSync" src || echo "0 命中�
 ## 一键安装
 
 ```bash
-dsh plugin --profile web add dsh-workplan@2.5.2
+dsh plugin --profile web add dsh-workplan@3.0.1
 ```
 
 装完**重启一次 DSH Web**（或重新载入当前页面）让插件生效。
@@ -93,7 +93,7 @@ dsh plugin --profile web add "$(pwd)"
 4. 点左侧栏的**「任务进度」**，就能看到：
 
    - 顶部五个数字：**几个任务 / 分配了多少件工作 / 做好了 / 正在做 / 卡住了**；
-   - 计划卡：分「进行中」「已结束」「已完成」三组，右上角是完成率。「已结束」= 这一轮已经停了（没有东西在跑）但计划还没做完，卡片会写清停在哪儿（预算用完 / 卡住了 / 还没开始），说一句「继续」即可接着推进；
+   - 计划卡：分「进行中」「已结束」「已完成」三组，右上角是完成率。「已结束」= 这一轮已经停了（没有东西在跑）但计划还没做完，卡片会写清停在哪儿（旧版预算/超时历史、真实异常 / 还没开始），说一句「继续」即可接着推进；
    - 展开任意计划：每个阶段的进度、每件具体工作由哪个部门负责、当前状态。
 
 5. 进度数字背后的每一行，都来自同一份任务状态——**不会再出现「显示 0 个正在做、但下面明明写着正在做」这种自相矛盾**（1.4.3 专门修的就是这个，见下文）。
@@ -112,7 +112,7 @@ dsh plugin --profile web add "$(pwd)"
 | `dsh_workplan_escalate` | 子 Agent 执行中遇阻上报：问题、选项、建议进状态机，等主 Agent 指示；不再是「只能憋到结尾写 BLOCKED」。 |
 | `dsh_workplan_instruct` | 主 Agent 回答请示并下达指示；失败则挂起，子任务下次激活时注入。带 60s/180s 回执检查。 |
 | `dsh_workplan_handoff` | 处置跨部门需求：`list` / `assign` / `resolve` / `close`。未处置会拦住交付；对「待指示」的行 `resolve` 会直接把答复投递给子会话。 |
-| `dsh_workplan_followup` | 给预算/超时中止、但产物已落盘的直接子会话补一条收尾说明。 |
+| `dsh_workplan_followup` | 给因真实异常或用户取消而中断、但产物已落盘的直接子会话补一条收尾说明。 |
 
 在 **plan 模式**下只会给你看计划，`dispatch` 会被明确拦下并说明原因，不会偷偷开跑。
 
@@ -127,27 +127,23 @@ dsh plugin --profile web add "$(pwd)"
 
 完整的角色、数据契约、状态机、失败恢复与「改代码时必须同步的三处」，见 **[协作契约](https://github.com/abbaababa/dsh-workplan/blob/main/docs/collaboration.md)**；12 个部门的职责与交接清单见 **[部门职责与交接约定](https://github.com/abbaababa/dsh-workplan/blob/main/docs/departments.md)**。
 
-## 预算、超时与续跑（知道这些就不会误以为卡死）
+## 执行时限、健康保护与续跑（知道这些就不会误以为卡死）
 
-| 项 | 默认值 | 怎么改 |
+**部门负责人和部门相关领域全球顶尖专家执行任务没有时限**：没有总时长、单次时长、空闲无进展、未回执或 10 分钟验收门槛。平台不会仅因执行较久、暂时没有新事件或未立即回执而中止、判 blocked、换人接手或拒绝 done。旧版 `totalTimeoutMs`、`childTimeoutMs`、`idleTimeoutMs`、`extendMs`、`timeoutMs` 及由此写入的旧 `deadlineAt` 都不会再生成计时器，只作为历史信息展示；派发工具也不再声明任何 `timeoutMs`。
+
+| 项 | 当前行为 | 怎么改 |
 |---|---|---|
-| 单轮派发预算 | 20 分钟 | `DSH_WORKPLAN_TOTAL_TIMEOUT_MS` |
-| 单个子 Agent 上限 | 15 分钟 | `DSH_WORKPLAN_CHILD_TIMEOUT_MS` |
-| 子 Agent 无进展判定 | 5 分钟 | `DSH_WORKPLAN_IDLE_TIMEOUT_MS` |
+| 负责人/专家执行时限 | **无**（预估和时间告知仅作协调信息，不影响验收） | 无需配置 |
+| 用户显式取消/真实错误 | 仍立即收束并保留盘上产物 | 用户直接取消任务 |
 | 规划器无进展上限 | 5 分钟（**自上一个输出块起算**，一直在输出就一直顺延） | `DSH_WORKPLAN_PLANNER_TIMEOUT_MS` |
 | 规划器静默判定 | 90 秒（输出开始后连一个字都不再来才算卡死） | `DSH_WORKPLAN_PLANNER_IDLE_TIMEOUT_MS` |
 | 规划器绝对上限 | 15 分钟（= 无进展上限 × 3，有无产出都到此为止） | 随 `…_PLANNER_TIMEOUT_MS` 等比变化 |
-| 自动续跑次数 | 4 次 | `DSH_WORKPLAN_MAX_RESUMES` |
+| 自动续跑次数 | 2 次 | `DSH_WORKPLAN_MAX_RESUMES` |
 | 并发子 Agent | 5 个（固定） | — |
 
-预算用尽不是失败：计划会变成「**本轮预算用尽，可续跑**」，已完成的不重跑，剩下的下次接着做。被判定卡住的子任务只卡它自己，不会拖垮整个计划；重试只会发生一次，第二次的提示词会带上一次的失败原因，不会原样重撞。
+这些规划器时限只保护“生成计划”这一步，不会作用到负责人或专家执行。执行阶段只由真实完成、真实错误、证据/质量门禁或用户取消改变；重试可由真实失败触发，不会因计时器到点触发。
 
-环境变量写在启动 DSH 的那个 shell 里，或者写进插件配置：
-
-```jsonc
-// cordis.patch.yml 里的 config 字段
-{ "totalTimeoutMs": 1800000 }   // 30 分钟
-```
+旧版本写进 shell 或 `cordis.patch.yml` 的 `{ "totalTimeoutMs": 1800000 }` 可以继续被读取用于历史回放，但**不会生效**；不需要为了“无限执行”把它改成 0 或填极大值。
 
 ## 安全与隐私（可以自己复核）
 
@@ -212,8 +208,8 @@ npm audit --omit=dev
 **数字和以前不一样了？**
 1.4.3 之后数字来自真实状态而不是缓存，所以会比旧版本「更小、但更准」（旧版本的完成率经常虚高）。
 
-**子 Agent 卡住不动？**
-5 分钟没有任何新事件会被判定卡住并单独标红；对主 Agent 说「续跑这个计划」即可从受阻处继续。
+**子 Agent 很久没有新消息，是卡住了吗？**
+不会因为 5 分钟没有新事件就自动判卡住、blocked 或换人。负责人和专家可以持续执行；你可以随时询问进度，或明确取消任务。只有真实完成、真实错误、证据/质量门禁不通过或你显式取消才会改变状态。若之前因旧版本自动中断，对主 Agent 说「续跑这个计划」即可从受阻处继续，已完成的产物不会重做。
 
 ## 卸载
 

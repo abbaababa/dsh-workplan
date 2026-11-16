@@ -1,24 +1,14 @@
 /*
- * [2.3.0][T3·质量验证] 专家执行时间机制——场景级独立验证（QA 视角，不复用 T1 断言，独立取证）
+ * [执行时限取消][T3·质量验证] 专家执行时间机制——场景级独立验证
  *
- * 对应子任务 T3 验收标准：
- *  A1 场景 A/B/C/D 全部通过：
- *   - 场景A（预估上报→告知用户）：通知文本含预估分钟数与「告知用户」义务，
- *     且 timeNotice 进入模型可读面（主 Agent 告知用户前可读到）；
- *   - 场景B（超时→放宽→告知专家）：放宽计算正确（新时限 = 原时限 + extendMs，
- *     与时钟同源精确断言）；投递给专家的【延期告知】含最新执行时间 ISO 原文与
- *     「必须在保证工作质量的前提下高效率执行」措辞；timeJournal 留痕 extend +
- *     notify-expert；第一次到点的主会话通知要求主 Agent 立即放宽（用户要求1）；
- *   - 场景C（二次超时→主 Agent 接手＋已完成部分不丢）：takeoverRequired=true；
- *     已完成产物文件的 sha256 在接手前/后一致（禁止丢弃的磁盘级证据）；
- *     接手后主 Agent 再写 artifacts 也不可能删掉保护条目（只增不减）；
- *     仅未完成部分（remainingOutputs）进入主 Agent 接手清单；
- *   - 场景D（回归：不超时正常完成）：结算走既有路径，timeoutCount=0、
- *     无 takeoverRequired、无【延期告知】/【接手】通知、专家零打扰。
- *  A2 场景C已完成产物哈希与接手前一致（磁盘级断言）。
- *  A3 无新增静态检查失败（由 npm run check + 全量套件承担，见测试报告）。
- *
- * 计时口径与既有测试同构：小窗口 childTimeoutMs + 轮询，不用真实长睡眠。
+ * 当前契约：部门负责人与全球顶尖专家执行无时限，timeNotice/预估值只是信息；
+ * 旧 childTimeoutMs / totalTimeoutMs / extendMs / 二次接手都不再形成生产时限。
+ * 场景：
+ *   - A：预估上报通知只含信息义务与“不影响验收”，timeNotice 进入模型可读面；
+ *   - B：旧 extendMs 明确 TIME_LIMITS_DISABLED，不写截止、不打扰专家；
+ *   - C：旧 900ms 窗口远超后仍 in_progress，不接手、磁盘产物哈希不变；
+ *   - D：正常完成路径不受影响，无超时/接手/延期通知。
+ * 仍保留：用户显式取消、真实错误、证据与质量门禁。
  */
 import test, { after } from 'node:test'
 import { seedLeaderSelfEffort } from './helpers/self-effort-contract.js'
@@ -32,7 +22,6 @@ import { buildPlanMessage, parseResultMessage } from '../src/plan.js'
 import {
   createWorkplanRuntime,
   modelStatusLines,
-  TAKEOVER_AFTER_TIMEOUTS,
 } from '../src/runtime.js'
 import { MAIN_DEEP_THINK_FIXTURE } from './helpers/main-deep-think.js'
 
@@ -40,7 +29,10 @@ const eventLoopAnchor = setInterval(() => {}, 1_000)
 const dropEventLoopAnchor = setTimeout(() => clearInterval(eventLoopAnchor), 60_000)
 dropEventLoopAnchor.unref?.()
 const workRoot = mkdtempSync(join(tmpdir(), 'wp-qa-t3-'))
-after(() => rmSync(workRoot, { recursive: true, force: true }))
+after(() => {
+  clearInterval(eventLoopAnchor)
+  rmSync(workRoot, { recursive: true, force: true })
+})
 
 function makePlanMessage(planId: string, outputs: string[]) {
   return buildPlanMessage({
@@ -158,7 +150,8 @@ test('场景A：预估上报后通知含预估分钟与「告知用户」义务�
   assert.ok(notice, '主会话应出现【专家预估上报】即时通知')
   assert.match(notice!, /22 分钟/, '通知含专家上报的预估分钟数（22）')
   assert.match(notice!, /请把此预期执行时间告知用户/, '通知要求主 Agent 把预估时间告知用户（用户要求 1 前半段）')
-  assert.match(notice!, /放宽|接手/, '通知同时提示超时/接手后续义务，让主 Agent 有准备')
+  assert.match(notice!, /不会形成执行截止、超时接管或完成验收门槛/, '通知明确預估不产生时限/接手/验收门')
+  assert.doesNotMatch(notice!, /放宽|extendMs|第二次超时/, '通知不再引导延期或二次接手')
   // 模型可读面：主 Agent 在通知之外也要能从状态行读到预估（防止通知被忽略）。
   const row = await rowOf(runtime, session)
   assert.equal(Number(row?.timeNotice?.declaredMinutes), 22, 'statusTool 行应携带 timeNotice（真实时序）')
@@ -171,58 +164,44 @@ test('场景A：预估上报后通知含预估分钟与「告知用户」义务�
 
 /* ============================ 场景 B ============================ */
 
-test('场景B：放宽时限计算 = 原时限 + extendMs（精确）；【延期告知】含最新时限与质量效率措辞', async () => {
+test('场景B（新契约）：旧 extendMs 只返回 TIME_LIMITS_DISABLED，不写截止/不投延期告知', async () => {
   const { session, runtime, gate, sent, hasStarted } = makeRuntime('wp-qa-b', ['T1_report.md'], { childTimeoutMs: 30_000 })
   await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
   assert.ok(await waitFor(hasStarted, 5_000), 'T1 应已派发')
   const before = await rowOf(runtime, session)
-  const deadline0 = Number(before?.deadlineAt)
-  assert.ok(Number.isFinite(deadline0) && deadline0 > 0, '运行中状态行应有协商截止 deadlineAt')
-  const res: any = await runtime.updateStatus({ session }, { subtaskId: 'T1', extendMs: 5_000, reason: 'QA 场景B：第 1 次超时预警前放宽' })
-  assert.equal(res?.ok, true, 'extendMs 放宽应放行')
-  assert.equal(res?.childNotified, true, '延期回执带 childNotified=true（插件已告知专家）')
+  assert.equal(before?.deadlineAt ?? null, null, '运行中状态行不再有 deadlineAt')
+  const res: any = await runtime.updateStatus({ session }, { subtaskId: 'T1', extendMs: 5_000, reason: 'QA 场景B：旧延期请求' })
+  assert.equal(res?.ok, false)
+  assert.equal(res?.code, 'TIME_LIMITS_DISABLED', '旧延期请求明确告知时限已取消')
+  assert.equal(res?.childNotified, undefined, '不向专家投递延期告知')
   const after = await rowOf(runtime, session)
-  // 放宽计算正确性：handle.extend 语义为 deadlineAt += extendMs（原时限平移）。
-  assert.equal(Number(after?.deadlineAt), deadline0 + 5_000, '新时限必须精确 = 原时限 + extendMs')
-  assert.ok(await waitFor(() => sent.length >= 1, 5_000), '告知应经 subagent 服务投递')
-  const text = sent[0].text
-  assert.equal(sent[0].childId, 'child-wp-qa-b', '投递目标是该专家子会话，不串台')
-  assert.match(text, /延期告知/, '抬头【dsh-workplan·延期告知】')
-  assert.ok(text.includes(new Date(Number(after?.deadlineAt)).toISOString()), '通知含最新执行时间（与时限字段同一 ISO 原文）')
-  assert.match(text, /必须在保证工作质量的前提下高效率执行/, '含「保证质量、高效率执行」硬要求（用户要求 1）')
-  assert.match(text, /不要重新开始/, '明确继续当前工作，防止专家重做')
+  assert.equal(after?.deadlineAt ?? null, null, '仍无截止时间')
+  assert.equal(after?.status, 'in_progress', '延期被拒不影响执行')
+  assert.equal(sent.length, 0, '专家零打扰')
   const journal = (after?.timeJournal ?? []).map((item: any) => item.action)
-  assert.ok(journal.includes('extend'), 'timeJournal 留痕 extend')
-  assert.ok(journal.includes('notify-expert'), 'timeJournal 留痕 notify-expert')
+  assert.ok(!journal.includes('extend'), '不得写 extend 假账')
+  assert.ok(!journal.includes('notify-expert'))
   gate.release({ stopReason: 'completed', output: [{ type: 'text', text: 'done' }] })
 })
 
-test('场景B：第一次到点的中断通知要求主 Agent 立即放宽并告知专家（用户要求 1 的主 Agent 侧）', async () => {
+test('场景B（新契约）：旧 400ms 窗口到点仍执行，不产生执行中断/放宽/接手通知', async () => {
   const { session, runtime, gate, hasStarted } = makeRuntime('wp-qa-b2', ['T1_report.md'], { childTimeoutMs: 400, totalTimeoutMs: 400_000 })
   await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
   assert.ok(await waitFor(hasStarted, 5_000), 'T1 应已派发')
-  // 第一次到点：主会话出现含「放宽」指引的执行中断通知（文本判据，无竞态；
-  // 接手文案含「takeoverRequired」，第一次文案必须没有——按发生顺序锁定第 1 条）。
-  const got1 = await waitFor(() => messageTexts(session).some((text: string) =>
-    text.includes('执行中断') && text.includes('放宽')), 20_000)
-  assert.ok(got1, '主会话应收到要求放宽的第一次超时通知')
+  await new Promise((resolve) => setTimeout(resolve, 900))
   const row = await rowOf(runtime, session)
-  assert.ok(Number(row?.timeoutCount ?? 0) >= 1, `第一次到点应 timeoutCount+1，实际 ${row?.timeoutCount}`)
-  const firstNotice = messageTexts(session).filter((text: string) => text.includes('执行中断'))[0]
-  assert.match(firstNotice, /第 1 次达到协商时限/, '第一次超时的文案点名「第 1 次」')
-  assert.match(firstNotice, /extendMs/, '通知点名放宽工具 extendMs（用户要求 1「必须继续放宽」）')
-  // 语义两段断言（实现原文：「会自动把最新时限与「保证质量、高效率执行」要求
-  // 告知专家」——词序与旧正则不同但语义等价；QA 断言按语义拆两段，防止把
-  // 措辞演进误报为缺陷）。
-  assert.match(firstNotice, /最新时限/, '通知说明放宽后会传达最新时限')
-  assert.match(firstNotice, /告知专家/, '通知说明告知对象是执行中的专家（让专家有准备）')
-  assert.doesNotMatch(firstNotice, /takeoverRequired/, '第一次超时不得出现接手语义（只有第 2 次才接手）')
+  assert.equal(row?.status, 'in_progress', '旧单次窗口到点后仍必须执行')
+  assert.equal(row?.deadlineAt ?? null, null)
+  assert.equal(Number(row?.timeoutCount ?? 0), 0, '不累计超时次数')
+  assert.notEqual(row?.takeoverRequired, true, '永不由 400ms 旧窗口触发接手')
+  const allText = messageTexts(session).join('\n')
+  assert.doesNotMatch(allText, /执行中断|延期告知|extendMs|takeoverRequired/, '不产生时限相关通知')
   gate.release({ stopReason: 'completed', output: [{ type: 'text', text: 'late' }] })
 })
 
 /* ============================ 场景 C（含 A2 哈希） ============================ */
 
-test('场景C：二次超时接手——产物 sha256 接手前后一致（A2）；保护清单只增不减；仅未完成部分进接手清单', async () => {
+test('场景C（新契约）：旧 900ms 窗口运行两倍时长仍不接手，磁盘产物原样保留', async () => {
   const artifact = join(workRoot, 'T1_report.md')
   const earlyWork = '# 专家已完成部分\n' + 'done-steps: A/B/C 三条链路已落地\n'
   writeFileSync(artifact, earlyWork)
@@ -230,41 +209,16 @@ test('场景C：二次超时接手——产物 sha256 接手前后一致（A2）
   const { session, runtime, gate, hasStarted } = makeRuntime('wp-qa-c', ['T1_report.md', 'T1_tests.md'], { childTimeoutMs: 900, totalTimeoutMs: 400_000 })
   await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
   assert.ok(await waitFor(hasStarted, 5_000), 'T1 应已派发')
-  let row: any = null
-  const end = Date.now() + 30_000
-  while (Date.now() < end) {
-    row = await rowOf(runtime, session)
-    if (row?.takeoverRequired === true) break
-    await new Promise((resolve) => setTimeout(resolve, 50))
-  }
-  assert.equal(row?.takeoverRequired, true, '第二次到点应置 takeoverRequired=true')
-  assert.ok(Number(row?.timeoutCount) >= TAKEOVER_AFTER_TIMEOUTS, `timeoutCount 应 ≥2，实际 ${row?.timeoutCount}`)
-  // A2：磁盘级证据——接手机制运行前后，已完成产物文件内容哈希一致（未被删除/覆盖）。
-  const hashAfter = sha256(artifact)
-  assert.equal(hashAfter, hashBefore, '【A2】已完成产物文件 sha256 接手前后必须一致')
-  // 接手清单：只含未完成部分。
-  const brief = row?.takeoverBrief
-  assert.ok(brief, 'takeoverBrief 已生成')
-  assert.ok((brief?.landedRefs ?? []).includes('T1_report.md'), '已完成产物登记进 landedRefs')
-  assert.deepEqual(brief?.remainingOutputs, ['T1_tests.md'], '仅未完成部分进入主 Agent 接手清单')
-  assert.match(String(brief?.instruction ?? ''), /禁止丢弃|禁止删除或覆盖/, '接手指令硬编码只读保护')
-  assert.match(String(row?.error ?? ''), /主 Agent/, '结算文案点名主 Agent 接手（用户要求 2）')
-  // 模型可读面必须把接手包与保护清单透出（T1 修复点：artifacts 透出）。
+  await new Promise((resolve) => setTimeout(resolve, 1_800))
+  const row: any = await rowOf(runtime, session)
+  assert.equal(row?.status, 'in_progress', '超过旧窗口两倍仍继续执行')
+  assert.notEqual(row?.takeoverRequired, true, '不再有二次超时/接手')
+  assert.equal(Number(row?.timeoutCount ?? 0), 0)
+  assert.equal(row?.takeoverBrief ?? null, null, '不生成接手清单')
+  assert.equal(sha256(artifact), hashBefore, '【A2】执行期间磁盘产物 sha256 原样保留')
   const readable: any = modelStatusLines([row])[0]
-  assert.equal(readable?.takeoverRequired, true, 'takeoverRequired 进入模型可读面')
-  assert.ok((readable?.artifacts ?? []).some((item: any) => item?.ref === 'T1_report.md'), '保护产物清单进入模型可读面')
-  // 接手后主 Agent 再写 artifacts（只补充新证据）也不可能删掉保护条目（只增不减）。
-  await runtime.updateStatus({ session }, {
-    subtaskId: 'T1',
-    status: 'in_progress',
-    force: true,
-    artifacts: [{ kind: 'file', ref: 'QA_main.md', exists: true }],
-  })
-  const row2 = await rowOf(runtime, session)
-  const refs = (row2?.artifacts ?? []).map((item: any) => item?.ref)
-  assert.ok(refs.includes('T1_report.md'), '接手后写入不得丢弃已完成产物登记')
-  assert.ok(refs.includes('QA_main.md'), '主 Agent 的新证据正常并入')
-  assert.equal(sha256(artifact), hashBefore, '写状态后磁盘产物依旧未被触碰')
+  assert.equal(readable?.executionTimeLimit, 'none')
+  assert.equal(readable?.deadlineAt ?? null, null)
   gate.release({ stopReason: 'completed', output: [{ type: 'text', text: 'late' }] })
 })
 

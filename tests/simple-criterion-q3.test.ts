@@ -10,7 +10,6 @@
 import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { q3SettlementVerdict } from '../src/criterion.js'
 import { validatePlan } from '../src/plan.js'
 import {
   ACTIVE_ENV, WIDE_WINDOWS, approval, completedWithEvidence, dispatch, dropWorkRoot,
@@ -40,19 +39,17 @@ function subtask(extra: any = {}) {
   return { id: 'T1', title: '验证', department: 'research', role: '分析', objective: '验证拆分优先', method: ['样例'], inputs: [], outputs: ['报告'], dependsOn: [], acceptance: ['断言通过'], risk: '无', ...extra }
 }
 
-test('C-Q3-01（AC-Q3-1 反例，软门禁口径）：12 分钟无说明 ⇒ ok=true 且双标记；不得显示达标；若硬拒绝则 fail', () => {
+test('C-Q3-01（新契约）：12 分钟预估只是信息，不产生超判据标记、拆分理由或硬拒绝', () => {
   const res: any = validatePlan(planWithSubtask(subtask({ estimateMinutes: 12 })))
-  // 守卫断言：GAP-1 消解＝软门禁；若实现为硬拒绝，本用例判 fail 并回报
-  assert.equal(res.ok, true, 'GAP-1 消解：Q2-B 软门禁不硬拒绝（硬拒绝会推翻用户裁决 Q2=B）')
+  assert.equal(res.ok, true, '估时长短不参与结构校验')
   const row = res.plan.stages[0].subtasks[0]
-  assert.equal(row.estimateOverCriterion, true)
-  assert.equal(row.estimateNeedsJustification, true, '「不存在未被标记的超判据行」：标记可查询')
-  assert.ok(!JSON.stringify(res.plan).includes('达标'), '规划产物不得显示达标')
-  // Q3 生产适配器同口径（T5 绑定：referenceQ3Settlement → q3SettlementVerdict）
-  assert.equal(q3SettlementVerdict({ declaredMinutes: 12, wallClockMinutes: 5 }).criterionResult, 'unmet', '事前 12>10 即未达标（D-4 双条件）')
+  assert.equal(row.estimateOverCriterion, undefined, '不再生成超判据标记')
+  assert.equal(row.estimateNeedsJustification, undefined, '不再要求时长理由')
+  assert.ok(!JSON.stringify(res.plan).includes('达标'), '规划产物不得显示时间达标')
+  assert.ok(!JSON.stringify(res.plan).includes('协商上限'), '不得生成时间协商上限')
 })
 
-test('C-Q3-02（AC-Q3-2 正例）：超判据无批准 ⇒ 非 done＋指向 replan(replace) 接替＋产物只读保留＋续做只补缺口', async () => {
+test('C-Q3-02（新契约）：旧判据超时也按真实证据 done；产物核验与摘要照旧', async () => {
   await withEnv(ACTIVE_ENV, async () => {
     const h = harness(2_000_000, WIDE_WINDOWS)
     await dispatch(h)
@@ -61,18 +58,14 @@ test('C-Q3-02（AC-Q3-2 正例）：超判据无批准 ⇒ 非 done＋指向 rep
       h.release(completedWithEvidence())
       let row: any = null
       assert.ok(await waitFor(async () => { row = await rowOf(h.runtime, h.session); return row && row.status !== 'in_progress' && row.status !== 'pending' }, 15_000), '应已结算')
-      assert.notEqual(row.status, 'done', '①不得 done')
-      assert.equal(row.blockedKind, 'criterion-overrun')
+      assert.equal(row.status, 'done', '证据齐全即 done，不因旧判据改判')
+      assert.equal(row.blockedKind ?? null, null)
+      assert.equal(row.criterionResult ?? null, null)
+      assert.ok(String(row.summary ?? '').length > 0, '正常完成摘要保留')
     })
     const row = await rowOf(h.runtime, h.session)
-    // ② 结算输出指向 replan(replace) 或接替行
-    assert.match(String(row.error ?? ''), /replan\(replace\)/)
-    assert.ok(/接替|只补缺口/.test(String(row.error ?? '')))
-    // ③ 原 artifacts 保留且可读（只增不减）
-    assert.ok(row.artifacts.some((a: any) => a.ref === 'T1_report.md' && a.exists === true))
-    // ④ 续做提示只列缺口、不含整步重跑指令
-    assert.ok(!/整步重跑/.test(String(row.error ?? '')), '不得指示整步重跑')
-    assert.match(String(row.error ?? ''), /只补缺口/)
+    assert.ok(row.artifacts.some((a: any) => a.ref === 'T1_report.md' && a.exists === true), '真实产物仍核验')
+    assert.ok(!/criterion-overrun|replan\(replace\)/.test(String(row.error ?? '')), '不得产生旧判据接替文案')
   })
 })
 
@@ -102,26 +95,27 @@ test('C-Q3-04（AC-Q3-3 反例）：method 为空被拒（硬规则）；多主�
   }
 })
 
-test('C-Q3-05（AC-Q3-4 正例）：有用户批准 ⇒ done＋记例外＋不生成接替行＋违规计数 0', async () => {
+test('C-Q3-05（新契约）：旧审批入口停用，11 分钟后仍凭证据 done，不生成接替行', async () => {
   await withEnv(ACTIVE_ENV, async () => {
     const h = harness(2_000_000, WIDE_WINDOWS)
     await dispatch(h)
     landReport(h)
-    const ok: any = await h.runtime.updateStatus({ session: h.session }, {
+    const disabled: any = await h.runtime.updateStatus({ session: h.session }, {
       subtaskId: 'T1', extendMs: 2_000, criterionApproval: approval({ at: Date.now() - 1_000 }),
     })
-    assert.equal(ok.ok, true)
+    assert.equal(disabled.ok, false)
+    assert.equal(disabled.code, 'TIME_LIMITS_DISABLED')
     await withFakeNow(11 * 60_000, async () => {
       h.release(completedWithEvidence())
       let row: any = null
       assert.ok(await waitFor(async () => { row = await rowOf(h.runtime, h.session); return row && row.status !== 'in_progress' && row.status !== 'pending' }, 15_000))
-      assert.equal(row.status, 'done', '①有批准可 done')
-      assert.equal(row.criterionResult, 'exception-approved')
+      assert.equal(row.status, 'done', '完成不依赖旧时间批准')
+      assert.equal(row.criterionResult ?? null, null)
     })
     const row = await rowOf(h.runtime, h.session)
-    assert.equal(row.criterionException?.approvedBy, 'user', '②记例外')
+    assert.equal(row.criterionException ?? null, null, '不再写时间例外')
     const snapshot: any = await h.runtime.statusTool({ session: h.session }, {})
-    assert.equal(snapshot.statuses.length, 1, '③不生成接替行')
-    assert.ok((row.criterionViolations ?? []).length === 0, '④违规计数为 0')
+    assert.equal(snapshot.statuses.length, 1, '不生成接替行')
+    assert.equal((row.criterionViolations ?? []).length, 0, '不记时间违规')
   })
 })

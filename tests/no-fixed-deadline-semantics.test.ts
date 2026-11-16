@@ -1,32 +1,18 @@
 /*
- * [2.2.0][T2 红灯先行] 固定期限语义废止 + L4 结算兜底 —— 对应优化项 **O-5a / O-5b / O-5c**。
- * 设计依据：docs/dsh-workplan_优化方案_20261107.md §1 ⑤ 验收矩阵 E1/E2/E4、§2.3、§5.3。
+ * 固定期限语义废止 —— 用户可见文案、预算预告、真实执行三层次。
  *
- * 断言点（口径抄录方案原文，不改写）：
- *  - E1：buildPlanMessage / buildBudgetWarning / buildChildPrompt 三处不再含
- *    固定期限措辞（「硬执行上限（默认 15 分钟/步）」等）——超时是安全兜底，
- *    不是交付期限；
- *  - E2：预算预告/计划消息把预估标注为「**仅供参考/非承诺**，实际时长协商决定」；
- *  - E4/L4：到点不再直接杀任务，而是进入 **L4 结算兜底 = 抢救（落盘成果保全）
- *    → 重试 → 续跑 + 「待裁决」标记**，工作成果不因慢被否定；
- *  - L2 钉：无进展窗（stalled/exhausted）判定逻辑不受影响（回归护栏）；
- *  - 续跑钉：blocked 行可被 resetBlockedStatuses 复位为 pending（续跑通道），
- *    escalated 行除外（「等指示」不是失败）。
- *
- * 现状（v2.1.7，红灯原因）：src/host.ts:114 仍写「子任务有硬执行上限（默认 15
- * 分钟/步）」；buildBudgetWarning（src/plan.ts:1275）无「仅供参考/非承诺」标注；
- * timeoutBlockedPatch（src/runtime.ts:1106）抢救语义在，但终态无「待裁决」标记
- * （closure:'blocked' / blockedKind:'timeout'，error 尾注「已强制结束」）。
- *
- * 计时口径：L4 链集成测试注入 childTimeoutMs=1000ms 小窗口（与既有
- * workplan-auto-retry.test.ts 同构），无真实长睡眠。
+ * 新契约：
+ *  - 负责人/专家提示词与计划消息明确“执行无时限、预估仅供参考”；
+ *  - buildBudgetWarning 不再宣告分钟预算或协商上限；
+ *  - 旧 childTimeoutMs 到点后任务仍在执行，不自动 blocked、不二次接手；
+ *  - 历史 timeoutBlockedPatch 仅作为真实异常/用户取消后的产物抢救辅助；
+ *  - watchdog 的纯函数边界与 blocked 续跑通道保持可用。
  */
-import test from 'node:test'
+import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import { readFileSync } from 'node:fs'
 
 import {
   buildBudgetWarning,
@@ -37,12 +23,18 @@ import {
 } from '../src/plan.js'
 import { dispatchPlan, timeoutBlockedPatch } from '../src/runtime.js'
 import { pickTimeoutReason } from '../src/watchdog.js'
+import { MAIN_DEEP_THINK_FIXTURE } from './helpers/main-deep-think.js'
+
+const anchor = setInterval(() => {}, 1_000)
+const dropAnchor = setTimeout(() => clearInterval(anchor), 60_000)
+dropAnchor.unref?.()
+after(() => clearInterval(anchor))
 
 function rawPlan() {
   return {
     planId: 'wp-l4',
-    title: 'L4 兜底验收',
-    taskUnderstanding: { originalRequest: '验证结算兜底', deliverable: '不误杀' },
+    title: '无固定期限验收',
+    taskUnderstanding: { originalRequest: '验证无执行时限', deliverable: '不误杀' },
     contradictions: { primary: { statement: '慢工与赶点的矛盾' }, secondary: [], transformationConditions: [] },
     stages: [{
       id: 'S1',
@@ -59,7 +51,7 @@ function rawPlan() {
         inputs: [],
         outputs: ['T1_report.md'],
         acceptance: ['报告落盘'],
-        risk: '超时',
+        risk: '执行较久',
         dependsOn: [],
         estimateMinutes: 10,
       }],
@@ -71,137 +63,98 @@ function completed(text = '完成') {
   return { stopReason: 'completed', output: [{ type: 'text', text }] }
 }
 
-/*
- * [SCv2-T6][C-Q1-09] TA-05 条件断言（AC-Q1-5 改写，预期来源 spec:76）：
- * 「必须在 N 分钟内完成/交付」句式不再一律禁止——判据层目标句是允许且必需的，
- * 但必须满足 N=10＋同行含判据层/完成目标标签＋相邻行（±2）含批准/例外通道；
- * 运行层被写成固定截止仍然禁止。口径与 reports/simple-criterion-v2-text-assertions.py
- * rule_ta05 逐字一致（同正则、同窗口、同词表），不另写第二套判据。
- */
-function ta05Holds(source: string): boolean {
-  const lines = String(source).split('\n')
-  const pattern = /必须在[^\n。]{0,12}分钟内(?:完成|交付)/g
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]
-    pattern.lastIndex = 0
-    let m: RegExpExecArray | null
-    while ((m = pattern.exec(line)) !== null) {
-      const seg = line.slice(Math.max(0, m.index - 6), m.index + m[0].length + 6)
-      const num = /(\d+)\s*分钟/.exec(seg)
-      const okNum = !!num && num[1] === '10'
-      const okLabel = /(判据层|完成目标)/.test(line)
-      const window = lines.slice(Math.max(0, i - 2), i + 3).join('\n')
-      const okExc = /(批准|例外)/.test(window)
-      if (!(okNum && okLabel && okExc)) return false
-    }
-  }
-  return true
+function deferred() {
+  let release!: (value: any) => void
+  const promise = new Promise<any>((resolve) => { release = resolve })
+  return { promise, release }
 }
 
-test('E1：三处文案不再含固定期限措辞（O-5a/O-5b）＋[SCv2-T6][C-Q1-09] 双向断言（AC-Q1-5）', () => {
-  const hostSource = readFileSync(path.resolve(process.cwd(), 'src/host.ts'), 'utf8')
-  const planSource = readFileSync(path.resolve(process.cwd(), 'src/plan.ts'), 'utf8')
-  assert.doesNotMatch(
-    hostSource,
-    /硬执行上限（默认 15 分钟\/步）/,
-    '待实现（O-5a/E1）：src/host.ts 系统提示词仍把超时写成「硬执行上限（默认 15 分钟/步）」——必须改为「超时是安全兜底（防止任务无限运行），不是交付期限」',
-  )
-  // 反向（运行层禁令保留）：「15 分钟/步」「硬执行上限」「强制结束」零命中
-  for (const [label, source] of [['src/host.ts', hostSource], ['src/plan.ts', planSource]] as const) {
-    assert.doesNotMatch(
-      source,
-      /15 分钟\/步|硬执行上限|强制结束/,
-      `E1：${label} 不得把运行层写成固定截止/强制结束（运行层是安全兜底，不是固定交付期限）`,
-    )
-    // [SCv2-T6][C-Q1-09] 正向：判据层目标句必须命中（TA-01 允许措辞三式之一）
-    assert.ok(
-      /完成目标[^\n]{0,12}(?:≤|<=|不超过)\s*10\s*分钟|10\s*分钟[^\n]{0,6}完成目标|判据层[^\n]{0,20}10\s*分钟/.test(source),
-      `E1 正向（AC-Q1-5 双向断言）：${label} 必须含判据层 10 分钟完成目标表述`,
-    )
-    // 条件断言（TA-05）：替代旧「一律禁止 必须在…分钟内完成」
-    assert.ok(ta05Holds(source), `E1/TA-05：${label} 的「必须在 N 分钟内完成」句式必须满足 N=10＋判据层标签＋例外通道`)
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+async function waitFor(check: () => boolean, timeoutMs = 5_000) {
+  const end = Date.now() + timeoutMs
+  while (Date.now() < end) {
+    if (check()) return true
+    await delay(10)
   }
+  return false
+}
+
+test('E1：计划与派发文案明确无时限，不出现固定完成承诺', () => {
   const plan = rawPlan()
-  const stage = (plan as any).stages[0]
+  const stage = plan.stages[0]
   const subtask = stage.subtasks[0]
   const texts: Array<[string, string]> = [
     ['buildPlanMessage', buildPlanMessage(plan as any)],
     ['buildBudgetWarning', buildBudgetWarning(plan as any)],
-    ['buildChildPrompt', buildChildPrompt({ plan: plan as any, subtask, stage, dependencyResults: [], cwd: '/tmp', conversationContext: '' })],
+    ['buildChildPrompt', buildChildPrompt({
+      plan: plan as any,
+      subtask,
+      stage,
+      dependencyResults: [],
+      cwd: '/tmp',
+      conversationContext: '',
+    })],
   ]
   for (const [label, text] of texts) {
     assert.doesNotMatch(
       String(text),
-      /硬执行上限|15 分钟\/步|强制结束/,
-      `E1：${label} 输出不得含运行层固定期限措辞（超时是安全兜底，不是交付期限）`,
+      /硬执行上限|15 分钟\/步|强制结束|必须在[^\n。]{0,12}分钟内(?:完成|交付)/,
+      `E1：${label} 不得含执行硬上限、强制结束或按分钟完成承诺`,
     )
-    // [SCv2-T6][C-Q1-09] 条件断言（TA-05）：判据层目标句允许，运行层固定截止禁止
-    assert.ok(ta05Holds(String(text)), `E1/TA-05：${label} 输出的「必须在 N 分钟内完成」句式必须满足 N=10＋判据层标签＋例外通道`)
   }
+  assert.match(texts[1][1], /没有时限|无时限|不形成执行截止/, '预算预告明确无执行截止')
+  assert.match(texts[1][1], /仅供参考/, '预估仅供参考')
+  assert.match(texts[2][1], /无执行硬截止/, '派发提示词明确无执行硬截止')
+  assert.match(texts[2][1], /不影响验收/, '预估与实际耗时不影响验收')
 })
 
-test('E2：预算预告把预估标注为「仅供参考/非承诺」（O-5b）', () => {
+test('E2：预算预告是纯 advisory，不协商、不设分钟预算', () => {
   const text = String(buildBudgetWarning(rawPlan() as any))
-  assert.match(
-    text,
-    /仅供参考|非承诺/,
-    '待实现（O-5b/E2）：buildBudgetWarning 预告文需改为「预估仅供参考，非承诺；实际时长协商决定」',
-  )
-  assert.match(
-    text,
-    /协商/,
-    'E2：预告文应点明实际时长由协商决定（extendMs 等协商路径）',
-  )
-  // [SCv2-T6][C-Q1-09][E2] 「协商」断言保留且必须处运行层语境（AC-Q1-5/AC-Q7-1）：
-  // 协商属于运行层安全兜底，不得与判据层完成目标混写。
-  assert.match(
-    text,
-    /运行层|安全兜底/,
-    'E2：预算预告必须带运行层标签（协商属运行层安全兜底，不是判据层目标）',
-  )
+  assert.match(text, /仅供参考/, '预估非承诺')
+  assert.match(text, /没有时限|无时限|不形成执行截止/, '明确没有执行截止')
+  assert.doesNotMatch(text, /协商上限|申请延期|必须在.{0,8}分钟|20 分钟|15 分钟/, '不残留预算/延期/分钟硬门')
 })
 
-test('E4/L4：硬超时结算抢救落盘成果（timeoutBlockedPatch 不丢成果）', () => {
-  const cwd = mkdtempSync(path.join(tmpdir(), 'dsh-wp-l4-'))
+test('历史产物抢救辅助仍可用：真实异常时保留盘上成果', () => {
+  const cwd = mkdtempSync(path.join(tmpdir(), 'dsh-wp-rescue-'))
   writeFileSync(path.join(cwd, 'T1_report.md'), '# 交付\n')
   const { patch, landed } = timeoutBlockedPatch(
     (rawPlan() as any).stages[0].subtasks[0],
     cwd,
-    '达到执行上限（1000ms），已强制结束',
+    '用户取消执行；已保留盘上产物',
   )
-  assert.equal(patch.status, 'blocked', '兜底结算走 blocked（结算，不是无限挂起）')
-  assert.match(String(patch.error), /产物已在盘上/, 'L4 抢救：声明产物落盘必须进 error 提示「先核对，不要当作从未运行」')
-  assert.ok(landed.includes('T1_report.md'), '抢救名单应含落盘产物')
+  assert.equal(patch.status, 'blocked', '取消/异常仍以 blocked 诚实结算')
+  assert.match(String(patch.error), /产物已在盘上/, '抢救提示要求先核对，不当作从未运行')
+  assert.ok(landed.includes('T1_report.md'), '抢救名单含落盘产物')
   assert.ok(
     Array.isArray(patch.artifacts) && patch.artifacts.some((item: any) => item?.exists === true),
-    'E4：工作成果不因慢被否定——落盘产物保留在结算产物列表里',
+    '落盘产物保留在结算产物列表',
   )
 })
 
-test('E4/L4：到点进入兜底链（自动重试一次）且终态带「待裁决」标记，不是失败否定', async () => {
-  const cwd = mkdtempSync(path.join(tmpdir(), 'dsh-wp-l4-'))
-  writeFileSync(path.join(cwd, 'T1_report.md'), '# 交付\n')
+test('E4：旧 1 秒 childTimeout 到点后仍执行，不自动重试/接手', async () => {
+  const cwd = mkdtempSync(path.join(tmpdir(), 'dsh-wp-live-'))
   const plan = rawPlan()
   const session: any = {
-    id: 'session-l4',
+    id: 'session-live',
     header: { createdAt: 1000 },
     events: [] as any[],
-    get seq() {
-      return this.events.length
-    },
+    get seq() { return this.events.length },
     append(type: string, data: any) {
       this.events.push({ type, data })
       return data
     },
     eventAt: (seq: number) => session.events[seq],
   }
+  const gate = deferred()
   let activations = 0
   const ctx = {
     logger: { warn() {} },
     subagents: {
       startActivation: async () => {
         activations += 1
-        return { childId: `child-hang-${activations}`, result: new Promise(() => {}), dispose: async () => {} }
+        return { childId: `child-live-${activations}`, result: gate.promise, dispose: async () => {} }
       },
     },
     sessions: { get: () => undefined, list: () => [], eventAt: () => undefined },
@@ -218,63 +171,54 @@ test('E4/L4：到点进入兜底链（自动重试一次）且终态带「待裁
     updatedAt: 1_000,
     resultWritten: false,
   }
-  const res = await dispatchPlan(ctx, record, {
+  const controller = new AbortController()
+  const running = dispatchPlan(ctx, record, {
     agent: { session, options: {} },
-    signal: new AbortController().signal,
+    signal: controller.signal,
     cwd,
     idleTimeoutMs: 60_000,
     childTimeoutMs: 1_000,
     totalTimeoutMs: 400_000,
     strictEvidence: false,
-  })
-  assert.equal(activations, 2, 'L4 链「重试」：硬超时不是终局，预算充足时自动再试一次（与 workplan-auto-retry 语义一致）')
-  const row = (res?.statuses ?? []).find((item: any) => item?.subtaskId === 'T1')
-  assert.equal(row?.status, 'blocked', '兜底链走完后以 blocked 结算（结算保证落地）')
-  assert.match(String(row?.error ?? ''), /产物已在盘上/, 'L4 抢救：终态保留落盘成果提示')
-  assert.ok(
-    Array.isArray(row?.artifacts) && row.artifacts.some((item: any) => item?.exists === true),
-    'E4：重试用尽后成果仍被保全（工作成果不因慢被否定）',
-  )
-  // 只匹配字段「值」，不匹配字段名（字段名 escalatedAt/escalationSeq 现状即存在，
-  // 匹配字段名会把本断言染成假绿——20261107 红灯留档记录过此坑）。
-  const markerText = [row?.closure, row?.blockedKind, row?.error, row?.summary, row?.hint, row?.question]
-    .filter((item: any) => typeof item === 'string')
-    .join('｜')
-  assert.match(
-    markerText,
-    /裁决|待裁决|escalated/,
-    '待实现（O-5c/E4）：L4 兜底终态必须带「待裁决」标记（如 closure/blockedKind 值或结算文案含「待裁决」——转新轮续跑/人工裁决通道；close 掉就等于把一个已抢救的工作成果错记成终局失败）。现状终态只有 blocked/timeout 与「已强制结束」。',
-  )
+    deepThink: MAIN_DEEP_THINK_FIXTURE,
+  } as any)
+  assert.ok(await waitFor(() => activations === 1), '应启动一次负责人')
+  await delay(1_300)
+  const row = record.statuses.find((item: any) => item?.subtaskId === 'T1')
+  assert.equal(row?.status, 'in_progress', '越过旧 1 秒窗口仍必须 in_progress')
+  assert.equal(row?.deadlineAt ?? null, null, '不得产生或显示 deadlineAt')
+  assert.equal(Boolean(row?.takeoverRequired), false, '不得进入二次接手')
+  assert.equal(Number(row?.timeoutCount ?? 0), 0)
+  assert.equal(activations, 1, '旧窗口到点不得自动重试或换人')
+  gate.release(completed('完成'))
+  controller.abort()
+  await Promise.race([running.catch(() => undefined), delay(2_000)])
 })
 
-test('L2 钉：无进展窗（stalled/exhausted）判定不受影响', () => {
+test('L2 纯函数：无进展/绝对窗口的独立语义仍可被显式调用', () => {
   assert.equal(
     pickTimeoutReason({ now: 10_000, startedAt: 0, lastProgressAt: 9_000, idleMs: 30_000, hardMs: 60_000, progressObservable: true }),
     null,
-    '窗内有进展：不判',
   )
   assert.equal(
     pickTimeoutReason({ now: 45_000, startedAt: 0, lastProgressAt: 9_000, idleMs: 30_000, hardMs: 60_000, progressObservable: true }),
     'stalled',
-    'L2 无进展窗：超过 idleMs 无进展判 stalled',
   )
   assert.equal(
     pickTimeoutReason({ now: 61_000, startedAt: 0, lastProgressAt: 60_000, idleMs: 30_000, hardMs: 60_000, progressObservable: true }),
     'exhausted',
-    'L2：绝对上限到点判 exhausted',
   )
   assert.equal(
     pickTimeoutReason({ now: 45_000, startedAt: 0, lastProgressAt: 9_000, idleMs: 30_000, hardMs: 60_000, progressObservable: false }),
     null,
-    'L2：进展不可观测时不判 stalled（只留绝对上限）',
   )
 })
 
-test('续跑钉：blocked 行复位为 pending（escalated 行除外）', () => {
+test('续跑钉：blocked 行复位为 pending，escalated 行保持', () => {
   const out = resetBlockedStatuses([
     { subtaskId: 'T1', status: 'blocked', closure: 'blocked', blockedKind: 'timeout' },
     { subtaskId: 'T2', status: 'blocked', closure: 'escalated' },
   ])
-  assert.equal(out.find((item: any) => item?.subtaskId === 'T1')?.status, 'pending', '续跑通道：blocked 行复位为 pending')
-  assert.equal(out.find((item: any) => item?.subtaskId === 'T2')?.status, 'blocked', '「等指示」不是失败：escalated 行不复位（待主 Agent 裁决）')
+  assert.equal(out.find((item: any) => item?.subtaskId === 'T1')?.status, 'pending')
+  assert.equal(out.find((item: any) => item?.subtaskId === 'T2')?.status, 'blocked')
 })

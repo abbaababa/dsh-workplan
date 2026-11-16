@@ -57,7 +57,7 @@
   ▼
 [执行] src/runtime.ts#runSubtask → #executeSubtask
   │ 子 Agent 输入：buildChildPrompt（全局任务/交付物/主要矛盾/阶段/依赖结果/执行要求）
-  │ 看门狗：无进展 idle 5min / 单项上限 15min；stalled 重试 1 次
+  │ 观测：记录事件序号与进度；无单次/idle/no-ack/整轮执行截止，显式取消仍可中止
   ▼
 [落状态] src/runtime.ts#writeSubtaskStatus → applyStatus
   │ 子 Agent 输出末尾的工作计划证据块 + 首行 BLOCKED → adjudicateResult 八种情形
@@ -70,7 +70,7 @@
 [展示] GET /dsh-workplan/plans → derivePlanSnapshot → client 4s 轮询
 ```
 
-**派发有两种模式。** 默认 `mode: "wait"` 会一直等到本轮调度结束（或总预算耗尽）才返回，期间可用 `dsh_workplan_status` 只读查询进度；`mode: "async"` 立刻返回 `running: true`，本轮结束时仍自动把结果写进会话。`wait` 如果撞上已在跑的派发，会**汇合**到同一个 Promise 并返回完整快照（`joined: true`），不会再只回一句「已在运行」。
+**派发有两种模式。** 默认 `mode: "wait"` 会一直等到本轮实际收束，期间可用 `dsh_workplan_status` 只读查询进度；`mode: "async"` 立刻返回 `running: true`，本轮结束时仍自动把结果写进会话。工具不声明 `timeoutMs`，负责人和专家也没有整轮或单次执行截止。`wait` 如果撞上已在跑的派发，会**汇合**到同一个 Promise 并返回完整快照（`joined: true`），不会再只回一句「已在运行」，也不会按 20 天等墙钟把活跃执行误判为 stale。
 
 **plan 模式只拦 dispatch。** `src/host.ts` 的 `tools.guard` 拒绝 `dsh_workplan_dispatch`，但不会冻结其他工具，也不会自动开始执行。
 
@@ -201,8 +201,9 @@
 ```
 pending ──派发──▶ in_progress ──证据块全 pass / 无块旧格式──▶ done
    ▲                    │
-   │                    ├──partial / 验收 fail / 坏块 / 首行 BLOCKED / 超时 / 失败──▶ blocked
-   │                    │
+   │                    ├──partial / 验收 fail / 坏块 / 首行 BLOCKED / 真实失败──▶ blocked
+   │                    ├──仅耗时或无回执──▶ 继续执行（只提示，不终结）
+   │                    └──用户显式取消──▶ cancelled / paused（按取消路径）
    └────续跑重置─────────┴── blocked ──(resume)──▶ pending
 ```
 
@@ -217,16 +218,16 @@ pending ──规划──▶ planning ──计划落地──▶ pending(待�
       └─(降级)─▶ degraded
 
 pending ──dispatch──▶ executing ──全部 done──▶ done
-                         ├─预算耗尽，仍有 pending──▶ paused
+                         ├─非时间暂停，仍有 pending──▶ paused
                          ├─有 blocked 且无可继续项──▶ blocked
-                         └─异常/中止──▶ blocked 或 paused（视路径）
+                         └─真实异常/用户中止──▶ blocked 或 paused（视路径）
  
 任意未完成阶段 + 本轮已结束（载荷层）──▶ ended（suspendedPhase 记录原阶段）
 未派发计划被取消 / 用户显式 cancel ──▶ cancelled
 ```
 
-- `paused` 不是失败：未完成项仍是 `pending`，**不消耗续跑额度**，再次 dispatch 即从剩下步骤继续。
-- `blocked` 才进入「续跑额度」计数；额度默认 4 次，可用配置改（0–5）。
+- `paused` 不是失败：未完成项仍是 `pending`，**不消耗续跑额度**，再次 dispatch 即从剩下步骤继续；当前没有执行预算耗尽路径。
+- `blocked` 才进入「续跑额度」计数；额度默认 2 次，可用配置改（0–5）。
 - `ended` 是展示层对账结果，不改内存 phase。
 
 ---
@@ -287,9 +288,9 @@ pending ──dispatch──▶ executing ──全部 done──▶ done
 
 | 现象 | 1.12.0 的实际行为 | 正确恢复动作 |
 |---|---|---|
-| 子 Agent 5 分钟无新事件 | 判 `CHILD_STALLED`，同一 prompt 重试 1 次 | 若仍失败转 `blocked`；主 Agent 核对并决定续跑或接手 |
-| 单项超过 15 分钟 | 强制结束，记 `blocked` | 拆小任务或提高 `childTimeoutMs` 后重派 |
-| 整轮 20 分钟预算用尽 | 阶段 `paused`，剩余项保持 `pending`，**不消耗续跑额度** | 再次 `dispatch` 即续跑，已完成不重跑 |
+| 负责人/专家长时间无新事件 | 保留序号观测与提示，不因时间自动判 `CHILD_STALLED`、blocked 或中止 | 用 `status` 核对；需要时 `instruct` 或用户显式 `cancel` |
+| 单项执行超过旧 15/120 分钟或 20 天哨兵 | 不创建截止，不自动重试、不二次超时接手；旧配置与 `deadlineAt` 仅作历史 | 等真实结果；需要调整时人工指示或取消 |
+| 超过旧 10 分钟判据 | 判据开关恒关闭，时间长短不否决证据合格的 `done` | 仍须满足产物、三阶段与质量验收 |
 | 子任务 `blocked` | 下游依赖被级联标记 `blocked`；错误只写「上游子任务受阻：T1、T2」 | 先修上游；再 `dispatch` 续跑（额度内） |
 | 续跑额度用尽 | `resumeAvailable:false`，结果消息要求主 Agent 直接接手 | 主 Agent 自己完成或向用户说明，不要重复派发 |
 | 运行中 `update` 改判 | **拒绝**（`TASK_RUNNING`）；`force:true` 才允许，并记录为人工改判 | 等本轮结束再改判；确需覆盖再显式 `force` |
@@ -298,7 +299,7 @@ pending ──dispatch──▶ executing ──全部 done──▶ done
 | 规划失败 | `degraded` 消息，不自动重规划 | 向用户说明并询问是否重试 |
 | 本轮对话结束但计划未完成 | 载荷阶段变 `ended`，`suspendedPhase` 保留原阶段 | 对主 Agent 说「继续」，不要重新建计划 |
 
-**预算与额度是两件事**：`paused`（时间用尽）不算续跑次数，`blocked` 续跑才算。结果消息里的数字应以 `statuses`/`resumeAvailable` 为准。
+**暂停与续跑额度是两件事**：`paused` 不算续跑次数，`blocked` 续跑才算。当前没有执行时间预算；结果消息里的数字应以 `statuses`/`resumeAvailable` 为准。
 
 ---
 
@@ -363,7 +364,7 @@ pending ──dispatch──▶ executing ──全部 done──▶ done
 2. `src/plan.ts#buildResultMessage`（持久消息）
 3. `src/plan.ts#applyResultStatuses`（回放）
 
-任何新增字段如果只改其中一处，刷新前后就会不一致。配置值（超时、额度）只在派发入口 `src/runtime.ts#dispatchTool` 解析一次成 `limits`，再往下传；**禁止在 `src/plan.ts` 再写常量**（1.6.0 的续跑额度文案直接引用 `MAX_PLAN_RESUMES`，配置改后数字就错，是反例）。
+任何新增字段如果只改其中一处，刷新前后就会不一致。配置值（非时间资源、续跑额度）只在派发入口 `src/runtime.ts#dispatchTool` 解析一次成 `limits`，再往下传；旧时间配置仍可被兼容读取，但不得形成 deadline、watchdog 终结或 stale 判定。**禁止在 `src/plan.ts` 再写配置常量**（1.6.0 的续跑额度文案直接引用 `MAX_PLAN_RESUMES`，配置改后数字就错，是反例）。
 
 ---
 
@@ -380,7 +381,7 @@ pending ──dispatch──▶ executing ──全部 done──▶ done
 | 取消落盘 | 未派发计划被取代时写 `workplan-cancel` | 已实现 |
 | 背景刷新 | 每次派发前重新采样最近对话；单一截断点 | 已实现 |
 | 兄弟可见 + `needs` 转达 | `buildTeamBrief` 注入兄弟任务只读一览；`needs` 汇总为「跨部门待转达」 | 已实现 |
-| 预算提示 | planner 拿到真实预算；计划消息给出预计轮次，不阻断派发 | 已实现 |
+| 无时限执行与预估提示 | planner/负责人/专家收到统一无时限口径；预估仅协调，不派生截止或完成否决 | 已实现 |
 
 **兼容承诺**：以上全部为「只增不改」——新字段可选、旧消息可回放、`PLAN_VERSION` 仍为 1、`dispatch` 默认行为不变。`strict: false` 与 `artifactGate: false` 提供两条回滚通道。验收编号与测试文件见仓库 `tests/` 下的 `workplan-*.test.ts`。
 
@@ -419,8 +420,8 @@ grep -n "export function planPhase\|export function reconcilePhase\|export funct
 # 子 Agent prompt 与截断
 grep -n "export function buildChildPrompt\|truncate(conversationContext" src/plan.ts
 
-# 派发阻塞、重试、预算与续跑
-grep -n "await record.dispatchPromise\|CHILD_STALLED\|TOTAL_TIMEOUT_MS\|canResumePlan" src/runtime.ts
+# 无时限执行、显式取消、真实错误与续跑
+grep -n "await record.dispatchPromise\|enforceTimeouts: false\|Number.POSITIVE_INFINITY\|canResumePlan" src/runtime.ts
 
 # 面板轮询与只读路由
 grep -n "setInterval\|/dsh-workplan/plans" src/client.ts src/runtime.ts

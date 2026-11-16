@@ -3,7 +3,7 @@
 > **Two selling points, one line: a full ISO/IEC 15408:2026 evidence pack you can verify with 5 commands, and a one-command install with zero runtime dependencies.**
 
 [![verify](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml/badge.svg)](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml)
-[![version](https://img.shields.io/badge/version-2.5.2-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v2.5.2)
+[![version](https://img.shields.io/badge/version-3.0.1-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v3.0.1)
 
 Adds "plan first → dispatch real department subagents → watch progress in the sidebar" to **DeepSeek Harness (DSH)**. No app, no DSH source patch, no page replacement.
 
@@ -80,7 +80,7 @@ The full contract — roles, data shapes, state machine, recovery, and the three
 ## Install
 
 ```bash
-dsh plugin --profile web add dsh-workplan@3.0.0
+dsh plugin --profile web add dsh-workplan@3.0.1
 ```
 
 Restart the DSH Web process (or reload the page) so the bundle is picked up.
@@ -102,7 +102,7 @@ dsh plugin --profile web add "$(pwd)"
 4. Open **Task progress** in the sidebar:
 
    - five headline numbers: **tasks / work items / done / in progress / blocked**;
-   - plan cards grouped into **In progress**, **Ended** and **Completed**, each with a completion rate. **Ended** means the turn has stopped (nothing is running) while the plan is still unfinished; the card also says where it stopped (budget spent / stuck / not started) and resuming is one sentence away;
+   - plan cards grouped into **In progress**, **Ended** and **Completed**, each with a completion rate. **Ended** means the turn has stopped (nothing is running) while the plan is still unfinished; the card also says where it stopped (paused / stuck / not started) and resuming is one sentence away;
    - expand any plan to see per-stage progress and who owns each work item.
 
 Every number is derived from the same task state — the panel can no longer claim "0 in progress" while the list below shows work running. That inconsistency is exactly what 1.4.3 fixed.
@@ -117,9 +117,9 @@ Every number is derived from the same task state — the panel can no longer cla
 | `dsh_workplan_cancel` | Cancel a plan that has not been dispatched; never fabricates completion. |
 | `dsh_workplan_replan` | Amend in place when the request changes: `cancel` / `replace` / `add`. Superseded rows are kept as history; the plan revision increases. Main agent only. |
 | `dsh_workplan_escalate` | A child reports a blocker mid-run (question, options, recommendation) into the state machine and waits for direction, instead of only writing `BLOCKED` at the very end. |
-| `dsh_workplan_instruct` | The main agent answers an escalation and issues direction; if delivery fails the instruction is queued for the next activation. Ack checks at 60s/180s. |
+| `dsh_workplan_instruct` | The main agent answers an escalation and issues direction; if delivery fails the instruction is queued for the next activation. A 60-second acknowledgement reminder is advisory only and never blocks or aborts work. |
 | `dsh_workplan_handoff` | Resolve cross-department needs: `list` / `assign` / `resolve` / `close`. Unresolved needs block delivery; when the asking row is waiting for direction, `resolve` delivers the answer straight into the child session. |
-| `dsh_workplan_followup` | Send a closing note to a direct child that was stopped by budget/timeout but already wrote its artifacts. |
+| `dsh_workplan_followup` | Send a closing note to a stopped or paused direct child that already wrote its artifacts. |
 | `dsh_workplan_verify` | Child agents submit their three-phase evidence for phase-3 (verification) checking; calls from phases 1–2 return `PHASE_GATE`. Passing verification is not completion — the completion gate re-checks the same evidence. |
 | `dsh_workplan_lessons` | Read-only view of the permanent lesson memory: `list` / `search` / `stats`. Never changes plan state; used to audit what was remembered and which mistakes keep repeating. |
 
@@ -138,25 +138,27 @@ Phase 3 also requires a **retrospective** (`retrospective` inside `phases.verifi
 
 A passing retrospective is appended to the **permanent lesson memory** at `~/.dsh/workplan/lessons.jsonl` (override with `DSH_WORKPLAN_LESSONS_FILE`). Before each dispatch, the most relevant lessons are ranked by department, project, keyword overlap, recurrence count and recency, then injected into the child prompt (max 8), labelled explicitly as historical data rather than new instructions. A repeated mistake increments `occurrences` and moves up the ranking instead of creating a duplicate — that is the self-iteration loop. A corrupt line is skipped instead of poisoning the whole file; the store keeps the most recent 500 records and writes atomically.
 
-## Budgets, timeouts, resumes
+## Execution time, health checks, and resumes
 
-| Setting | Default | Environment variable |
+**Department leads and domain experts have no whole-round, per-attempt, idle, or acknowledgement time limit.** Estimates are coordination information only: they never create deadlines or decide `done`. The legacy 10-minute completion criterion is disabled and cannot be re-enabled through environment variables. `extendMs` remains a compatibility input but returns `TIME_LIMITS_DISABLED` without changing a timer.
+
+| Setting | Current behavior | Configuration |
 |---|---|---|
-| Dispatch budget per round | 20 min | `DSH_WORKPLAN_TOTAL_TIMEOUT_MS` |
-| Single subagent ceiling | 15 min | `DSH_WORKPLAN_CHILD_TIMEOUT_MS` |
-| No-progress window | 5 min | `DSH_WORKPLAN_IDLE_TIMEOUT_MS` |
-| Planner no-progress ceiling | 5 min (**measured from the last output chunk**; still streaming keeps pushing it out) | `DSH_WORKPLAN_PLANNER_TIMEOUT_MS` |
-| Planner stall window | 90 s (zero chunks of any kind after output started = wedged) | `DSH_WORKPLAN_PLANNER_IDLE_TIMEOUT_MS` |
-| Planner absolute ceiling | 15 min (= no-progress ceiling × 3, streaming or not) | scales with `…_PLANNER_TIMEOUT_MS` |
-| Automatic resumes | 4 | `DSH_WORKPLAN_MAX_RESUMES` |
+| Lead/expert round and attempt execution | **Unlimited**: ends on a real result, a real error, evidence/quality gates, or explicit user cancellation | Legacy `DSH_WORKPLAN_TOTAL_TIMEOUT_MS`, `DSH_WORKPLAN_CHILD_TIMEOUT_MS`, `totalTimeoutMs`, `childTimeoutMs`, and subtask `timeoutMs` never create a deadline |
+| Idle and acknowledgement monitoring | Observation and reminders only; no time-only `blocked` status or abort | Legacy `DSH_WORKPLAN_IDLE_TIMEOUT_MS` does not limit execution |
+| Dispatch tool | No `timeoutMs`; `async` returns immediately, while `wait` waits for actual settlement | Prefer `async` for long work, with `status` and explicit `cancel` |
+| Planner no-progress ceiling | 5 min from the last output chunk; planning only, not lead/expert execution | `DSH_WORKPLAN_PLANNER_TIMEOUT_MS` |
+| Planner stall window | 90 s of missing output after streaming starts; transport health only | `DSH_WORKPLAN_PLANNER_IDLE_TIMEOUT_MS` |
+| Planner absolute ceiling | 15 min; planning only | Scales with `…_PLANNER_TIMEOUT_MS` |
+| Automatic resumes | 2; non-time pause recovery, not an execution clock | `DSH_WORKPLAN_MAX_RESUMES` |
 | Subagent concurrency | 5 (fixed) | — |
 
-Running out of budget is not a failure: the plan becomes **"budget used, resumable"**, finished work is not redone, and the remainder continues on the next dispatch. A stalled subtask blocks only itself.
+Individual model connections, Bash commands, and disposal waits retain their local health checks; they are not department task deadlines. Without automatic time-based termination, genuinely stuck work can keep consuming concurrency and spend, so use the dashboard/`status` and explicitly cancel or redirect it. Legacy deadlines, extension journals, timeout counts, and criterion fields remain readable history but never arm new timers.
 
-Limits can also be set in the plugin config:
+Non-time settings can still be placed in the plugin config:
 
 ```jsonc
-{ "totalTimeoutMs": 1800000 }
+{ "maxResumes": 2 }
 ```
 
 ## Security and privacy
@@ -219,7 +221,7 @@ The fix removes the cached snapshot: every number is derived at serialisation ti
 
 **Numbers are lower than before.** That is the fix: 1.4.3 derives them from real state, and the old numbers were frequently inflated.
 
-**A subagent stopped moving.** Five minutes without new events marks it blocked, in isolation. Tell the main agent to resume the plan.
+**A subagent stopped moving.** Five minutes without events no longer blocks or aborts it. Inspect the dashboard/`status`, then explicitly cancel the plan/subtask or send an `instruct` update. This preserves human control without killing long reasoning or large tasks.
 
 ## Uninstall
 

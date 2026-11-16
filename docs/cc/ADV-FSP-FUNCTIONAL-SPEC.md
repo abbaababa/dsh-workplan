@@ -13,7 +13,7 @@ G-08（ADV-FSP.1 独立接口规范缺失）。核对方法：工具名逐一来
 
 TOE 对外暴露 **2 类接口**：9 个 Agent 工具（宿主注入给模型调用）+ 1 个本地 HTTP 路由（面板数据源）。
 
-### 1.1 Agent 工具（11 个）／ Agent tools
+### 1.1 Agent 工具（14 个）／ Agent tools
 
 | # | 工具 | 调用者 | 用途（一句话） | 关键参数 | 失败/拒绝行为 |
 |---|---|---|---|---|---|
@@ -30,13 +30,26 @@ TOE 对外暴露 **2 类接口**：9 个 Agent 工具（宿主注入给模型调
 | 11 | `dsh_workplan_lessons` | 根会话 / 子 Agent（只读） | 查看永久教训记忆（`list` / `search` / `stats`） | `action`、`department`、`query`、`limit` | 只读，不写计划状态、不提供写入动作；记忆只能由阶段三复盘通过后的完成判定写入 |
 | 12 | `dsh_workplan_delegate` | 部门负责人子 Agent（2.3.9；2.5.0 强化） | 第三层派发：先提交「两轮深度思考」产物（第一轮全面、全盘、深入梳理研究思考自己的任务，第二轮基于其全部结果理清方法、流程、步骤），再把任务拆成更简单的单项工作分给本部门多名顶尖专家与组员 | `action: review/dispatch/status/self_effort`、`consolidation{problemAnalysis, approach, approachBasis, assignments[], taskReasoningEffort?}`、self_effort 携带 `reasoningEffort+complexityRationale+deepThink{problemAnalysis, approach, approachBasis}`（2.5.2 叶子执行前硬门禁） | 非部门负责人子会话（根会话 / 第三层叶子）拒绝；`review` 未登记时 `dispatch` 返回 `DELEGATE_CONSOLIDATION_MISSING`；两轮产物缺 approach/approachBasis 返回 `DELEGATE_CONSOLIDATION_INCOMPLETE`（2.5.1）；分工表缺 expert 或 member 返回 `DELEGATE_ROLE_MIX_REQUIRED`；越界推理等级按模型家族集合钳制并留痕；`taskReasoningEffort` 非法返回 `DELEGATE_TASK_EFFORT_INVALID`，合法则钳制后写入状态行 `effortOverride`（五档白名单消毒 + durable 回放 + 尝试重置不清除），派发链每次激活经 `resolveTaskEffort` 优先读它，下级档位以成员 self_effort 自配为权威（分工表档仅建议；继承仅旧计划回放兼容）；下级子会话 `maxDepth:2`，第四层由宿主深度上限硬拒 |
 
+| 13 | `dsh_workplan_hold` | 主 Agent（仅根会话） | 认可闸门·显式按住：把尚未派发的计划置为「用户认可前不得派发」（3.0.0 本地修复；与任务锚点关键词识别互为双保险） | `planId?`, `reason` | 已派发的计划拒绝；已按住时幂等返回 |
+| 14 | `dsh_workplan_release` | 主 Agent（仅根会话） | 认可闸门·解除并开跑：登记用户认可留痕（`gateHistory`，durable 回放不丢）后立即派发，语义与 `dsh_workplan_dispatch` 同一套闸门 | `planId?`, `note`, `deepThink?`, `mode?` | 非 held 计划返回 `NOT_HELD`；解除后派发若被 deepThink 等门禁拒绝，闸门保持已解除、认可事实无需重来 |
+
 ### 1.2 HTTP 路由（1 个）／ HTTP route
 
 | 路由 | 方法 | 用途 | 安全头 | 说明 |
 |---|---|---|---|---|
 | `/dsh-workplan/plans` | GET | 返回面板所需的计划状态数据 | `x-content-type-options: nosniff`、`referrer-policy: no-referrer`（`HARDENING_HEADERS`，见 `tests/security-headers.test.ts`） | 非该路径一律拒绝（`src/runtime.ts` L5516）；只读，无写入接口 |
 
-### 1.3 不存在的接口（负面声明）／ Interfaces that do NOT exist
+### 1.3 宿主生命周期订阅（3 个）／ Host lifecycle subscriptions
+
+这些事件是插件与 DSH 宿主的内部协作入口，不是新增模型工具或 HTTP 路由。
+
+| 事件 | 触发时机 | 本插件行为 | 边界与失败防护 |
+|---|---|---|---|
+| `agent/pre-step` | 模型步骤开始前 | 识别真实任务、启动后台规划；在途规划期间允许后续 step 的不同真实任务取代旧规划 | 非根会话、内部通知、社交/状态/空泛续跑不启动或取消规划；相同任务去重 |
+| `agent/inbox/inserted` | followup/queue 消息进入 live inbox | 收尾正在等待旧规划时，不同真实人类任务入队即中止旧规划，防止旧结果迟到覆盖 | 只认 `source.kind=user` 或省略的人类消息；同任务、状态问题和内部 workplan 通知不取消；旧规划经 `superseded + AbortController` 静默退出 |
+| `agent/turn-stopping` | 自然收尾且 next-step inbox 为空 | 等待在途规划结算，并把成功/降级/澄清结果一次性交回主 Agent；随后执行既有未完成与认可闸门 | 若等待期间已由另一规划接替，旧 waiter 退出；held 计划交回后仍等待用户认可，不进入重复 steer |
+
+### 1.4 不存在的接口（负面声明）／ Interfaces that do NOT exist
 
 - 无网络出站调用、无遥测上报（零运行时依赖，`package.json` `dependencies` 为空）。
 - 无鉴权/账户体系（见 ST 假设 A-1：宿主环境已鉴别，TOE 不自做鉴别）。
@@ -44,4 +57,4 @@ TOE 对外暴露 **2 类接口**：9 个 Agent 工具（宿主注入给模型调
 
 ## 2. SFR 对应 / SFR trace
 
-接口行为与 ST（`docs/cc/SECURITY-TARGET.md`）SFR 的对应：审计留痕→FAU_GEN（状态变更全留档）；访问控制→FDP_ACC/ACF（文件沙箱 + presented-write-guard）；域隔离→FPT_SEP（子会话隔离）；会话超时→FTA_SSL（15 分钟/步、20 分钟预算，可用 `DSH_WORKPLAN_CHILD_TIMEOUT_MS`/`IDLE_TIMEOUT_MS`/`TOTAL_TIMEOUT_MS` 覆盖默认值）。
+接口行为与 ST（`docs/cc/SECURITY-TARGET.md`）SFR 的对应：审计留痕→FAU_GEN（状态变更全留档）；访问控制→FDP_ACC/ACF（文件沙箱 + presented-write-guard）；域隔离→FPT_SEP（子会话隔离）；会话终止→FTA_SSL（负责人/专家执行无总时长、单次、空闲或无回执硬截止；旧时限配置与 deadline 仅历史回放，不再生成计时器；用户取消、真实错误与证据/质量门禁仍有效）。

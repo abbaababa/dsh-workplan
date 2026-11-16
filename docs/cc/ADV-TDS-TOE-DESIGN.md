@@ -15,7 +15,7 @@ TS 源码共 **12 个文件（11 个模块 + globals.d.ts）**，合计 17,430 �
 |---|---|---|---|
 | `src/plan.ts` | 3820 | 计划数据模型与状态机 | 是（状态与完成判据） |
 | `src/runtime.ts` | 6071 | 执行编排：调度、子会话生命周期、状态回写、HTTP 服务与加固头 | 是 |
-| `src/host.ts` | 1278 | 9 个工具的宿主侧定义与提示词规则（15 分钟/步、20 分钟预算条款） | 是 |
+| `src/host.ts` | 1278 | 9 个工具的宿主侧定义与提示词规则（负责人/专家无执行时限条款） | 是 |
 | `src/client.ts` | 3367 | 面板前端渲染 | 否 |
 | `src/replan.ts` | 708 | 需求变更重规划（cancel/replace/add） | 是 |
 | `src/understanding.ts` | 901 | 结果理解与核对辅助 | 否 |
@@ -36,7 +36,7 @@ TS 源码共 **12 个文件（11 个模块 + globals.d.ts）**，合计 17,430 �
 └─ 文件沙箱：DSH file policy 限定可写范围（workspace-write 等）
 ```
 
-边界规则：子 Agent 不能派发、不能安装服务、权限在启动时固化；`tests/session-reference-safety.test.ts` 与 `tests/workplan-presented-write-guard.test.ts` 回归守护该边界。host 工具超时 > 计划预算（`src/host.ts` L1019–1023），保证不会出现“工具还在跑、预算已判死”的竞态。
+边界规则：子 Agent 不能派发、不能安装服务、权限在启动时固化；`tests/session-reference-safety.test.ts` 与 `tests/workplan-presented-write-guard.test.ts` 回归守护该边界。host 的 dispatch 工具不声明 `timeoutMs`，工具注册表也不会据此建立截止；负责人与专家执行只由真实结果、真实错误、证据/质量门禁或用户显式取消收束。
 
 ## 3. TSF 与模块映射（兼答 G-26/27/29/30/31/32 成文化）
 
@@ -46,7 +46,7 @@ TS 源码共 **12 个文件（11 个模块 + globals.d.ts）**，合计 17,430 �
 | FDP_ACC/ACF 访问控制 | DSH file policy + presented-write-guard | workplan-presented-write-guard、session-reference-safety |
 | FMT_MOF/MSA 安全管理 | deliveryReady 门禁 + status-lock + 仅根会话可 handoff | workplan-status-lock、delivery-gate、present-gate-evidence |
 | FPT_SEP 域隔离 | 子会话隔离模型（§2） | session-reference-safety、security-headers |
-| FTA_SSL 会话超时 | host.ts 硬上限/预算常量，env 可覆盖 | timeout-artifact-evidence |
+| FTA_SSL 会话超时 | host.ts 明确负责人/专家无执行时限；旧超时常量只读，规划器等局部窗口单独受限 | timeout-artifact-evidence |
 | FRU_FLT 容错 | auto-resume、watchdog、blocked/重规划留档 | auto-resume-policy、workplan-stuck-recovery、workplan-auto-retry |
 
 ## 4. 构建与实现表示（ADV_IMP 补充）

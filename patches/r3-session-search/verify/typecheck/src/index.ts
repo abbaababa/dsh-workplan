@@ -84,6 +84,7 @@ export const SESSION_QUERY_SQLITE_SNIPPET_CHARS = 240
 
 // One transient source change gets a retry; repeated churn fails rather than monopolizing the queue.
 const STABLE_OBSERVATION_ATTEMPTS = 2
+const SEARCH_RECONCILE_BUDGET_MS = 25000
 
 /** SQLite module/handle opening phase; `never` disables full-text search entirely. */
 export type OpenAt = 'startup' | 'first-search' | 'never'
@@ -237,6 +238,7 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
   private _closed = false
   private _closePromise: Promise<void> | undefined
   private readonly _prewarmAbort = new AbortController()
+  private _writeTail: Promise<void> = Promise.resolve()
   private readonly _optionalPersistenceFiber: Fiber
 
   constructor(ctx: Context, config: Config) {
@@ -285,10 +287,10 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
     this._assertSearchEnabled()
     const normalized = normalizeSessionRequest(request, this.config)
     const signal = exec?.signal
-    return this._serialized(signal, async () => {
-      await this._ensureReady(signal)
-      const persistenceBinding = await this._reconcile(signal)
-      assertNotAborted(signal)
+    await this._ensureReady(signal)
+    const persistenceBinding = await this._reconcileWithinBudget(signal)
+    assertNotAborted(signal)
+    {
       const generation = String(this._globalGeneration)
       const fingerprint = requestFingerprint(normalized)
       const offset = normalized.cursor === undefined
@@ -303,7 +305,7 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
         generation,
         offset: cursorOffset,
       }), offset)
-    })
+    }
   }
 
   override async searchEvents(
@@ -313,10 +315,15 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
     this._assertSearchEnabled()
     const normalized = normalizeEventRequest(request, this.config)
     const signal = exec?.signal
-    return this._serialized(signal, async () => {
-      await this._ensureReady(signal)
-      const persistenceBinding = await this._reconcile(signal)
-      assertNotAborted(signal)
+    // [R3-fix2] bounded off-queue reconcile
+    await this._ensureReady(signal)
+    // [R3-fix4] event search serves the committed index without requiring a globally
+    // stable corpus snapshot (the after-list re-observation never converges on a live
+    // corpus). Cold-read commits still run, so indexing/change-detection are unchanged.
+    const persistenceBinding = await this._reconcileWithinBudget(signal, false)
+    assertNotAborted(signal)
+    await this._ensureTargetIndexed(normalized.sessionId, signal)
+    {
       const target = this._targetObservation(normalized.sessionId, persistenceBinding)
       const fingerprint = requestFingerprint(normalized)
       const offset = normalized.cursor === undefined
@@ -334,7 +341,7 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
           offset: cursorOffset,
         }), offset),
       }
-    })
+    }
   }
 
   /** Close the database after every accepted operation reaches quiescence. */
@@ -360,6 +367,7 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
     this._closed = true
     this._prewarmAbort.abort()
     await this._tail
+    await this._writeTail.catch(() => {})
     if (this._ready !== undefined) {
       try {
         await this._ready
@@ -418,7 +426,79 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
     }
   }
 
-  private async _reconcile(signal: AbortSignal | undefined): Promise<PersistenceBinding> {
+  private _withWriteLock<T>(operation: () => T): Promise<T> {
+    const run = this._writeTail.then(() => operation(), () => operation())
+    this._writeTail = run.then(() => {}, () => {})
+    return run
+  }
+
+  // [R3-fix2] bounded off-queue reconcile: a search never spends the whole tool
+  // budget on corpus observation; committed progress is kept and the index served.
+  private async _reconcileWithinBudget(signal: AbortSignal | undefined, requireStability = true): Promise<PersistenceBinding> {
+    if (signal === undefined) return this._reconcile(signal, requireStability)
+    const deadline = new AbortController()
+    const link = (): void => deadline.abort()
+    signal?.addEventListener('abort', link, { once: true })
+    const timer = setTimeout(() => deadline.abort(), SEARCH_RECONCILE_BUDGET_MS)
+    try {
+      return await this._reconcile(deadline.signal, requireStability)
+    } catch (error: unknown) {
+      if (signal?.aborted) throw error
+      if (isAbort(error)) return this._persistenceBinding
+      throw error
+    } finally {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', link)
+    }
+  }
+
+  // [R3-fix2] targeted cold read: a bounded round may not have reached the requested
+  // session yet; index just that session (abort-raced) so results stay correct.
+  private async _ensureTargetIndexed(sessionId: SessionId, signal: AbortSignal | undefined): Promise<void> {
+    const db = this._requireDb()
+    if (db.prepare('SELECT id FROM persisted_sessions WHERE id = ?').get(sessionId) !== undefined) return
+    if (db.prepare('SELECT id FROM temp.live_sessions WHERE id = ?').get(sessionId) !== undefined) return
+    const persistence = this._persistenceBinding.service
+    if (persistence === undefined) return
+    try {
+      const loaded = await waitWithAbort(readColdSessionLog(persistence, sessionId, signal), signal)
+      const observed = observeSession(loaded.header, loaded.inheritedEventCount, loaded.events)
+      const generation = this._mainGeneration() + 1
+      await this._withWriteLock(() => {
+        let began = false
+        try {
+          db.exec('BEGIN IMMEDIATE')
+          began = true
+          this._replacePersistedSession(observed, 'targeted' as SessionPersistenceRevision, generation)
+          db.prepare('UPDATE search_state SET global_generation = ? WHERE singleton = 1').run(generation)
+          db.exec('COMMIT')
+        } catch (error: unknown) {
+          if (began) {
+            try {
+              db.exec('ROLLBACK')
+            } catch {
+              // The original SQLite failure remains the actionable cause.
+            }
+          }
+          throw new SessionQueryError(
+            `session-search reconciliation failed: ${errorMessage(error)}`,
+            'SESSION_QUERY_INDEX_FAILED',
+            { cause: error },
+          )
+        }
+      })
+      this._globalGeneration += 1
+    } catch (error: unknown) {
+      if (isAbort(error) || signal?.aborted) throw error
+      try {
+        this.ctx.logger('session-query-sqlite').warn(`[R3-fix2] targeted cold read failed for session "${sessionId}": ${errorMessage(error)}`)
+      } catch {
+        // Logging must never throw.
+      }
+    }
+  }
+
+  private async _reconcile(signal: AbortSignal | undefined, requireStability = true): Promise<PersistenceBinding> {
     assertNotAborted(signal)
     const db = this._requireDb()
     const persistedRows = db.prepare(
@@ -433,7 +513,8 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
     // observing so every cold-read session can be committed atomically on its own.
     const nextMainGeneration = this._mainGeneration() + 1
     let persistedWriteCount = 0
-    const commitPersisted = (entry: ObservedPersistedSession, observed: ObservedSession): void => {
+    const commitPersisted = async (entry: ObservedPersistedSession, observed: ObservedSession): Promise<void> => {
+      await this._withWriteLock(() => {
       let began = false
       try {
         db.exec('BEGIN IMMEDIATE')
@@ -459,12 +540,13 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
           { cause: error },
         )
       }
+      })
       persistedWriteCount += 1
       persistedById.set(entry.header.id, { id: entry.header.id, revision: entry.revision, generation: nextMainGeneration })
     }
     let observation: Observation
     try {
-      observation = await this._observeStable(persistedById, signal, commitPersisted)
+      observation = await this._observeStable(persistedById, signal, commitPersisted, requireStability)
     } catch (error: unknown) {
       // [R3-fix] an aborted/failed round keeps its committed rows: advance the
       // session-cursor change token so stale cursors are rejected after partial
@@ -500,6 +582,7 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
     })
 
     if (hasWrites) {
+      await this._withWriteLock(() => {
       let began = false
       try {
         db.exec('BEGIN IMMEDIATE')
@@ -532,6 +615,7 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
           { cause: error },
         )
       }
+      })
     }
 
     if (hasWrites || pointerChanged) this._globalGeneration += 1
@@ -544,7 +628,8 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
   private async _observeStable(
     indexed: ReadonlyMap<SessionId, IndexedPersistedRow>,
     signal: AbortSignal | undefined,
-    commitPersisted: (entry: ObservedPersistedSession, observed: ObservedSession) => void,
+    commitPersisted: (entry: ObservedPersistedSession, observed: ObservedSession) => Promise<void>,
+    requireStability = true,
   ): Promise<Observation> {
     for (let attempt = 0; attempt < STABLE_OBSERVATION_ATTEMPTS; attempt += 1) {
       assertNotAborted(signal)
@@ -557,7 +642,7 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
           const canReuseIndexed = this._lastPersistenceIdentity === undefined
             || this._lastPersistenceIdentity === persistenceBinding.identity
           const listOptions = signal === undefined ? undefined : { signal }
-          const before = await persistence.list(listOptions)
+          const before = await waitWithAbort(persistence.list(listOptions), signal)
           assertNotAborted(signal)
           persisted = materializePersistenceSnapshots(before)
           // [R3-fix] incremental per-session commit: isolate per-session failures,
@@ -583,11 +668,11 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
             coldReadRevisions.set(entry.header.id, entry.revision)
             coldReadAttempts += 1
             try {
-              const loaded = await readColdSessionLog(persistence, entry.header.id, signal)
+              const loaded = await waitWithAbort(readColdSessionLog(persistence, entry.header.id, signal), signal)
               assertNotAborted(signal)
               assertSessionHeadersCompatible(entry.header, loaded.header)
               const observed = observeSession(loaded.header, loaded.inheritedEventCount, loaded.events)
-              commitPersisted(entry, observed)
+              await commitPersisted(entry, observed)
               coldReadSuccesses += 1
             } catch (error: unknown) {
               if (isAbort(error) || signal?.aborted) throw error
@@ -613,26 +698,30 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
               { cause: firstFailure?.error },
             )
           }
-          assertNotAborted(signal)
-          const afterSnapshots = await persistence.list(listOptions)
-          assertNotAborted(signal)
-          const after = materializePersistenceSnapshots(afterSnapshots)
-          let coldReadStable = true
-          for (const [id, revision] of coldReadRevisions) {
-            const first = persisted.get(id)
-            const second = after.get(id)
-            if (
-              first === undefined
-              || second === undefined
-              || revision !== second.revision
-              || !sameHeader(first.header, second.header)
-            ) {
-              coldReadStable = false
-              break
+          // [R3-fix4] only a stability-requiring caller (session search / pre-warm)
+          // pays for the after-list re-observation; event search skips it.
+          if (requireStability) {
+            assertNotAborted(signal)
+            const afterSnapshots = await waitWithAbort(persistence.list(listOptions), signal)
+            assertNotAborted(signal)
+            const after = materializePersistenceSnapshots(afterSnapshots)
+            let coldReadStable = true
+            for (const [id, revision] of coldReadRevisions) {
+              const first = persisted.get(id)
+              const second = after.get(id)
+              if (
+                first === undefined
+                || second === undefined
+                || revision !== second.revision
+                || !sameHeader(first.header, second.header)
+              ) {
+                coldReadStable = false
+                break
+              }
             }
+            if (!coldReadStable) continue
+            if (this._persistenceBinding !== persistenceBinding) continue
           }
-          if (!coldReadStable) continue
-          if (this._persistenceBinding !== persistenceBinding) continue
         } catch (error: unknown) {
           if (isAbort(error) || signal?.aborted) {
             throw new SessionQueryError('session-search aborted', 'SESSION_QUERY_ABORTED', {
@@ -655,7 +744,7 @@ export class SqliteSessionQueryEngine extends SessionQueryEngine {
         if (durable !== undefined) assertSessionHeadersCompatible(observed.header, durable.header)
         live.set(session.id, observed)
       }
-      if (!sameSessionIds(initiallyLive, live)) continue
+      if (requireStability && !sameSessionIds(initiallyLive, live)) continue
       return { persistenceBinding, persisted, live }
     }
     throw new SessionQueryError(

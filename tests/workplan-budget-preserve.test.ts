@@ -20,7 +20,6 @@ import assert from 'node:assert/strict'
 import {
   applyStatus,
   createStatuses,
-  derivePlanSnapshot,
 } from '../src/plan.js'
 import { dispatchPlan } from '../src/runtime.js'
 
@@ -83,14 +82,16 @@ function makeSession() {
   }
 }
 
-function hangingChild() {
-  return { childId: 'child-hang', result: new Promise(() => {}), dispose: async () => {} }
-}
-
 function makeCtx() {
   return {
     logger: { warn() {} },
-    subagents: { startActivation: () => hangingChild() },
+    subagents: {
+      startActivation: () => ({
+        childId: 'child-quick',
+        result: Promise.resolve({ stopReason: 'completed', output: [{ type: 'text', text: '完成' }] }),
+        dispose: async () => {},
+      }),
+    },
     sessions: { get: () => undefined, list: () => [], eventAt: () => undefined },
   }
 }
@@ -106,7 +107,7 @@ function options(session: any) {
   }
 }
 
-test('预算到点不重置「待指示」行：question/options 保留，阶段按 blocked 收束', async () => {
+test('旧预算到点不再介入：待指示行的 question/options 原样保留', async () => {
   const plan = makePlan()
   let statuses = createStatuses(plan)
   statuses = applyStatus(statuses, 'T1', {
@@ -120,32 +121,21 @@ test('预算到点不重置「待指示」行：question/options 保留，阶段
     progress: 100,
     finishedAt: 2,
   })
-  // 一条上一轮被中断、仍写着 in_progress 的行：它才是应该被重置的那一类。
-  statuses = applyStatus(statuses, 'T2', {
-    status: 'in_progress',
-    closure: 'assigned',
-    childId: 'child-old',
-    progress: 30,
-    startedAt: 1,
-  })
   const record = makeRecord(plan, statuses, 'blocked')
   const session = makeSession()
 
-  await dispatchPlan(makeCtx(), record, options(session))
+  const result = await dispatchPlan(makeCtx(), record, options(session))
+  assert.ok(result)
 
   const t1: any = record.statuses.find((item: any) => item.subtaskId === 'T1')
-  assert.equal(t1.status, 'blocked', '等指示行不能被预算重置成 pending')
+  assert.equal(t1.status, 'blocked', '等指示行不受派发影响')
   assert.equal(t1.closure, 'escalated', 'escalated 闭包必须保留')
   assert.equal(t1.blockedKind, 'escalated')
-  assert.match(String(t1.question), /第三方凭证/, '问题原文必须还在，否则请示等于被吞掉')
+  assert.match(String(t1.question), /第三方凭证/, '问题原文必须还在')
   assert.deepEqual(t1.options, ['跳过并标注未验证', '改为离线样本'])
 
-  const t2: any = record.statuses.find((item: any) => item.subtaskId === 'T2')
-  assert.equal(t2.status, 'pending', '真正被预算打断的行照常回到 pending 以便续跑')
-  assert.equal(t2.childId, null)
-  assert.equal(record.phase, 'blocked', '有等指示行时阶段必须是 blocked，自动续跑才会停下')
-  assert.match(String(record.error), /本轮执行预算（\d+ 分钟）已到/)
-  assert.match(String(record.error), /等待指示/)
+  assert.equal(record.phase, 'blocked', '仍有待指示项时计划保持 blocked')
+  assert.ok(!(record.errors ?? []).some((line: string) => /本轮执行预算|总执行超时/.test(line)))
 })
 
 test('预算到点不重置「已下发指示」行：不抛 INVALID_TRANSITION，指示原样保留', async () => {
@@ -177,11 +167,11 @@ test('预算到点不重置「已下发指示」行：不抛 INVALID_TRANSITION�
   assert.ok(result, '预算到点必须返回记录，而不是从 catch 里再抛一次')
 
   const t1: any = record.statuses.find((item: any) => item.subtaskId === 'T1')
-  assert.equal(t1.status, 'in_progress', '已下发指示的行仍在推进，不能被重置成 pending')
+  assert.equal(t1.status, 'in_progress', '已下发指示的行仍在推进，不被派发重置')
   assert.equal(t1.closure, 'instructed')
   assert.match(String(t1.instruction?.text), /方案 B/)
-  assert.equal(record.phase, 'paused', '其余 pending 项仍可续跑；已指示行不会被重派')
-  assert.match(String(record.error), /本轮执行预算（\d+ 分钟）已到/)
+  assert.notEqual(record.phase, 'paused', '不再有预算暂停阶段')
+  assert.ok(!(record.errors ?? []).some((line: string) => /本轮执行预算/.test(line)))
 })
 
 test('预算到点不重置「已重规划」旧行：replanned 是终态，不能参与重置', async () => {
@@ -208,7 +198,10 @@ test('预算到点不重置「已重规划」旧行：replanned 是终态，不�
 
   const t1: any = record.statuses.find((item: any) => item.subtaskId === 'T1')
   assert.equal(t1.closure, 'replanned', '被重规划的旧行必须保持闭态，供追溯')
-  assert.equal(record.phase, 'paused')
-  const snapshot = derivePlanSnapshot(record.statuses)
-  assert.equal(snapshot.stats.pending, 2, 'live 行 T1b/T2 回到 pending，旧行不计入')
+  assert.notEqual(record.phase, 'paused')
+  const t1b: any = record.statuses.find((item: any) => item.subtaskId === 'T1b')
+  const t2: any = record.statuses.find((item: any) => item.subtaskId === 'T2')
+  assert.notEqual(t1b?.closure, 'replanned', '接替行照常可执行，不继承旧行闭态')
+  assert.notEqual(t2?.closure, 'replanned')
+  assert.ok(!(record.errors ?? []).some((line: string) => /本轮执行预算|总执行超时/.test(line)))
 })

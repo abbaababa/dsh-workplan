@@ -100,23 +100,14 @@ test('C-Q5-03（AC-Q5-3 边界，GAP-2）：T6 首跑前历史基线快照 shasu
   assert.ok(output.includes('OK'), '必须有逐文件 OK 记录')
 })
 
-test('C-Q5-04（AC-Q5-2 边界，D-1）：criterionV2Active 生效点前 1 秒 false/后 1 秒 true；缺失/非法一律 fail-closed', () => {
+test('C-Q5-04（执行时限取消）：criterionV2Active 在任何环境变量与时间点都恒为 false', () => {
   const since = 1_000_000
   const env = { DSH_WORKPLAN_CRITERION_V2: '1', DSH_WORKPLAN_CRITERION_V2_SINCE: String(since) }
-  // ① 生效点前 → false（跳过判据层，按旧规则，无违规）
-  assert.equal(criterionV2Active(since - 1_000, env), false, '生效点前 1 秒不生效')
-  // ② 生效后 → true
-  assert.equal(criterionV2Active(since + 1_000, env), true, '生效点后 1 秒生效')
-  assert.equal(criterionV2Active(since, env), true, '边界含等号（createdAt≥起点）')
-  // ③ 开关/起点/createdAt 任一缺失或非法一律 false（fail-closed）
-  assert.equal(criterionV2Active(since + 1_000, {}), false)
-  assert.equal(criterionV2Active(since + 1_000, { DSH_WORKPLAN_CRITERION_V2: '1' }), false, '缺起点')
-  assert.equal(criterionV2Active(since + 1_000, { DSH_WORKPLAN_CRITERION_V2: '0', DSH_WORKPLAN_CRITERION_V2_SINCE: String(since) }), false, '开关关')
-  assert.equal(criterionV2Active(since + 1_000, { DSH_WORKPLAN_CRITERION_V2: '1', DSH_WORKPLAN_CRITERION_V2_SINCE: 'abc' }), false, '非法起点')
-  assert.equal(criterionV2Active(undefined, env), false, 'createdAt 缺失')
-  assert.equal(criterionV2Active('abc', env), false, 'createdAt 非法')
-  // ISO 起点可解析（epoch 毫秒或 ISO 双格式）
+  assert.equal(criterionV2Active(since - 1_000, env), false)
+  assert.equal(criterionV2Active(since, env), false, '历史生效点也不再打开 10 分钟门')
+  assert.equal(criterionV2Active(since + 1_000, env), false)
+  assert.equal(criterionV2Active(Number.MAX_SAFE_INTEGER, env), false, '未来任何时间都不生效')
   const iso = { DSH_WORKPLAN_CRITERION_V2: 'true', DSH_WORKPLAN_CRITERION_V2_SINCE: '2026-11-13T00:00:00Z' }
-  assert.equal(criterionV2Active(Date.parse('2026-11-13T00:00:01Z'), iso), true)
+  assert.equal(criterionV2Active(Date.parse('2026-11-13T00:00:01Z'), iso), false)
   assert.equal(criterionV2Active(Date.parse('2026-11-12T23:59:59Z'), iso), false)
 })

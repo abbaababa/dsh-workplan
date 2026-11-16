@@ -33,6 +33,7 @@ function harness(hardMs: number) {
   let fakeNow = startedAt
   const warnings: Array<{ remainingMs: number }> = []
   const input: any = {
+    enforceTimeouts: true,
     getSeq: () => undefined,
     idleMs: 3_600_000,
     hardMs,

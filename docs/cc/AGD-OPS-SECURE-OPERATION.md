@@ -50,15 +50,11 @@ npm install -g dsh-workplan
 | 待指示（escalated） | 子 Agent 在等主 Agent 决定 | `dsh_workplan_instruct` 下发决定，或确认后置 blocked |
 | 取消（cancelled） | 用户撤销 ≠ 完成 | 剩余项仍按未完成处理 |
 
-### 3.3 超时与预算（FTA_SSL 运行参数，兼答 G-31）
+### 3.3 执行时限与健康保护（FTA_SSL 运行参数，兼答 G-31）
 
-默认：子任务单步硬上限 **15 分钟**、整轮预算 **20 分钟**；host 工具超时 > 计划预算（避免竞态）。可按需覆盖的环境变量（均为毫秒）：
+部门负责人和部门相关领域全球顶尖专家执行任务**没有总时长、单次时长、空闲无进展、未回执或 10 分钟验收门槛**。旧版 `DSH_WORKPLAN_CHILD_TIMEOUT_MS`、`DSH_WORKPLAN_IDLE_TIMEOUT_MS`、`DSH_WORKPLAN_TOTAL_TIMEOUT_MS` 仍可被读取用于历史回放，但**不会创建计时器或推动状态**；dispatch 工具也不再声明 `timeoutMs`。
 
-```bash
-DSH_WORKPLAN_CHILD_TIMEOUT_MS=900000   # 单步上限（默认 15 分钟）
-DSH_WORKPLAN_IDLE_TIMEOUT_MS=…         # 子会话空闲超时
-DSH_WORKPLAN_TOTAL_TIMEOUT_MS=1200000  # 整轮预算（默认 20 分钟）
-```
+保留的局部健康保护仅包括规划器自身窗口、模型流/网络超时、前台 Bash 与后台 Job wait 等，不作用于负责人/专家的正式执行。用户显式取消、真实错误、证据与质量门禁仍会收束任务并保留盘上产物。
 
 ### 3.4 日志与留痕位置
 - 计划与子任务状态、证据块（WORKPLAN_EVIDENCE）持久化在会话记录中，面板只读展示。

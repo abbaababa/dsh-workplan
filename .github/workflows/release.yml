@@ -1,0 +1,131 @@
+# release.yml — 自动发布流水线（构建 → 测试 → 发布）
+#
+# 触发方式（触发条件）：
+#   - 推送 tag（形如 v3.0.1）→ 走完整链路：build（构建）+ test（测试）+ release（发布）
+#   - 推送到 main 分支、或开 Pull Request → 只跑 build + test（不打 tag、不发布）
+#   - 手动 workflow_dispatch → 同「推送到 main」；若手动跑到某个 tag 上，也会触发发布
+#
+# 步骤顺序（不可颠倒）：build → test → release，
+# 由 jobs.<name>.needs 表达先后依赖：构建先于测试，测试先于发布。
+
+name: release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+# 默认最小权限：只读（最小权限原则）。发布 job 单独放开写权限。
+permissions:
+  contents: read
+
+jobs:
+  # 第 1 步 · 构建：类型检查（tsc）+ 产出构建物 + 校验「提交的构建产物没有过期」。
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [22, 26]
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 构建（tsc 类型检查并产出 lib/ 与 client.js）
+        run: npm run build
+
+      - name: 校验提交的构建产物没有过期
+        run: git diff --exit-code -- lib client.js
+
+  # 第 2 步 · 测试：依赖 build 完成。npm test 会重新构建后运行全部用例，
+  # 内置「版本四处一致」「计时器句柄分类」「cancelled===0」等硬断言。
+  test:
+    name: Test
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [22, 26]
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 运行测试
+        run: npm test
+
+  # 第 3 步 · 发布：只在推送 tag 时运行，依赖 test 全部通过。
+  # 顺序：校验版本一致 → 构建 → 打包 tgz → 创建 GitHub Release（必须带 tgz 制品）→ 发布 npm。
+  release:
+    name: Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write    # 创建 GitHub Release 需要
+      id-token: write    # npm publish --provenance 需要
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node.js（并指向 npm 官方源）
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org/
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 校验 tag 与 package.json 版本一致
+        run: |
+          pkg_version="$(node -p "require('./package.json').version")"
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [ "$pkg_version" != "$tag_version" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} 与 package.json version ${pkg_version} 不一致"
+            exit 1
+          fi
+          echo "版本一致：tag=${tag_version}，package.json=${pkg_version}"
+
+      - name: 构建
+        run: npm run build
+
+      - name: 打包 tgz 制品
+        run: npm pack
+
+      - name: 创建 GitHub Release（必须带 tgz 制品，历史教训：无制品会让索引源 404）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            dsh-workplan-*.tgz
+
+      - name: 发布到 npm（官方索引源）
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

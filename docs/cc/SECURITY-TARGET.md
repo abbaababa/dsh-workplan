@@ -53,7 +53,7 @@
 | 计划取代 | `src/supersede.ts`（429 行）+ `src/supersede-digest.ts`（116 行） | 跨计划取代 V1–V8 复算与摘要 |
 | 自动续跑 | `src/auto-resume.ts`（275 行） | 中断后续跑策略 |
 | 部门枚举 | `src/departments.ts`（244 行） | 部门 key 定义 |
-| 看门狗 | `src/watchdog.ts`（207 行） | 子代理超时与预算控制 |
+| 看门狗 | `src/watchdog.ts` | 子代理进度观测；正式执行默认不因耗时收束 |
 | 随包第三方 | `vendor/chart.umd.js` | Chart.js 4.6.1（MIT），本地分发 |
 
 （行数为 v1.12.0 于 git HEAD `5fe47a1` 的 `wc -l src/*.ts` 实测，2026-11-03；完整清单见 `docs/SBOM.md` §5，模块级设计见 `docs/cc/ADV-TDS-TOE-DESIGN.md`。）
@@ -142,7 +142,7 @@
 | **O-02 无出站数据流** | TOE 代码不发起任何对外网络请求；浏览器仅同源请求 | T-02, P-01 |
 | **O-03 输入与方法受约束** | 路由为精确匹配；非 GET/HEAD 一律 405；静态文件路径写死 | T-03 |
 | **O-04 写入受控** | 状态写入需携带匹配的 `expectedRevision`，不匹配即失败 | T-04, P-03 |
-| **O-05 资源有界** | 子代理超时、总预算上限、响应体超过 2.5 MB 截断 | T-05 |
+| **O-05 资源有界** | 响应体超过 2.5 MB 截断、并发上限、用户显式取消；负责人/专家执行时长不设硬上限 | T-05 |
 | **O-06 供应链最小化** | 运行时零依赖；唯一第三方文件随包固定并记录哈希 | T-06, P-02 |
 | **O-07 进度可验证** | 完成声明必须附证据与验收分级；`structured` 之外不得直接采信 | T-07, P-03 |
 
@@ -207,7 +207,7 @@ TOE 应在以下事件发生时生成可追溯记录：计划创建、派发开�
 ### 6.5 TSF 自测试（FPT_TST）
 
 **FPT_TST.1 TSF 自测试**
-TOE 应提供可重复执行的自测试，覆盖：计划模型校验、派发与取消语义、看门狗超时、预算与恢复、版本一致性、安全响应头、路由方法约束的源码级断言。
+TOE 应提供可重复执行的自测试，覆盖：计划模型校验、派发与取消语义、看门狗纯观测兼容、旧时间记录回放、失败恢复、版本一致性、安全响应头、路由方法约束的源码级断言。
 
 - 赋值：测试套件 = `npm run verify`（31 个文件 / 188 项测试，CI 每次提交执行）。
 - **已知缺口（如实记录，不掩饰）**：`route()` 内部的鉴权分支（401/403）、405 分支与 2.5 MB 截断分支目前**没有**逐分支自动化用例，只有源码级断言（`tests/security-headers.test.ts` 断言加固头被注册、图表路由的 405 与方法限制存在）。补这些用例需要构造 DSH `connection` 桩件，属于待办而非已完成项，故本节不把「鉴权分支、方法限制、响应截断」列为已覆盖。
@@ -226,7 +226,7 @@ TOE 应提供可重复执行的自测试，覆盖：计划模型校验、派发�
 | FMT_SMR.1 | 同上 + 路由 | 浏览器角色只能 GET/HEAD；写操作只能经模型工具 | 同 FMT_MOF.1 |
 | FAU_GEN.1 | 会话事件 + 工具返回值 | 每次派发/完成/取消/拒绝均落会话事件，含证据字段 | 阅读 `dsh_workplan_status` 返回结构 |
 | FPT_TST.1 | `tests/` + `npm run verify` | 65 个测试文件 462 项（v1.12.0 基线；2026-11-03 实跑 462/462 pass）；CI 每次提交执行 | `npm run verify` |
-| O-05 资源有界 | `src/runtime.ts`、`src/watchdog.ts` | 响应 > 2.5 MB 截断；子代理与总预算双超时且被夹紧 | `grep -n "2_500_000" src/runtime.ts` |
+| O-05 资源有界 | `src/runtime.ts`、`src/watchdog.ts` | 响应 > 2.5 MB 截断；负责人/专家执行无时限，旧时间值不武装计时器；并发与显式取消仍受限 | `grep -n "2_500_000" src/runtime.ts` |
 | O-02/O-03 硬化头 | `src/runtime.ts` `HARDENING_HEADERS` | `x-content-type-options: nosniff`、`referrer-policy: no-referrer` | `grep -n HARDENING_HEADERS src/runtime.ts` |
 | P-02 零运行时依赖 | `package.json` | `dependencies` 为空对象 | `npm ls --omit=dev` |
 
@@ -275,8 +275,8 @@ grep -n "requestRejection\|HARDENING_HEADERS\|2_500_000\|expectedRevision" src/r
 | FIA（鉴别）：环境假设 | TOE 不做鉴别，依赖宿主已鉴别（A-01）；不自建账户体系 | 见 §6.2（FIA_UID.1 精化）与 `docs/cc/AGD-OPS-SECURE-OPERATION.md` §4 |
 | FMT_MOF.1（安全管理角色表，成文化） | 角色：用户（读面板/取消）、主 Agent（全部 9 工具，交付门禁持有人）、子 Agent（仅 escalate/update 自身行）；仅根会话可用 `handoff`，仅「待指示」行可被 `instruct` 恢复 | `tests/workplan-status-lock.test.ts`、`tests/workplan-team-brief.test.ts` |
 | FPT_SEP.1（域隔离，成文化） | 子 Agent 运行于独立会话/独立工作目录；跨会话引用被校验拒绝 | `tests/session-reference-safety.test.ts`、`docs/cc/ADV-TDS-TOE-DESIGN.md` §2 |
-| FTA_SSL.4（超时，成文化） | 子任务单步硬上限 15 分钟、整轮预算 20 分钟（默认值，`DSH_WORKPLAN_CHILD_TIMEOUT_MS` 等可覆盖）；host 工具超时 > 计划预算，杜绝竞态 | `src/host.ts`（超时条款与 L1019–1023）；`tests/timeout-artifact-evidence.test.ts` |
-| FRU_FLT.2（容错，成文化） | 预算耗尽/中断→产物落盘+自动续跑；卡死→看门狗判 blocked 并留档；需求变更→replan 旧行保留可追溯 | `tests/auto-resume-policy.test.ts`、`tests/workplan-stuck-recovery.test.ts`、`tests/workplan-auto-retry.test.ts` |
+| FTA_SSL.4（会话终止，成文化） | 部门负责人与专家执行**无总时长、单次、空闲或无回执硬截止**；旧配置/旧 deadline 只读回放，不重新武装计时器。规划器与局部传输健康保护不作用于执行角色；用户可显式取消。 | `src/host.ts`（提示词与 schema）、`src/runtime.ts`（无执行 timer）、`tests/no-fixed-deadline-semantics.test.ts`、`tests/expert-time-mechanism-2-3-0.test.ts` |
+| FRU_FLT.2（容错，成文化） | 真实错误/用户取消→产物落盘+可续跑；执行不会因耗时被自动判 blocked；需求变更→replan 旧行保留可追溯 | `tests/auto-resume-policy.test.ts`、`tests/workplan-auto-retry.test.ts`、`tests/no-fixed-deadline-semantics.test.ts` |
 
 ### 10.2 ACO 判定（对应差距 G-25）
 

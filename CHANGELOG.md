@@ -1,4 +1,50 @@
+## 3.0.1 — 2026-11-16
+
+### 激活热修：`dsh_workplan_hold` / `dsh_workplan_release` 缺 output 契约导致插件启用失败（宿主 register 硬校验）
+
+> **事故**：v3.0.1 在 DSH Web GUI 启用失败，横幅报错 `TypeError: tool "dsh_workplan_hold" must declare output { schema, render, presentationMeta? }`（`file:///…/dsh-workplan/lib/host.js`）。宿主 `ToolsService.register()`（dsh-tools）强制每个工具声明 `output { schema, render, presentationMeta? }`；这两个 3.0.1 新增工具把 `render` 直接挂在工具根上、整体缺 `output` 包裹，注册即抛 TypeError，整个插件条目激活失败（web/headless 两 profile 经符号链接同源皆挂，错误横幅停在第一个失败工具上，release 同款隐患一并修复）。插件自身 1195 例全绿却过不了宿主注册——测试套件此前没有任何用例按宿主契约校验工具定义，此次一并补上永久防线。
+
+**治本改动（`src/host.ts`）**：
+
+- 两个工具补齐 `output { schema, render }`：schema 覆盖 runtime 全部返回形（hold：`ok/planId/alreadyHeld/hold/code/error`；release：`ok/gateReleased/planId/note/hold/dispatch/code/error`），与文件内其它 12 个工具同款写法对齐；render 按宿主契约接收 `(args, value)` 并返回 `ContentBlock[]`（此前实现返回裸字符串，不符合契约）。
+- 顺带修正 release 的 render 判定顺序：「未能解除」以 `gateReleased !== true` 为准——原实现只看 `ok === false`，会把「闸门已解除但 deepThink 门禁拒派发」误报成未解除（该分支 `ok` 恰为 `false` 但闸门已松，与工具描述「闸门保持已解除」矛盾）。
+
+**回归**：新增 `tests/tool-output-contract.test.ts` 3 例（①全部 14 个已注册工具逐字复刻宿主 register 判定 + schema 形状 + render 返回 ContentBlock[]；②注册工具集与 `tests/fixtures/tool-surface.json` 清单逐字一致；③hold/release 门禁文案三分支语义）。另经宿主真实校验器（`@deepseek-ai/dsh-tools` 的 `assertSupportedJsonSchema` / `validateJsonSchemaValue`）对编译产物 `lib/host.js` 冒烟：14/14 通过。全量 **1206 例：pass 1205 / fail 0 / cancelled 0**。
+
+**生效方式**：已 `npm run build` 并同步 `lib/`（web 与 headless 两 profile 经符号链接同源生效），**须用户手工重启 dsh** 后生效（禁止 Agent 自行重启）。
+
+### 与 DSH 0.2.2-rc.3 内置 subagent 插件的冲突修复（全量审计后的 4 条真冲突，修 3 条 + 1 条文档声明）
+
+> **审计结论**：工具名/配置键/事件无碰撞，4 条真冲突全部位于「插件 ↔ 内置 subagent 宿主 API/设置」边界。本条修复 3 条，第 4 条（双派发通道）以文档声明收口（内置工具无 per-agent 开关，preset toolFilter 改动面过大）。
+
+**治本改动（`src/runtime.ts` + `package.json` + `README.md`）**：
+
+- **[P0] `interruptByParent` 已在新版宿主移除 ⇒ phase-0 旧会话不再被中断（白跑烧 token、与 phase-1 重复工作）**。新增 `interruptChildContinuable()`（runtime.ts）：优先新版 `subagents.interrupt(target, { kind:'ancestor', agent })`（authority 携带活体祖先 Agent，语义等价于旧 'continuable'：中断当前回合、保留收件箱可接续）；旧版宿主自动回退 `interruptByParent`。三处调用点（selfEffortTool 接续、delegateTool direct/review 登记）全部改走该 helper。旧测试夹具只 mock 旧 API ⇒ 回退路径保持可用，全部旧测试不回改。
+- **[P1a] 设置页 `subagent.maxDepth`（默认 1）与三层体系（需 2）语义错位**。经核实宿主源码，两条深度通道互不相干：设置页滑块只约束内置 subagent/subagent_fork 工具（经 `resolveMaxDepth()`），插件派发只认 `spec.maxDepth`（manager.ts `resolveChildDepth`），滑块任何位置都不影响负责人→专家流程。新增 `detectDepthOverrideConflict()` + `notifyDepthOverrideConflict()`：三处派发点在检测到该设置 <2 时向计划会话发**一次性**说明（讲清两通道设计、无需操作、如何保持一致），不阻断派发。
+- **[P1b] 宿主并发上限 `ACTIVATION_LIMIT_REACHED` 原样透出**。新增 `describeSubagentActivationError()`：识别该错误（code 或 message 双口径），翻译为可行动中文提示（稍后重试 / 「设置 → 子代理」调大 `maxActiveSubagents`）；非该类错误原样返回不吞错。三处 `startActivation` 错误路径接入。
+- **[P2] `package.json` 补 `engines.dsh: ">=0.2.2-rc.3"`**：此前完全无版本护栏，`interruptByParent` 漂移失效无人知晓；此后由宿主 plugin-compatibility 显式拦截过低版本。
+- **[P2] README 新增「和 DSH 内置的子代理是什么关系」章节**：声明双派发通道事实（内置 subagent/subagent_fork 在插件子会话仍可见、绕过则不经任何闸门），并说明两个设置项对本插件的不同影响。
+
+**回归**：新增 `tests/workplan-301-subagent-api-compat.test.ts`（8 个用例：新 API 优先/旧版回退/静默失败/异常吞掉、深度冲突一次性告警与各无冲突分支、并发上限翻译与非上限原样返回）。
+
 ## 3.0.0 — 2026-11-14
+
+### 2026-11-15 本地机制修复补丁（认可闸门 + 死锁自愈；版本号维持 3.0.0，经用户确认后再定是否升版）
+
+> **事故**：wp-e745a477 —— 用户任务原文写明「有疑问先问用户，经用户认可后再开始执行」，插件却在第一条用户消息上自动生成计划并因 `autoDispatch` 默认 true 立即派发；T1 子会话缺上下文升级待指示后子会话失联，`NO_CHILD` / `ESCALATION_OPEN` / dispatch 被待指示行挡住，三条出口全堵，整盘卡死只能人工取消。
+
+**治本改动（`src/approval-gate.ts` + `src/runtime.ts` + `src/plan.ts` + `src/host.ts`）**：
+
+1. **认可闸门（keyword 半，默认开）**：计划创建时检测任务锚点里的「先经用户认可/批准/确认再执行」门槛语（8 类正则），命中则计划照出、按住不派（`dispatchHold` 落档，durable 回放与重启重建均还原），直到用户明确认可、主 Agent 调用 `dsh_workplan_release`。`DSH_WORKPLAN_APPROVAL_GATE=0/false/off` 只关这一半。
+2. **认可闸门（manual 半）**：新增 `dsh_workplan_hold` / `dsh_workplan_release` 工具，关键词未命中时主 Agent 可显式按住/解除；解除登记 `gateHistory` 留痕并走 dispatch 全部既有闸门。plan 模式下 release 同 dispatch 被 toolGuard 拒绝。
+3. **派发/收尾联动**：闸门按住时 `dsh_workplan_dispatch` 拒 `DISPATCH_HELD`；回合收尾 steer 与 headless 硬失败对 held 计划豁免（不再催派发）；未派发 held 计划不被下一条用户消息自动取消。
+4. **死锁自愈**：`dsh_workplan_instruct` 遇到 `NO_CHILD` / `NOT_DIRECT_CHILD` 不再硬失败——把 escalated 行复位为 `pending`（合法迁移边）并登记 `reviveInstruction`（durable 透传 + 重建子会话时由 `buildChildPrompt` 注入提示词），下一次 dispatch 重建全新子会话并带上下达的决定。
+5. **止血配置**：`cordis.patch.yml` 一度置 `autoDispatch:false`，全量回归通过后恢复 `config:{}`（默认自动派发 + 关键词闸门保护）。
+
+**回归**：新增 `tests/approval-gate.test.ts` 19 例（门槛语 8 命中/3 不误伤/总开关/isDispatchHeld/revive 补丁与 applyStatus 集成/提示词注入/durable 透传）；`tests/fixtures/tool-surface.json` 登记 2 个新工具；全量 **1195 例：pass 1194 / fail 0 / cancelled 0**（基线 1175 全绿）。`docs/cc/ADV-FSP`（工具 12→14）与 `AVA`（AS-14/15）同步。
+
+**生效方式**：已 `npm run build` 并同步 `lib/`（web 与 headless 两 profile 经符号链接同源生效），**须用户手工重启 dsh** 后生效（禁止 Agent 自行重启）。
+
 
 > **定版依据**：用户 2026-11-14 明确要求「优化全部完美完成后，此插件版本定为 3.0.0」，并裁决发布方式为**仅本地**（改版本号 + 构建 + 回归 + 变更说明，不对外发布、不打 tag）。本节下方「low 任务禁止第三层下派」一段原为 2.5.5 候选改动，经用户裁决**整体保留为 3.0.0 基线的一部分**，故并入本节，不再单独定版。
 >

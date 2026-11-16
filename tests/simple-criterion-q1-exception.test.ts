@@ -113,7 +113,7 @@ test('C-Q1-04（AC-Q1-2 边界）：刷新/重启回放后五要素仍在；只�
   assert.equal(legacyReplayedRow.criterionException, undefined)
 })
 
-test('C-Q1-05（AC-Q1-3 正例）：超判据墙钟 11 分钟且无批准 ⇒ 不得 done；blocked(criterion-overrun)；产物保留；文案指向接替', async () => {
+test('C-Q1-05（新契约）：墙钟超过旧 10 分钟判据也无批准照常 done，时间不进入验收', async () => {
   await withEnv(ACTIVE_ENV, async () => {
     const h = harness(2_000_000, WIDE_WINDOWS)
     await dispatch(h)
@@ -122,106 +122,95 @@ test('C-Q1-05（AC-Q1-3 正例）：超判据墙钟 11 分钟且无批准 ⇒ �
       h.release(completedWithEvidence())
       let row: any = null
       assert.ok(await waitFor(async () => { row = await rowOf(h.runtime, h.session); return row && row.status !== 'in_progress' && row.status !== 'pending' }, 15_000), '应已结算')
-      assert.notEqual(row.status, 'done', '①超判据且无批准不得 done')
-      assert.equal(row.criterionResult, 'unmet')
-      assert.equal(row.blockedKind, 'criterion-overrun')
-      assert.ok((row.criterionViolations ?? []).length >= 1, '违规审计落行')
-      assert.ok(row.criterionViolations[0].wallClockMs >= 11 * 60_000, '伪造墙钟 11 分钟进入审计')
+      assert.equal(row.status, 'done', '有完整证据即可 done，无需用户批准“超时”')
+      assert.equal(row.criterionResult ?? null, null, '生产不再产生判据结果')
+      assert.equal(row.blockedKind ?? null, null, '不得因耗时进入 criterion-overrun')
+      assert.equal(row.takeoverRequired ?? false, false)
+      assert.ok((row.criterionViolations ?? []).length === 0, '不记录时间违规')
+      assert.ok(Array.isArray(row.artifacts) && row.artifacts.some((a: any) => a.ref === 'T1_report.md' && a.exists === true), '真实产物仍然核验')
+      assert.ok(Number(row.attemptWallClockMs) >= 11 * 60_000, '耗时仍如实记录，仅作信息')
     })
-    const row = await rowOf(h.runtime, h.session)
-    // ② 结算文案含「未完成」或「接替」指向（replan(replace)）
-    assert.match(String(row.error ?? ''), /replan\(replace\)/)
-    assert.ok(/未完成|接替/.test(String(row.summary ?? '') + String(row.error ?? '')))
-    // ③ artifacts 仍含 T1_report.md 且 exists=true
-    assert.ok(Array.isArray(row.artifacts) && row.artifacts.some((a: any) => a.ref === 'T1_report.md' && a.exists === true), '产物保留且 exists=true')
-    // ④ 不得出现「已完成/最终版」式收尾
-    assert.ok(!/已完成|最终版/.test(String(row.summary ?? '')), '结算文案不得出现已完成/最终版式收尾')
   })
 })
 
-test('C-Q1-06（AC-Q1-3 对照）：先写入用户批准留痕 ⇒ done；例外指向本任务；不生成接替行；不新增违规计数', async () => {
+test('C-Q1-06（新契约）：extendMs/criterionApproval 不再改期或参与 done，证据齐全照常完成', async () => {
   await withEnv(ACTIVE_ENV, async () => {
     const h = harness(2_000_000, WIDE_WINDOWS)
     await dispatch(h)
     landReport(h)
-    const ok: any = await h.runtime.updateStatus({ session: h.session }, {
+    const disabled: any = await h.runtime.updateStatus({ session: h.session }, {
       subtaskId: 'T1', extendMs: 2_000,
       criterionApproval: approval({ at: Date.now() - 1_000 }),
     })
-    assert.equal(ok.ok, true, '用户批准留痕后放宽放行')
+    assert.equal(disabled.ok, false)
+    assert.equal(disabled.code, 'TIME_LIMITS_DISABLED')
+    assert.equal(disabled.deadlineAt ?? null, null)
+    const before = await rowOf(h.runtime, h.session)
+    assert.equal(before.deadlineAt ?? null, null, '旧延期不得重新武装截止')
+    assert.ok(!(before.timeJournal ?? []).some((item: any) => item.action === 'extend'))
     await withFakeNow(11 * 60_000, async () => {
       h.release(completedWithEvidence())
       let row: any = null
       assert.ok(await waitFor(async () => { row = await rowOf(h.runtime, h.session); return row && row.status !== 'in_progress' && row.status !== 'pending' }, 15_000), '应已结算')
-      assert.equal(row.status, 'done', '①有批准可 done')
-      assert.equal(row.criterionResult, 'exception-approved')
+      assert.equal(row.status, 'done', '没有时限门，证据通过即可 done')
+      assert.equal(row.criterionResult ?? null, null)
+      assert.equal(row.criterionException ?? null, null)
+      assert.equal(row.subtaskId, 'T1')
     })
-    const row = await rowOf(h.runtime, h.session)
-    // ② 例外记录可读且指向本任务
-    assert.equal(row.criterionException?.approvedBy, 'user')
-    assert.equal(row.subtaskId, 'T1')
-    // ③ 不生成接替行（计划仍只有 T1，无 replacedBy）
+    const disabledRow = await rowOf(h.runtime, h.session)
     const snapshot: any = await h.runtime.statusTool({ session: h.session }, {})
-    assert.equal(snapshot.statuses.length, 1)
-    assert.equal(row.replacedBy, undefined)
-    // ④ 不新增违规计数
-    assert.ok((row.criterionViolations ?? []).length === 0, '批准路径不记违规')
+    assert.equal(snapshot.statuses.length, 1, '不生成接替行')
+    assert.equal(disabledRow.replacedBy, undefined)
+    assert.equal((disabledRow.criterionViolations ?? []).length, 0)
   })
 })
 
-test('C-Q1-10（AC-Q1-6 边界）：第一次到点、无批准 ⇒ deadlineAt 不自动延长；无 extend/notify-expert；不走接手', async () => {
+test('C-Q1-10（新契约）：旧 1 秒窗口到点仍执行，deadline 恒为 null；用户显式取消仍收束', async () => {
   await withEnv(ACTIVE_ENV, async () => {
     const h = harness(2_000_000, { childTimeoutMs: 1_000 })
     await dispatch(h)
     const before = await rowOf(h.runtime, h.session)
-    const deadlineAt0 = Number(before.deadlineAt)
-    const startedAt0 = Number(before.startedAt)
-    assert.ok(Number.isFinite(deadlineAt0), '到点前应有协商截止')
-    let row: any = null
-    assert.ok(await waitFor(async () => { row = await rowOf(h.runtime, h.session); return row?.criterionResult != null && row.status === 'blocked' }, 15_000), '到点应结算')
-    // ① deadlineAt 未被自动延长（窗口长度不变；若起点未变则截止逐字不变）
-    assert.equal(Number(row.deadlineAt) - Number(row.startedAt), 1_000, '协商窗口未被延长')
-    if (Number(row.startedAt) === startedAt0) assert.equal(Number(row.deadlineAt), deadlineAt0, 'deadlineAt 与到点前一致')
-    // ② timeJournal 无 extend、无 notify-expert（也无批准落痕）
-    const actions = (row.timeJournal ?? []).map((item: any) => item.action)
-    assert.ok(!actions.includes('extend'), `不得自动 extend：${JSON.stringify(actions)}`)
-    assert.ok(!actions.includes('notify-expert'), `不得通知专家延期：${JSON.stringify(actions)}`)
-    assert.ok(!actions.includes('criterion-exception'))
-    // ③ 状态走未完成/接替路径，takeoverRequired !== true（第一次超时不接手）
-    assert.equal(row.status, 'blocked')
-    assert.notEqual(row.takeoverRequired, true)
-    assert.match(String(row.error ?? ''), /先向用户申请例外批准/, '生效计划第一次超时通知改为先报批（Q1-B）')
+    assert.equal(before.deadlineAt ?? null, null, '起始即无执行截止')
+    assert.equal(before.executionTimeLimit, 'none')
+    await new Promise((resolve) => setTimeout(resolve, 1_300))
+    const running = await rowOf(h.runtime, h.session)
+    assert.equal(running.status, 'in_progress', '越过旧窗口不得自动 blocked/done')
+    assert.equal(running.deadlineAt ?? null, null, '不得补写截止')
+    assert.equal(Number(running.timeoutCount ?? 0), 0, '不得累计超时')
+    assert.notEqual(running.takeoverRequired, true, '不得二次接手')
+    const actions = (running.timeJournal ?? []).map((item: any) => item.action)
+    assert.ok(!actions.includes('extend'), '不得自动延长')
+    assert.ok(!actions.includes('notify-expert'), '不得通知专家超时')
+
+    const cancelled: any = await h.runtime.cancelPlan({ session: h.session }, { reason: '无时限任务的用户显式取消' })
+    assert.equal(cancelled.ok, true)
+    assert.equal(cancelled.abortedRunning, true, '用户取消仍能终止真实执行')
+    const record = h.runtime.state.records.get(h.session.id)
+    assert.equal(record?.phase, 'cancelled', '用户取消应落为 cancelled')
+    const afterCancel = await rowOf(h.runtime, h.session)
+    assert.equal(afterCancel.deadlineAt ?? null, null)
+    assert.equal(Number(afterCancel.timeoutCount ?? 0), 0)
   })
 })
 
-test('C-Q1-11（AC-Q1-6 边界）：第一次到点前已批准 ⇒ deadlineAt 后移＋extend 留痕＋childNotified；未批准 extendMs 拒绝', async () => {
+test('C-Q1-11（新契约）：带不带用户批准，extendMs 都只返回 TIME_LIMITS_DISABLED，绝不改截止', async () => {
   await withEnv(ACTIVE_ENV, async () => {
     const h = harness(2_000_000, { childTimeoutMs: 60_000 })
     await dispatch(h)
     const before = await rowOf(h.runtime, h.session)
-    const deadlineAt0 = Number(before.deadlineAt)
-    // ④ 未带批准调用 extendMs 返回 ok:false 且拒因可辨认
+    assert.equal(before.deadlineAt ?? null, null)
     const denied: any = await h.runtime.updateStatus({ session: h.session }, { subtaskId: 'T1', extendMs: 2_000, reason: '无批准放宽' })
     assert.equal(denied.ok, false)
-    assert.equal(denied.code, 'EXTEND_NEEDS_USER_APPROVAL')
-    // 已批准：放行并留痕
-    const ok: any = await h.runtime.updateStatus({ session: h.session }, {
+    assert.equal(denied.code, 'TIME_LIMITS_DISABLED')
+    const approved: any = await h.runtime.updateStatus({ session: h.session }, {
       subtaskId: 'T1', extendMs: 2_000, criterionApproval: approval({ at: Date.now() - 1_000 }),
     })
-    assert.equal(ok.ok, true)
-    // ① deadlineAt 后移且大于原值
-    assert.ok(Number(ok.deadlineAt) > deadlineAt0, '批准后截止后移')
-    // ③ childNotified === true（延期告知语义保留）
-    assert.equal(ok.childNotified, true)
+    assert.equal(approved.ok, false)
+    assert.equal(approved.code, 'TIME_LIMITS_DISABLED')
+    assert.equal(approved.deadlineAt ?? null, null)
     const row = await rowOf(h.runtime, h.session)
-    assert.equal(Number(row.deadlineAt), Number(ok.deadlineAt))
-    // ② timeJournal 新增 extend 条目且带批准来源（criterion-exception by:user）
-    const journal = row.timeJournal ?? []
-    assert.ok(journal.some((item: any) => item.action === 'extend'), 'extend 条目落档')
-    const approvalEntry = journal.find((item: any) => item.action === 'criterion-exception')
-    assert.ok(approvalEntry, '批准审计条目落档')
-    assert.equal(approvalEntry.by, 'user', '批准来源=用户')
-    assert.equal(approvalEntry.extendMs, 2_000)
+    assert.equal(row.deadlineAt ?? null, null)
+    assert.ok(!(row.timeJournal ?? []).some((item: any) => item.action === 'extend' || item.action === 'criterion-exception'), '不写延期/例外审计')
     h.release(completed())
   })
 })

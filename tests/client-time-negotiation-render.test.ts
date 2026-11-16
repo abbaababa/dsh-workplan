@@ -205,33 +205,35 @@ async function makeRenderer() {
   }
 }
 
-test('A2：看板可见预估 / 协商上限 / 延期 / 开工预告 / 预警 / 通道 / 推理等级', async () => {
+test('A2（新契约）：看板固定写明无执行时限，旧截止/延期只作历史，信息与推理等级可见', async () => {
   const render = await makeRenderer()
   const html = render()
   assert.ok(html.length > 1000, '夹具必须真的渲染出面板')
   for (const expected of [
-    '时长协商',
-    '预估时长：6 分钟',
-    '协商上限：12 分钟',
-    '协商截止：',
-    '延期记录：+3 分钟',
-    '开工预告：6 分钟',
-    '到点预警：剩余 120 秒',
+    '执行时间（无时限）',
+    '部门负责人和全球顶尖专家执行无时限；预估仅供参考，不影响完成验收',
+    '预估时长（仅信息）：6 分钟',
+    '开工预估（仅信息）：6 分钟',
+    '历史延期记录（不再生效）：+3 分钟',
+    '历史时间提示：剩余 120 秒',
     '预告通道：已观测到送达',
     '推理等级：max',
     // [2.2.7][T5/五档] medium/xhigh 必须同样渲染出 Pill；client.ts 白名单漏改即红灯。
     '推理等级：medium',
     '推理等级：xhigh',
     '推理等级：low',
-    '待裁决：到点后按安全兜底结算',
+    '历史待裁决标记',
   ]) {
     assert.ok(html.includes(expected), `看板必须出现「${expected}」；实际片段：${html.slice(0, 400)}`)
+  }
+  for (const obsolete of ['协商上限：', '协商截止：', '到点后按安全兜底结算']) {
+    assert.equal(html.includes(obsolete), false, `新看板不得再展示旧时限话术「${obsolete}」`)
   }
   assert.equal(html.includes('undefined'), false, '字段缺失不得渲染 undefined')
   assert.equal(html.includes('[object Object]'), false, '对象字段不得直接字符串化')
 })
 
-test('A2 降级：无协商字段的任务不渲染协商块、不报错', async () => {
+test('A2 降级（新契约）：无预估字段的任务仍显示无时限事实，不报错、不造数', async () => {
   const render = await makeRenderer()
   // 只保留 T2（没有任何协商字段），验证整块不出现且不产生脏文本。
   const bareSession = {
@@ -245,7 +247,8 @@ test('A2 降级：无协商字段的任务不渲染协商块、不报错', async
   }
   const html = render(bareSession)
   assert.ok(html.length > 1000, '降级夹具仍应正常渲染面板')
-  assert.equal(html.includes('时长协商'), false, '没有任何字段时整块不渲染')
+  assert.ok(html.includes('执行时间（无时限）'), '无任何旧字段时仍必须说明执行无时限')
+  assert.equal(html.includes('预估时长（仅信息）'), false, '缺失预估不得凭空补数字')
   assert.equal(html.includes('undefined'), false)
   assert.equal(html.includes('NaN'), false)
   assert.equal(html.includes('[object Object]'), false)

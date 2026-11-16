@@ -27,7 +27,7 @@ import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { createUpdateTool } from '../src/host.js'
-import { buildPlanMessage, parseResultMessage } from '../src/plan.js'
+import { buildPlanMessage } from '../src/plan.js'
 import { createWorkplanRuntime } from '../src/runtime.js'
 import { MAIN_DEEP_THINK_FIXTURE } from './helpers/main-deep-think.js'
 
@@ -144,72 +144,56 @@ test('O-4c：dsh_workplan_update schema 显式声明 extendMs 与 timeNotice（D
   assert.equal(tool?.parameters?.additionalProperties, false, '保持 additionalProperties:false（宿主 schema 子集）')
 })
 
-test('O-4c/O-4d：运行中仅凭 extendMs 放宽（不需 force），deadlineAt += extendMs、计时重置、不被原截止点杀死（D2），并记入 timeJournal（D3）', async () => {
+test('无时限：运行中 extendMs 返回 TIME_LIMITS_DISABLED，不写 deadline/journal，越过旧窗口仍存活', async () => {
   const { session, runtime, gate, hasStarted } = makeRuntime({}, { childTimeoutMs: 1_200 })
-  await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
+  const dispatchP = runtime.dispatchTool(
+    { session, options: {} },
+    { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' },
+    new AbortController().signal,
+  )
   assert.ok(await waitFor(hasStarted), 'T1 应已派发')
   const before = await rowOf(runtime, session)
-  let res: any
-  try {
-    res = await runtime.updateStatus({ session }, { subtaskId: 'T1', extendMs: 1_500, reason: '专家预警新预估，需继续收尾' })
-  } catch (error: any) {
-    assert.fail(
-      `待实现（O-4c/D2）：运行中 extendMs 事务应放行（入参 { subtaskId, extendMs, reason }，不改判定只改时限、无需 force；TASK_RUNNING 唯一豁免）。现状抛错：${String(error?.code ?? error?.message ?? error)}`,
-    )
-  }
-  assert.equal(res?.ok, true, '待实现（O-4c/D2）：运行中 extendMs 应放行并返回 ok（TASK_RUNNING 唯一豁免分支，src/runtime.ts:3586-3601）')
+  const res: any = await runtime.updateStatus(
+    { session },
+    { subtaskId: 'T1', extendMs: 1_500, reason: '旧调用兼容探针' },
+  )
+  assert.equal(res?.ok, false)
+  assert.equal(res?.code, 'TIME_LIMITS_DISABLED', '明确告知无截止可延期，不得伪装成功')
+  assert.match(String(res?.error ?? ''), /取消时限|无需/, '回执解释当前无时限')
   const afterExtend = await rowOf(runtime, session)
-  assert.ok(
-    Number.isFinite(Number(afterExtend?.deadlineAt)),
-    '待实现（O-4d/§2.2）：状态行应有协商截止 deadlineAt（毫秒时间戳，可被 extendMs 推移）',
-  )
-  assert.equal(
-    Number(afterExtend.deadlineAt) - Number(before?.deadlineAt ?? NaN),
-    1_500,
-    'O-4d：deadlineAt += extendMs（方案 §2.2 效果 3：定时器与 watchdog hardMs 同步推移）',
-  )
-  assert.ok(
-    Array.isArray(afterExtend?.timeJournal)
-      && afterExtend.timeJournal.some((entry: any) => entry?.action === 'extend' && Number(entry?.extendMs) === 1_500 && String(entry?.reason ?? '').includes('专家预警')),
-    '待实现（D3）：放宽全程写入协商流水 timeJournal（含时间/操作者/理由；方案 §2.2）',
-  )
-  // 原截止点（1200ms）已过、任务仍存活 = 计时已按新 deadlineAt 重置。
+  assert.equal(afterExtend?.deadlineAt, null, '不得重新武装 deadlineAt')
+  assert.equal(before?.deadlineAt, null, '起始即无 deadline')
+  const extensionJournal = (afterExtend?.timeJournal ?? []).filter((entry: any) => entry?.action === 'extend')
+  assert.equal(extensionJournal.length, 0, '未生效的延期不得记入生效流水')
   await delay(1_700)
   const alive = await rowOf(runtime, session)
-  assert.equal(alive?.status, 'in_progress', 'O-4d/D2：extendMs 后任务不得在原截止点被杀（一次性 setTimeout 改为截止时刻驱动的可重置计时）')
+  assert.equal(alive?.status, 'in_progress', '越过旧 1.2 秒窗口后任务仍必须存活')
   gate.release(completed('完成'))
-  assert.ok(await waitFor(() => session.events.some((event: any) => event.type === 'user/message' && parseResultMessage(event.data)), 10_000), '本轮应收束')
+  await dispatchP
+  const finished = await rowOf(runtime, session)
+  assert.notEqual(finished?.status, 'blocked', '显式完成不得被记为超时 blocked')
 })
 
-test('O-4c/D4：累计延期超封顶（初始协商上限 × 1）被拒并转「请主 Agent 裁决」', async () => {
-  // 初始协商上限 = 2000ms（显式 timeoutMs 与全局 childTimeoutMs 同值，两条取值路径一致）。
+test('无时限：旧 timeoutMs/childTimeoutMs 下重复 extendMs 均拒绝，不存在封顶或裁决升级', async () => {
   const { session, runtime, gate, hasStarted } = makeRuntime({ timeoutMs: 2_000 }, { childTimeoutMs: 2_000 })
-  await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
-  assert.ok(await waitFor(hasStarted), 'T1 应已派发')
-  let first: any
-  try {
-    first = await runtime.updateStatus({ session }, { subtaskId: 'T1', extendMs: 1_500, reason: '第一次放宽' })
-  } catch (error: any) {
-    assert.fail(`待实现（O-4c）：封顶内的 extendMs 应放行。现状抛错：${String(error?.code ?? error?.message ?? error)}`)
-  }
-  assert.equal(first?.ok, true, '累计 1500ms ≤ 初始协商上限 2000ms × 1，应放行')
-  let second: any
-  try {
-    second = await runtime.updateStatus({ session }, { subtaskId: 'T1', extendMs: 1_500, reason: '第二次放宽' })
-  } catch (error: any) {
-    assert.fail(
-      `待实现（O-4c/D4）：累计放宽（3000ms）超初始协商上限 × 1（2000ms）应被拒绝并转「请主 Agent 裁决」，而不是抛裸错。现状抛错：${String(error?.code ?? error?.message ?? error)}`,
-    )
-  }
-  assert.equal(second?.ok, false, '待实现（D4/§2.2 校验 2）：累计 extendMs ≤ 初始协商上限 × 1（最多再给一倍），超封顶必须被拒（放宽永远有界）')
-  assert.match(String(second?.code ?? ''), /EXTEND|BUDGET|CAP/i, '拒绝错误码应点名放宽预算耗尽（如 EXTEND_BUDGET_EXHAUSTED，方案 §2.2 拒绝路径）')
-  assert.match(
-    String(second?.hint ?? '') + String(second?.error ?? ''),
-    /裁决|新轮|人工|escalat/i,
-    '待实现（D4）：超封顶必须自动转「请主 Agent 裁决」——提示转新轮续跑（auto-resume）或转 escalate 由主 Agent/用户决策',
+  const dispatchP = runtime.dispatchTool(
+    { session, options: {} },
+    { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' },
+    new AbortController().signal,
   )
+  assert.ok(await waitFor(hasStarted), 'T1 应已派发')
+  const first: any = await runtime.updateStatus({ session }, { subtaskId: 'T1', extendMs: 1_500, reason: '第一次旧调用' })
+  const second: any = await runtime.updateStatus({ session }, { subtaskId: 'T1', extendMs: 1_500, reason: '第二次旧调用' })
+  for (const res of [first, second]) {
+    assert.equal(res?.ok, false)
+    assert.equal(res?.code, 'TIME_LIMITS_DISABLED')
+    assert.doesNotMatch(String(res?.code ?? ''), /EXTEND_BUDGET_EXHAUSTED|TAKEOVER/)
+  }
+  const row = await rowOf(runtime, session)
+  assert.equal(row?.status, 'in_progress')
+  assert.equal(row?.deadlineAt, null)
   gate.release(completed('完成'))
-  await waitFor(() => session.events.some((event: any) => event.type === 'user/message' && parseResultMessage(event.data)), 10_000)
+  await dispatchP
 })
 
 test('O-4c/§5.4 #1：子 Agent 身份发起 extendMs 被拒（update 工具 root-only）', async () => {
