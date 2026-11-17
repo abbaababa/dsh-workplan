@@ -40,6 +40,12 @@ function phasesFixture(overrides: any = {}) {
       unknowns: ['对端限流阈值未确认'],
       approach: ['先读现有实现确认入口 → 写最小复现脚本 → 跑一次并保存输出 → 对照验收标准逐条记录证据。'],
       approachBasis: ["第二轮的方法、流程、步骤基于第一轮完成好的全部结果：现状与主要矛盾决定先确认入口再最小改动，约束决定不改无关文件，验收标准决定每一步的留证方式。"],
+      resources: ['现有代码库与只读权限：本任务所需源文件、测试与运行环境均已确认可用', '任务数据与验收标准：来自计划行，已核对'],
+      tools: ['TypeScript 编译与 node 测试运行器：用于改码后自检', '文件读写与命令执行工具：用于执行与留证'],
+    },
+    preparation: {
+      prepared: ['源文件、测试环境与验收标准均已就位：工作目录可读写，依赖已安装'],
+      evidence: ['ls 与 node -v 输出正常；测试运行器可启动'],
     },
     execution: { steps: ['读源码确认入口', '运行最小复现脚本', '记录输出证据'], deviations: [] },
     verification: {
@@ -112,7 +118,7 @@ test('下发：子任务提示词附带统一格式规范，且与核验用的�
 test('规范：版本号与条目集合稳定（对外契约，改动须升版本）', () => {
   // [3.0.0] 用户要求 7/10 新增 F10（专家精简 JSON 汇报）与 F11（部门精简 JSON 汇总），
   // 依「改动须升版本」把版本从 1 升到 2；F1–F9 原文一字未改。
-  assert.equal(COMM_FORMAT_VERSION, 2)
+  assert.equal(COMM_FORMAT_VERSION, 3)
   assert.deepEqual(
     COMM_FORMAT_SPEC.requirements.map((item: any) => item.id),
     ['F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F11'],

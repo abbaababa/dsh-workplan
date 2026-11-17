@@ -1,3 +1,7 @@
+## 3.0.3 — 2026-11-17
+
+- release v3.0.3: latest source + version publish
+
 ## 3.0.2 — 2026-11-17
 
 - **修复**：GitHub Actions Release 流水线补齐 `NPM_TOKEN` secret + `gh release create` 幂等（已存在则 upload --clobber），npm 发布不再 ENEEDAUTH/E403。

@@ -202,7 +202,8 @@ const BASE_PAYLOAD = {
   status: 'done',
   acceptance: [{ criterion: 'A1', result: 'pass', evidence: '命令输出' }],
   phases: {
-    planning: { problemAnalysis: ['a'], approach: ['b'], approachBasis: ['c'] },
+    planning: { problemAnalysis: ['a'], resources: ['r'], tools: ['t'], approach: ['b'], approachBasis: ['c'] },
+    preparation: { prepared: ['p'], evidence: ['e'] },
     execution: { steps: ['s'] },
     verification: {
       allPassed: true,
@@ -242,8 +243,8 @@ test('未声明层级时 F10/F11 都不查（历史回放零回归）', () => {
   assert.equal(result.compliant, true)
 })
 
-test('规范版本升到 2，F1–F9 原文一字未改且新增 F10/F11', () => {
-  assert.equal(COMM_FORMAT_VERSION, 2)
+test('规范版本升到 3，五步证据与 F10/F11 同版', () => {
+  assert.equal(COMM_FORMAT_VERSION, 3)
   assert.deepEqual(
     COMM_FORMAT_SPEC.requirements.map((item: any) => item.id),
     ['F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F11'],

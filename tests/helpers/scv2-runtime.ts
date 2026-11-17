@@ -144,6 +144,12 @@ export function completedWithEvidence(artifactRef = 'T1_report.md') {
         approachBasis: [
           '第一轮确认产物必须先于结算落盘，故第二轮把落盘排在回报之前；判据闸只认本次尝试墙钟，故核对步骤绑定 statusTool 投影。',
         ],
+        resources: ['工作目录写权限与 T1_report.md 落盘位置已确认可用'],
+        tools: ['文件读写工具用于落盘与核对，statusTool 用于核对结算行'],
+      },
+      preparation: {
+        prepared: ['工作目录可写、T1_report.md 落盘路径与 statusTool 均已就位'],
+        evidence: ['ls 工作目录正常；statusTool 可读取 T1 状态行'],
       },
       execution: { steps: ['落盘 T1_report.md', '回报结果块'], deviations: [] },
       verification: {

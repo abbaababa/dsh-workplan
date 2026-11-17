@@ -49,6 +49,12 @@ function phases(overrides: any = {}) {
         '先读现有写入路径确认入口 → 在入口加幂等键校验 → 用同一请求连发两次 → 核对只写一条记录 → 对照验收标准逐条留证。',
       ],
       approachBasis: [BASIS],
+      resources: ['现有代码库与只读权限：本任务所需源文件、测试与运行环境均已确认可用', '任务数据与验收标准：来自计划行，已核对'],
+      tools: ['TypeScript 编译与 node 测试运行器：用于改码后自检', '文件读写与命令执行工具：用于执行与留证'],
+    },
+    preparation: {
+      prepared: ['源文件、测试环境与验收标准均已就位：工作目录可读写，依赖已安装'],
+      evidence: ['ls 与 node -v 输出正常；测试运行器可启动'],
     },
     execution: { steps: ['读写入路径', '加幂等校验', '连发两次并核对记录数'], deviations: [] },
     verification: {
@@ -110,16 +116,18 @@ function consolidation(overrides: any = {}) {
 
 test('协议文案：两轮深度思考的顺序、依赖与用户原文口径', () => {
   const text = threePhasePromptLines().join('\n')
-  assert.match(text, /第一轮 · 任务深研：先全面、全盘、深入梳理、研究、思考自己的任务/)
-  assert.match(text, /基于刚才第一轮完成好的所有结果，再全面、全盘、深入地开展梳理、研究和思考/)
-  assert.match(text, /理清自己该具体如何一步步以最高效率执行、确保完美完成自己任务的方法、流程和步骤/)
-  assert.match(text, /最后，基于刚才第二轮理清楚的所有方法、流程、步骤，开始具体的执行工作/)
+  assert.match(text, /先全面、全盘、深入梳理、研究、思考自己的任务/)
+  assert.match(text, /基于第一步完成好的所有结果，再全面、全盘、深入地梳理、研究、思考/)
+  assert.match(text, /以最高效率执行、确保完美完成自己任务的方法、流程和步骤/)
+  assert.match(text, /基于第三步备齐的成果和既定实施方案，开始具体执行/)
   assert.match(text, /approachBasis/)
-  assert.match(text, /禁止动手执行/)
-  const first = text.indexOf('第一轮 · 任务深研')
-  const second = text.indexOf('第二轮 · 理清方法流程步骤')
-  const exec = text.indexOf('【阶段二 · 执行阶段】')
-  assert.ok(first >= 0 && first < second && second < exec, '第一轮 → 第二轮 → 执行的顺序不可颠倒')
+  assert.match(text, /五步工作法/)
+  const first = text.indexOf('【第一步 · 任务梳理')
+  const second = text.indexOf('【第二步 · 资源、工具与实施方案研究')
+  const third = text.indexOf('【第三步 · 准备')
+  const fourth = text.indexOf('【第四步 · 执行与验证')
+  const fifth = text.indexOf('【第五步 · JSON mode')
+  assert.ok(first >= 0 && first < second && second < third && third < fourth && fourth < fifth, '五步顺序不可颠倒')
 })
 
 test('部门负责人任务书（二级）注入两轮深度思考协议与执行要求', () => {
@@ -170,13 +178,13 @@ test('buildLlmRulesBrief：负责人 tier 与专家/组员 tier 都携带协议'
 /* ---------- 2. 结算门禁：approachBasis 必填 ---------- */
 
 test('契约版本 2：两轮产物齐全 ⇒ ok，摘要可读', () => {
-  assert.equal(THREE_PHASE_VERSION, 2)
+  assert.equal(THREE_PHASE_VERSION, 3)
   const check = validatePhaseEvidence(phases(), ['有单测证据'])
   assert.equal(check.ok, true, JSON.stringify(check.errors))
-  assert.equal(check.phases!.version, 2)
+  assert.equal(check.phases!.version, 3)
   assert.deepEqual(check.phases!.planning.approachBasis, [BASIS])
-  assert.match(phaseSummaryLine(check.phases!), /两轮深度思考/)
-  assert.match(phaseSummaryLine(check.phases!), /第二轮依据 1 条/)
+  assert.match(phaseSummaryLine(check.phases!), /第二步 资源\/工具\/方案研究/)
+  assert.match(phaseSummaryLine(check.phases!), /依据 1 条/)
 })
 
 test('缺 approachBasis ⇒ 规划阶段未完成（PHASE_GATE），不得记 done', () => {
@@ -186,7 +194,7 @@ test('缺 approachBasis ⇒ 规划阶段未完成（PHASE_GATE），不得记 do
   assert.equal(check.ok, false)
   assert.equal(check.failedPhase, 'planning')
   assert.match(check.errors.join('；'), /approachBasis/)
-  assert.equal(phaseGateFromErrors(check.errors), 'phase-1-2')
+  assert.equal(phaseGateFromErrors(check.errors), 'phase-1-3')
 })
 
 test('approachBasis 太薄（一句空话冒充依赖对应）⇒ 规划阶段未完成', () => {

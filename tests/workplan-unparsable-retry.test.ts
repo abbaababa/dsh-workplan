@@ -54,6 +54,12 @@ function phasesFixture() {
       approachBasis: [
         '第二轮的方法、流程、步骤基于第一轮完成好的全部结果：非法 JSON 不得计 done 的约束决定预裁决不放行，CHILD_NOT_COMPLETED 语义不得回归的事实决定复用既有回喂通道，有界重试的边界决定第三步才受阻。',
       ],
+      resources: ['现有代码库与只读权限：本任务所需源文件、测试与运行环境均已确认可用', '任务数据与验收标准：来自计划行，已核对'],
+      tools: ['TypeScript 编译与 node 测试运行器：用于改码后自检', '文件读写与命令执行工具：用于执行与留证'],
+    },
+    preparation: {
+      prepared: ['源文件、测试环境与验收标准均已就位：工作目录可读写，依赖已安装'],
+      evidence: ['ls 与 node -v 输出正常；测试运行器可启动'],
     },
     execution: { steps: ['读现有实现确认入口', '实现通道', '运行测试并记录输出'], deviations: [] },
     verification: {

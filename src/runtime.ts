@@ -7168,21 +7168,21 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     const expectedAcceptance = Array.isArray(found?.subtask?.acceptance) ? found.subtask.acceptance : []
     const rawPhases = isRecord(args?.phases)
       ? args.phases
-      : { planning: args?.planning, execution: args?.execution, verification: args?.verification }
+      : { planning: args?.planning, preparation: args?.preparation, execution: args?.execution, verification: args?.verification }
     const check = validatePhaseEvidence(rawPhases, expectedAcceptance)
     if (!check.ok || !check.phases) {
       const gate = phaseGateFromErrors(check.errors)
       return {
         ok: false,
         passed: false,
-        code: gate === 'phase-1-2' ? 'PHASE_GATE' : 'VERIFICATION_INCOMPLETE',
+        code: gate === 'phase-1-3' ? 'PHASE_GATE' : 'VERIFICATION_INCOMPLETE',
         phase: gate,
         planId: record.plan.planId,
         subtaskId: row.subtaskId,
         gaps: check.errors,
-        error: gate === 'phase-1-2'
-          ? `阶段三核验缺少前两阶段证据：先完成「梳理问题 → 形成可执行思路」并实际执行，再提交阶段三核验。${check.errors.slice(0, 5).join('；')}`
-          : `阶段三核验未通过：${check.errors.slice(0, 5).join('；')}`,
+        error: gate === 'phase-1-3'
+          ? `核验缺少前几步证据：先完成「梳理任务 → 研究资源工具方案 → 准备到位 → 执行」并按步写全证据，再提交验证核验。${check.errors.slice(0, 5).join('；')}`
+          : `验证核验未通过：${check.errors.slice(0, 5).join('；')}`,
       }
     }
     return {
@@ -7192,7 +7192,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       planId: record.plan.planId,
       subtaskId: row.subtaskId,
       summary: phaseSummaryLine(check.phases),
-      message: '插件核验通过：三阶段证据齐全、验证全部通过。现在把同一份 phases 写进结果块并提交。',
+      message: '插件核验通过：前四步证据齐全、验证全部通过。现在把同一份 phases 写进结果块，并按第五步以 JSON mode 交回本部门负责人。',
     }
   }
 

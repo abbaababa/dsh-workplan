@@ -112,6 +112,12 @@ function phasesFor(criterion: string) {
       unknowns: [],
       approach: ['第二轮：先构造假会话夹具并核对既有教训 → 释放结算 → 逐条核对通知文本与留痕 → 重复结算核对幂等不重报。'],
       approachBasis: ['第二轮基于第一轮的夹具事实与幂等矛盾，决定用假会话逐条核对通知与留痕两个落点。'],
+      resources: ['现有代码库与只读权限：本任务所需源文件、测试与运行环境均已确认可用', '任务数据与验收标准：来自计划行，已核对'],
+      tools: ['TypeScript 编译与 node 测试运行器：用于改码后自检', '文件读写与命令执行工具：用于执行与留证'],
+    },
+    preparation: {
+      prepared: ['源文件、测试环境与验收标准均已就位：工作目录可读写，依赖已安装'],
+      evidence: ['ls 与 node -v 输出正常；测试运行器可启动'],
     },
     execution: { steps: ['构造夹具', '释放结算', '核对通知与留痕'], deviations: [] },
     verification: {

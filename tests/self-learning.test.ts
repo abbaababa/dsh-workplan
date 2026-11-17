@@ -50,6 +50,12 @@ function phases(overrides: any = {}) {
       unknowns: ['样本是否完整'],
       approach: ['第一步先抽样读 3 行确认字段名与类型 → 第二步写取数脚本并加入字段校验 → 第三步运行脚本并记录行数与 sha256 → 第四步对照验收标准逐条留证 → 第五步复核产物路径可被下游直接读取。'],
       approachBasis: ["第二轮的方法、流程、步骤基于第一轮完成好的全部结果：现状与主要矛盾决定先确认入口再最小改动，约束决定不改无关文件，验收标准决定每一步的留证方式。"],
+      resources: ['现有代码库与只读权限：本任务所需源文件、测试与运行环境均已确认可用', '任务数据与验收标准：来自计划行，已核对'],
+      tools: ['TypeScript 编译与 node 测试运行器：用于改码后自检', '文件读写与命令执行工具：用于执行与留证'],
+    },
+    preparation: {
+      prepared: ['源文件、测试环境与验收标准均已就位：工作目录可读写，依赖已安装'],
+      evidence: ['ls 与 node -v 输出正常；测试运行器可启动'],
     },
     execution: { steps: ['确认数据源', '运行脚本', '记录行数'], deviations: [] },
     verification: {
@@ -115,7 +121,7 @@ test('完成判定：复盘缺失时判 blocked，齐全时判 done 并带出复
   const blocked = adjudicateResult({ output: evidence(noRetro), expectedAcceptance: planAcceptance })
   assert.equal(blocked.status, 'blocked')
   assert.equal(blocked.verification, 'unverified')
-  assert.match(String(blocked.error), /三阶段证据不完整/)
+  assert.match(String(blocked.error), /五步证据不完整/)
 
   const done = adjudicateResult({ output: evidence(base), expectedAcceptance: planAcceptance })
   assert.equal(done.status, 'done')

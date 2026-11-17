@@ -43,6 +43,12 @@ function phases(overrides: any = {}) {
       approachBasis: [
         '第二轮的方法、流程、步骤基于第一轮完成好的全部结果：重复写入的现状与主要矛盾决定在入口加幂等键校验，不改数据库结构的约束决定不动存储层，验收标准决定连发两次并核对记录数的留证方式。',
       ],
+      resources: ['现有代码库与只读权限：本任务所需源文件、测试与运行环境均已确认可用', '任务数据与验收标准：来自计划行，已核对'],
+      tools: ['TypeScript 编译与 node 测试运行器：用于改码后自检', '文件读写与命令执行工具：用于执行与留证'],
+    },
+    preparation: {
+      prepared: ['源文件、测试环境与验收标准均已就位：工作目录可读写，依赖已安装'],
+      evidence: ['ls 与 node -v 输出正常；测试运行器可启动'],
     },
     execution: { steps: ['读写入路径', '加幂等校验', '连发两次并核对记录数'], deviations: [] },
     verification: {
@@ -109,22 +115,22 @@ test('子 Agent 提示词包含三阶段顺序、禁止跳步与阶段三插件�
     conversationContext: '',
     statuses: createStatuses(plan),
   })
-  assert.match(prompt, /三阶段工作法/)
-  assert.match(prompt, /阶段一 · 规划阶段/)
+  assert.match(prompt, /五步工作法/)
+  assert.match(prompt, /第一步 · 任务梳理/)
   // [2.5.1] 两轮深度思考协议：第一轮任务深研 + 第二轮基于第一轮全部结果理清方法、流程、步骤。
-  assert.match(prompt, /第一轮 · 任务深研：先全面、全盘、深入梳理、研究、思考自己的任务/)
-  assert.match(prompt, /基于刚才第一轮完成好的所有结果，再全面、全盘、深入地开展梳理、研究和思考/)
+  assert.match(prompt, /先全面、全盘、深入梳理、研究、思考自己的任务/)
+  assert.match(prompt, /基于第一步完成好的所有结果，再全面、全盘、深入地梳理、研究、思考/)
   assert.match(prompt, /方法、流程和步骤/)
   assert.match(prompt, /approachBasis/)
-  assert.match(prompt, /阶段二 · 执行阶段/)
-  assert.match(prompt, /阶段三 · 验证阶段/)
+  assert.match(prompt, /第四步 · 执行与验证/)
+  assert.match(prompt, /第五步 · JSON mode 结构化交付给本部门负责人/)
   assert.doesNotMatch(prompt, /插件禁用/, '2.0.2 起不得把「阶段一、二禁用插件」写成永久规则')
   assert.match(prompt, /dsh_workplan_verify/)
   assert.match(prompt, /"phases"/, '结果块模板必须包含 phases 字段')
   // 顺序要求：规划段必须出现在执行要求之前。
   assert.ok(
-    prompt.indexOf('三阶段工作法') < prompt.indexOf('执行要求：'),
-    '三阶段工作法必须先于执行要求出现，不能被埋在末尾',
+    prompt.indexOf('五步工作法') < prompt.indexOf('执行要求：'),
+    '五步工作法必须先于执行要求出现，不能被埋在末尾',
   )
 })
 
@@ -133,8 +139,8 @@ test('三阶段证据：齐全且验证通过才 ok', () => {
   assert.equal(check.ok, true)
   assert.ok(check.phases)
   assert.equal(check.errors.length, 0)
-  assert.match(phaseSummaryLine(check.phases!), /阶段一 规划/)
-  assert.match(phaseSummaryLine(check.phases!), /阶段三 验证/)
+  assert.match(phaseSummaryLine(check.phases!), /第一步 任务梳理/)
+  assert.match(phaseSummaryLine(check.phases!), /第四步 执行与验证/)
 })
 
 test('三阶段证据：缺 planning 直接失败，并指向阶段一', () => {
@@ -144,7 +150,7 @@ test('三阶段证据：缺 planning 直接失败，并指向阶段一', () => {
   assert.equal(check.ok, false)
   assert.equal(check.failedPhase, 'planning')
   assert.match(check.errors.join('；'), /planning 缺失/)
-  assert.equal(phaseGateFromErrors(check.errors), 'phase-1-2')
+  assert.equal(phaseGateFromErrors(check.errors), 'phase-1-3')
 })
 
 test('三阶段证据：规划太薄（一句目标冒充思路）不算规划', () => {
@@ -199,7 +205,7 @@ test('完成判定：没有 phases 的 done 被降级为 blocked/unverified', ()
   const verdict = adjudicateResult({ output, expectedAcceptance: ['同一请求连发两次只写一条记录'] })
   assert.equal(verdict.status, 'blocked')
   assert.equal(verdict.verification, 'unverified')
-  assert.match(String(verdict.error), /三阶段证据不完整/)
+  assert.match(String(verdict.error), /五步证据不完整/)
   assert.match(String(verdict.error), /planning/)
 })
 
@@ -215,7 +221,7 @@ test('完成判定：三阶段齐全的 done 仍按原规则判 structured', () 
   assert.equal(verdict.status, 'done')
   assert.equal(verdict.verification, 'structured')
   assert.ok(verdict.phases, '通过的三阶段证据要随判定返回，供主 Agent 复核')
-  assert.match(String(verdict.phaseSummary), /阶段一 规划/)
+  assert.match(String(verdict.phaseSummary), /第一步 任务梳理/)
 })
 
 test('兼容边界：requirePhases=false 保留旧完成语义（历史回放/明确关闭）', () => {
@@ -233,9 +239,9 @@ test('兼容边界：requirePhases=false 保留旧完成语义（历史回放/�
 test('提示词段落：阶段三核验 + 缺证据 PHASE_GATE，且不再声明全局禁用', () => {
   const text = threePhasePromptLines().join('\n')
   assert.doesNotMatch(text, /插件禁用/, '2.0.2 起不得把「阶段一、二禁用插件」写成永久规则')
-  assert.match(text, /会因缺少前两阶段证据返回 PHASE_GATE/)
-  assert.match(text, /阶段三：可以调用 dsh_workplan_verify/)
-  assert.match(text, /禁止动手执行/)
+  assert.match(text, /会因缺少前几步证据返回 PHASE_GATE/)
+  assert.match(text, /第四步：可以调用 dsh_workplan_verify/)
+  assert.match(text, /五步工作法/)
 })
 
 function runtimeFixture() {
@@ -289,8 +295,8 @@ test('阶段三核验工具：缺前两阶段证据被 PHASE_GATE 拒绝（证�
   assert.equal(out.ok, false)
   assert.equal(out.passed, false)
   assert.equal(out.code, 'PHASE_GATE')
-  assert.equal(out.phase, 'phase-1-2')
-  assert.match(String(out.error), /缺少前两阶段证据/)
+  assert.equal(out.phase, 'phase-1-3')
+  assert.match(String(out.error), /缺少前几步证据/)
 })
 
 test('阶段三核验工具：三阶段齐全且验证通过 → passed', async () => {
@@ -299,7 +305,7 @@ test('阶段三核验工具：三阶段齐全且验证通过 → passed', async 
   assert.equal(out.ok, true)
   assert.equal(out.passed, true)
   assert.equal(out.phase, 'verification')
-  assert.match(String(out.summary), /阶段一 规划/)
+  assert.match(String(out.summary), /第一步 任务梳理/)
 })
 
 test('阶段三核验工具：验证未全部通过 → VERIFICATION_INCOMPLETE', async () => {
@@ -309,5 +315,5 @@ test('阶段三核验工具：验证未全部通过 → VERIFICATION_INCOMPLETE'
   const out = await runtime.verifyTool({ session: child }, { phases: input })
   assert.equal(out.ok, false)
   assert.equal(out.code, 'VERIFICATION_INCOMPLETE')
-  assert.match(String(out.error), /阶段三核验未通过/)
+  assert.match(String(out.error), /验证核验未通过/)
 })

@@ -4058,7 +4058,7 @@ export function adjudicateResult({ output, strict = true, expectedAcceptance = [
       acceptance,
       artifacts,
       needs,
-      error: `三阶段证据不完整（未按「规划→执行→验证」回报）：${phaseCheck.errors.slice(0, 6).join('；')}`,
+      error: `五步证据不完整（未按「任务梳理→资源工具方案研究→准备→执行验证→JSON 交付」回报）：${phaseCheck.errors.slice(0, 6).join('；')}`,
       phases: null,
     }
   }
@@ -6688,7 +6688,7 @@ export function buildChildPrompt({
     '',
     '结果回传（必填）：在汇报的最后附上一个结构化结果块，主 Agent 会按它逐项核对，不再只依赖自述。',
     EVIDENCE_MARKER_BEGIN,
-    '{"status":"done","blockedReason":"","phases":{"planning":{"problemAnalysis":["要解决的问题 1（含现状/约束/未知/主要矛盾）"],"constraints":["..."],"unknowns":["..."],"approach":["第 1 步：做什么 → 产出什么 → 如何证明"]},"execution":{"steps":["实际执行的步骤"],"deviations":[]},"verification":{"allPassed":true,"checks":[{"criterion":"A1","method":"怎么验证","evidence":"命令输出/文件/引用"}],"requirementCheck":"逐条核对用户原要求的结果","retrospective":{"problems":["本次遇到的问题（现象+根因）"],"detours":["走过的弯路/返工/无效尝试；确实没有就写 []"],"resolutions":["最终是如何解决的"],"prevention":["以后如何预防再犯：遇到…先…"]}}},"acceptance":[{"criterion":"A1 把上面的验收标准原文抄在这里","result":"pass","evidence":"用命令输出、文件路径或引用证明"}],"artifacts":[{"kind":"file","ref":"相对工作目录的路径"}],"needs":[],"question":"","options":[],"timeSpentMinutes":0,"finalEstimateMinutes":0}',
+    '{"status":"done","blockedReason":"","phases":{"planning":{"problemAnalysis":["要解决的问题 1（含现状/约束/未知/主要矛盾）"],"constraints":["..."],"unknowns":["..."],"resources":["完成本任务需要的资源：数据/文件/权限/人/知识/时间（逐项写用途与获取方式）"],"tools":["需要的工具及用途（为什么选它）"],"approach":["第 1 步：做什么 → 产出什么 → 如何证明"]},"preparation":{"prepared":["已备齐的资源/工具：准备了什么、在哪里、是否可用"],"evidence":["每项就绪证据：命令输出/文件路径/配置项/版本号/引用"]},"execution":{"steps":["实际执行的步骤"],"deviations":[]},"verification":{"allPassed":true,"checks":[{"criterion":"A1","method":"怎么验证","evidence":"命令输出/文件/引用"}],"requirementCheck":"逐条核对用户原要求的结果","retrospective":{"problems":["本次遇到的问题（现象+根因）"],"detours":["走过的弯路/返工/无效尝试；确实没有就写 []"],"resolutions":["最终是如何解决的"],"prevention":["以后如何预防再犯：遇到…先…"]}}},"acceptance":[{"criterion":"A1 把上面的验收标准原文抄在这里","result":"pass","evidence":"用命令输出、文件路径或引用证明"}],"artifacts":[{"kind":"file","ref":"相对工作目录的路径"}],"needs":[],"question":"","options":[],"timeSpentMinutes":0,"finalEstimateMinutes":0}',
     EVIDENCE_MARKER_END,
     '- [2.2.9] 盘上结算备份（必做）：发送结果块之前，先把同一份 JSON 写入 reports/wp-settlement-<你的子任务 ID>.json（相对工作目录）。收尾消息因异常（error/截断/超时）丢失时，宿主会自动采纳该备份结算，避免「已完成的工作」被误判为「缺失回报」而受阻并级联冻结下游。[2.5.2][T4b] 备份 JSON 顶层必须带 planId 与 subtaskId（childId 若已知也带上），且必须是本次执行新写（覆盖同名旧文件）：宿主采纳前会校验新鲜度（文件修改时间不早于本次尝试开始时间）与归属（planId/subtaskId 必须匹配本计划/本子任务），陈旧或跨计划的备份会被拒绝采纳并留审计痕。',
     '- status 只能是 done / blocked / partial；partial 会被当作受阻处理。',

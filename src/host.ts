@@ -84,7 +84,7 @@ export const inject = ['tools', 'systemPrompt', 'llm', 'subagents', 'sessions']
 export const PROMPT_ORDER = 40
 
 const PROMPT_SECTION = [
-  '本会话已启用自动任务分解。系统会在每个新用户任务的第一个模型步骤前生成计划，并先把计划显示在对话里；收到【任务分解】后，必须先调用 dsh_workplan_dispatch（默认 wait 等结果；预计较久时用 mode:"async" 先开跑），再做任何其他工具调用或回答。',
+  '本会话已启用自动任务分解。系统会在每个新用户任务的第一个模型步骤前生成计划，并先把计划显示在对话里；看到【任务分解】计划消息后，若插件未自动派发或需要续跑/重试，再调用 dsh_workplan_dispatch（默认 wait 等结果；预计较久时用 mode:"async" 先开跑）。若只收到「任务分解已在后台生成中」而尚未看到【任务分解】，不要手动派发，先告知用户正在分配并等待计划落地。',
   /*
    * [3.0.0] 用户 2026-11-14 十三条要求的提示词侧双保险（代码侧同源门禁见
    * v3-contract / comm-format / llm-rules / runtime）。文案不做发挥，只写
@@ -94,7 +94,7 @@ const PROMPT_SECTION = [
   '3.0.0 任务书质量要求（用户要求 3/6）：插件派给部门负责人的每个子任务都携带 qualityRequirements（结果质量要求），部门负责人派给专家的每条任务也必须携带 qualityRequirements。负责人→专家缺它平台直接拒绝派发（DELEGATE_QUALITY_REQUIREMENTS_MISSING）；主 Agent→部门负责人缺它则该子任务在派发时被直接拒发（DISPATCH_QUALITY_REQUIREMENTS_MISSING，不启动部门 Agent），须 replan 补齐后重派。你审阅计划时先看每个子任务是否写了清楚的质量要求。',
   '3.0.0 极简任务（用户要求 5，用户裁决 A＝硬门槛）：部门负责人派出的每条任务必须简单到像 1+1=2——一个动作、一个主产物、一项可独立验收，单句、≤300 字符、不含「并且/同时/另外/还要/以及/分别/顺便」等并列词；不满足即被拒绝并给出拆分提示（DELEGATE_TASK_NOT_ATOMIC）。',
   '3.0.0 角色与汇报（用户要求 7/8/9/10/11/12）：部门组员角色已取消，只保留部门负责人与全球顶尖专家（role 只允许 expert）；专家完成后必须以 JSON 汇报（证据块里的 report：keyResults/keyInfo/importantInfo/leadRequirements，精简、禁止重复，F10）；部门负责人必须全面汇总本部门全部专家汇报后，以 JSON 交回主 Agent（departmentSummary：keyResults/keyInfo/importantInfo/sources，精简、禁止累赘重复，F11）；等所有部门的汇总都交回后，由你再全面、深入整理汇总成最终成果交付给用户（用户要求 12）。',
-  '3.0.2 版本（用户要求 13）：本插件当前版本为 3.0.2。涉及版本号的对外表述一律写 3.0.2。',
+  '3.0.3 版本（用户要求 13）：本插件当前版本为 3.0.3。涉及版本号的对外表述一律写 3.0.3。',
   /*
    * [2.5.1] 主 Agent 两轮深度思考协议（用户 2026-11-11 补充要求）：部门三层
    * 执行者已有结算/再分配双门禁，主 Agent 自己也必须做到同一协议——提示词
@@ -1032,7 +1032,7 @@ export function createVerifyTool(runtime: any) {
         },
         phases: {
           type: 'object',
-          description: '三阶段证据：planning（问题梳理 + 可执行思路）、execution（执行步骤）、verification（逐项验证）。',
+          description: '五步证据：planning（第一步问题梳理 + 第二步资源/工具/方案）、preparation（第三步准备与就绪证据）、execution（第四步执行步骤）、verification（第四步逐项验证与复盘）。',
           properties: {
             planning: {
               type: 'object',
@@ -1042,9 +1042,20 @@ export function createVerifyTool(runtime: any) {
                 constraints: { type: 'array', items: { type: 'string' }, description: '约束条件' },
                 unknowns: { type: 'array', items: { type: 'string' }, description: '未知或待确认项' },
                 approach: { type: 'array', items: { type: 'string' }, description: '第二轮 · 方法流程步骤：基于第一轮全部结果理清的具体一步步执行、完美完成任务的方法、流程和步骤（每一步做什么、产出什么、如何证明）' },
-                approachBasis: { type: 'array', items: { type: 'string' }, description: '第二轮依据（必填）：第二轮如何基于第一轮完成好的所有结果——第一轮的哪些事实/约束/矛盾决定了第二轮的哪些方法/流程/步骤' },
+                approachBasis: { type: 'array', items: { type: 'string' }, description: '第二步依据（必填）：第二步的资源、工具、方案如何基于第一步完成好的所有结果——第一步的哪些事实/约束/矛盾决定了第二步的哪些资源/工具/步骤' },
+                resources: { type: 'array', items: { type: 'string' }, description: '第二步 · 资源研究：完成本任务需要哪些资源（数据/文件/权限/人/知识/时间），逐项写清用途与获取方式' },
+                tools: { type: 'array', items: { type: 'string' }, description: '第二步 · 工具研究：需要哪些工具、每个工具用来做什么、为什么选它' },
               },
-              required: ['problemAnalysis', 'approach', 'approachBasis'],
+              required: ['problemAnalysis', 'approach', 'approachBasis', 'resources', 'tools'],
+            },
+            preparation: {
+              type: 'object',
+              description: '第三步 · 准备：把第二步研究出的资源、工具、实施方案真正备齐，并给出可复核的就绪证据。',
+              properties: {
+                prepared: { type: 'array', items: { type: 'string' }, description: '已准备好的资源/工具清单：准备了什么、在哪里、是否可用' },
+                evidence: { type: 'array', items: { type: 'string' }, description: '就绪证据：命令输出/文件路径/配置项/版本号/引用，与 prepared 一一对应' },
+              },
+              required: ['prepared', 'evidence'],
             },
             execution: {
               type: 'object',
@@ -1086,7 +1097,7 @@ export function createVerifyTool(runtime: any) {
               required: ['allPassed', 'checks', 'retrospective'],
             },
           },
-          required: ['planning', 'execution', 'verification'],
+          required: ['planning', 'preparation', 'execution', 'verification'],
         },
       },
       required: ['phases'],
@@ -1998,7 +2009,7 @@ export function apply(ctx: any, config: WorkplanConfig = {}) {
 
 export const meta = {
   name,
-  version: '3.0.2',
+  version: '3.0.3',
   promptOrder: PROMPT_ORDER,
   routes: ['/dsh-workplan/plans', '/dsh-workplan/vendor/chart.umd.js'],
 }
