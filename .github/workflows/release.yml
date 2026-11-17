@@ -115,15 +115,24 @@ jobs:
       - name: 打包 tgz 制品
         run: npm pack
 
-      - name: 创建 GitHub Release（必须带 tgz 制品，历史教训：无制品会让索引源 404）
+      - name: 创建 GitHub Release（幂等：Release 已存在则上传覆盖资产，避免重跑时因已存在而失败）
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --title "${GITHUB_REF_NAME}" \
-            --generate-notes \
-            dsh-workplan-*.tgz
+          set -e
+          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "Release ${GITHUB_REF_NAME} 已存在，跳过创建，直接上传/覆盖资产"
+            gh release upload "${GITHUB_REF_NAME}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --clobber \
+              dsh-workplan-*.tgz
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "${GITHUB_REF_NAME}" \
+              --generate-notes \
+              dsh-workplan-*.tgz
+          fi
 
       - name: 发布到 npm（官方索引源）
         run: npm publish --provenance --access public
