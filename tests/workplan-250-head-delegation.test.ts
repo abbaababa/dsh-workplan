@@ -214,9 +214,9 @@ test('要求2 端到端：review 配置整体等级 → 状态行 effortOverride
   assert.equal(status.effortOverride, 'medium')
 })
 
-test('要求5：版本声明统一 3.0.2（2.5.0 断言随定版升级）', () => {
+test('要求5：版本声明统一 3.0.3（2.5.0 断言随定版升级）', () => {
   const pkg = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8'))
-  assert.equal(pkg.version, '3.0.2')
+  assert.equal(pkg.version, '3.0.3')
   const fixture = JSON.parse(readFileSync(join(process.cwd(), 'tests/fixtures/tool-surface.json'), 'utf8'))
-  assert.equal(fixture.version, '3.0.2')
+  assert.equal(fixture.version, '3.0.3')
 })
