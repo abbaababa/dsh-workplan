@@ -1,3 +1,8 @@
+## 3.0.2 — 2026-11-17
+
+- **修复**：GitHub Actions Release 流水线补齐 `NPM_TOKEN` secret + `gh release create` 幂等（已存在则 upload --clobber），npm 发布不再 ENEEDAUTH/E403。
+- **版本**：全仓版本号对齐 3.0.2。
+
 ## 3.0.1 — 2026-11-16
 
 ### 激活热修：`dsh_workplan_hold` / `dsh_workplan_release` 缺 output 契约导致插件启用失败（宿主 register 硬校验）

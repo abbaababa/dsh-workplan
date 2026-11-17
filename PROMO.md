@@ -24,7 +24,7 @@
 
 - **安全有据可查**：全套自评证据公开在仓库里，任何人都能自己核对，不用信任何人的口头承诺。/ **Verifiable security**: the full self-assessment pack is public in the repo — check it yourself instead of trusting anyone's word.
 - **版本口径诚实**：对齐 2026 结构、认证体系现行受理 CC:2022；不说「已认证」。/ **Honest version framing**: 2026 structure, schemes currently accept CC:2022; we never claim certification.
-- **安装一条命令**：`dsh plugin --profile web add dsh-workplan@3.0.1`，重启即用。/ **One-command install** with a restart, nothing else.
+- **安装一条命令**：`dsh plugin --profile web add dsh-workplan@3.0.2`，重启即用。/ **One-command install** with a restart, nothing else.
 - **零第三方运行时依赖**：不写磁盘、不外发数据、面板要登录。/ **Zero third-party runtime dependencies**: no disk writes, no outbound traffic, the panel requires login.
 - **小白友好**：README 用大白话解释每一步，照抄命令即可。/ **Beginner-friendly**: the README explains every step in plain language; copy the commands as-is.
 
@@ -32,7 +32,7 @@
 
 ```bash
 # 1. 安装 / install
-dsh plugin --profile web add dsh-workplan@3.0.1
+dsh plugin --profile web add dsh-workplan@3.0.2
 
 # 2. 重启 DSH Web（或刷新页面）/ restart DSH Web (or reload the page)
 
