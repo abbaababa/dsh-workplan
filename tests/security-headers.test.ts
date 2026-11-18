@@ -11,7 +11,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { HARDENING_HEADERS, applyHardeningHeaders } from '../src/runtime.js'
+import { HARDENING_HEADERS, MAX_PLANS_RESPONSE_BYTES, applyHardeningHeaders, trimPlansPayload } from '../src/runtime.js'
 
 function recordingRes() {
   const headers: Record<string, string> = {}
@@ -42,6 +42,34 @@ test('applyHardeningHeaders 对没有 setHeader 的对象保持静默', () => {
   assert.doesNotThrow(() => applyHardeningHeaders({}))
   assert.doesNotThrow(() => applyHardeningHeaders(null))
   assert.doesNotThrow(() => applyHardeningHeaders(undefined))
+})
+
+test('看板响应按字节截断：中文不再按字符冒充 2.5MB', () => {
+  const huge = '汉'.repeat(1_200_000) // 约 3.6MB UTF-8
+  const payload = {
+    ok: true,
+    now: 1,
+    sessions: [{
+      sessionId: 's-1',
+      planId: 'wp-1',
+      title: huge,
+      phase: 'executing',
+      plan: { planId: 'wp-1', title: huge },
+      statuses: [],
+    }],
+  }
+  assert.ok(Buffer.byteLength(JSON.stringify(payload)) > MAX_PLANS_RESPONSE_BYTES)
+  const trimmed = trimPlansPayload(payload)
+  const bytes = Buffer.byteLength(JSON.stringify(trimmed))
+  assert.equal(trimmed.truncated, true)
+  assert.ok(bytes <= MAX_PLANS_RESPONSE_BYTES, `截断后仍超限：${bytes}`)
+  assert.doesNotThrow(() => JSON.parse(JSON.stringify(trimmed)), '截断结果必须是合法 JSON')
+})
+
+test('看板响应未超限时原样返回，不改变字段', () => {
+  const payload = { ok: true, now: 1, sessions: [{ sessionId: 's', title: '短标题' }] }
+  const same = trimPlansPayload(payload)
+  assert.equal(same, payload)
 })
 
 test('两条路由的处理函数都调用加固助手', async () => {

@@ -31,7 +31,7 @@ const QWEN = 'qwen3-max-preview'
 
 function assignments(extra: any[] = []) {
   return [
-    { member: '专家甲', role: 'expert', task: '实现核心逻辑并附单测', ...extra[0], qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
+    { member: '专家甲', role: 'expert', task: '实现核心逻辑后附单测', ...extra[0], qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
     { member: '组员乙', role: 'expert', task: '整理验收证据清单', ...extra[1], qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
   ]
 }
@@ -214,9 +214,9 @@ test('要求2 端到端：review 配置整体等级 → 状态行 effortOverride
   assert.equal(status.effortOverride, 'medium')
 })
 
-test('要求5：版本声明统一 3.0.3（2.5.0 断言随定版升级）', () => {
+test('要求5：版本声明统一 3.0.6（2.5.0 断言随定版升级）', () => {
   const pkg = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8'))
-  assert.equal(pkg.version, '3.0.3')
+  assert.equal(pkg.version, '3.0.6')
   const fixture = JSON.parse(readFileSync(join(process.cwd(), 'tests/fixtures/tool-surface.json'), 'utf8'))
-  assert.equal(fixture.version, '3.0.3')
+  assert.equal(fixture.version, '3.0.6')
 })

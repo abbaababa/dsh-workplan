@@ -76,7 +76,7 @@ const consolidation = (overrides: any = {}) => ({
   approach: ['专家做核心实现：先确认入口再最小改动，并附聚焦单测自测；组员整理证据清单并逐条核对验收。'],
   approachBasis: ["第二轮分工的方法、流程、步骤基于第一轮完成好的全部结果：质量与时间的主要矛盾决定专家承担核心实现、组员承担自测与证据，约束决定不改无关文件。"],
   assignments: [
-    { member: 'Expert-A', role: 'expert', task: '实现核心逻辑并自测', reasoningEffort: 'low', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
+    { member: 'Expert-A', role: 'expert', task: '实现核心逻辑后自测', reasoningEffort: 'low', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
     { member: 'Member-B', role: 'expert', task: '整理验收证据清单', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
   ],
   ...overrides,
@@ -85,7 +85,7 @@ const consolidation = (overrides: any = {}) => ({
 // 默认 consolidation() 保持 2 人（非复杂用例依赖上限 6）；复杂用例专用 8 人表，
 // Expert-A 的 low 建议档原样保留（phase-0 强制 low/自配权威的被测意图不变）。
 const assignments8 = () => [
-  { member: 'Expert-A', role: 'expert', task: '实现核心逻辑并自测', reasoningEffort: 'low', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
+  { member: 'Expert-A', role: 'expert', task: '实现核心逻辑后自测', reasoningEffort: 'low', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
   { member: 'Member-B', role: 'expert', task: '整理验收证据清单', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
   ...Array.from({ length: 6 }, (_, i) => ({
     member: `Member-${String.fromCharCode(67 + i)}`, role: 'expert', task: `单一目标子任务 ${i + 3}（单一主产物、可独立验收）`, qualityRequirements: ['必须给出可复核的命令输出或文件证据'],
@@ -125,7 +125,7 @@ test('自配档 e2e：叶子 self_effort 登记（钳制留痕）→ 平台以�
   assert.match(p1, /phase-0→phase-1 接续/, '接续块必须在任务书中')
   assert.match(p1, /跨模块根因排查/, 'phase-0 产物（复杂度依据）随接续携带')
   assert.match(p1, /继续勿重做/, '禁止重做 phase-0 已完成工作')
-  assert.match(p1, /实现核心逻辑并自测/, '完整任务书随接续携带')
+  assert.match(p1, /实现核心逻辑后自测/, '完整任务书随接续携带')
   // [2.5.5][T3] 复杂声明使 review 登记也中断负责人 phase-0（既有 stall-fix 口径），
   // 叶子 self_effort 中断顺延为 interrupts[1]，原断言逐字保留。
   assert.deepEqual(interrupts[0], { childId: 'child-leader', parentId: 'session-root', mode: 'continuable' }, 'review 自配登记中断负责人 phase-0')

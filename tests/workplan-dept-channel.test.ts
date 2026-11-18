@@ -261,8 +261,12 @@ test('下行：head instruct(member) 投递叶子＋lastInstruction 持久化＋
   assert.equal(insJournal[0].data?.inReplyTo, escJournal[0].id)
 })
 
-test('下行：sessionId 目标可用；subtaskId 省略时默认负责人自己的行', async () => {
+test('下行：已请示成员可用 sessionId 接收指示；subtaskId 省略时默认负责人自己的行', async () => {
   const f = makeFixture('wp-chan-ins2')
+  const esc1 = await f.runtime.escalateTool(f.leaf1Agent, { question: '请示甲' })
+  assert.equal(esc1.ok, true, JSON.stringify(esc1))
+  const esc2 = await f.runtime.escalateTool(f.leaf2Agent, { question: '请示乙' })
+  assert.equal(esc2.ok, true, JSON.stringify(esc2))
   const bySession = await f.runtime.instructTool(f.leaderAgent, { sessionId: LEAF1, instruction: '按 sessionId 投递' })
   assert.equal(bySession.ok, true, JSON.stringify(bySession))
   assert.equal(bySession.sessionId, LEAF1)
@@ -308,17 +312,21 @@ test('授权负例：跨部门目标（登记在他行 delegates）→ NOT_DELEG
   assert.equal(f.calls.length, 0)
 })
 
-test('授权负例：subtaskId 不是自己的行 → UNKNOWN_SUBTASK；目标不在直接子会话 catalog → NOT_DIRECT_CHILD', async () => {
+test('授权负例：subtaskId 不是自己的行 → UNKNOWN_SUBTASK；已请示但目标不在直接子会话 catalog → NOT_DIRECT_CHILD', async () => {
   const f = makeFixture('wp-chan-neg4')
   const wrongRow = await f.runtime.instructTool(f.leaderAgent, { subtaskId: 'T2', member: '跨部门丙', instruction: 'x' })
   assert.equal(wrongRow.ok, false)
   assert.equal(wrongRow.code, 'UNKNOWN_SUBTASK')
-  // head 的 catalog 只登记 leaf-1：组员乙（leaf-2）不是直接子会话证据 ⇒ 拒绝。
+  // 3.0.5：先让组员乙真实进入待指示，再验证“不是直接子会话证据”这道授权闸仍生效。
   const g = makeFixture('wp-chan-neg5', { headCatalog: [LEAF1] })
+  const esc = await g.runtime.escalateTool(g.leaf2Agent, { question: '请示乙' })
+  assert.equal(esc.ok, true, JSON.stringify(esc))
   const notDirect = await g.runtime.instructTool(g.leaderAgent, { subtaskId: 'T1', member: '组员乙', instruction: 'x' })
   assert.equal(notDirect.ok, false)
   assert.equal(notDirect.code, 'NOT_DIRECT_CHILD')
-  assert.equal(g.calls.length, 0)
+  assert.equal(g.calls.length, 1)
+  assert.equal(g.calls[0].targetId, HEAD)
+  assert.match(g.calls[0].text, /请示乙/)
 })
 
 /* ------------------------------------------------------------------ *
@@ -499,7 +507,7 @@ const consolidation = {
   approach: ['专家做核心实现：先确认入口再最小改动，并附聚焦单测自测', '组员做自测：逐条核对验收标准并落盘留证'],
   approachBasis: ['第二轮分工的方法、流程、步骤基于第一轮完成好的全部结果：质量与时间的主要矛盾决定专家承担核心实现、组员承担自测与证据。'],
   assignments: [
-    { member: 'Expert-A', role: 'expert', task: '实现核心逻辑并自测', reasoningEffort: 'medium', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
+    { member: 'Expert-A', role: 'expert', task: '实现核心逻辑后自测', reasoningEffort: 'medium', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
     { member: 'Member-B', role: 'expert', task: '补充核心路径回归用例', reasoningEffort: 'low', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
   ],
 }

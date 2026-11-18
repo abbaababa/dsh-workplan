@@ -17,6 +17,22 @@
  * 该测试红 = 接线断裂（脚本/路径/编译产物变更），保护整体失效，禁止信任当轮「全绿」结论。
  */
 import { after } from 'node:test'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+/*
+ * [3.0.6][第 3 批②] 通知台账全局隔离：appendUserMessage 的旁路台账
+ * （src/notice-ledger.ts）默认写 ~/.dsh/workplan/notices.jsonl。几乎所有测试
+ * 文件都会触发 appendUserMessage，若不留向就会污染用户真实台账。测试子进程
+ * 统一重定向到每进程临时文件（显式设置过该变量的文件不受影响）。
+ */
+if (!process.env.DSH_WORKPLAN_NOTICES_FILE) {
+  process.env.DSH_WORKPLAN_NOTICES_FILE = join(
+    mkdtempSync(join(tmpdir(), 'dsh-workplan-test-notices-')),
+    'notices.jsonl',
+  )
+}
 
 const anchor = setInterval(() => {}, 1_000)
 const failsafe = setTimeout(() => clearInterval(anchor), 600_000)

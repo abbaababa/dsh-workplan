@@ -79,7 +79,7 @@ const consolidation = () => ({
   approach: ['专家做核心实现：先确认入口再最小改动，并附聚焦单测自测', '组员做证据：逐条核对验收标准并落盘留证'],
   approachBasis: ['第二轮分工基于第一轮全部梳理结果：质量与时间矛盾决定专家做核心实现、组员做证据。'],
   assignments: [
-    { member: 'Expert-A', role: 'expert', task: '实现核心逻辑并自测', reasoningEffort: 'low', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
+    { member: 'Expert-A', role: 'expert', task: '实现核心逻辑后自测', reasoningEffort: 'low', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
     { member: 'Member-B', role: 'expert', task: '整理验收证据清单', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
   ],
 })
@@ -230,7 +230,7 @@ test('协议文案同源：三阶段/主Agent提示词/负责人与叶子 brief/
   assert.match(head, /少走弯路/)
   const leaf = buildLlmRulesBrief({ model: QWEN, tier: 'delegate', memberRole: 'expert' })
   assert.match(leaf, /少走弯路/)
-  const phase0 = buildPhaseZeroDelegateePrompt({ departmentLabel: '工程', member: { member: 'X', role: 'expert', task: '读取目标文件并写出一份结论', effort: 'low', qualityRequirements: ['必须给出命令输出'] }, cwd: '/tmp' })
+  const phase0 = buildPhaseZeroDelegateePrompt({ departmentLabel: '工程', member: { member: 'X', role: 'expert', task: '读取目标文件得出一份结论', effort: 'low', qualityRequirements: ['必须给出命令输出'] }, cwd: '/tmp' })
   assert.match(phase0, /deepThink/, 'phase-0 任务书必须写明 deepThink 义务')
   assert.match(phase0, /DEEP_THINK_MISSING/)
   assert.match(phase0, /少走弯路/)

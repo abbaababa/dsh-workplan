@@ -103,7 +103,7 @@ const goodConsolidation = (efforts: { expert: string; member: string }) => ({
   approach: ['专家做核心实现：先确认入口再最小改动，并附聚焦单测自测', '组员做自测：逐条核对验收标准并落盘留证'],
   approachBasis: ["第二轮分工的方法、流程、步骤基于第一轮完成好的全部结果：质量与时间的主要矛盾决定专家承担核心实现、组员承担自测与证据，约束决定不改无关文件。"],
   assignments: [
-    { member: 'Expert-A', role: 'expert', task: '实现核心逻辑并自测', reasoningEffort: efforts.expert, qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
+    { member: 'Expert-A', role: 'expert', task: '实现核心逻辑后自测', reasoningEffort: efforts.expert, qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
     { member: 'Member-B', role: 'expert', task: '补充核心路径回归用例', reasoningEffort: efforts.member, qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
   ],
 })
@@ -157,7 +157,7 @@ test('delegateTool：review 缺 problemAnalysis / assignments ⇒ 拒绝并给�
   const { runtime, leaderAgent } = makeRuntime('qwen3.8-flash')
   const noAnalysis = await runtime.delegateTool(leaderAgent, {
     action: 'review',
-    consolidation: { assignments: [{ member: 'A', role: 'expert', task: '读取目标文件并写出一份结论', reasoningEffort: 'low', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] }] },
+    consolidation: { assignments: [{ member: 'A', role: 'expert', task: '读取目标文件得出一份结论', reasoningEffort: 'low', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] }] },
   })
   assert.equal(noAnalysis.ok, false)
   assert.match(noAnalysis.error, /problemAnalysis/)
@@ -178,7 +178,7 @@ test('delegateTool：组员角色取消后，非 expert 角色入参 ⇒ DELEGAT
     consolidation: {
       // [2.5.4][T3R1] 补足字数，使拒因落在被测的角色配比（断言意图不变）。
       problemAnalysis: ['现状：部门任务需要拆给专家与组员；目标是保质保量完成；约束是不改无关文件；主要矛盾是质量与时间。'],
-      assignments: [{ member: 'A', role: 'worker', task: '读取目标文件并写出一份结论', reasoningEffort: 'low', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] }],
+      assignments: [{ member: 'A', role: 'worker', task: '读取目标文件得出一份结论', reasoningEffort: 'low', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] }],
     },
   })
   assert.equal(result.ok, false)

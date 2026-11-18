@@ -16,7 +16,7 @@
  *     由 channel-expert 按契约 §3 实现）。
  */
 import { randomBytes } from 'node:crypto'
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, statSync, unlinkSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
@@ -285,11 +285,12 @@ export function deptJournalPath(planId: string): string {
 
 /**
  * 追加一条留痕（契约 §2）：先 validate，再 mkdirSync(recursive)+appendFileSync。
- * 任何失败（校验不过 / planId 非法 / 写盘失败）显式返回 JOURNAL_WRITE_FAILED，绝不静默。
+ * 任何失败（校验不过 / planId 非法 / 写盘失败 / 回读不一致）显式返回
+ * JOURNAL_WRITE_FAILED / JOURNAL_READBACK_FAILED，绝不静默。
  */
 export function appendDeptMessage(
   msg: unknown,
-): { ok: true; path: string } | { ok: false; code: 'JOURNAL_WRITE_FAILED'; error: string } {
+): { ok: true; path: string } | { ok: false; code: 'JOURNAL_WRITE_FAILED' | 'JOURNAL_READBACK_FAILED'; error: string } {
   const verdict = validateDeptMessage(msg)
   if (!verdict.ok) return { ok: false, code: 'JOURNAL_WRITE_FAILED', error: verdict.error }
   let path: string
@@ -299,25 +300,157 @@ export function appendDeptMessage(
     return { ok: false, code: 'JOURNAL_WRITE_FAILED', error: errorText(error) }
   }
   try {
-    mkdirSync(dirname(path), { recursive: true })
-    appendFileSync(path, `${JSON.stringify(verdict.value)}\n`, 'utf8')
+    /*
+     * [安全加固] 防符号链接投毒：journal 文件若是符号链接则跳过写入并告警——
+     * 绝不跟随链接把审计内容写到链接指向的任意路径；失败显式返回（绝不静默）。
+     * lstatSync 抛错（文件不存在等）属正常首写场景，交给 appendFileSync 处理。
+     */
+    try {
+      if (lstatSync(path).isSymbolicLink()) {
+        console.warn(`dsh-workplan: journal 文件是符号链接，跳过写入 path=${path}`)
+        return {
+          ok: false,
+          code: 'JOURNAL_WRITE_FAILED',
+          error: `JOURNAL_WRITE_FAILED: journal 文件是符号链接，已跳过写入 path=${path}（防链接投毒）。`,
+        }
+      }
+    } catch {
+      /* 文件不存在（首写）或 lstat 失败：继续走正常写入，错误由 appendFileSync 显式上报。 */
+    }
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
+    appendFileSync(path, `${JSON.stringify(verdict.value)}\n`, { encoding: 'utf8', mode: 0o600 })
+    try {
+      // 既有文件权限收紧为 0o600（best-effort；新建文件已由 mode 覆盖）。
+      chmodSync(path, 0o600)
+    } catch {
+      /* best-effort：权限收紧失败不阻断追加。 */
+    }
   } catch (error) {
     return { ok: false, code: 'JOURNAL_WRITE_FAILED', error: errorText(error) }
   }
+  /* [T3][回读校验] 写后读回比对关键字段（见下方 helper 注释），不一致绝不静默。 */
+  const readback = verifyJournalAppendReadback(path, verdict.value)
+  if (!readback.ok) return { ok: false, code: 'JOURNAL_READBACK_FAILED', error: readback.error }
   return { ok: true, path }
+}
+
+/*
+ * [T3][回读校验] journal 追加写后读回。依据：reports/wp-member-expert-persist-call-T1.json
+ * 写盘点⑦（dept-journal.ts:290-308；2026-11-17 复核 mkdirSync:302、appendFileSync:303
+ * 无漂移）与 reports/wp-member-expert-storage-T1-storage.json（落盘路径
+ * <journalDir>/<planId>.jsonl，事件流追加、非整文件快照）。
+ * appendFileSync 成功后读回文件末尾窗口，JSON 解析后比对关键字段（v/id/planId/
+ * subtaskId/kind/ts/body 头 120 字摘要）。找不到匹配行 → 返回显式错误码
+ * JOURNAL_READBACK_FAILED（本模块「绝不静默」契约=显式错误码+处置指引，与
+ * JOURNAL_WRITE_FAILED 同口径；负责人硬性要求③的「抛显式错误」在本模块以
+ * 显式错误码实现，错误信息含文件路径与期望/实际摘要及指引：重试或让主 Agent
+ * 手动制定计划）。纯读校验、不写盘 → 幂等（硬性要求④）。
+ *
+ * [复审修复][O(n²)→O(窗口)] journal 默认永久保留，文件会涨到 MB 级；旧实现每次
+ * 追加后 readFileSync 整个文件逐行 parse，热路径每次请示/指示/完成/预估都全文件
+ * 重读。改为只读末尾一个窗口（JOURNAL_READBACK_WINDOW_BYTES）：
+ *   - O_APPEND 保证刚写入的行必在文件末尾；窗口 ≥ 单行最大体积（body ≤4000 字符 +
+ *     data JSON ≤4000 字符，单 line 远小于 64KB）即可命中；
+ *   - 窗口起点可能落在行中间 → 首行 parse 失败直接跳过该坏行继续；
+ *   - 并发追加交错不会把新行挤出窗口（需同一瞬时有 64KB 更新行写入才会，
+ *     概率可忽略；且失败显式可重试）。
+ */
+function deptMessageKeyDigest(record: any): string {
+  return JSON.stringify({
+    v: record?.v,
+    id: record?.id,
+    planId: record?.planId,
+    subtaskId: record?.subtaskId,
+    kind: record?.kind,
+    ts: record?.ts,
+    bodyHead: String(record?.body ?? '').slice(0, 120),
+  })
+}
+
+/** 回读窗口字节数：64KB。单行最大体积（body 4000 + data JSON 4000 + 结构开销）远小于此。 */
+const JOURNAL_READBACK_WINDOW_BYTES = 64 * 1024
+
+/** 只读文件末尾一个窗口（按字节）；文件小于窗口则全读。读失败由调用方捕获。 */
+function readJournalTailWindow(path: string, windowBytes: number): string {
+  const { size } = statSync(path)
+  const start = Math.max(0, size - windowBytes)
+  const length = size - start
+  if (length <= 0) return ''
+  const buffer = Buffer.alloc(length)
+  const fd = openSync(path, 'r')
+  try {
+    let offset = 0
+    while (offset < length) {
+      const read = readSync(fd, buffer, offset, length - offset, start + offset)
+      if (read <= 0) break
+      offset += read
+    }
+  } finally {
+    closeSync(fd)
+  }
+  return buffer.toString('utf8')
+}
+
+function verifyJournalAppendReadback(
+  path: string,
+  expected: DeptMessage,
+): { ok: true } | { ok: false; error: string } {
+  let text: string
+  try {
+    text = readJournalTailWindow(path, JOURNAL_READBACK_WINDOW_BYTES)
+  } catch (error) {
+    return {
+      ok: false,
+      error: `dsh-workplan: journal 回读校验读不到文件 path=${path}（${errorText(error)}）。`
+        + '请重试；若多次失败请让主 Agent 手动制定计划。',
+    }
+  }
+  const lines = text.split('\n').filter((line) => line.trim() !== '')
+  const want = deptMessageKeyDigest(expected)
+  /*
+   * 只扫末尾窗口：窗口首行可能被截断（窗口从行中间字节开始），parse 失败跳过该
+   * 坏行继续；新追加的行（digest 匹配）由 O_APPEND 保证在文件末尾、必在窗口内。
+   */
+  for (const line of lines) {
+    let parsed: any = null
+    try {
+      parsed = JSON.parse(line)
+    } catch {
+      continue
+    }
+    if (deptMessageKeyDigest(parsed) === want) return { ok: true }
+  }
+  const tail = lines.slice(-5)
+  const actual = tail
+    .map((line) => {
+      try {
+        return deptMessageKeyDigest(JSON.parse(line))
+      } catch {
+        return '<不可解析行>'
+      }
+    })
+    .join(' | ')
+  return {
+    ok: false,
+    error: `dsh-workplan: journal 落盘回读校验失败 path=${path}：写入内容与读回内容关键字段不一致。`
+      + `期望=${want.slice(0, 300)} 实际(末${tail.length}行)=${actual.slice(0, 300)}。`
+      + '请重试；若多次失败请让主 Agent 手动制定计划。',
+  }
 }
 
 export interface DeptReadFilter {
   kind?: DeptKind
   since?: number
   limit?: number
+  /** true=取最近 limit 条（尾部）；默认 false=按追加序取最早 limit 条。 */
+  newest?: boolean
 }
 
 /**
  * 按追加序回放留痕（契约 §2）：
  *   - 文件不存在 → 空列表（ok:true）；
  *   - 坏行（JSON 损坏或校验不过）计入 skipped，不静默吞；
- *   - kind/since 过滤后按 limit 截取：默认 500、上限 5000；
+ *   - kind/since 过滤后按 limit 截取：默认 500、上限 5000；newest=true 取最近，否则取最早；
  *   - planId 非法或读盘失败 → 显式 JOURNAL_READ_FAILED。
  */
 export function readDeptMessages(
@@ -369,5 +502,84 @@ export function readDeptMessages(
     if (since !== null && message.ts < since) continue
     matched.push(message)
   }
-  return { ok: true, messages: matched.slice(0, limit), skipped }
+  return { ok: true, messages: filter?.newest ? matched.slice(-limit) : matched.slice(0, limit), skipped }
+}
+
+/**
+ * [3.0.6][第 2 批] 留痕目录的可选保留策略（默认关闭）。
+ *
+ * 审计证据不该被默认删除，所以本函数只在显式配置
+ * `journalRetentionDays > 0`（或环境变量
+ * `DSH_WORKPLAN_JOURNAL_RETENTION_DAYS`）时被调用。它只删除同时满足以下
+ * 条件的文件：目录里直接的 `.jsonl` 普通文件、文件名是合法 planId、
+ * mtime 早于保留天数。活跃计划会持续追加，mtime 保持新，因此不会被误删。
+ *
+ * 单次最多删 `maxFiles`（默认 200，上限 1000）个最旧文件，避免一次启动
+ * 长时间阻塞；删除失败不再静默跳过——逐个 console.warn 一行并收集进
+ * 返回值的 `errors[]`（ok 保持 true，兼容既有调用方）。
+ *
+ * [复审修复] `excludePlanIds`（可选）：文件名（去 .jsonl）在集合内的一律
+ * 跳过删除，防「活跃但安静」（久无新消息、mtime 变旧）的计划被误删。
+ */
+export function pruneJournal(options: {
+  retentionDays: number
+  now?: number
+  maxFiles?: number
+  /** 活跃计划保护名单：journal 文件名（去 .jsonl）在集合内的跳过删除。 */
+  excludePlanIds?: ReadonlySet<string>
+}): { ok: boolean; scanned: number; deleted: string[]; error?: string; errors?: string[] } {
+  const days = Number(options?.retentionDays)
+  if (!Number.isFinite(days) || days <= 0) return { ok: true, scanned: 0, deleted: [] }
+  const dir = resolveJournalDir()
+  let names: string[]
+  try {
+    names = readdirSync(dir)
+  } catch (error: any) {
+    if (error?.code === 'ENOENT') return { ok: true, scanned: 0, deleted: [] }
+    return { ok: false, scanned: 0, deleted: [], error: errorText(error) }
+  }
+  const now = Number.isFinite(options?.now) ? Number(options.now) : Date.now()
+  const cutoff = now - days * 24 * 60 * 60 * 1000
+  const maxFiles = Math.max(0, Math.min(1000, Math.trunc(options?.maxFiles ?? 200)))
+  const exclude = options?.excludePlanIds
+  const candidates: Array<{ name: string; path: string; mtimeMs: number }> = []
+  for (const name of names) {
+    if (!name.endsWith('.jsonl')) continue
+    const planId = name.slice(0, -'.jsonl'.length)
+    if (!PLAN_ID_PATTERN.test(planId)) continue
+    // 活跃但安静的保护名单：在册计划即使 mtime 超期也不删。
+    if (exclude?.has(planId)) continue
+    const path = join(dir, name)
+    try {
+      const stat = lstatSync(path)
+      // 只删普通文件；符号链接一律跳过（防越界删除）。
+      if (!stat.isFile() || stat.isSymbolicLink()) continue
+      if (stat.mtimeMs >= cutoff) continue
+      candidates.push({ name, path, mtimeMs: stat.mtimeMs })
+    } catch {
+      // 单个文件 stat 失败不影响其他文件，最后以 scanned 如实反映总数。
+      continue
+    }
+  }
+  candidates.sort((a, b) => a.mtimeMs - b.mtimeMs)
+  const deleted: string[] = []
+  const errors: string[] = []
+  for (const candidate of candidates.slice(0, maxFiles)) {
+    try {
+      unlinkSync(candidate.path)
+      deleted.push(candidate.name)
+    } catch (error) {
+      // 单个 unlink 失败不再静默：收集原因 + 逐条 warn（ok 保持 true 兼容）。
+      const reason = `${candidate.name}: ${errorText(error)}`
+      errors.push(reason)
+      console.warn(`dsh-workplan: journal 保留清理删除失败 ${reason} path=${candidate.path}`)
+    }
+  }
+  const result: { ok: boolean; scanned: number; deleted: string[]; error?: string; errors?: string[] } = {
+    ok: true,
+    scanned: names.length,
+    deleted,
+  }
+  if (errors.length > 0) result.errors = errors
+  return result
 }

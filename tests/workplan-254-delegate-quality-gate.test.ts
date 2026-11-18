@@ -105,7 +105,7 @@ function makeRuntime(model = 'qwen3.8-flash') {
 }
 
 const assignments2 = () => [
-  { member: 'Expert-A', role: 'expert', task: '实现核心逻辑并自测', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
+  { member: 'Expert-A', role: 'expert', task: '实现核心逻辑后自测', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
   { member: 'Member-B', role: 'expert', task: '整理验收证据清单', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
 ]
 

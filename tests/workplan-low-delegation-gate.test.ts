@@ -54,7 +54,7 @@ function goodConsolidation(overrides: any = {}) {
     approach: ['专家做核心实现：先确认入口再最小改动，并附聚焦单测自测', '组员做自测：逐条核对验收标准并落盘留证'],
     approachBasis: ['第二轮分工的方法、流程、步骤基于第一轮完成好的全部结果：质量与时间的主要矛盾决定专家承担核心实现、组员承担自测与证据，约束决定不改无关文件。'],
     assignments: [
-      { member: 'Expert-A', role: 'expert', task: '实现核心逻辑并自测', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
+      { member: 'Expert-A', role: 'expert', task: '实现核心逻辑后自测', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
       { member: 'Member-B', role: 'expert', task: '补充核心路径回归用例', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
     ],
     ...overrides,
@@ -67,7 +67,7 @@ function eight(extra: any[] = []) {
     member: `组员${'丙丁戊己庚辛'[i]}`, role: 'expert', task: `单一目标子任务 ${i + 3}（单一主产物、可独立验收）`, qualityRequirements: ['必须给出可复核的命令输出或文件证据'],
   }))
   return [
-    { member: 'Expert-A', role: 'expert', task: '实现核心逻辑并自测', ...extra[0], qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
+    { member: 'Expert-A', role: 'expert', task: '实现核心逻辑后自测', ...extra[0], qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
     { member: 'Member-B', role: 'expert', task: '补充核心路径回归用例', ...extra[1], qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
     ...fillers,
   ]

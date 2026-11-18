@@ -3,12 +3,12 @@
 > **两个卖点，一句话：ISO/IEC 15408:2026 全套安全证据，5 条命令自己验；安装一条命令、零第三方运行时依赖。**
 
 [![verify](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml/badge.svg)](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml)
-[![version](https://img.shields.io/badge/version-3.0.3-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v3.0.3)
+[![version](https://img.shields.io/badge/version-3.0.6-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v3.0.6)
 
 给 **DeepSeek Harness（DSH）** 加一段「先拆计划 → 真派部门子 Agent 去做 → 左侧栏实时看进度」的能力。不装 App、不改 DSH 源码、不换页面。
 
 - 对话里先出【任务分解】：阶段、子任务、部门、验收标准，一样不缺
-- 最多 5 个真实子 Agent 并行执行，结果写回会话
+- 每轮最多 5 个部门负责人并行启动；负责人还会再派专家，整棵会话树同时活跃的子 Agent 受宿主 `maxActiveSubagents` 约束（默认 8）
 - 左侧栏「任务进度」：谁在做、做到哪、哪件卡住了
 
 **English (US) — plain-language guide:** [README.en.md](README.en.md)
@@ -54,7 +54,7 @@ grep -RInE "child_process|execSync|eval\(|writeFileSync" src || echo "0 命中�
 
 1. **先排计划**：你发出任务后、AI 真正动手前，它先写一份计划——分几个阶段、每个阶段几件具体工作、每件工作交给哪个部门、怎么做、什么算做完、可能卡在哪。
 2. **计划先给你看**：这份计划以「任务分解」的形式出现在对话里，包含每一步的依据与验收标准，而不是一句话糊过去。
-3. **真的派人去做**：确认后，每一件具体工作交给一个**真实的 DSH 子 Agent** 去执行（最多 5 个同时跑），结果写回会话；你在左侧栏「任务进度」里随时能看到谁在做、做到哪、哪件卡住了。
+3. **真的派人去做**：确认后，每一件具体工作交给一个**真实的 DSH 子 Agent** 去执行（每轮最多 5 个负责人同时启动；负责人再派专家，整棵树受宿主上限约束，默认 8），结果写回会话；你在左侧栏「任务进度」里随时能看到谁在做、做到哪、哪件卡住了。
 
 计划不是装饰品：主 Agent 必须先派发、等到部门结果回来，才能继续往下答。
 
@@ -69,7 +69,7 @@ grep -RInE "child_process|execSync|eval\(|writeFileSync" src || echo "0 命中�
 ## 一键安装
 
 ```bash
-dsh plugin --profile web add dsh-workplan@3.0.3
+dsh plugin --profile web add dsh-workplan@3.0.6
 ```
 
 装完**重启一次 DSH Web**（或重新载入当前页面）让插件生效。
@@ -114,7 +114,7 @@ dsh plugin --profile web add "$(pwd)"
 | `dsh_workplan_handoff` | 处置跨部门需求：`list` / `assign` / `resolve` / `close`。未处置会拦住交付；对「待指示」的行 `resolve` 会直接把答复投递给子会话。 |
 | `dsh_workplan_followup` | 给已中止或暂停、但产物已落盘的直接子会话补一条收尾说明。 |
 | `dsh_workplan_verify` | 子 Agent 在**阶段三（验证阶段）**提交三阶段证据做核验；阶段一、二调用会返回 `PHASE_GATE`。核验通过≠完成，最终仍由完成判定复核。 |
-| `dsh_workplan_lessons` | 只读查看**永久教训记忆**：`list` / `search` / `stats`。它只读文件，不改计划状态；用来核对「到底记住了什么、哪些错误在重复发生」。 |
+| `dsh_workplan_lessons` | 只读查看**永久教训记忆**：`list` / `search` / `stats`。仅限根会话调用（子 Agent 不能跨项目读取）；它只读文件，不改计划状态；用来核对「到底记住了什么、哪些错误在重复发生」。 |
 
 在 **plan 模式**下只会给你看计划，`dispatch` 会被明确拦下并说明原因，不会偷偷开跑。
 
@@ -178,7 +178,9 @@ DSH_WORKPLAN_LESSONS_FILE=/path/x.jsonl   # 需要时用环境变量覆盖
 | 规划器静默判定 | 90 秒（仅规划输出传输健康保护） | `DSH_WORKPLAN_PLANNER_IDLE_TIMEOUT_MS` |
 | 规划器绝对上限 | 15 分钟（仅规划器） | 随 `…_PLANNER_TIMEOUT_MS` 等比变化 |
 | 自动续跑次数 | 2 次（处理可续跑的非时间暂停，不是执行时钟） | `DSH_WORKPLAN_MAX_RESUMES` |
-| 并发子 Agent | 5 个（固定） | — |
+| 回合收尾等待上限 | 60 分钟（只约束收尾时"等计划/派发落地"的等待；到点放行或报错但**不杀任务**，部门/专家执行本身仍无时限；0 = 无限旧行为） | `DSH_WORKPLAN_TURN_STOPPING_MAX_WAIT_MS` |
+| 澄清闸轮次上限 | 同一回合对话连续触发 2 轮澄清提问后放行进入规划（30 分钟无触发自动归零） | 固定 |
+| 并发子 Agent | **每轮最多 5 个负责人**；负责人还会再派专家，整棵会话树同时活跃的子 Agent 受宿主 `maxActiveSubagents` 约束（默认 8） | — |
 
 单次模型网络请求、单条 Bash 命令和清理等待仍有各自的局部健康保护；它们不是部门任务的总时限，不能用一条慢命令的传输超时替代整个任务 deadline。后台任务也不能绕过用户显式取消。
 
@@ -191,10 +193,17 @@ DSH_WORKPLAN_LESSONS_FILE=/path/x.jsonl   # 需要时用环境变量覆盖
 { "maxResumes": 2 }
 ```
 
+留痕（`journal`）默认**永久保留**，不自动删除任何审计证据。只有显式配置正数时，才会在启动 10 秒后（不阻塞激活）和之后每 24 小时清理一次“超过该天数未更新”的 `<planId>.jsonl`（单次最多 200 个最旧文件；**当前活跃的计划始终排除**，正在执行的计划也会持续追加，不会被误删；单个文件删除失败会逐条告警留痕）：
+
+```jsonc
+{ "journalRetentionDays": 90 }
+// 等价环境变量：DSH_WORKPLAN_JOURNAL_RETENTION_DAYS=90
+```
+
 ## 安全与隐私（可以自己复核）
 
 - **没有第三方运行时依赖**：`dependencies` 是空的；装出来的只有这个插件自己的 JS、配置、图标和说明。
-- **不写你的磁盘**：源码里没有任何 `writeFileSync` / `appendFileSync` / `mkdirSync`（可 `grep` 验证）；结果只写进 DSH 会话记录。
+- **只写三类本地文件，不写你的项目目录**：① `~/.dsh/workplan/journal/<planId>.jsonl`（计划留痕：派发、指示、请示、完成）；② `~/.dsh/workplan/lessons.jsonl`（永久教训记忆）；③ `~/.dsh/workplan/notices.jsonl`（专用通知台账：workplan 通知的权威机器可读流，与用户真实输入分离）。三者都可用环境变量改到别处，统一 **0o600 文件 / 0o700 目录**权限并拒绝向符号链接写入；台账默认最多保留最新 5000 行（`DSH_WORKPLAN_NOTICES_MAX_LINES` 可改），超限原子重写；源码里的 `appendFileSync` / `writeFileSync` 只出现在留痕/记忆/台账这几个模块。
 - **不向外发数据**：源码里没有 `child_process`、没有对外 `fetch`/`http.request`；唯一的一次 `fetch` 是浏览器端请求**同源**的 `/dsh-workplan/plans`。
 - **面板数据要登录**：该路由走 DSH 自己的鉴权，未登录直接返回 401。
 - **图表库是本地自带**：`vendor/chart.umd.js`（Chart.js 4.6.1，MIT）随包分发，不加载任何 CDN 脚本。
@@ -203,7 +212,8 @@ DSH_WORKPLAN_LESSONS_FILE=/path/x.jsonl   # 需要时用环境变量覆盖
 
 ```bash
 npm view dsh-workplan@latest dependencies     # 应为空
-grep -RInE "writeFileSync|child_process|eval\(" src   # 应无命中
+grep -RInE "child_process|eval\(" src   # 应无命中
+grep -RIn "appendFileSync\|writeFileSync" src  # 只应出现在 dept-journal.ts、lessons.ts 与 notice-ledger.ts
 npm audit --omit=dev
 ```
 

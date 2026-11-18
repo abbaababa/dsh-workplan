@@ -105,7 +105,7 @@ function consolidation(overrides: any = {}) {
     approach: ['专家做核心实现：先确认入口再最小改动，并附聚焦单测自测', '组员做自测：逐条核对验收标准并落盘留证'],
     approachBasis: ['第二轮分工的方法、流程、步骤基于第一轮全部梳理结果：质量与时间矛盾决定专家做核心实现、组员做自测。'],
     assignments: [
-      { member: 'Expert-A', role: 'expert', task: '实现核心逻辑并自测', reasoningEffort: 'xhigh', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
+      { member: 'Expert-A', role: 'expert', task: '实现核心逻辑后自测', reasoningEffort: 'xhigh', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
       { member: 'Member-B', role: 'expert', task: '补充核心路径回归用例', reasoningEffort: 'low', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
     ],
     ...overrides,
@@ -258,7 +258,7 @@ test('旧拒因顺序不变：problemAnalysis → assignments 先于两轮产物
    * 分工表本身合格时拒因必须落在缺 approach 上。
    */
   const expertOnly = pd({
-    consolidation: { problemAnalysis: ['现状：部门任务需要拆给专家与组员；目标是保质保量完成；约束是不改无关文件；主要矛盾是质量与时间。'], assignments: [{ member: 'A', role: 'expert', task: '读取目标文件并写出一份结论', reasoningEffort: 'low', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] }] },
+    consolidation: { problemAnalysis: ['现状：部门任务需要拆给专家与组员；目标是保质保量完成；约束是不改无关文件；主要矛盾是质量与时间。'], assignments: [{ member: 'A', role: 'expert', task: '读取目标文件得出一份结论', reasoningEffort: 'low', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] }] },
     model: 'qwen3.8-flash',
   })
   assert.equal(expertOnly.code, 'DELEGATE_CONSOLIDATION_INCOMPLETE')

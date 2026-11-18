@@ -14,7 +14,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { auditClarifyNeed } from '../src/understanding.js'
+import { auditClarifyNeed, resetClarifyRounds } from '../src/understanding.js'
 import { buildClarifyMessage, PLAN_MARKER_BEGIN } from '../src/plan.js'
 import { matchDepartmentKeywords } from '../src/departments.js'
 
@@ -33,6 +33,8 @@ const CLARIFY_CASES = [
 
 for (const item of CLARIFY_CASES) {
   test(`clarify: ${item.name} is asked, not planned (${item.rule})`, () => {
+    // [3.0.2] 本文件对默认会话多次触发澄清闸，逐用例清零以免触达轮次上限。
+    resetClarifyRounds('')
     const verdict = auditClarifyNeed(item.text, '')
     assert.equal(verdict.needed, true, JSON.stringify(verdict))
     assert.equal(verdict.rule, item.rule)
@@ -50,6 +52,7 @@ test('clarify: real tasks are not intercepted', () => {
     '把 T11 的补丁 rebase 到 HEAD，补齐回归用例，写发布记录。',
     '发布 1.12.3 到 npm，并建 GitHub Release。',
   ]
+  resetClarifyRounds('')
   for (const text of normal) {
     const verdict = auditClarifyNeed(text, '')
     assert.equal(verdict.needed, false, `must not ask: ${text} -> ${JSON.stringify(verdict)}`)
@@ -57,11 +60,13 @@ test('clarify: real tasks are not intercepted', () => {
 })
 
 test('clarify: the conversation may supply the missing surface', () => {
+  resetClarifyRounds('')
   const verdict = auditClarifyNeed('把它改成默认收起。', '上一轮说：把截图红圈处的分步进度改成可点击。')
   assert.equal(verdict.needed, false, JSON.stringify(verdict))
 })
 
 test('clarify: the interception message carries no plan envelope', () => {
+  resetClarifyRounds('')
   const verdict = auditClarifyNeed(T0513, '')
   const message = buildClarifyMessage(verdict)
   const text = message.content.map((part: any) => part.text ?? '').join('')

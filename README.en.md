@@ -3,12 +3,12 @@
 > **Two selling points, one line: a full ISO/IEC 15408:2026 evidence pack you can verify with 5 commands, and a one-command install with zero runtime dependencies.**
 
 [![verify](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml/badge.svg)](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml)
-[![version](https://img.shields.io/badge/version-3.0.3-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v3.0.3)
+[![version](https://img.shields.io/badge/version-3.0.6-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v3.0.6)
 
 Adds "plan first → dispatch real department subagents → watch progress in the sidebar" to **DeepSeek Harness (DSH)**. No app, no DSH source patch, no page replacement.
 
 - A task-decomposition block appears in the conversation first: stages, work items, departments, acceptance criteria
-- Up to 5 real subagents run in parallel and write results back into the session
+- Up to 5 department leads start per round; the whole session tree is capped by the host's `maxActiveSubagents` (default 8)
 - The **Task progress** panel shows who is working, how far, and what is stuck
 
 **中文（简体）说明：** [README.md](README.md)
@@ -52,7 +52,7 @@ For every new task with a real goal, the plugin inserts three beats:
 
 1. **Plan before acting.** Before the model's first step, it writes a plan: stages → concrete work items → which department owns each one → how to do it → what counts as done → what could go wrong.
 2. **Show the plan first.** The plan appears in the conversation as a task-decomposition block, so you can see the reasoning and acceptance criteria instead of a one-line promise.
-3. **Dispatch real work.** Each work item is handed to a **real DSH subagent** (up to 5 at a time), and results are written back to the session. The main agent must dispatch and wait for the department results before it continues.
+3. **Dispatch real work.** Each work item is handed to a **real DSH subagent** (up to 5 leads per round; leads may spawn experts, and the whole tree is capped by the host's `maxActiveSubagents`, default 8), and results are written back to the session. The main agent must dispatch and wait for the department results before it continues.
 
 Greetings, thanks, and status questions ("how far along are we?") do not trigger a plan.
 
@@ -80,7 +80,7 @@ The full contract — roles, data shapes, state machine, recovery, and the three
 ## Install
 
 ```bash
-dsh plugin --profile web add dsh-workplan@3.0.3
+dsh plugin --profile web add dsh-workplan@3.0.6
 ```
 
 Restart the DSH Web process (or reload the page) so the bundle is picked up.
@@ -151,7 +151,7 @@ A passing retrospective is appended to the **permanent lesson memory** at `~/.ds
 | Planner stall window | 90 s of missing output after streaming starts; transport health only | `DSH_WORKPLAN_PLANNER_IDLE_TIMEOUT_MS` |
 | Planner absolute ceiling | 15 min; planning only | Scales with `…_PLANNER_TIMEOUT_MS` |
 | Automatic resumes | 2; non-time pause recovery, not an execution clock | `DSH_WORKPLAN_MAX_RESUMES` |
-| Subagent concurrency | 5 (fixed) | — |
+| Subagent concurrency | **Up to 5 leads per round**; the whole tree is capped by the host's `maxActiveSubagents` (default 8) | — |
 
 Individual model connections, Bash commands, and disposal waits retain their local health checks; they are not department task deadlines. Without automatic time-based termination, genuinely stuck work can keep consuming concurrency and spend, so use the dashboard/`status` and explicitly cancel or redirect it. Legacy deadlines, extension journals, timeout counts, and criterion fields remain readable history but never arm new timers.
 
@@ -161,10 +161,17 @@ Non-time settings can still be placed in the plugin config:
 { "maxResumes": 2 }
 ```
 
+The plan journal is kept **forever** by default. Only when a positive retention is configured does the plugin prune `<planId>.jsonl` files untouched for that many days, at startup and every 24 hours (at most 200 oldest files per run; active plans keep appending and are never pruned):
+
+```jsonc
+{ "journalRetentionDays": 90 }
+// same as DSH_WORKPLAN_JOURNAL_RETENTION_DAYS=90
+```
+
 ## Security and privacy
 
 - **No third-party runtime dependencies** — `dependencies` is empty.
-- **No filesystem writes** — no `writeFileSync` / `appendFileSync` / `mkdirSync` in `src/`; results go into the DSH session record.
+- **Writes only two local file families, never your project** — ① `~/.dsh/workplan/journal/<planId>.jsonl` (plan journal); ② `~/.dsh/workplan/lessons.jsonl` (permanent lessons). Both paths can be overridden by env vars; `appendFileSync` / `writeFileSync` appear only in `dept-journal.ts` and `lessons.ts`.
 - **No outbound traffic** — no `child_process`, no external `fetch`/`http.request`; the one `fetch` is the browser asking its own origin for `/dsh-workplan/plans`.
 - **The panel route is authenticated** — unauthenticated requests get 401.
 - **Chart.js is vendored** (`vendor/chart.umd.js`, MIT); no CDN script is loaded.
@@ -173,7 +180,8 @@ Verify it yourself:
 
 ```bash
 npm view dsh-workplan@latest dependencies
-grep -RInE "writeFileSync|child_process|eval\(" src
+grep -RInE "child_process|eval\(" src
+grep -RIn "appendFileSync\|writeFileSync" src  # only dept-journal.ts and lessons.ts
 npm audit --omit=dev
 ```
 

@@ -3,12 +3,12 @@
 > **两个卖点，一句话：ISO/IEC 15408:2026 全套安全证据，5 条命令自己验；安装一条命令、零第三方运行时依赖。**
 
 [![verify](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml/badge.svg)](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml)
-[![version](https://img.shields.io/badge/version-3.0.3-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v3.0.3)
+[![version](https://img.shields.io/badge/version-3.0.6-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v3.0.6)
 
 给 **DeepSeek Harness（DSH）** 加一段「先拆计划 → 真派部门子 Agent 去做 → 左侧栏实时看进度」的能力。不装 App、不改 DSH 源码、不换页面。
 
 - 对话里先出【任务分解】：阶段、子任务、部门、验收标准，一样不缺
-- 最多 5 个真实子 Agent 并行执行，结果写回会话
+- 每轮最多 5 个部门负责人并行启动；负责人还会再派专家，整棵会话树同时活跃的子 Agent 受宿主 `maxActiveSubagents` 约束（默认 8）
 - 左侧栏「任务进度」：谁在做、做到哪、哪件卡住了
 
 **English (US) — plain-language guide:** [README.en.md](README.en.md)
@@ -54,7 +54,7 @@ grep -RInE "child_process|execSync|eval\(|writeFileSync" src || echo "0 命中�
 
 1. **先排计划**：你发出任务后、AI 真正动手前，它先写一份计划——分几个阶段、每个阶段几件具体工作、每件工作交给哪个部门、怎么做、什么算做完、可能卡在哪。
 2. **计划先给你看**：这份计划以「任务分解」的形式出现在对话里，包含每一步的依据与验收标准，而不是一句话糊过去。
-3. **真的派人去做**：确认后，每一件具体工作交给一个**真实的 DSH 子 Agent** 去执行（最多 5 个同时跑），结果写回会话；你在左侧栏「任务进度」里随时能看到谁在做、做到哪、哪件卡住了。
+3. **真的派人去做**：确认后，每一件具体工作交给一个**真实的 DSH 子 Agent** 去执行（每轮最多 5 个负责人同时启动；负责人再派专家，整棵树受宿主上限约束，默认 8），结果写回会话；你在左侧栏「任务进度」里随时能看到谁在做、做到哪、哪件卡住了。
 
 计划不是装饰品：主 Agent 必须先派发、等到部门结果回来，才能继续往下答。
 
@@ -69,7 +69,7 @@ grep -RInE "child_process|execSync|eval\(|writeFileSync" src || echo "0 命中�
 ## 一键安装
 
 ```bash
-dsh plugin --profile web add dsh-workplan@3.0.3
+dsh plugin --profile web add dsh-workplan@3.0.6
 ```
 
 装完**重启一次 DSH Web**（或重新载入当前页面）让插件生效。
@@ -139,7 +139,7 @@ dsh plugin --profile web add "$(pwd)"
 | 规划器静默判定 | 90 秒（输出开始后连一个字都不再来才算卡死） | `DSH_WORKPLAN_PLANNER_IDLE_TIMEOUT_MS` |
 | 规划器绝对上限 | 15 分钟（= 无进展上限 × 3，有无产出都到此为止） | 随 `…_PLANNER_TIMEOUT_MS` 等比变化 |
 | 自动续跑次数 | 2 次 | `DSH_WORKPLAN_MAX_RESUMES` |
-| 并发子 Agent | 5 个（固定） | — |
+| 并发子 Agent | **每轮最多 5 个负责人**；整棵树受宿主 `maxActiveSubagents` 约束（默认 8） | — |
 
 这些规划器时限只保护“生成计划”这一步，不会作用到负责人或专家执行。执行阶段只由真实完成、真实错误、证据/质量门禁或用户取消改变；重试可由真实失败触发，不会因计时器到点触发。
 
@@ -148,7 +148,7 @@ dsh plugin --profile web add "$(pwd)"
 ## 安全与隐私（可以自己复核）
 
 - **没有第三方运行时依赖**：`dependencies` 是空的；装出来的只有这个插件自己的 JS、配置、图标和说明。
-- **不写你的磁盘**：源码里没有任何 `writeFileSync` / `appendFileSync` / `mkdirSync`（可 `grep` 验证）；结果只写进 DSH 会话记录。
+- **只写两类本地文件，不写你的项目目录**：① `~/.dsh/workplan/journal/<planId>.jsonl`（计划留痕）；② `~/.dsh/workplan/lessons.jsonl`（永久教训记忆）。两者都可用环境变量改到别处；`appendFileSync` / `writeFileSync` 只出现在 `dept-journal.ts` 与 `lessons.ts`。
 - **不向外发数据**：源码里没有 `child_process`、没有对外 `fetch`/`http.request`；唯一的一次 `fetch` 是浏览器端请求**同源**的 `/dsh-workplan/plans`。
 - **面板数据要登录**：该路由走 DSH 自己的鉴权，未登录直接返回 401。
 - **图表库是本地自带**：`vendor/chart.umd.js`（Chart.js 4.6.1，MIT）随包分发，不加载任何 CDN 脚本。
@@ -157,7 +157,8 @@ dsh plugin --profile web add "$(pwd)"
 
 ```bash
 npm view dsh-workplan@latest dependencies     # 应为空
-grep -RInE "writeFileSync|child_process|eval\(" src   # 应无命中
+grep -RInE "child_process|eval\(" src   # 应无命中
+grep -RIn "appendFileSync\|writeFileSync" src  # 只应出现在 dept-journal.ts 与 lessons.ts
 npm audit --omit=dev
 ```
 

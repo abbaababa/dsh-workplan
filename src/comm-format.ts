@@ -98,7 +98,7 @@ export const COMM_FORMAT_SPEC = Object.freeze({
       description: '专家（第三层执行者）结果必须包含 report 对象，只允许 keyResults/keyInfo/importantInfo/leadRequirements 四个字符串数组字段，至少各有 1 条非空内容（keyInfo/important 可为空数组但须存在），每数组最多 6 条、每条最多 200 字符，内部与跨字段不得出现重复表述',
       rationale: '用户要求 7：专家成果必须非常精简地汇报给部门负责人，只要关键信息、关键成果、重要信息和负责人要求的东西，并以 JSON mode 结构化输出' }),
     Object.freeze({ id: 'F11', category: 'report',
-      description: '部门负责人结果必须包含 departmentSummary 对象，只允许 keyResults/keyInfo/importantInfo/sources 四个字符串数组字段，keyResults 至少 1 条非空、sources 必须覆盖本部门全部已派发专家，每数组最多 6 条、每条最多 200 字符，内部与跨字段不得出现重复表述',
+      description: '部门负责人结果必须包含 departmentSummary 对象，只允许 keyResults/keyInfo/importantInfo/sources 四个字符串数组字段，keyResults 至少 1 条非空，keyResults/keyInfo/importantInfo 每项最多 6 条、每条最多 200 字符；sources 最多 16 条且必须逐人覆盖本部门全部已派发专家，内部与跨字段不得出现重复表述',
       rationale: '用户要求 8/10/11：部门负责人必须全面汇总全部专家汇报，汇总报告必须精简、禁止累赘重复，并以 JSON mode 结构化直接交回主 Agent' }),
   ]),
   /*

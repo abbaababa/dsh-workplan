@@ -365,6 +365,18 @@ async function waitFor(check: () => boolean, timeoutMs = 5000) {
   return false
 }
 
+async function waitForNoticeRow(runtime: any, session: any, subtaskId: string, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs
+  let row: any = null
+  while (Date.now() < deadline) {
+    const snapshot: any = await runtime.statusTool({ session }, {})
+    row = (snapshot?.statuses ?? []).find((item: any) => item?.subtaskId === subtaskId) ?? null
+    if (row?.noticeChannel) return row
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  return row
+}
+
 function makePlanMessage(subtask: any, sessionId = LEAD_ID) {
   return buildPlanMessage({
     planId: 'wp-notice-channel',
@@ -407,8 +419,8 @@ test('运行时集成：派发写 awaiting（真实 target/caller），转达消
   })
   await runtime.dispatchTool({ id: LEAD_ID, session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
 
-  const running: any = await runtime.statusTool({ session }, {})
-  const row = (running?.statuses ?? []).find((item: any) => item.subtaskId === 'T1')
+  // async 派发只保证「开始」，不保证子会话已进入 assigned；轮询到通道条目出现。
+  const row = await waitForNoticeRow(runtime, session, 'T1')
   assert.ok(row?.noticeChannel, '派发后状态行必须出现 noticeChannel')
   assert.equal(row.noticeChannel.state, 'awaiting')
   assert.equal(row.noticeChannel.target, session.id, '目标必须是本轮主会话 id（不得是 "lead"）')
@@ -630,8 +642,7 @@ test('F4 运行时：无活 agent 时不得把 plan.sessionId 当发送目标（
   // 只给会话、不给活 agent：这是 T4 D5 的「injected 为空且无活 agent」场景。
   await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
 
-  const running: any = await runtime.statusTool({ session }, {})
-  const row = (running?.statuses ?? []).find((item: any) => item.subtaskId === 'T1')
+  const row = await waitForNoticeRow(runtime, session, 'T1')
   assert.ok(row?.noticeChannel, '派发后状态行必须留下通道条目（即使目标不可用也要如实记录）')
   assert.equal(row.noticeChannel.target, null, 'plan.sessionId 不得被当成发送目标')
   assert.equal(row.noticeChannel.reason, 'TARGET_NOT_INJECTED', '目标不可用必须给出确定性原因码')

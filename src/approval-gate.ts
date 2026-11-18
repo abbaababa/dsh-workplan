@@ -69,6 +69,66 @@ const APPROVAL_PATTERNS: Array<{ re: RegExp; label: string }> = [
   },
 ]
 
+/*
+ * [3.0.2] 命中候选的语境排除：否定 / 引用 / 规章制度转述。
+ *
+ * 正则只看字面，两种常见文本会被误按：
+ *  1. 否定句——「不用经用户认可再执行，直接干」：用户恰恰在**取消**门槛，
+ *     字面却完整命中「经…认可再…」；
+ *  2. 引用/转述——用户粘贴规章制度原文（「制度规定：须经用户批准后再执行」）
+ *     或把门槛语当引文讨论，不是在给自己的任务设门槛。
+ *
+ * 排除判据（命中位置之前约 40 字符窗口内，命中任一则该条候选不触发）：
+ *  - 否定词：不用/无需/不必/不需要/禁止/谈不上；单字 勿/别 须紧贴命中
+ *    （6 字内且无句断），避免「识别/分别/级别」里的「别」误伤；
+ *  - 引号包裹：「」“”‘’以及直引号成对出现、且命中片段位于引号内；
+ *  - 转述字样：原文/制度/规定/条款。
+ * 窗口只回看、不越过句读推断语义——拿不准时维持原判定（宁漏勿冤的
+ * 方向对漏判更有利：漏判只是回到默认自动派发，误判才会把普通任务按住）。
+ */
+const NEGATION_WORDS: readonly string[] = Object.freeze(['不用', '无需', '不必', '不需要', '禁止', '谈不上'])
+/** 单字否定必须紧贴命中（其后 ≤6 字即命中、中间无句末符），否则视为普通用字。 */
+const SINGLE_CHAR_NEGATION = /[勿别][^。；！？\n]{0,6}$/
+/** 用户转述规章制度时的常见字样（40 字窗口内出现即视为引用而非本任务门槛）。 */
+const RULES_QUOTE_WORDS: readonly string[] = Object.freeze(['原文', '制度', '规定', '条款'])
+/** 成对引号：「」“”‘’为不对称对；直引号 " 与 ' 按出现次数奇偶判定。 */
+const QUOTE_PAIRS: ReadonlyArray<readonly [string, string]> = Object.freeze([
+  ['「', '」'], ['“', '”'], ['‘', '’'], ['"', '"'], ["'", "'"],
+])
+
+function hasNegationBefore(window: string): boolean {
+  for (const word of NEGATION_WORDS) {
+    if (window.includes(word)) return true
+  }
+  return SINGLE_CHAR_NEGATION.test(window)
+}
+
+function isInsideQuotes(text: string, index: number): boolean {
+  const before = text.slice(0, index)
+  for (const [open, close] of QUOTE_PAIRS) {
+    if (open === close) {
+      let count = 0
+      for (let position = 0; position < before.length; position += 1) {
+        if (before[position] === open) count += 1
+      }
+      if (count % 2 === 1) return true
+    } else if (before.lastIndexOf(open) > before.lastIndexOf(close)) {
+      return true
+    }
+  }
+  return false
+}
+
+/** 命中位置之前约 40 字符窗口内是否存在否定/引用/转述标记。 */
+function hasExemptContext(text: string, index: number): boolean {
+  const window = text.slice(Math.max(0, index - 40), index)
+  if (hasNegationBefore(window)) return true
+  for (const word of RULES_QUOTE_WORDS) {
+    if (window.includes(word)) return true
+  }
+  return isInsideQuotes(text, index)
+}
+
 function excerptOf(text: string, match: RegExpExecArray, max = 60): string {
   const start = Math.max(0, match.index - 6)
   const end = Math.min(text.length, match.index + match[0].length + 10)
@@ -85,9 +145,23 @@ export function detectApprovalGate(taskText: string): ApprovalGateVerdict {
   if (!text) return { held: false, matched: [], reason: '' }
   const matched: ApprovalGateMatch[] = []
   for (const { re, label } of APPROVAL_PATTERNS) {
-    const found = re.exec(text)
-    if (found) {
-      matched.push({ label, excerpt: excerptOf(text, found) })
+    // [3.0.2] 逐处匹配并跳过带否定/引用语境的候选；同一条规则后一处干净命中
+    // 仍可触发（如先转述制度、再给自己的任务立门槛）。
+    const scanner = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`)
+    let found: RegExpExecArray | null
+    let hit: RegExpExecArray | null = null
+    while ((found = scanner.exec(text)) !== null) {
+      if (found[0] === '') {
+        scanner.lastIndex += 1
+        continue
+      }
+      if (!hasExemptContext(text, found.index)) {
+        hit = found
+        break
+      }
+    }
+    if (hit) {
+      matched.push({ label, excerpt: excerptOf(text, hit) })
       // 一条规则命中即可；继续跑完所有规则只为汇总证据，不去重（同义重复无害）。
     }
   }

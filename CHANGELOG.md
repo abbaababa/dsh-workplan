@@ -1,3 +1,57 @@
+## 3.0.6 — 2026-11-18（审计后第 1–4 批：数据安全、并发排队、看板开销、收尾闸门与复审修复）
+
+- **永久记忆不再可能被整体清空**：`recordLesson` 读文件失败（EACCES/EMFILE/EIO/路径被目录占用）时直接抛 `LESSONS_READ_FAILED` 并拒绝写入，不再把“读失败”当成“空文件”后覆盖；重写时把无法解析的坏行原样带回文件末尾；覆盖前留一代 `<file>.bak`。
+- **journal 回读不再误报成功为失败**：写后校验从“只看末 5 行”改为全文件定位本次写入，避免并发追加把刚写入的行挤出窗口后误报 `JOURNAL_READBACK_FAILED`、调用方重试又重复写一条。
+- **看板响应上限按字节计**：`body.length` 改为 `Buffer.byteLength`，截断后复检；先减会话数，再丢单会话大块明细，最后只留摘要，任何一级都返回合法 JSON。
+- **鉴权 fail-closed**：`connection.requestRejection` 不存在时返回 503，不再因可选链静默放行全部会话计划。
+- **文档更正**：README 不再声称“不写磁盘”“并发固定 5 个”；如实写明 journal/lessons 两类落盘文件，以及 5 个/轮 + 宿主 `maxActiveSubagents`（默认 8）的真实并发边界。
+- **回归**：新增 4 例（读失败拒写、坏行保留 + `.bak`、字节截断、未超限原样返回）；全量 **1218 例：pass 1217 / fail 0 / cancelled 0**（1 例 todo）。
+
+### 第 2 批：并发上限排队、看板轮询合并、静态资源缓存、留痕可选清理
+
+- **撞宿主并发上限不再直接判失败**：新增 `startActivationQueued`，三处 `subagents.startActivation`（主导派发、自配档接续、成员派发）撞 `ACTIVATION_LIMIT_REACHED` 时按指数退避（1s→15s）+ 全局冷却等待空位，最多等 10 分钟；等待期间不写失败状态、不消耗子任务 attempt，取消时抛 `ABORTED`，等满才如实报“仍未等到空位”。
+- **看板轮询按会话共享**：同一 `sessionId`（或“全部会话”）只保留一个 4 秒轮询器和一组订阅者，最后一个订阅者卸载时停止；不再每个 `TurnCard` 各发一份请求。
+- **图表库只读一次**：`/dsh-workplan/vendor/chart.umd.js` 首次读取后缓存 Buffer，后续请求不再每次 `readFileSync` 210KB；读取失败不缓存，仍可重试。
+- **留痕可选清理（默认关闭）**：新增 `journalRetentionDays` / `DSH_WORKPLAN_JOURNAL_RETENTION_DAYS`，默认 0 = 永久保留；正数时启动及每 24 小时删除超过该天数未更新的合法 `<planId>.jsonl`（跳过符号链接，单次最多 200 个最旧文件）。
+- **回归**：新增 4 例并发排队 + 5 例留痕清理 + handle-policy 白名单登记；全量 **1227 例：pass 1226 / fail 0 / cancelled 0**（1 例 todo），`npm run build` 已同步 `lib/`。
+
+### 第 3 批：收尾等待上限、专用通知台账、结构化门禁死锁修复
+
+- **回合收尾不再无限等待**：`agent/turn-stopping` 等待在途规划/派发新增上限 `turnStoppingMaxWaitMs` / `DSH_WORKPLAN_TURN_STOPPING_MAX_WAIT_MS`（默认 60 分钟，0 = 无限旧行为）。到点不杀任务：计划仍在后台执行、结果照常落盘；交互式按「等待预算耗尽」放行但留痕（`releasedIncomplete.reason='wait-exhausted'` + 每回合至多一条通知），fail-closed（headless）抛 `WORKPLAN_WAIT_EXHAUSTED` 并以错误收尾。只约束收尾等待，不构成部门/专家执行时限。
+- **专用通知台账**：宿主禁止插件新增 Session 事件类型（重启会拒开）且 `appendPluginRecord` 保留给实验包，故通知权威流落在插件自有 JSONL（默认 `~/.dsh/workplan/notices.jsonl`，`DSH_WORKPLAN_NOTICES_FILE` 可覆盖）：`appendUserMessage` 每次成功落盘 workplan 通知即同步记一行（sessionId/planId/kind/form/summary/text + 对应 surface seq），与用户真实输入彻底分离；写失败不拖垮投递，失败行进内存环形缓冲（上限 100）下次补落，绝不静默丢弃。
+- **结构化门禁死锁修复**：复杂任务按裁决强制 ≥8 名专家（上限 12），而部门汇总 `sources` 必须逐人覆盖全部已派发专家——旧实现把 `sources` 也卡 6 条精简上限，7–12 人的部门永远交不出合法汇总。现 `sources` 单独放宽到 16 条（其余三个数组仍 6 条），契约文案同步。
+- **回归**：新增 4 例收尾等待上限 + 5 例通知台账 + 1 例 sources 覆盖（12 人通过 / 其余数组仍限 6 条 / 第 17 人仍拒）；测试进程全局隔离台账路径；全量 **1237 例：pass 1236 / fail 0 / cancelled 0**（1 例 todo），`npm run build` 已同步 `lib/`。
+
+### 第 4 批：复审修复（自引入回归 + 高危缺口 + 中危加固）
+
+**自引入回归（第 1–3 批的收尾）**
+- **journal 回读 O(n²) → O(窗口)**：写后校验不再全文件重读，只读末尾 64KB 窗口内定位本次写入（O_APPEND 保证新行必在末尾）；单行体积超窗口的极端情形会在错误信息里如实呈现末 5 行摘要。
+- **通知台账有界且加固**：新增 `NOTICE_LEDGER_MAX_LINES = 5000`（`DSH_WORKPLAN_NOTICES_MAX_LINES` 可覆盖），超限原子重写为最新 N 行；目录 0o700、文件 0o600，写前 lstat 防符号链接投毒（跳过 + warn，不抛错）。
+- **等待耗尽标志按派发实例复位**：三处 `dispatchPromise` 赋值前清零 `turnWaitExhausted`/`waitExhaustedNotifiedTurn`，同一记录再次派发不再被"零预算"秒放行、不再每回合误发上限通知。
+- **F11 文案与门禁同源**：下发部门负责人的 comm-format 文本改为「keyResults/keyInfo/importantInfo 每项最多 6 条；sources 最多 16 条且必须逐人覆盖」，不再与放宽后的门禁相互矛盾。
+
+**高危缺口**
+- **僵尸 in_progress 回收**：重启/崩溃回放时，无人调度且失联的 in_progress 行降级为 blocked（留痕 + warn），既有重置/重派路径可接管，不再永远"正在做"；cancelled/superseded 计划的历史留痕原样回放不受影响。
+- **salvaged 半截计划不再自动派发**：规划器只抢救出残缺结果时暂停自动执行，给用户一条可见通知，确认后再 `workplan_dispatch`。
+- **bash 写保护绕过封堵**：`fileWriteGuardReason` 新增 shell 命令启发式（`>`/`>>`/heredoc、`tee`、`sed -i`、`mv`/`cp`/`install` 目标位、`dd of=`，按 `&&`/`;`/`|` 分段、去引号、20k 截断），已交付文件不能再用 bash 原地改写；只读命令不拦。
+- **认可闸门否定/引用识别**：命中点前 40 字符窗口内出现否定词（不用/无需/不必/勿/别/禁止…）、制度转述词（原文/制度/规定/条款）或引号包裹时不再误触发，「不用经用户认可再执行」与粘贴的规章原文不再把计划按住。
+- **澄清闸轮次上限**：同一会话连续 2 轮触发澄清后放行进入规划（30 分钟无触发自动归零 + `resetClarifyRounds` 导出），不再「越简短回答越问不出计划」的活锁。
+- **看板三处**：`/plans` 轮询 15 秒超时（超时走错误路径 + 警告横幅，不再永久冻结）、后台标签页暂停轮询（回前台补一轮）、服务端截断标志（`truncated`/`omittedSessions`/`omittedDetail`）不再被前端丢弃，裁剪时看板显示"部分数据已省略"提示。
+
+**中危加固**
+- **lessons 仅限根会话**：`dsh_workplan_lessons` 增加根会话硬校验，子 Agent（含其他插件拉起的会话）不再能读全局跨项目经验文件。
+- **本地文件权限收紧**：journal/lessons/notice-ledger 写路径统一 0o600 文件 + 0o700 目录 + 写前符号链接校验（lessons 遇符号链接抛 `LESSONS_WRITE_REFUSED`）。
+- **原子门英文盲区**：句末符补英文句点（后跟空白/结尾才算，版本号 a.ts/1.12.0 不误伤）、并列词补 并/然后/接着/再（否定/频率语境不误伤）；报错如实报告截断后长度。
+- **验收措辞归一化**：覆盖匹配前对验收项与子 Agent 文本做全角折叠、完成态前缀剥离（已完成/完成/已/done/yes）、标点空白归一，「换个措辞就永远 missing」的无限退回关闭；three-phase 私有副本同步。
+- **prune 增强**：清理排除当前活跃计划（不再误删"活跃但安静"的审计留痕）、unlink 失败逐条 warn + `errors` 留痕、首次清理挪出激活路径（启动 10 秒后，随插件卸载清除）。
+- **回归**：新增 77 例（journal/ledger 9、wait-cap 1、comm-format 1、client 轮询 7、认可闸门 14、澄清闸 14、原子门 6、验收归一化 8、lessons 守卫 9、zombie 2、salvaged 2、bash 守卫 22、prune 4 等）；全量 **1327 例：pass 1326 / fail 0 / cancelled 0**（1 例 todo），`npm test` 内置 build 已同步 `lib/`。
+
+## 3.0.5 — 2026-11-17
+
+- **机制改进（用户四步闭环）**：第三层专家遇阻必须 `dsh_workplan_escalate` 向部门负责人请示；负责人在答复前必须全面梳理该问题与本部门全部已派发任务执行状态、研究方案，并用 `dsh_workplan_instruct` 把决定投回原专家；原专家继续执行。
+- **硬闸门**：任一第三层成员待指示时，`dsh_workplan_delegate` 的 `review/dispatch/direct` 一律拒绝改派/重派/降级（`DELEGATE_ESCALATION_OPEN`）；`dsh_workplan_instruct` 只允许答复已请示成员（`NOT_ESCALATED`），投递成功后原专家恢复执行。
+- **回归**：新增 `tests/workplan-305-escalation-owner-continuity.test.ts`，并同步负责人 brief、专家任务书、工具描述与版本口径到 3.0.5。
+
 ## 3.0.3 — 2026-11-17
 
 - release v3.0.3: latest source + version publish

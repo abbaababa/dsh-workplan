@@ -107,7 +107,7 @@ test('质量要求渲染块：逐条编号、注明下达方', () => {
 const QUALITY = ['必须给出可复现的命令输出作为证据']
 
 test('极简门槛：合格的单项任务通过', () => {
-  assert.equal(checkAtomicAssignment('读取 src/a.ts 并写出一份根因结论', QUALITY).ok, true)
+  assert.equal(checkAtomicAssignment('分析 src/a.ts 得出根因结论', QUALITY).ok, true)
 })
 
 test('极简门槛：并列词、分号、多句、过长、缺质量要求全部被拒', () => {
@@ -124,7 +124,7 @@ test('极简门槛：并列词、分号、多句、过长、缺质量要求全�
     assert.equal(result.code, code, task)
     assert.ok(String(result.hint ?? '').length > 0, '必须给出可照做的拆小提示')
   }
-  const missingQuality = checkAtomicAssignment('读取 src/a.ts 并写出一份根因结论', [])
+  const missingQuality = checkAtomicAssignment('分析 src/a.ts 得出根因结论', [])
   assert.equal(missingQuality.ok, false)
   assert.equal(missingQuality.code, 'DELEGATE_QUALITY_REQUIREMENTS_MISSING')
 })
@@ -196,6 +196,39 @@ test('部门汇总：未覆盖全部专家、缺对象、多余字段被拒', ()
   assert.equal(checkDepartmentSummary({ ...GOOD_SUMMARY, extra: ['x'] }).ok, false)
 })
 
+test('部门汇总：sources 覆盖 8-12 名复杂任务专家（3.0.6 死锁修复，不再卡 6 条精简上限）', () => {
+  const phrases = [
+    '根因报告', '回归用例', '性能基线', '接口契约', '数据字典', '部署手册',
+    '风险评估', '验收清单', '依赖图谱', '变更日志', '容量测算', '巡检脚本',
+    '告警规则', '灰度方案', '回滚预案', '压测结论', '权限矩阵',
+  ]
+  const sourcesFor = (count: number) =>
+    Array.from({ length: count }, (_, i) => `专家${i + 1}：${phrases[i]}已交付`)
+  // 12 人（复杂任务上限）逐人覆盖：必须通过——修复前会被「最多 6 条」硬拒。
+  const experts12 = Array.from({ length: 12 }, (_, i) => `专家${i + 1}`)
+  assert.deepEqual(
+    checkDepartmentSummary({ ...GOOD_SUMMARY, sources: sourcesFor(12) }, experts12),
+    { ok: true, violations: [] },
+  )
+  // 其余三个数组的 6 条精简上限不放松：keyResults 第 7 条仍拒。
+  const fatKeyResults = {
+    ...GOOD_SUMMARY,
+    keyResults: Array.from({ length: 7 }, (_, i) => `互不相同的精简成果条目${phrases[i]}${i}`),
+    sources: sourcesFor(12),
+  }
+  const fat = checkDepartmentSummary(fatKeyResults, experts12)
+  assert.equal(fat.ok, false)
+  assert.match(fat.violations.join('\n'), /keyResults 最多 6 条/)
+  // sources 自身上限 16：第 17 人仍拒（防止无限膨胀）。
+  const experts17 = Array.from({ length: 17 }, (_, i) => `专家${i + 1}`)
+  const tooMany = checkDepartmentSummary(
+    { ...GOOD_SUMMARY, sources: sourcesFor(17) },
+    experts17,
+  )
+  assert.equal(tooMany.ok, false)
+  assert.match(tooMany.violations.join('\n'), /sources 最多 16 条/)
+})
+
 /* ============================ F10 / F11 门禁接线 ============================ */
 
 const BASE_PAYLOAD = {
@@ -264,7 +297,7 @@ const CONSOLIDATION = {
   taskReasoningEffort: 'high',
 }
 
-const ATOMIC_TASK = '读取 src/plan.ts 并写出一份根因结论'
+const ATOMIC_TASK = '分析 src/plan.ts 得出根因结论'
 
 /* 复杂档（high）触发既有 ≥8 人门禁（2.5.4 基线保留，不因本版放宽）。 */
 const EIGHT = Array.from({ length: 8 }, (_, i) => ({
@@ -339,6 +372,6 @@ test('派发：质量要求随分工表落到成员记录上', () => {
 
 /* ============================ 要求 13：版本号 ============================ */
 
-test('要求 13：插件 meta 版本为 3.0.3', () => {
-  assert.equal(meta.version, '3.0.3')
+test('要求 13：插件 meta 版本为 3.0.6', () => {
+  assert.equal(meta.version, '3.0.6')
 })

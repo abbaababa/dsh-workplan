@@ -316,3 +316,71 @@ test('收尾等待期间 followup 入队：inbox 事件立即中止旧规划并�
   second.controller.abort()
   await second.promise
 })
+
+test('inbox 首次取代写入用户可见通知恰好一次，连续新消息不重复通知', async () => {
+  const session = makeSession()
+  // 真实缺陷场景：用户首条消息已开回合（受保护系统头已落地），后台规划在途，
+  // 新消息经 inbox 事件到达。头已存在 → 取代通知必须立即落盘，不得被头前暂存吞掉。
+  session.append('system/message', { role: 'system', content: [{ type: 'text', text: 'system head' }] })
+  const ctx: any = makeCtx(session)
+  ctx.llm = {
+    async resolveModelInfo(provider: string, model: string) {
+      return { provider, model, id: model, reasoning: { defaultEffort: 'high', efforts: ['low', 'high', 'max'] } }
+    },
+    stream(options: any) {
+      return {
+        [Symbol.asyncIterator]: () => (async function* () {
+          await new Promise<void>((_resolve, reject) => {
+            if (options.signal.aborted) {
+              reject(new DOMException('aborted', 'AbortError'))
+              return
+            }
+            options.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true })
+          })
+        })(),
+      }
+    },
+  }
+  const runtime: any = createWorkplanRuntime(ctx, {
+    autoDispatch: false,
+    totalTimeoutMs: 60_000,
+    plannerTimeoutMs: 5_000,
+    plannerIdleTimeoutMs: 5_000,
+  })
+  const next = async () => ({ kind: 'enter', messages: [] })
+  const oldText = '修复旧状态机的明确缺陷并运行指定回归测试'
+  await runtime.onPreStep({
+    agent: { session }, turn: 1, step: 1,
+    modelSelection: { provider: 'fixture', model: 'fixture-model', reasoningEffort: 'high' },
+    messages: [userMessage('m-old', oldText)],
+    signal: new AbortController().signal,
+  }, next)
+  const first = runtime.state.planningInFlight.get(session.id)
+  assert.ok(first?.promise, '第一个任务必须登记后台规划')
+
+  const noticesOf = () => session.events.filter((event: any) =>
+    event.type === 'user/message'
+    && String(event.data?.content?.[0]?.text ?? '').includes('【dsh-workplan·任务分解被取代】'))
+
+  runtime.onInboxInserted({
+    agent: { session },
+    message: userMessage('m-followup-1', '修复新任务中的指定收尾闸门并验证精确行为'),
+  })
+  assert.equal(first.superseded, true)
+  assert.equal(first.controller.signal.aborted, true, '新任务入队必须立即中止旧规划')
+  assert.equal(noticesOf().length, 1, '首次取代必须写入恰好一条用户可见取代通知')
+
+  runtime.onInboxInserted({
+    agent: { session },
+    message: userMessage('m-followup-2', '再补充一个完全不同的新任务要求'),
+  })
+  runtime.onInboxInserted({
+    agent: { session },
+    message: userMessage('m-followup-3', '第三个连续新任务消息'),
+  })
+  assert.equal(first.controller.signal.aborted, true)
+  assert.equal(noticesOf().length, 1, '连续多条新消息只通知一次（幂等），不得刷屏')
+
+  first.controller.abort()
+  await first.promise
+})

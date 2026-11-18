@@ -27,7 +27,7 @@ export const GATE_PAD_APPROACH = '第二轮方法流程步骤：先按依赖顺�
 export function gateMembers(count: number) {
   return Array.from({ length: count }, (_, i) => {
     const qualityRequirements = ['必须给出可复核的命令输出或文件证据']
-    if (i === 0) return { member: 'Expert-A', role: 'expert', task: '实现核心逻辑并自测', qualityRequirements }
+    if (i === 0) return { member: 'Expert-A', role: 'expert', task: '实现核心逻辑后自测', qualityRequirements }
     if (i === 1) return { member: 'Member-B', role: 'expert', task: '整理验收证据清单', qualityRequirements }
     return { member: `Member-${i + 1}`, role: 'expert', task: `单一目标子任务 ${i + 1}（单一主产物、可独立验收）`, qualityRequirements }
   })

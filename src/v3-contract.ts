@@ -142,13 +142,30 @@ export const MIN_ATOMIC_TASK_CHARS = 8
  * 并列/多目标的强信号词。命中 1 个以上即视为「一个任务里塞了多件事」。
  * 只收强信号（明显的并列连词与小标题分隔），不收「和」这类高频虚词，
  * 避免把正常表述误判成多任务。
+ *
+ * [3.0.2] 补齐「并/然后/接着」：子 Agent 的任务书常写「改 A 并改 B」「先备份
+ * 然后上传」这类口语并列，旧词表全漏（英文盲区事故：英文句点 + 英文 then
+ * 都不在判据里，复合任务被当单句放行）。「并且」已含「并」，报错文案按
+ * 长词优先去重。
  */
 const MULTI_GOAL_MARKERS: readonly string[] = Object.freeze([
-  '并且', '同时', '另外', '还要', '以及', '分别', '顺便',
+  '并且', '同时', '另外', '还要', '以及', '分别', '顺便', '并', '然后', '接着',
 ])
 
-/** 句末终止符：原子任务必须是单句。 */
-const SENTENCE_TERMINATORS: readonly RegExp[] = [new RegExp('[。！？!?]', 'g')]
+/**
+ * [3.0.2] 「再」只在两个动作之间当连词时才算并列信号（「先备份再修改」）。
+ * 不再/再次/再三/再现/再也不/要再 等副词用法不算——「不要再等待」不会被误伤。
+ * 若后续实测「再」的误判率仍偏高，按用户裁决可仅保留 并/然后/接着 并删除
+ * 本规则。
+ */
+const ZAI_CONJUNCTION_RE = /(?<![不未莫无勿别一要])再(?![次三现也])/
+
+/**
+ * 句末终止符：原子任务必须是单句。
+ * [3.0.2] 英文句点 `.` 计入，但只认「后跟空白或文本结尾」的句读——文件名
+ * （a.ts）、版本号（1.12.0）、省略号（...）里的点不算句子分隔。
+ */
+const SENTENCE_TERMINATORS: readonly RegExp[] = [new RegExp('[。！？!?]|\\.(?:\\s|$)', 'g')]
 
 export interface AtomicTaskCheck {
   ok: boolean
@@ -162,13 +179,15 @@ export interface AtomicTaskCheck {
  *
  * 判据全部可机械复算，不看语义：
  *  1) 非空且长度在 8–300 字符之间；
- *  2) 只有一句话（不出现第二个句末标点，不含分号分句）；
- *  3) 不含并列强信号词（并且/同时/另外/还要/以及/分别/顺便）；
+ *  2) 只有一句话（不出现第二个句末标点——含英文句点 `.`，不含分号分句）；
+ *  3) 不含并列强信号词（并且/并/同时/另外/还要/以及/分别/顺便/然后/接着，
+ *     以及两动作之间的连词「再」）；
  *  4) 必须带非空的质量要求（用户要求 6：交代清楚成果必须达到的要求和质量）。
  *
  * 返回的 hint 是可直接照做的拆小指令，不是一句「不合格」。
  */
 export function checkAtomicAssignment(task: string, qualityRequirements?: unknown): AtomicTaskCheck {
+  const rawLength = String(task ?? '').trim().length
   const text = String(task ?? '').replace(/\s+/g, ' ').trim()
   if (text.length < MIN_ATOMIC_TASK_CHARS) {
     return {
@@ -182,7 +201,9 @@ export function checkAtomicAssignment(task: string, qualityRequirements?: unknow
     return {
       ok: false,
       code: 'DELEGATE_TASK_NOT_ATOMIC',
-      error: `分到的任务太长（${text.length} 字符 > ${MAX_ATOMIC_TASK_CHARS}），不是 1+1=2 的单项任务。`,
+      // [3.0.2] 如实报告截断后实际长度：调用方（llm-rules truncate(1500)）先截断
+      // 再送检，这里的数字是被判定文本的真实长度，不是原始输入的长度。
+      error: `分到的任务太长（截断后实际 ${rawLength} 字符 > ${MAX_ATOMIC_TASK_CHARS}），不是 1+1=2 的单项任务。`,
       hint: '按「一个目标 / 一个主产物 / 一项可独立验收」拆成多条；每条只保留一个动作，其余另起一条。',
     }
   }
@@ -207,11 +228,14 @@ export function checkAtomicAssignment(task: string, qualityRequirements?: unknow
     }
   }
   const hit = MULTI_GOAL_MARKERS.filter((marker) => text.includes(marker))
-  if (hit.length > 0) {
+  // 「并且」与「并」同命中时只报长词，报错文案不重复列同一个信号。
+  const markers = hit.filter((marker) => !hit.some((other) => other !== marker && other.includes(marker)))
+  if (ZAI_CONJUNCTION_RE.test(text)) markers.push('再')
+  if (markers.length > 0) {
     return {
       ok: false,
       code: 'DELEGATE_TASK_NOT_ATOMIC',
-      error: `分到的任务含并列词「${hit.join('、')}」，说明一个任务里有多件事。`,
+      error: `分到的任务含并列词「${markers.join('、')}」，说明一个任务里有多件事。`,
       hint: '把并列词前后的内容各拆成一条独立任务，每条只做一个动作。',
     }
   }
@@ -232,6 +256,14 @@ export function checkAtomicAssignment(task: string, qualityRequirements?: unknow
 
 /** 单个汇报数组的条数上限：精简的量化口径。 */
 export const MAX_REPORT_ITEMS = 6
+/**
+ * [3.0.6][第 3 批③] sources（部门汇总「覆盖的专家汇报」）专用上限。
+ * 死锁修复：复杂任务按用户裁决 D1/D2 强制 ≥8 名专家（上限 12），而 sources
+ * 必须覆盖全部已派发专家——若与其他数组共用 6 条上限，7–12 人的部门永远
+ * 交不出合法汇总（覆盖诚实要求 vs 精简上限互相矛盾）。覆盖是硬要求，
+ * 故 sources 单独放宽到 16（≥ 复杂任务 12 人上限 + 余量），其余数组仍 6 条。
+ */
+export const MAX_SOURCES_ITEMS = 16
 /** 单条汇报文本的字符上限。 */
 export const MAX_REPORT_ITEM_CHARS = 200
 
@@ -328,7 +360,7 @@ function checkListField(
   container: Record<string, unknown>,
   name: string,
   violations: string[],
-  options: { minItems: number; dedupeAcross?: readonly string[] },
+  options: { minItems: number; maxItems?: number; dedupeAcross?: readonly string[] },
 ): string[] {
   const raw = container[name]
   if (!Array.isArray(raw)) {
@@ -339,8 +371,9 @@ function checkListField(
   if (lines.length < options.minItems) {
     violations.push(`${name} 至少 ${options.minItems} 条非空内容，当前 ${lines.length} 条`)
   }
-  if (lines.length > MAX_REPORT_ITEMS) {
-    violations.push(`${name} 最多 ${MAX_REPORT_ITEMS} 条（精简要求），当前 ${lines.length} 条，请合并去重`)
+  const maxItems = options.maxItems ?? MAX_REPORT_ITEMS
+  if (lines.length > maxItems) {
+    violations.push(`${name} 最多 ${maxItems} 条（精简要求），当前 ${lines.length} 条，请合并去重`)
   }
   for (const line of lines) {
     if (line.length > MAX_REPORT_ITEM_CHARS) {
@@ -413,7 +446,7 @@ export function checkDepartmentSummary(summary: unknown, expectedExperts: readon
   checkListField(container, 'keyResults', violations, { minItems: 1, dedupeAcross: ['keyInfo', 'importantInfo'] })
   checkListField(container, 'keyInfo', violations, { minItems: 0, dedupeAcross: ['keyResults', 'importantInfo'] })
   checkListField(container, 'importantInfo', violations, { minItems: 0, dedupeAcross: ['keyResults', 'keyInfo'] })
-  const covered = checkListField(container, 'sources', violations, { minItems: 0 })
+  const covered = checkListField(container, 'sources', violations, { minItems: 0, maxItems: MAX_SOURCES_ITEMS })
   if (expectedExperts.length > 0) {
     const joined = covered.join('\n').toLowerCase()
     const missing = expectedExperts.filter((member) => member.trim() !== '' && !joined.includes(member.trim().toLowerCase()))
@@ -458,7 +491,7 @@ export function renderDepartmentSummarySpec(): string {
     '    "sources": ["专家名：一句关键成果"]',
     '  }',
     ...DEPARTMENT_SUMMARY_FIELDS.map((field) => `- ${field.name}（${field.label}）：${field.description}`),
-    `- 每个数组最多 ${MAX_REPORT_ITEMS} 条、每条最多 ${MAX_REPORT_ITEM_CHARS} 字符；sources 必须覆盖本部门全部已派发专家，同一信息只能出现一次。`,
+    `- keyResults/keyInfo/importantInfo 每个数组最多 ${MAX_REPORT_ITEMS} 条、每条最多 ${MAX_REPORT_ITEM_CHARS} 字符；sources 最多 ${MAX_SOURCES_ITEMS} 条（不受 6 条精简上限约束——必须逐人覆盖本部门全部已派发专家，覆盖是诚实硬要求），同一信息只能出现一次。`,
     '- 门禁：缺 departmentSummary、字段缺失、未覆盖全部专家、或出现重复项，结果一律退回重交（DEPARTMENT_SUMMARY_INVALID / DEPARTMENT_SUMMARY_NOT_CONCISE）。',
   ].join('\n')
 }

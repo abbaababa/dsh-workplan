@@ -115,6 +115,19 @@ test('下发：子任务提示词附带统一格式规范，且与核验用的�
   assert.match(prompt, /退回/, '必须写明不合规会被退回')
 })
 
+/*
+ * [3.0.6] 文案同步：门禁 v3-contract 已把 departmentSummary.sources 放宽到 16
+ * （MAX_SOURCES_ITEMS=16，覆盖全部已派发专家是诚实硬要求），F11 下发文案必须
+ * 同源——keyResults/keyInfo/importantInfo 仍每项 6 条，sources 最多 16 条，
+ * 不得再渲染「每数组最多 6 条」旧口径（7–12 人部门旧口径下永远交不出合法汇总）。
+ */
+test('下发：负责人层 F11 文案与门禁同源（sources 最多 16 条，其余数组仍 6 条）', () => {
+  const spec = renderCommFormatSpec('leader')
+  assert.match(spec, /sources 最多 16 条/, '负责人层必须写明 sources 上限 16 条')
+  assert.match(spec, /keyResults\/keyInfo\/importantInfo 每项最多 6 条/, '其余三个数组仍保持 6 条精简上限')
+  assert.doesNotMatch(spec, /每数组最多 6 条/, 'F11 不得再保留「每数组最多 6 条」旧口径')
+})
+
 test('规范：版本号与条目集合稳定（对外契约，改动须升版本）', () => {
   // [3.0.0] 用户要求 7/10 新增 F10（专家精简 JSON 汇报）与 F11（部门精简 JSON 汇总），
   // 依「改动须升版本」把版本从 1 升到 2；F1–F9 原文一字未改。

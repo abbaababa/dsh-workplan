@@ -191,11 +191,12 @@ export function buildLlmRulesBrief(info: LlmRulesBriefInfo = {}): string {
      * 与代码门禁同源（planDelegations 的 checkAtomicAssignment、comm-format 的
      * F10/F11），提示词只是把代码已经在执行的规则提前说清楚。
      */
-    lines.push('- 极简任务硬门槛（用户要求 5，用户裁决 A＝硬门槛）：你派出的每一条任务必须简单到像 1+1=2——一个动作、一个主产物、一项可独立验收；出现「并且/同时/另外/还要/以及/分别/顺便」或分号并列、或超过 300 字符，平台直接拒绝派发（DELEGATE_TASK_NOT_ATOMIC）并给出拆分提示，实例：不要派「分析并修复并写测试」，要拆成「读 X 定位原因」「按原因改 Y」「写 Z 用例」三条。')
+    lines.push('- 极简任务硬门槛（用户要求 5，用户裁决 A＝硬门槛）：你派出的每一条任务必须简单到像 1+1=2——一个动作、一个主产物、一项可独立验收；出现「并且/并/同时/另外/还要/以及/分别/顺便/然后/接着/再」或分号并列、或一个任务里写了多句（含英文句点分隔的多句）、或超过 300 字符，平台直接拒绝派发（DELEGATE_TASK_NOT_ATOMIC）并给出拆分提示，实例：不要派「分析并修复并写测试」，要拆成「读 X 定位原因」「按原因改 Y」「写 Z 用例」三条。')
     lines.push('- 质量要求硬门槛（用户要求 6）：每一条分派都必须带 qualityRequirements（至少 1 条、每条 ≤400 字符、最多 8 条），写清「成果必须达到什么要求、什么算合格、怎么算不合格」；缺它平台拒绝派发（DELEGATE_QUALITY_REQUIREMENTS_MISSING）。任务书会把这块原文交给专家。')
     lines.push('- 专家汇报必须精简且是 JSON（用户要求 7）：专家完成后在证据块里给出 report（keyResults/keyInfo/importantInfo/leadRequirements 四个字符串数组，每数组 ≤6 条、每条 ≤200 字符，禁止重复）；你收到后逐条核对，缺项或重复会被格式门禁退回（F10）。')
     lines.push('- 你的汇总必须精简且是 JSON（用户要求 8/10/11）：汇总本部门全部专家汇报后，在证据块里给出 departmentSummary（keyResults/keyInfo/importantInfo/sources 四个字符串数组，sources 必须覆盖全部已派发专家，禁止累赘重复）；不合格会被退回（F11）。汇总完成后直接交回主 Agent，不需要另建文件。')
     lines.push('- 执行时间与验收：你和每位全球顶尖专家均没有总时长、单次时长、空闲或回执硬截止。开工预估及其汇总只用于协调与告知，未报齐时如实显示部分和，但不构成分钟判据；不得以耗时、预估超额或未经时间批准为由拒绝 done，extendMs 已停用。完成只由真实结果、产物、结构化证据和质量验收决定；用户显式取消与真实错误仍然有效。')
+    lines.push('- 专家遇阻处置（3.0.5 硬规则，机制已强制）：任何专家调用 dsh_workplan_escalate 后，禁止用 review/dispatch/direct 把该问题改派、重派或降级给其他专家；你必须先用 action="status" 全面梳理该成员的问题与本部门全部 delegates 执行状态，再研究形成解决方案，最后用 dsh_workplan_instruct 答复原 member；平台在该成员待指示期间会硬拒一切改派动作，投递成功后强制原专家继续执行。')
   }
   return lines.join('\n')
 }
@@ -637,7 +638,7 @@ export function buildDelegateePrompt(input: {
     '- 开工前必须先预估本人任务耗时（整数分钟）并经 self_effort 的 timeNotice={ declaredMinutes: 正整数分钟, reason? } 上报部门负责人，未上报不接续（T6/D9 硬门禁：ESTIMATE_MISSING/ESTIMATE_INVALID）；该上报只是协调信息，必须如实预估。你和部门负责人执行任务均没有总时长、单次时长、空闲或回执硬截止；预估或实际耗时不会触发延期、超时接手，也不影响 done 验收。',
     '- 必须在确保自身任务完成品质非常高的前提下，完美、超高效率地执行；严禁低效执行与浪费 token。',
     '- 你是第三层叶子执行者：不得派生任何第四层 Agent/子会话；无法完成时在结论首行写 BLOCKED: 原因 并说明缺什么，不要空转。',
-    '- 遇阻上报通道：遇阻（缺权限/缺输入/依赖产物缺失/需求自相矛盾/无法验证/需要负责人决定方向）时，第一动作是调用 dsh_workplan_escalate({ "question": "需要负责人回答的单个问题", "options": ["可选方向"], "needs": ["需要谁提供什么"] })——请示会经 delegate 登记落到你所属部门行的第三层台账（待指示），由部门负责人用 dsh_workplan_instruct 答复你；调用成功后停止推进、只做只读核对，不要自行选定一个选项继续。',
+    '- 遇阻上报通道（3.0.5 四步闭环）：遇阻（缺权限/缺输入/依赖产物缺失/需求自相矛盾/无法验证/需要负责人决定方向）时，第一动作是调用 dsh_workplan_escalate({ "question": "需要负责人回答的单个问题", "options": ["可选方向"], "needs": ["需要谁提供什么"] })。流程必须严格为：你先向部门负责人报告具体问题→负责人全面梳理你的问题与本部门全部已派发任务执行状态→负责人研究形成解决方案→负责人用 dsh_workplan_instruct 把方案告诉你→你继续执行原任务。平台禁止负责人在你待指示期间把你改派给其他专家；你必须是继续执行的人。调用 escalate 成功后停止推进、只做只读核对，不要自行选定一个选项继续。',
     '- 完成后把结论与逐项证据（命令输出/文件/引用）用简洁中文回报给部门负责人会话；同时把同一份结构化结论写入 reports/wp-member-<你的成员名>-<任务代号>.json（相对工作目录，目录不存在就创建）作为结算兜底。',
     `- 结果块契约：以 ${EVIDENCE_MARKER_BEGIN} 开头、${EVIDENCE_MARKER_END} 结尾，内含合法 JSON（status ∈ done/blocked/partial、phases 三阶段、acceptance 逐条带证据）。`,
     '',

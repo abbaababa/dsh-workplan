@@ -226,6 +226,7 @@ window.__ModuleLoader__.load({
         "vizStageTitle": "分步进度",
         "vizOverall": "总体进度",
         "allPlansHint": "上面是当前各会话最新计划的合计；历史计划不在此汇总，下面每张卡片只统计本计划。",
+        "trimNotice": "计划数据过大，部分会话或明细已在服务端省略，当前仅展示子集；缩小范围或会话后再看完整数据。",
         "openHint": "打开左侧「任务进度」看完整安排。",
         "timeNegotiation": "执行时间（无时限）",
         "noTimeLimit": "部门负责人和全球顶尖专家执行无时限；预估仅供参考，不影响完成验收",
@@ -461,6 +462,7 @@ window.__ModuleLoader__.load({
         "vizStageTitle": "Step progress",
         "vizOverall": "Overall progress",
         "allPlansHint": "These totals cover the latest plan in each live session; older plans are not included. Each card below counts only its own plan.",
+        "trimNotice": "The plan data was too large, so some sessions or details were omitted on the server; only a subset is shown. Narrow the scope to see the full data.",
         "openHint": "Open “Task progress” on the left for the full plan.",
         "timeNegotiation": "Execution time (no limit)",
         "noTimeLimit": "Department leads and domain experts have no execution time limit; estimates are informational and do not affect acceptance",
@@ -1589,35 +1591,173 @@ window.__ModuleLoader__.load({
       if (!payload || payload.ok !== true) {
         throw new Error(asText(payload?.error) || '计划接口返回异常')
       }
-      return Array.isArray(payload.sessions) ? payload.sessions : []
+      /*
+       * [复审修复] 返回完整载荷，不再只回 sessions：服务端 2.5MB 上限
+       * （runtime.ts MAX_PLANS_RESPONSE_BYTES + trimPlansPayload）裁剪时会置
+       * truncated / omittedSessions / omittedDetail，旧实现把它们丢掉，看板
+       * 静默少显示数据。向后兼容：调用方仍取 .sessions（数组）。
+       *
+       * omittedDetail 在服务端是挂在每个 session 项上的（trimPlansPayload
+       * 里 sessions[].omittedDetail = true），顶层也可能有；两者都要看。
+       */
+      const sessions = Array.isArray(payload.sessions) ? payload.sessions : []
+      const omittedSessions = typeof payload.omittedSessions === 'number'
+        && Number.isFinite(payload.omittedSessions) ? payload.omittedSessions : 0
+      const omittedDetail = payload.omittedDetail === true
+        || sessions.some((item: any) => item && item.omittedDetail === true)
+      return { sessions, truncated: payload.truncated === true, omittedSessions, omittedDetail }
+    }
+
+    /*
+     * [3.0.6][第 2 批] 看板轮询按会话共享。
+     *
+     * 旧实现里每个 TurnCard 都调用 usePlans(sessionId)，各自 4 秒一次请求：
+     * 一个会话有 30 张卡就是 30 请求/4s，服务端每次还要重建无内存记录的计划。
+     * 现在同一 key（''=全部会话，或具体 sessionId）只有一个轮询器 + 一组订阅者，
+     * 最后一个订阅者卸载时才停止；新订阅者立即拿到当前快照，不重复请求。
+     */
+    const planPolls = new Map<string, any>()
+
+    /* [复审修复] 单次轮询的挂死上限：到点按超时错误路径处理，绝不让 running 永真。 */
+    const PLAN_POLL_TIMEOUT_MS = 15000
+
+    function emptyPlansState() {
+      return {
+        loading: true,
+        sessions: [],
+        truncated: false,
+        omittedSessions: 0,
+        omittedDetail: false,
+        error: null,
+        updatedAt: null,
+      }
     }
 
     function usePlans(sessionId?: string) {
-      const [state, setState] = useState({ loading: true, sessions: [], error: null, updatedAt: null })
-      const load = useCallback(async (signal?: AbortSignal) => {
-        try {
-          const sessions = await fetchPlans(sessionId, signal)
-          if (signal?.aborted) return
-          setState({ loading: false, sessions, error: null, updatedAt: Date.now() })
-        } catch (error) {
-          if (signal?.aborted) return
-          setState((previous: any) => ({
-            ...previous,
-            loading: false,
-            error: error instanceof Error ? error.message : String(error),
-          }))
-        }
-      }, [sessionId])
+      const key = sessionId || ''
+      const [state, setState] = useState(() => planPolls.get(key)?.state ?? emptyPlansState())
       useEffect(() => {
-        const controller = new AbortController()
-        load(controller.signal)
-        const timer = setInterval(() => load(controller.signal), 4000)
-        return () => {
-          controller.abort()
-          clearInterval(timer)
+        let entry = planPolls.get(key)
+        if (!entry) {
+          entry = {
+            state: emptyPlansState(),
+            listeners: new Set(),
+            timer: null,
+            controller: null,
+            running: false,
+            run: null,
+            timedOut: false,
+            onVisible: null,
+          }
+          planPolls.set(key, entry)
         }
-      }, [load])
-      return { ...state, reload: () => load() }
+        const listener = (next: any) => setState(next)
+        entry.listeners.add(listener)
+        setState(entry.state)
+        if (!entry.run) {
+          entry.run = async () => {
+            if (entry.running) return
+            /*
+             * [复审修复] 后台标签页跳过本次轮询：interval 保留，回到前台后
+             * 自然恢复；另有 visibilitychange 监听立即补一轮（见下方注册）。
+             */
+            if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+            entry.running = true
+            entry.timedOut = false
+            const controller = new AbortController()
+            entry.controller = controller
+            /*
+             * [复审修复] 15s 超时：一次挂死的请求不再让 entry.running 永真、
+             * 看板永久冻结。卸载中止保持静默；超时中止走错误路径：
+             * console.warn + 结束本次 running，interval 继续。
+             *
+             * 优先 AbortSignal.timeout + AbortSignal.any（无 JS 侧计时器句柄，
+             * 不存在悬挂/句柄卫生问题）；宿主运行时不支持 any() 时退回手动
+             * setTimeout 控制器（等效实现），句柄挂在 entry 上，finally 与
+             * 卸载 cleanup 双路清理——注意这里禁止 unref：这是收束类计时器
+             * （tests/handle-policy.test.ts 契约），unref 会让 node 事件循环
+             * 提前排空、看板错误路径永远到不了。
+             */
+            const anySignal = typeof (AbortSignal as any).any === 'function'
+              && typeof (AbortSignal as any).timeout === 'function'
+            let timeoutTimer: any = null
+            const signal = anySignal
+              ? (AbortSignal as any).any([controller.signal, (AbortSignal as any).timeout(PLAN_POLL_TIMEOUT_MS)])
+              : (() => {
+                timeoutTimer = setTimeout(() => {
+                  entry.timedOut = true
+                  controller.abort()
+                }, PLAN_POLL_TIMEOUT_MS)
+                return controller.signal
+              })()
+            entry.timeoutTimer = timeoutTimer
+            try {
+              const plansPayload = await fetchPlans(sessionId, signal)
+              if (signal.aborted) return
+              entry.state = {
+                loading: false,
+                sessions: plansPayload.sessions,
+                truncated: plansPayload.truncated === true,
+                omittedSessions: plansPayload.omittedSessions,
+                omittedDetail: plansPayload.omittedDetail === true,
+                error: null,
+                updatedAt: Date.now(),
+              }
+            } catch (error) {
+              /*
+               * 静默条件：仅「主动中止（卸载/重入）」。超时的判定两路都要覆盖——
+               * 手动兜底路径置了 entry.timedOut；AbortSignal.any 路径里超时只体现为
+               * 组合 signal 被中止而 controller 没有（卸载恰好相反：controller 先中止）。
+               */
+              const timedOut = entry.timedOut === true
+                || (signal.aborted === true && controller.signal.aborted === false)
+              if (signal.aborted && !timedOut) return
+              if (timedOut) {
+                console.warn('[dsh-workplan] plans 轮询超时（15000ms），已结束本轮，下一轮继续', error)
+              }
+              entry.state = {
+                ...entry.state,
+                loading: false,
+                error: error instanceof Error ? error.message : String(error),
+              }
+            } finally {
+              if (timeoutTimer !== null) clearTimeout(timeoutTimer)
+              entry.timeoutTimer = null
+              entry.running = false
+              entry.timedOut = false
+              entry.controller = null
+              entry.listeners.forEach((notify: any) => notify(entry.state))
+            }
+          }
+          entry.run()
+          entry.timer = setInterval(() => entry.run(), 4000)
+          /*
+           * [复审修复] 回到前台立即补一轮：后台期间 interval 触发的轮询
+           * 全部被跳过，不补的话用户切回来最多干等一个周期。
+           */
+          entry.onVisible = () => {
+            if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+              entry.run?.()
+            }
+          }
+          if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+            document.addEventListener('visibilitychange', entry.onVisible)
+          }
+        }
+        return () => {
+          entry.listeners.delete(listener)
+          if (entry.listeners.size === 0) {
+            if (entry.timer) clearInterval(entry.timer)
+            if (entry.timeoutTimer) clearTimeout(entry.timeoutTimer)
+            entry.controller?.abort()
+            if (typeof document !== 'undefined' && typeof document.removeEventListener === 'function') {
+              document.removeEventListener('visibilitychange', entry.onVisible)
+            }
+            planPolls.delete(key)
+          }
+        }
+      }, [key, sessionId])
+      return { ...state, reload: () => planPolls.get(key)?.run?.() }
     }
 
     function ErrorBanner({ message, onRetry, t }: any) {
@@ -3133,7 +3273,10 @@ window.__ModuleLoader__.load({
     const BACK_TOP_THRESHOLD = 200
 
     function Dashboard({ t }: any) {
-      const { sessions, error, loading, updatedAt, reload } = usePlans()
+      const {
+        sessions, error, loading, updatedAt, reload,
+        truncated, omittedSessions, omittedDetail,
+      } = usePlans()
       const [openSessionId, setOpenSessionId] = useState(null)
       const selectSession = useCallback((sessionId: string) => {
         if (!sessionId) return
@@ -3317,6 +3460,17 @@ window.__ModuleLoader__.load({
           h('button', { type: 'button', className: 'dsh-wp-button', onClick: reload, disabled: loading }, t('refresh')),
         ),
         error ? h(ErrorBanner, { message: error, onRetry: reload, t }) : null,
+        /*
+         * [复审修复] 服务端裁剪提示：载荷被 2.5MB 上限裁剪（truncated /
+         * omittedSessions / omittedDetail 任一成立）时明确告知「展示为子集」，
+         * 不再静默少显示数据。复用现有 degraded 横幅样式，不新增 CSS/依赖。
+         */
+        (truncated === true || Number(omittedSessions) > 0 || omittedDetail === true)
+          ? h('div', {
+            className: 'dsh-wp-banner dsh-wp-banner--degraded dsh-wp-trim-notice',
+            role: 'status',
+          }, t('trimNotice'))
+          : null,
         activeSessions.length > 0 ? h('div', { className: 'dsh-wp-statbar', role: 'list' },
           h('div', { className: 'dsh-wp-stat dsh-wp-stat--tasks', role: 'listitem' }, h('div', { className: 'dsh-wp-stat-value' }, activeSessions.length), h('div', { className: 'dsh-wp-stat-label' }, t('sessionCount'))),
           h('div', { className: 'dsh-wp-stat', role: 'listitem' }, h('div', { className: 'dsh-wp-stat-value' }, totals.total), h('div', { className: 'dsh-wp-stat-label' }, t('workItems'))),

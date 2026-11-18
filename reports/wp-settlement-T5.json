@@ -1,155 +1,192 @@
 {
+ "planId": "wp-b310f420-138b-463f-9b5b-7ee5cbcd3887",
+ "subtaskId": "T5",
  "status": "done",
  "blockedReason": "",
- "planId": "wp-ef790a1b-48bf-4396-9203-13514bc40e6c",
- "subtaskId": "T5",
  "phases": {
   "planning": {
    "problemAnalysis": [
-    "目标与验收：产出《组员角色引用点清单与移除影响评估》。A1 每个引用点标注文件路径与类别（必改/可兼容/仅文档）；A2 明确回答角色字段是否持久化、历史计划是否需兼容；A3 给出移除顺序与回归检查点；A4 禁止出现未验证表述。",
-    "现状事实：插件仓库 /Users/open/Documents/Stocks/plugins/dsh-workplan，HEAD=3af2686c（v2.5.4 定版）；父会话正在并发实施 T8–T11，同一批 src 文件在 22:37–22:43 持续被改写并出现 [3.0.0] 标记与 dsh 新的两条固定文案，因此任何固定行号都会漂移。",
-    "核心区分：'member' 在本仓库有两种含义——A 类角色值（role:'member'、组员、DeptRole、DEPT_ROLES）是移除对象；B 类成员名槽位（member:'姓名'、delegates[].member、delegateEstimates[member]）是三层台账索引，必须保留；另有 C 类伪命中（subtask.role 部门岗位角色）与角色无关。",
-    "持久化事实（实测）：~/.dsh/workplan/journal 下 69 个 .jsonl，\"role\":\"member\" 748 条、\"role\":\"expert\" 559 条；读取端 readDeptMessages 对校验失败行静默 skipped+=1。计划存档侧 consolidation.assignments[].role 与 delegates[].role 由 plan.ts applyStatus 落档，两处写回均为 role==='expert'?'expert':'member'。",
-    "主要矛盾：用户要求取消组员角色，但历史数据与历史计划已持久化 member；若先删枚举/schema 再改写入层，会出现「748 条历史端点被跳过、审计断链」且「删掉的 member 被写回兜底」，形成不可逆损坏。",
-    "边界：只做只读侦察与影响评估，不改源码、不运行构建、不重启；构建会 rm -rf dist 与 rm lib/*.js，在并发实施期间运行会破坏他人工作树，故测试与构建只能静态判定并如实标注 unverified。"
+    "T5 目标：用 T4 脚本把最新源码+版本发布到官方 GitHub。现状：发布前 HEAD=8711a55、26 个未提交修改、版本 3.0.2；H3 已定版本 3.0.3/tag v3.0.3，H4 已授权提交工作区。主要矛盾：npm 3.0.2 被占用须升 3.0.3；测试断言硬编码版本号须随版本升级。未知：是否存在并行 T5 执行体。"
    ],
    "constraints": [
-    "只读：不修改 src/lib/配置，不重启服务",
-    "行号必须以快照哈希锚定，实施复核用「符号/片段」而非固定行号",
-    "历史 journal/测试夹具不得为让 grep 归零而删除",
-    "未运行的测试/构建一律写 unverified，禁止把静态判定写成实测"
+    "远端 tag 与版本号必须与源码一致",
+    "发布输出必须留档可复核",
+    "失败必须带完整错误输出，不得静默重试覆盖错误",
+    "不得硬编码密钥"
    ],
    "unknowns": [
-    "新 review 传入 member 时的最终策略（拒绝 vs 归一 expert）属产品决策，需主 Agent/用户定",
-    "计划状态的宿主存储格式不在插件仓库内，未逐份枚举历史计划文件，持久化结论由代码路径与字段消毒逻辑得出"
+    "并行 T5 代理（agent-10/agent-12）是否同时操作同一仓库"
+   ],
+   "resources": [
+    "plugins/dsh-workplan 仓库（git/SSH 凭证，admin）",
+    "T4 产物 scripts/publish-release.sh",
+    "gh CLI 登录态",
+    "reports/ 留档目录"
+   ],
+   "tools": [
+    "bash：执行发布脚本与 git 取证",
+    "gh：查询 CI run / Release / 远端 ref",
+    "curl：校验 Release 资产下载 HTTP 200"
    ],
    "approach": [
-    "第 1 步：git rev-parse / git grep -c 锁定仓库根、HEAD 与全仓引用计数 → 产出可复现基线（已完成）",
-    "第 2 步：逐个源码文件按精确正则 ('member'|\"member\"|组员|DeptRole|DEPT_ROLES|memberRole) 穷举并在每处回读上下文 → 把命中分成 A/B/C 三类（已完成）",
-    "第 3 步：沿 dept-journal append/read/validate 与 plan applyStatus 追数据流 → 实测 journal 749/559 条数与 skipped 语义，判定持久化与兼容要求（已完成）",
-    "第 4 步：按 S1→S9 排移除顺序（读兼容→写入兜底→门禁→schema→文案→前端→测试→构建→发版），硬约束 S2 早于 S3/S4、S8 最后 → 产出顺序表与 R1–R10 回归点（已完成）",
-    "第 5 步：写报告后用脚本对全部 file:line 引用做存在性/范围校验，并逐条回读关键断言 → 发现行号漂移后补 §9 最新复核（已完成）",
-    "第 6 步：落盘证据文件与结算备份，向 lead 报核心结论（本步）"
+    "第1步：只读取证——git status/log/tag/remote 确认起点状态",
+    "第2步：--dry-run 干跑确认编排无错（EXIT=0，留档 reports/T5-publish.log 之前的 dry-run 输出）",
+    "第3步：正式执行 publish-release.sh --version 3.0.3 --yes，全程 tee 留档 reports/T5-publish.log",
+    "第4步：首跑在『构建产物不可复现』检查失败（EXIT=1，错误完整留档），实证重建后 lib 与提交一致",
+    "第5步：发现 tag/推送/断言修复提交由并行 T5 执行体完成，转为只读核验：远端 main=5baf764=本地 HEAD、tag v3.0.3 指向 5baf764、CI 最新双跑 success、Release 含 tgz、下载 200",
+    "第6步：写结算备份 reports/wp-settlement-T5.json 并结构化回报"
    ],
    "approachBasis": [
-    "因为父会话并发改写导致行号漂移，所以第 5 步必须用符号/片段复核并加 §9 状态更新，而不是一次性写死行号",
-    "因为 'member' 有角色值与成员名两种语义，所以第 2 步先分类再统计，避免把必须保留的成员名槽位算成移除对象",
-    "因为 journal 读取是 fail-closed 静默跳过，所以第 3 步实测 748 条存量，并据此把「读兼容」定为 S1 地基",
-    "因为 plan.ts 两处写回会把未知值兜底成 member，所以顺序表把「修写入兜底」放在收窄门禁/schema 之前（S2 早于 S3/S4）",
-    "因为 npm run build 会清空 dist 与 lib，所以只做静态判定并声明 unverified，避免破坏并发实施"
+    "H3/H4 决定直接以 3.0.3 正式执行而非再请示版本号",
+    "T4 已证脚本幂等且 dry-run 通过，故首跑即正式跑并 tee 留档满足质量要求2",
+    "历史教训『先验证再动手』决定先做只读取证与 dry-run",
+    "历史教训『专家 failed 但盘上有产物先实测再判断』决定发现并行提交后不抢跑、改做全量只读核验",
+    "历史教训『npm/registry 证据三类齐全』扩展到 GitHub：ref+CI run+Release 资产+HTTP 200 四证齐"
+   ]
+  },
+  "preparation": {
+   "prepared": [
+    "发布脚本 scripts/publish-release.sh：存在且 dry-run 通过",
+    "git/SSH 推送凭证：前置检查通过",
+    "gh CLI：已登录（gh auth status 通过脚本 preflight）",
+    "reports/ 留档目录：可写"
+   ],
+   "evidence": [
+    "ls plugins/dsh-workplan/scripts/publish-release.sh 存在",
+    "dry-run 末行『✅ 3.0.3 编排完成（通道: CI）』EXIT=0",
+    "reports/T5-publish.log 第4行『前置检查通过 ✓』"
    ]
   },
   "execution": {
    "steps": [
-    "1. 锁定仓库根与 HEAD（3af2686c），git grep 精确正则统计 HEAD 引用：src 75 行/7 文件",
-    "2. 用 node 脚本在当前工作树穷举 src/tests/lib/dist/client.js/docs：src 68 行、tests 26 文件 176 行、lib 7 文件 68 行、dist 7 文件 68 行；对 8 个疑似零命中文件逐文件 grep -c 确认为 0",
-    "3. 逐文件回读命中行，把 7 个 src 文件命中分成必改 F1–F18、可兼容 C1–C8、仅文档 D1–D7 三类；排除 plan.ts subtask.role 与 host.ts role:{type:'string'} 等伪命中",
-    "4. 实测持久化：69 个 journal、748 条 member、559 条 expert；追踪 appendDeptMessage → readDeptMessages → runtime.ts:8019 消费点，确认 skipped 静默跳过语义",
-    "5. 追踪 plan.ts:4422 applyStatus → consolidation.assignments[].role / delegates[].role 写入与回放，识别 4718/4789 两处 member 兜底",
-    "6. 产出移除顺序 S1–S9、回归检查点 R1–R10、风险与兼容结论，写入主报告并落盘证据文件",
-    "7. 用 /tmp/verify_t5.mjs 校验报告 45 个唯一 file:line 引用存在性与行范围（0 越界），发现抽查锚点因并发编辑漂移 → 追加 §9（22:42–22:44 复核：8 项已完成、4 项仍待改）并用 24 条断言逐行复核 §9（24/24 通过）",
-    "8. 修正测试断言行号（delegate-tool.test.ts:185）与 §2.4 判定依据，回读测试原文确认两条断言",
-    "9. 写结算备份 reports/wp-settlement-T5.json（含 planId/subtaskId），向 lead 报核心结论"
+    "git status/log/tag 取证：26 修改、HEAD=8711a55、远端 tag 至 v3.0.2",
+    "执行 ./scripts/publish-release.sh --version 3.0.3 --summary ... --yes，输出 tee 至 reports/T5-publish.log",
+    "首跑结果：check/test/build 全过，但 git diff -- lib client.js 非空，脚本按设计 die『构建产物不可复现，禁止发布』EXIT=1（完整留档）",
+    "实证排查：本地 npm run build 后 lib/client.js 与 HEAD 完全一致（git status 0 修改），确认失败为版本同步后构建产物与索引比对时序问题，非真实不可复现",
+    "发现并行 T5 执行体已推送：chore(release): 3.0.3 提交、tag v3.0.3、断言修复提交 5baf764（test: 版本断言升级 3.0.2 -> 3.0.3）",
+    "转为只读核验：git ls-remote（main=5baf764、tag→5baf764）、gh run list（最新 tag/main 双跑 success）、gh release view（v3.0.3 含 dsh-workplan-3.0.3.tgz 1696545B）、curl 下载 URL HTTP 200、npm latest=3.0.3",
+    "写盘上结算 reports/wp-settlement-T5.json"
    ],
    "deviations": [
-    "原计划 8 路并行取证（5 专家+3 组员）遇平台 active child limit: 15，执行会话创建被拒；改为负责人独立穷举 + 2 份已落盘分片交叉复核（02-data-model、05-other-src）",
-    "原计划按 22:39:47 快照写死行号；因父会话在 22:40–22:41 继续改写源码与构建产物，追加 §9 并以符号锚点复核，报告明确区分两份快照"
+    "原方案由本执行体完成推送；实际首跑在可复现检查失败后，推送由并行 T5 执行体（agent-10）完成，本执行体改为全量只读核验并交叉确认所有验收证据，未重复推送（遵守不重复已完成的同类工作）"
    ]
   },
   "verification": {
    "allPassed": true,
    "checks": [
     {
-     "criterion": "A1",
-     "method": "报告中 F1–F18 / C1–C8 / D1–D7 / §2.4 测试清单每行都写文件路径并按「必改/可兼容/仅文档」归档；脚本校验 45 个唯一 file:line 引用全部存在且在行范围内",
-     "evidence": "reports/T5-roles/T5-组员角色引用点与移除影响评估-20261114.md §2；node 校验输出 unique refs 45 bad 0"
+     "criterion": "A1 GitHub 仓库可见最新 tag 与 release",
+     "method": "git ls-remote 查 tag；gh release view 查 Release 与资产；curl 校验资产下载",
+     "evidence": "refs/tags/v3.0.3 → 5baf764；Release v3.0.3 存在（非 draft），资产 dsh-workplan-3.0.3.tgz 1696545B，下载 URL 返回 HTTP 200，页面 https://github.com/abbaababa/dsh-workplan/releases/tag/v3.0.3"
     },
     {
-     "criterion": "A2",
-     "method": "读 dept-journal append/read/validate + plan applyStatus 数据流，并实测磁盘 journal 计数",
-     "evidence": "§3.1：69 个 journal、748 条 '\"role\":\"member\"'、559 条 expert（grep 实测）；§3.2：plan.ts:4718/4789 写回 member 兜底；结论「是，持久化两处；必须读兼容，历史计划不需迁移但不能删枚举/字段」"
+     "criterion": "A2 远端提交与本地源码一致",
+     "method": "git ls-remote 比对远端 main 与本地 HEAD/工作区",
+     "evidence": "远端 main=5baf764cd8fc…，本地 git rev-parse HEAD=5baf764cd8fc…，git status 修改文件数 0（仅历史未跟踪文件），完全一致"
     },
     {
-     "criterion": "A3",
-     "method": "给出 S1–S9 顺序表（每步含涉及点、为什么在该位置、完成判据）与 R1–R10 回归检查点；§9 再按当前代码标注已完成/待改",
-     "evidence": "报告 §4、§5、§9.2：仍待改为 plan.ts:4726/4797、runtime.ts:8832/8905/9009/9289/8798/8816/8453/8485、llm-rules.ts:169/428、tests 两个文件；S2 早于 S3/S4、S8 最后的硬约束"
+     "criterion": "质量要求1：远端 tag 与版本号与源码一致",
+     "method": "package.json 版本与 tag/Release 名比对",
+     "evidence": "package.json version=3.0.3，tag/Release=v3.0.3，npm latest=3.0.3，四处一致"
     },
     {
-     "criterion": "A4",
-     "method": "全文 grep 未验证措辞（应该没有/估计没有/大概没有/可能没有/其他地方）；对未跑的测试与构建显式写 unverified",
-     "evidence": "grep 输出 none；§6.4 明确「测试未运行、构建非本会话执行、行号会漂移、历史计划未逐份枚举」；§9 每条状态均附 22:42–22:44 实测行号，24 条断言复核全通过"
+     "criterion": "质量要求2：发布输出留档可复核",
+     "method": "检查留档文件",
+     "evidence": "reports/T5-publish.log（首跑全程+错误）、reports/T5-ci-fail-job22.log（失败 CI 日志 527633B）、reports/wp-settlement-T5.json"
+    },
+    {
+     "criterion": "质量要求3：失败带完整错误输出",
+     "method": "首跑失败留档与 CI 失败日志",
+     "evidence": "reports/T5-publish.log 末行 EXIT=1 及完整 diff 上下文；CI 失败 not ok 737/1205 原文在 reports/T5-ci-fail-job22.log"
     }
    ],
-   "requirementCheck": "本子任务要求：组员角色引用点清单（A1）、持久化与兼容判定（A2）、移除顺序与回归点（A3）、无未验证表述（A4）。四项均有可复核证据；同时识别出「必改/可兼容/仅文档」三档与「角色值 vs 成员名槽位」的判定口径，直接支撑 3.0.0 的「取消部门组员角色」落地并避免历史数据损坏。",
+   "requirementCheck": "用户原要求『将最新版 dsh-workplan 插件的最新源代码和相对应最新版本自动发布到官方 GitHub』已达成：main 已推送最新源码（含全部未提交修改的发布提交），v3.0.3 tag+Release 已创建且资产可下载；npm 侧 latest=3.0.3 由同一 CI 流水线发布。",
    "retrospective": {
     "problems": [
-     "父会话并发实施 T8–T11 导致同一批 src 文件在取证期间持续改写：现象是我先按 22:39:47 快照写入的行号在 22:42 复核时全部漂移（plan 4718→4726、three-phase 359 被删除、runtime 8965→9009）；根因是共享工作树且职责边界未按文件切分。",
-     "8 路并行取证在 phase-0 后全部被平台 active child limit: 15 拒绝，现象是多份分片没有产出、成员被结算；根因是全会话树并发名额被兄弟任务占满，非任务缺陷。"
+     "首跑被脚本『构建产物不可复现』检查拦截（EXIT=1）：版本同步+构建后 lib 与 git 索引比对在未提交状态下必非空，属脚本检查时序缺陷，非真实不可复现；经实证重建后产物与提交逐字节一致",
+     "发现同一 T5 子任务存在并行执行体（agent-10/agent-12），仓库提交/推送/改标签被另一方完成，双写冲突风险真实存在",
+     "首个 tag 触发的 CI 运行失败（not ok 737/1205：测试断言硬编码 3.0.2 而版本已升 3.0.3），根因=断言未随版本升级，已由 5baf764 修复并重推"
     ],
     "detours": [
-     "首次用固定行号写满报告表格，随后不得不追加 §9 并用符号锚点重核（一次返工，已转化为「双快照+符号定位」结构）",
-     "校验脚本首版只查行范围不查内容断言，漏掉了 F16 测试断言行号写错（:183 实为 :185），回读测试原文后修正"
+     "首跑正式发布失败一次，转为实证排查（重建比对）确认是检查时序误报"
     ],
     "resolutions": [
-     "把报告改成「22:39:47 快照 + §9 最新复核」双快照结构，所有实施建议以符号/片段定位，行号只作定位辅助",
-     "对 §9 的每条状态用 sed 回读该行原文并脚本断言（24/24 通过），测试断言逐条回读源文件确认",
-     "并行名额被拒后不再重试 dispatch，改为负责人独立穷举 + 已落盘分片交叉复核，保证交付"
+     "未重跑脚本抢推，改为全量只读核验远端 ref/CI/Release/下载/npm 五证，确认并行执行体产物真实有效",
+     "CI 失败根因（版本断言 3.0.2 硬编码）由并行执行体以 5baf764 修复，重推后 CI 双跑 success、Release 生成"
     ],
     "prevention": [
-     "遇到共享工作树被并发改写，先声明取证快照哈希，再用「符号/片段」而非行号交付，最后补一节「最新复核状态」",
-     "遇到引用行号，先用脚本校验存在性与范围，再对关键断言逐行回读原文，禁止只验范围不验内容",
-     "遇到第三层 dispatch 被拒（并发上限），先查 status/拒绝原因，立即转负责人直核兜底，禁止反复重试同一 dispatch"
+     "遇到发布脚本在提交前用 git diff 比对构建产物，先实证重建比对再判真伪，禁止直接改脚本跳过检查；遇到同一子任务存在并行执行体，先 list_agents 核实再决定动手还是转核验，禁止双写同一仓库；遇到 tag 已推送后 CI 失败，先取失败 job 日志定位再修，禁止盲目重推标签"
     ]
    }
   }
  },
  "acceptance": [
   {
-   "criterion": "A1 每个引用点标注文件路径与类别",
+   "criterion": "A1 GitHub 仓库可见最新 tag 与 release",
    "result": "pass",
-   "evidence": "报告 §2.1（F1–F18 必改）、§2.2（C1–C8 可兼容）、§2.3（D1–D7 仅文档）、§2.4（26 个测试文件清单）均逐条给出文件路径与类别；脚本校验 45 个唯一 file:line 引用 0 越界"
+   "evidence": "git ls-remote: refs/tags/v3.0.3→5baf764；gh release view v3.0.3：资产 dsh-workplan-3.0.3.tgz(1696545B)，curl 下载 HTTP 200"
   },
   {
-   "criterion": "A2 明确回答是否存在角色字段持久化及是否需兼容",
+   "criterion": "A2 远端提交与本地源码一致",
    "result": "pass",
-   "evidence": "§3 结论：持久化两处——journal JSONL（实测 69 文件/748 条 member，dept-journal.ts append/read/validate）与计划存档（plan.ts:4422 applyStatus → consolidation.assignments[].role:4718 / delegates[].role:4789）；必须读兼容（保留 'member' 于 DeptRole/DEPT_ROLES），历史计划不需迁移但禁止删字段或把未知值兜底成 member"
-  },
-  {
-   "criterion": "A3 给出移除顺序建议与需回归的检查点",
-   "result": "pass",
-   "evidence": "§4 S1–S9 顺序表（含 S2 早于 S3/S4、S8 最后两条硬约束与每步完成判据）；§5 R1–R10 回归检查点（含 748 条历史 journal skipped=0、历史 delegates 回放不改写、build 后 lib 含 enum ['expert']、npm test 全绿）；§9.2 列出截至 22:43 仍待改的 4 项及当前行号"
-  },
-  {
-   "criterion": "A4 无“应该没有其他地方引用”这类未验证表述",
-   "result": "pass",
-   "evidence": "全文 grep 未验证措辞（应该没有/估计没有/大概没有/可能没有/其他地方）输出 none；§6.4 显式声明测试未运行、构建非本会话执行、历史计划未逐份枚举、行号会漂移，均写 unverified 而非 pass"
+   "evidence": "远端 main=5baf764cd8fc5d43f6500653297230c8e3a81dd0=本地 HEAD；git status 修改数 0"
   }
  ],
  "artifacts": [
   {
    "kind": "file",
-   "ref": "plugins/dsh-workplan/reports/T5-roles/T5-组员角色引用点与移除影响评估-20261114.md"
+   "ref": "plugins/dsh-workplan/reports/T5-publish.log"
   },
   {
    "kind": "file",
-   "ref": "plugins/dsh-workplan/reports/T5-roles/evidence-role-hits-20261114.txt"
+   "ref": "plugins/dsh-workplan/reports/T5-ci-fail-job22.log"
   },
   {
    "kind": "file",
-   "ref": "plugins/dsh-workplan/reports/t5-inventory/fragments/02-data-model.md"
+   "ref": "plugins/dsh-workplan/reports/wp-settlement-T5.json"
   },
   {
-   "kind": "file",
-   "ref": "plugins/dsh-workplan/reports/t5-inventory/fragments/05-other-src.md"
-  },
-  {
-   "kind": "file",
-   "ref": "reports/wp-settlement-T5.json"
+   "kind": "url",
+   "ref": "https://github.com/abbaababa/dsh-workplan/releases/tag/v3.0.3"
   }
  ],
  "needs": [],
  "question": "",
  "options": [],
- "timeSpentMinutes": 9,
- "finalEstimateMinutes": 9
+ "report": {
+  "keyResults": [
+   "GitHub 已发布 v3.0.3：tag 指向 5baf764，Release 含 dsh-workplan-3.0.3.tgz 且下载 HTTP 200",
+   "远端 main=本地 HEAD=5baf764，工作区零修改，源码完全一致",
+   "CI release 流水线对 main 与 tag 双跑 success，npm latest 已=3.0.3"
+  ],
+  "keyInfo": [
+   "发布提交 78b6d98 chore(release): 3.0.3 含全部 26 项未提交修改与四处版本同步",
+   "断言修复提交 5baf764 将版本硬编码断言 3.0.2→3.0.3，修复首个 tag 触发的 CI 红叉",
+   "首个 tag CI 失败原因=测试断言硬编码 3.0.2（not ok 737/1205），日志留档 reports/T5-ci-fail-job22.log"
+  ],
+  "importantInfo": [
+   "本计划 T5 存在并行执行体（agent-10 仍在 running，agent-12 已 inactive），推送动作由 agent-10 完成，本执行体只做只读核验，请 lead 注意重复派发现象",
+   "首跑本执行体脚本在『构建产物不可复现』检查失败（EXIT=1 已留档），根因是脚本提交前用 git diff 比对构建产物的时序缺陷，建议 T4 后续修补"
+  ],
+  "leadRequirements": [
+   "确认 T5 只需结算一次，避免 agent-10 与本执行体重复上报冲突",
+   "如需修补 publish-release.sh 的可复现时序检查，可分派工程部门"
+  ]
+ },
+ "departmentSummary": {
+  "keyResults": [
+   "T5 达成：dsh-workplan 3.0.3 最新源码与版本已发布官方 GitHub（tag+Release+资产可下载），远端与本地源码完全一致"
+  ],
+  "keyInfo": [
+   "远端 main=tag 目标=5baf764；Release 资产 dsh-workplan-3.0.3.tgz 1696545B；下载 HTTP 200；npm latest=3.0.3；CI 双跑 success"
+  ],
+  "importantInfo": [
+   "T5 被重复派发给两个并行执行体（agent-10/agent-15），推送由 agent-10 完成；publish-release.sh 的可复现检查存在提交前比对时序缺陷，首个 tag 曾因此类问题+版本断言硬编码致 CI 红叉，均已解决"
+  ],
+  "sources": [
+   "agent-15（本执行体）：完成 dry-run+首跑留档+全量只读核验五证，确认 tag/Release/远端一致性/下载/npm 全部通过"
+  ]
+ },
+ "timeSpentMinutes": 12,
+ "finalEstimateMinutes": 10
 }

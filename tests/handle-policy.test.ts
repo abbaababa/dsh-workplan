@@ -33,6 +33,12 @@ const HYGIENE_WHITELIST: Record<string, number> = {
   // plan.ts [2.5.5] head 落地补发保险丝：卫生类（只补发可见通知、不驱动终态；
   // 2s×300 有界自停；缺失仅延迟通知可见性，不影响任何收束）
   flushPoll: 1,
+  // host.ts [3.0.6] 留痕清理定时器：卫生类（不触发只少清理一次旧 journal 文件，
+  // 不驱动任何任务终态；24h 周期，宿主关闭时随 ctx.effect 清理）
+  journalRetentionTimer: 1,
+  // host.ts [3.0.6][复审修复] 首次留痕清理延迟器：卫生类（激活同步路径不得当场
+  // 扫盘；10s 后触发一次，不驱动任何任务终态；宿主关闭时随 ctx.effect 清理）
+  firstPruneTimer: 1,
 }
 
 /** 历史事故点位黑名单：显式命名，回归时给出最直白的报错（与白名单检查互为双保险）。 */
@@ -59,7 +65,11 @@ test('[2.2.9][P-3] handle-policy：src/ 全部 unref 点位 === 卫生类白名�
   //    补发保险丝，卫生类：只补发可见通知、有界自停、不驱动终态）允许 unref。
   assert.deepEqual(
     Object.fromEntries([...found.entries()].map(([f, n]) => [f, n.sort()])),
-    { 'plan.ts': ['flushPoll'], 'runtime.ts': ['notice', 'notice', 'noticeTimer', 'poll', 'poll'] },
+    {
+      'host.ts': ['firstPruneTimer', 'journalRetentionTimer'],
+      'plan.ts': ['flushPoll'],
+      'runtime.ts': ['notice', 'notice', 'noticeTimer', 'poll', 'poll'],
+    },
     'unref 点位与 handle-policy 契约不符：收束类计时器（必须触发才能到达终态）禁止 unref；'
     + '新增卫生类计时器必须显式加入 tests/handle-policy.test.ts 白名单并附分类理由。'
     + '背景见 docs/rootcause-red-x-recurrence-20261110-T1.md §3/§4.1。',

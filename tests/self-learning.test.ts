@@ -10,7 +10,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, readFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -232,6 +232,56 @@ test('永久记忆：文件损坏一行不影响其余教训，空复盘不落�
   })
   assert.equal(empty, null)
   assert.equal(readLessons(file).length, 1)
+})
+
+test('永久记忆：读失败拒绝写入，绝不把历史覆盖成空文件', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-workplan-lessons-'))
+  const file = join(dir, 'as-directory')
+  // 用目录冒充记忆文件：existsSync 为真，readFileSync 抛 EISDIR，模拟不可读。
+  mkdirSync(file)
+  assert.throws(
+    () => recordLesson({
+      file,
+      planId: 'wp-1',
+      subtaskId: 'T1',
+      department: 'engineering',
+      title: 'T1 读失败',
+      retrospective: retro(),
+    }),
+    /LESSONS_READ_FAILED/,
+  )
+  // 只读端仍保持容错（提示词注入不能因文件异常而崩），但写入端绝不静默清空。
+  assert.equal(readLessons(file).length, 0)
+})
+
+test('永久记忆：重写时坏行原样保留，覆盖前留一代 .bak', () => {
+  const file = tempLessonsFile()
+  writeFileSync(file, 'not-json-line\n', 'utf8')
+  const first = recordLesson({
+    file,
+    planId: 'wp-1',
+    subtaskId: 'T1',
+    department: 'engineering',
+    title: 'T1 第一次',
+    retrospective: retro(),
+    now: 1_000,
+  })
+  assert.equal(first?.mode, 'created')
+  assert.match(readFileSync(file, 'utf8'), /not-json-line/)
+  assert.equal(readLessons(file).length, 1)
+
+  recordLesson({
+    file,
+    planId: 'wp-2',
+    subtaskId: 'T2',
+    department: 'engineering',
+    title: 'T2 第二次',
+    retrospective: retro(),
+    now: 2_000,
+  })
+  const backup = readFileSync(`${file}.bak`, 'utf8')
+  assert.match(backup, /not-json-line/)
+  assert.match(backup, /T1 第一次/)
 })
 
 test('防再犯：相关教训注入提示词，重复次数越多排得越靠前', () => {

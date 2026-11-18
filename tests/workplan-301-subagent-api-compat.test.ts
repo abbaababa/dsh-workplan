@@ -21,6 +21,8 @@ import {
   describeSubagentActivationError,
   detectDepthOverrideConflict,
   interruptChildContinuable,
+  isActivationLimitError,
+  startActivationQueued,
 } from '../src/runtime.js'
 
 const LIVE_LEADER = { id: 'agent-leader' }
@@ -109,6 +111,44 @@ test('[3.0.1][P1b] describeSubagentActivationError 翻译宿主并发上限', ()
   const byMessage = describeSubagentActivationError(new Error('subagent limit reached (active child limit: 8)'), '派发成员')
   assert.ok(byMessage instanceof PlanError)
   assert.equal(byMessage.code, 'ACTIVATION_LIMIT_REACHED')
+})
+
+test('[3.0.6] 并发上限排队：先满后空，等待后成功而不是判失败', async () => {
+  let calls = 0
+  const result = await startActivationQueued(async () => {
+    calls += 1
+    if (calls === 1) {
+      throw Object.assign(new Error('subagent limit reached (active child limit: 8)'), { code: 'ACTIVATION_LIMIT_REACHED' })
+    }
+    return { childId: 'child-1' }
+  }, undefined, '派发子任务 T1')
+  assert.deepEqual(result, { childId: 'child-1' })
+  assert.equal(calls, 2)
+})
+
+test('[3.0.6] 非并发上限错误立即上抛，不排队、不重试', async () => {
+  const original = new Error('boom')
+  await assert.rejects(
+    () => startActivationQueued(async () => { throw original }, undefined, 'ctx'),
+    (error: any) => error === original,
+  )
+})
+
+test('[3.0.6] 排队等待期间被取消：抛 ABORTED，不把取消记成并发失败', async () => {
+  const controller = new AbortController()
+  controller.abort()
+  await assert.rejects(
+    () => startActivationQueued(async () => {
+      throw Object.assign(new Error('limit reached'), { code: 'ACTIVATION_LIMIT_REACHED' })
+    }, controller.signal, 'ctx'),
+    (error: any) => error?.code === 'ABORTED',
+  )
+})
+
+test('[3.0.6] isActivationLimitError 同时认 code 与 message，不误伤普通错误', () => {
+  assert.equal(isActivationLimitError({ code: 'ACTIVATION_LIMIT_REACHED' }), true)
+  assert.equal(isActivationLimitError(new Error('subagent limit reached (active child limit: 8)')), true)
+  assert.equal(isActivationLimitError(new Error('boom')), false)
 })
 
 test('[3.0.1][P1b] describeSubagentActivationError 非并发上限错误原样返回', () => {

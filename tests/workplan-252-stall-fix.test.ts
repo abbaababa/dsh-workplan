@@ -83,7 +83,7 @@ const consolidation = (effort?: string) => ({
   // （D1/D2）：前两名保留原 Expert-A/Member-B，其余补通用组员；本文件用例只考察
   // 中断/心跳/门禁语义，无派生数量断言，补人数不改断言意图。
   assignments: [
-    { member: 'Expert-A', role: 'expert', task: '实现核心逻辑并自测', reasoningEffort: 'low', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
+    { member: 'Expert-A', role: 'expert', task: '实现核心逻辑后自测', reasoningEffort: 'low', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
     { member: 'Member-B', role: 'expert', task: '整理验收证据清单', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
     ...gateMembers(8).slice(2),
   ],
