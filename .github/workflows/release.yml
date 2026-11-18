@@ -135,6 +135,13 @@ jobs:
           fi
 
       - name: 发布到 npm（官方索引源）
-        run: npm publish --provenance --access public
+        run: |
+          set -e
+          VERSION="${GITHUB_REF_NAME#v}"
+          if npm view "dsh-workplan@${VERSION}" version >/dev/null 2>&1; then
+            echo "dsh-workplan@${VERSION} 已在索引源存在（本地已先行发布），跳过发布以保持幂等"
+          else
+            npm publish --provenance --access public
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
