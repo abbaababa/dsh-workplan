@@ -228,7 +228,10 @@ test('冒烟：主 Agent startPhases 门禁与叶子 self_effort+startPhases 门
   assert.equal(badReview.ok, false)
   assert.equal(badReview.code, 'DELEGATE_CONSOLIDATION_INCOMPLETE')
   // 叶子门禁：self_effort 缺 startPhases 仍被硬拒。
-  await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation(), startPhases: MAIN_START_PHASES_FIXTURE })
+  // [3.1.0] 分工表须显式声明复杂档（'xhigh'）：8 人表 + 无声明时按非复杂判（cap=6），
+  // 3.1.0 起超上限从「静默截断」改为 HEADCOUNT_MAX 拒收——本用例测门禁语义而非
+  // 截断行为，按 T4 夹具约定补显式声明使 8 人表合规（与 R1 各用例同一形态）。
+  await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation('xhigh'), startPhases: MAIN_START_PHASES_FIXTURE })
   await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
   const leaf = { session: { id: 'member-1', header: { parentSession: 'child-leader', cwd: '/tmp/stall-cwd' } }, options: { provider: 'qw', model: QWEN } }
   const noThink = await runtime.delegateTool(leaf, { action: 'self_effort', reasoningEffort: 'xhigh', complexityRationale: '复杂' })

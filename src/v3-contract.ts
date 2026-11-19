@@ -257,13 +257,16 @@ export function checkAtomicAssignment(task: string, qualityRequirements?: unknow
 /** 单个汇报数组的条数上限：精简的量化口径。 */
 export const MAX_REPORT_ITEMS = 6
 /**
- * [3.0.6][第 3 批③] sources（部门汇总「覆盖的专家汇报」）专用上限。
- * 死锁修复：复杂任务按用户裁决 D1/D2 强制 ≥8 名专家（上限 12），而 sources
+ * [3.0.6][第 3 批③][3.1.0 改数] sources（部门汇总「覆盖的专家汇报」）专用上限。
+ * 死锁修复史：复杂任务按用户裁决 D1/D2 强制 ≥8 名专家（上限原 12），而 sources
  * 必须覆盖全部已派发专家——若与其他数组共用 6 条上限，7–12 人的部门永远
  * 交不出合法汇总（覆盖诚实要求 vs 精简上限互相矛盾）。覆盖是硬要求，
- * 故 sources 单独放宽到 16（≥ 复杂任务 12 人上限 + 余量），其余数组仍 6 条。
+ * 故 sources 单独放宽；3.1.0 专家上限 12→25，本条数同步 16→30（25 + 余量 5）。
+ * 单一真源在 caps.ts（可用 DSH_WORKPLAN_MAX_SOURCES_ITEMS 覆盖），此处 re-export
+ * 保持既有 import 路径不变。
  */
-export const MAX_SOURCES_ITEMS = 16
+import { MAX_SOURCES_ITEMS } from './caps.js'
+export { MAX_SOURCES_ITEMS }
 /** 单条汇报文本的字符上限。 */
 export const MAX_REPORT_ITEM_CHARS = 200
 

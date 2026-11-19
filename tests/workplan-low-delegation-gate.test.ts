@@ -269,7 +269,7 @@ test('B3 拒因顺序：缺 consolidation 最先／review 开工证据闸先于�
 
 /* ---------- C 双入口同判据＋声明记忆＋防注入 ---------- */
 
-test('C1 runtime：非 qwen medium review 钳制留痕＋declared 记忆 → dispatch 读回不误杀（§8.2 cap6 截断为既有行为保留）', async () => {
+test('C1 runtime：非 qwen medium review 钳制留痕＋declared 记忆 → dispatch 按钳制前声明档判复杂：8 人全部派发（截 6 缺陷已修，3.1.0）', async () => {
   const { runtime, leaderAgent, record, spawned } = makeRuntime(OTHER, { provider: 'openai' })
   const review = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: goodConsolidation({ taskReasoningEffort: 'medium', assignments: eight() }), startPhases: goodPhases() })
   assert.equal(review.ok, true, JSON.stringify(review))
@@ -282,7 +282,11 @@ test('C1 runtime：非 qwen medium review 钳制留痕＋declared 记忆 → dis
   assert.equal(row.consolidation.taskReasoningEffortDeclared, 'medium', '钳制前声明记忆必须留档')
   const dispatch = await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
   assert.equal(dispatch.ok, true, `declared 记忆防误杀：${JSON.stringify(dispatch)}`)
-  assert.equal(spawned.length, 6, '§8.2 既有 dispatch cap=6 截断原样保留（S4，登记不修）')
+  // [3.1.0] 治本：dispatch 的 complexTask 判据改用钳制前声明记忆（与禁派闸同源），
+  // review 放行的 8 人名单不再被复读时的钳制后 low 回落成 cap=6 静默截断。
+  assert.equal(spawned.length, 8, 'dispatch 按钳制前声明档判复杂：8 人全部派发（旧「截 6」行为已修）')
+  assert.equal(dispatch.delegates.length, 8)
+  assert.ok(dispatch.delegates.every((d: any) => d.status === 'running'), '8 名成员全部 running')
 })
 
 test('C2 防注入：review 输入携带 taskReasoningEffortDeclared 被剥离 ⇒ low 仍禁派；单元层平台写入形态原样消费', async () => {
@@ -460,11 +464,11 @@ test('E2 单元：非 qwen medium 7 人 ⇒ DELEGATE_HEADCOUNT_MIN（复杂判�
   assert.equal(r.code, 'DELEGATE_HEADCOUNT_MIN')
 })
 
-test('E3 单元：declared 记忆优先于钳制后声明；complexTask/memberCap 不消费记忆（cap=6 既有行为）', () => {
+test('E3 单元：declared 记忆同时驱动禁派闸与复杂判定：钳制后 low + 记忆 medium + 8 人 ⇒ 复杂放行 8 人（3.1.0 治本）', () => {
   const r = planDelegations({ consolidation: goodConsolidation({ taskReasoningEffort: 'low', taskReasoningEffortDeclared: 'medium', assignments: eight() }), model: QWEN })
-  assert.equal(r.ok, true, 'banDeclared=medium（记忆）⇒ 禁派闸不触发')
-  assert.equal(r.taskEffort, 'low')
-  assert.equal(r.members.length, 6, 'complexTask 按钳制后声明 low ⇒ cap=6（§3.4 不消费记忆）')
+  assert.equal(r.ok, true, 'banDeclared=medium（记忆）⇒ 禁派闸不触发；complexTask 也消费同一记忆')
+  assert.equal(r.taskEffort, 'low', '持久化档仍是钳制后值')
+  assert.equal(r.members.length, 8, 'complexTask 按钳制前声明记忆判复杂 ⇒ cap=25：8 人全部保留（旧「回落 6 截断」已修）')
 })
 
 /* ---------- F 非 low 既有行为回归（S4） ---------- */
@@ -494,12 +498,17 @@ test('F2 回归：整体档钳制留痕＋成员越界钳制留痕＋未配档�
   assert.deepEqual(r.members.slice(1).map((m) => m.effort), Array(7).fill('medium'), '未配档成员继承整体档')
 })
 
-test('F3 回归（S4 核心）：行级 high/medium 兜底只进禁派链，不触发 complexTask/≥8/12 上限（cap=6 静默截断保留）', () => {
+test('F3 回归（S4 核心）：行级 high/medium 兜底只进禁派链，不触发 complexTask/≥8/上限；3.1.0 起超限由静默截断改为拒收', () => {
   for (const rowEffort of ['high', 'medium']) {
+    // S4 不变：declaredEffort 缺失 ⇒ 非复杂（cap=6），行级等级不 newly 触发 ≥8/上限判据。
     const r = planDelegations({ consolidation: goodConsolidation({ assignments: eight() }), model: QWEN, taskRowEffort: rowEffort })
-    assert.equal(r.ok, true, `行级 ${rowEffort}：banComplex=true 闸不触发；declaredEffort 缺 ⇒ 非复杂`)
-    assert.equal(r.members.length, 6, '行级等级不得 newly 触发 ≥8/12（独立判定链，S4）')
-    assert.equal(r.taskEffort, null)
+    assert.equal(r.code, 'DELEGATE_HEADCOUNT_MAX', `行级 ${rowEffort}：8 人超非复杂上限 6 ⇒ 拒收（不再静默截 6）`)
+    assert.ok(r.error!.includes('6'), '拒因须含上限 6')
+    // 6 人以内仍原样放行（S4：行级等级不触发 ≥8 下限，行为零变化）。
+    const six = planDelegations({ consolidation: goodConsolidation({ assignments: eight().slice(0, 6) }), model: QWEN, taskRowEffort: rowEffort })
+    assert.equal(six.ok, true, `行级 ${rowEffort}：6 人非复杂原样放行`)
+    assert.equal(six.members.length, 6)
+    assert.equal(six.taskEffort, null)
   }
 })
 
@@ -610,4 +619,29 @@ test('X1：行级 startPhases 经 durable workplan-update 回放不丢（G1 双�
   const rebuilt: any = reconstructFromSession(rootSession)
   const row = rebuilt.statuses.find((item: any) => item.subtaskId === 'T1')
   assert.deepEqual(row.startPhases, record.statuses[0].startPhases, '重建后行级 startPhases 回放不丢')
+})
+
+/* ---------- H 重派跳过已完成成员（3.1.0） ---------- */
+
+test('H1 runtime：[3.1.0] 重派跳过已完成成员——done 专家不重复拉起、成果原样保留、skippedDone 留痕', async () => {
+  const { runtime, leaderAgent, record, spawned } = makeRuntime(QWEN)
+  const review = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: goodConsolidation({ taskReasoningEffort: 'medium', assignments: eight() }), startPhases: goodPhases() })
+  assert.equal(review.ok, true, JSON.stringify(review))
+  const first = await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
+  assert.equal(first.ok, true, JSON.stringify(first))
+  assert.equal(spawned.length, 8, '首轮 8 人全部拉起')
+  // 模拟结算：Expert-A 已交付（done），其余 7 人失败待重派（running 会触发重复派发闸）。
+  const row = record.statuses[0]
+  row.delegates = row.delegates.map((d: any, i: number) => (i === 0
+    ? { ...d, status: 'done', summary: '核心逻辑已交付', finishedAt: 2000 }
+    : { ...d, status: 'failed', error: '模拟失败', finishedAt: 2000 }))
+  const again = await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
+  assert.equal(again.ok, true, JSON.stringify(again))
+  assert.equal(again.skippedDone, 1, '重派结果必须显式报告跳过 1 名已完成成员')
+  assert.equal(spawned.length, 15, '8+7：done 成员未被重复拉起，仅 7 名失败成员重派')
+  const kept = again.delegates.find((d: any) => d.member === 'Expert-A')
+  assert.equal(kept.status, 'done', 'done 成果原样保留（不重置回 running）')
+  assert.equal(kept.summary, '核心逻辑已交付')
+  assert.ok(again.delegates.filter((d: any) => d.member !== 'Expert-A').every((d: any) => d.status === 'running'))
+  assert.match(again.hint, /跳过 1 名已完成成员/, 'hint 须告知负责人未重复拉起已完成专家')
 })

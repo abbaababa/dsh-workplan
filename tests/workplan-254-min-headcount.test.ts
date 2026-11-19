@@ -5,8 +5,9 @@
  *     合计 ≥8 人」，xhigh 不豁免；复杂判定用「钳制前声明档」
  *     （consolidation.taskReasoningEffort ?? taskEffortFallback），因为
  *     correctEffortForModel 在非 qwen 系会把 medium 钳到 low，按钳制后判会静默豁免。
- * D2：复杂任务合计 <8 直接阻断分派（code=DELEGATE_HEADCOUNT_MIN）；上限放宽到 12
- *     （12 为实现取值）；非复杂保持 6 人上限 + 原有静默截断，旧行为零变化。
+ * D2：复杂任务合计 <8 直接阻断分派（code=DELEGATE_HEADCOUNT_MIN）；上限 3.1.0 起
+ *     由 12 放宽到 25（用户裁决，单一真源 src/caps.ts），超限拒收 DELEGATE_HEADCOUNT_MAX
+ *     （不再静默截断）；low/未配置禁派（非复杂 6 人上限仅在历史/非法档路径保留）。
  * [2.5.5][T3] 夹具适配（负责人裁决，门禁实现与夹具适配同批交付）：D1–D3 low/未配置
  *     禁派后，A3/A4/边界的 low 子案改断言 DELEGATE_LOW_TASK_FORBIDDEN＋direct 指路；
  *     提示词同步改 W1 新串。复杂档各案断言意图零删改。
@@ -36,6 +37,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { buildLlmRulesBrief, planDelegations } from '../src/llm-rules.js'
+import { MAX_COMPLEX_DELEGATE_MEMBERS, MIN_COMPLEX_DELEGATE_MEMBERS } from '../src/caps.js'
 import { START_EVIDENCE_MIN_CHARS_BRIEF } from '../src/five-step.js'
 
 const QWEN = 'qwen3-max-preview'
@@ -152,15 +154,18 @@ test('边界：qwen 模型 + 声明 high → 复杂 7 人拦（实际档位被�
   assert.equal(plan.code, 'DELEGATE_HEADCOUNT_MIN')
 })
 
-test('边界：复杂 12 人过；13 人截断 12 过；非复杂（low）8 人禁派拦', () => {
-  const twelve = planWith('max', 12, null)
-  console.log(`[254-min-headcount] 边界 复杂12人 → ok=${twelve.ok} members=${twelve.members.length}`)
-  assert.equal(twelve.ok, true)
-  assert.equal(twelve.members.length, 12)
-  const thirteen = planWith('max', 13, null)
-  console.log(`[254-min-headcount] 边界 复杂13人 → ok=${thirteen.ok} members=${thirteen.members.length}（截断 12）`)
-  assert.equal(thirteen.ok, true)
-  assert.equal(thirteen.members.length, 12)
+test('边界：复杂 25 人过；26 人拒收 DELEGATE_HEADCOUNT_MAX（3.1.0 不再静默截断）；非复杂（low）8 人禁派拦', () => {
+  const twentyFive = planWith('max', 25, null)
+  console.log(`[254-min-headcount] 边界 复杂25人 → ok=${twentyFive.ok} members=${twentyFive.members.length}`)
+  assert.equal(twentyFive.ok, true)
+  assert.equal(twentyFive.members.length, 25)
+  const twentySix = planWith('max', 26, null)
+  console.log(`[254-min-headcount] 边界 复杂26人 → ok=${twentySix.ok} code=${twentySix.code}（拒收，不再截断）`)
+  assert.equal(twentySix.ok, false)
+  assert.equal(twentySix.code, 'DELEGATE_HEADCOUNT_MAX')
+  assert.ok(twentySix.error!.includes('26'), '拒因须含当前人数 26')
+  assert.ok(twentySix.error!.includes('25'), '拒因须含上限 25')
+  assert.ok(twentySix.error!.includes('拆'), '拒因须给出拆两轮出路')
   // [2.5.5][T3] D1–D3 适配（原则②）：low 8 人旧「截断 6 过」改为禁派硬拒。
   const nonComplex8 = planWith('low', 8, null)
   console.log(`[254-min-headcount] 边界 low 8人 → ok=${nonComplex8.ok} code=${nonComplex8.code}（禁派）`)
@@ -218,13 +223,15 @@ test('拒因顺序回归：人数闸前的既有闸仍先拒（3.0.8 新顺序�
   assert.equal(bare.code, 'DELEGATE_HEADCOUNT_MIN')
 })
 
-test('提示词同步：负责人任务书人数口径改为 low 禁派＋direct 直执 / 复杂≥8 且 ≤12（D1/D2＋T3 W1，3.0.8 五步口径）', () => {
+test('提示词同步：负责人任务书人数口径为 low 禁派＋direct 直执 / 复杂≥8 且 ≤25，超限拒收不静默截断（D1/D2＋T3 W1＋3.1.0）', () => {
   const brief = buildLlmRulesBrief({ tier: 'department', model: QWEN })
   console.log('[254-min-headcount] 提示词同步断言')
   // [2.5.5][T3] W1 文案同步（原则③）：与 src/llm-rules.ts 负责人告知块逐字一致；
-  // [3.0.8] 「两轮思考产物」表述改为「第 1/2/3 步证据」（单框架收口）。
+  // [3.0.8] 「两轮思考产物」表述改为「第 1/2/3 步证据」（单框架收口）；
+  // [3.1.0] 上限 12→25 且与 caps.ts 常量同源（环境变量覆盖时提示词不漂移）。
   assert.ok(brief.includes('low/未配置任务禁止下派——负责人亲自执行，第 1/2/3 步证据经 dsh_workplan_delegate(action="direct") 登记（' + START_EVIDENCE_MIN_CHARS_BRIEF + '；可选 reasoningEffort="low"）'))
-  assert.ok(brief.includes('复杂任务（medium/high/xhigh/max）合计不少于 8 人且最多 12 人，少于 8 人硬性阻断'))
+  assert.ok(brief.includes(`复杂任务（medium/high/xhigh/max）合计不少于 ${MIN_COMPLEX_DELEGATE_MEMBERS} 人且最多 ${MAX_COMPLEX_DELEGATE_MEMBERS} 人，少于 ${MIN_COMPLEX_DELEGATE_MEMBERS} 人硬性阻断，超过上限平台拒收（可精简名单或拆两轮派发，绝不静默丢人无痕）`))
+  assert.ok(!brief.includes('最多 12 人'), '旧「最多 12 人」口径必须移除')
   assert.ok(brief.includes('startPhases={ planning{ problemAnalysis[], approach[], approachBasis[], resources[], tools[] }, preparation{ prepared[], evidence[] } }'), '3.0.8 负责人告知块必须带 startPhases 开工证据口径')
   assert.ok(!brief.includes('两轮思考产物'), '旧「两轮思考产物」表述须已移除')
   assert.ok(!brief.includes('非复杂任务（low/未配置）最多 6 人'), '旧「非复杂≤6 人」表述须已移除')

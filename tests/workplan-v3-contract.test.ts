@@ -196,18 +196,27 @@ test('部门汇总：未覆盖全部专家、缺对象、多余字段被拒', ()
   assert.equal(checkDepartmentSummary({ ...GOOD_SUMMARY, extra: ['x'] }).ok, false)
 })
 
-test('部门汇总：sources 覆盖 8-12 名复杂任务专家（3.0.6 死锁修复，不再卡 6 条精简上限）', () => {
+test('部门汇总：sources 覆盖 8-25 名复杂任务专家（3.0.6 死锁修复随 3.1.0 扩容到 25 人保持有效）', () => {
   const phrases = [
     '根因报告', '回归用例', '性能基线', '接口契约', '数据字典', '部署手册',
     '风险评估', '验收清单', '依赖图谱', '变更日志', '容量测算', '巡检脚本',
-    '告警规则', '灰度方案', '回滚预案', '压测结论', '权限矩阵',
+    '告警规则', '灰度方案', '回滚预案', '压测结论', '权限矩阵', '链路追踪',
+    '缓存策略', '配额校准', '日志规范', '审计要点', '熔断阈值', '镜像扫描',
+    '编排模板', '网关策略', '调度窗口', '快照保留', '密钥轮换', '探针配置',
+    '成本归因',
   ]
   const sourcesFor = (count: number) =>
     Array.from({ length: count }, (_, i) => `专家${i + 1}：${phrases[i]}已交付`)
-  // 12 人（复杂任务上限）逐人覆盖：必须通过——修复前会被「最多 6 条」硬拒。
+  // 12 人（旧上限）逐人覆盖：仍须通过。
   const experts12 = Array.from({ length: 12 }, (_, i) => `专家${i + 1}`)
   assert.deepEqual(
     checkDepartmentSummary({ ...GOOD_SUMMARY, sources: sourcesFor(12) }, experts12),
+    { ok: true, violations: [] },
+  )
+  // [3.1.0] 25 人（新上限）逐人覆盖：必须通过——死锁修复在新上限下不得复发。
+  const experts25 = Array.from({ length: 25 }, (_, i) => `专家${i + 1}`)
+  assert.deepEqual(
+    checkDepartmentSummary({ ...GOOD_SUMMARY, sources: sourcesFor(25) }, experts25),
     { ok: true, violations: [] },
   )
   // 其余三个数组的 6 条精简上限不放松：keyResults 第 7 条仍拒。
@@ -219,14 +228,14 @@ test('部门汇总：sources 覆盖 8-12 名复杂任务专家（3.0.6 死锁修
   const fat = checkDepartmentSummary(fatKeyResults, experts12)
   assert.equal(fat.ok, false)
   assert.match(fat.violations.join('\n'), /keyResults 最多 6 条/)
-  // sources 自身上限 16：第 17 人仍拒（防止无限膨胀）。
-  const experts17 = Array.from({ length: 17 }, (_, i) => `专家${i + 1}`)
+  // sources 自身上限 30（随 caps.ts）：第 31 人仍拒（防止无限膨胀）。
+  const experts31 = Array.from({ length: 31 }, (_, i) => `专家${i + 1}`)
   const tooMany = checkDepartmentSummary(
-    { ...GOOD_SUMMARY, sources: sourcesFor(17) },
-    experts17,
+    { ...GOOD_SUMMARY, sources: sourcesFor(31) },
+    experts31,
   )
   assert.equal(tooMany.ok, false)
-  assert.match(tooMany.violations.join('\n'), /sources 最多 16 条/)
+  assert.match(tooMany.violations.join('\n'), /sources 最多 30 条/)
 })
 
 /* ============================ F10 / F11 门禁接线 ============================ */
@@ -372,6 +381,6 @@ test('派发：质量要求随分工表落到成员记录上', () => {
 
 /* ============================ 要求 13：版本号 ============================ */
 
-test('要求 13：插件 meta 版本为 3.0.9', () => {
-  assert.equal(meta.version, '3.0.9')
+test('要求 13：插件 meta 版本为 3.1.0', () => {
+  assert.equal(meta.version, '3.1.0')
 })

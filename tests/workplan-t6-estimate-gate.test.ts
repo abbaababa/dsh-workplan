@@ -407,16 +407,16 @@ test('A3⑥ delegates[].estimate 消毒：合法保留（Number.isInteger）；�
   }
 })
 
-test('A3台账 delegateEstimates：逐键消毒、上限 12、非法形状抛 INVALID_DELEGATE_ESTIMATES、null 清除', () => {
+test('A3台账 delegateEstimates：逐键消毒、上限 25（3.1.0 随专家上限扩容）、非法形状抛 INVALID_DELEGATE_ESTIMATES、null 清除', () => {
   const plan = makePlan('wp-t6est-a3map')
   const est = (minutes: any) => ({ declaredMinutes: minutes, at: 1500, delivery: 'sent' })
   const statuses = applyStatus(createStatuses(plan), 'T1', { delegateEstimates: { Good: est(15), Bad: est(2.5), Worse: est(0) } })
   assert.deepEqual(statuses[0].delegateEstimates, { Good: est(15) }, '非法键丢弃、合法键保留')
   assert.ok(Number.isInteger(statuses[0].delegateEstimates.Good.declaredMinutes))
   const many: Record<string, any> = {}
-  for (let i = 0; i < 13; i += 1) many[`M-${i}`] = est(10 + i)
+  for (let i = 0; i < 26; i += 1) many[`M-${i}`] = est(10 + i)
   const capped = applyStatus(createStatuses(plan), 'T1', { delegateEstimates: many })
-  assert.equal(Object.keys(capped[0].delegateEstimates).length, 12, '上限 12（8 人场景必须全存活，不得沿用旧 6 截断）')
+  assert.equal(Object.keys(capped[0].delegateEstimates).length, 25, '上限 25（8–25 人场景全部存活，不得沿用旧 6/12 截断）')
   assert.equal(applyStatus(createStatuses(plan), 'T1', { delegateEstimates: null })[0].delegateEstimates, null)
   for (const bad of ['bogus', 5, []]) {
     assert.throws(

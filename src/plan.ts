@@ -18,6 +18,9 @@ import {
   sanitizeCriterionException,
 } from './criterion.js'
 import { MAX_TASK_ANCHOR_CHARS } from './understanding.js'
+// [3.1.0] 复杂任务专家人数上限单一真源（caps.ts）：存档消毒、门禁、提示词同源，
+// 杜绝「写 25 读 12」的存读不对称（3.0.6 死锁同类事故的预防）。
+import { MAX_COMPLEX_DELEGATE_MEMBERS, MIN_COMPLEX_DELEGATE_MEMBERS } from './caps.js'
 import { isMappingDigest, verifyMappingDigest } from './supersede-digest.js'
 import { checkStartEvidenceCarryover, fiveStepPromptLines, MAX_PHASE_ITEM_CHARS, MAX_PHASE_LIST_ITEMS, MAX_PHASE_TOTAL_CHARS, phaseSummaryLine, sanitizeStartPhaseEvidence, START_EVIDENCE_MIN_CHARS_BRIEF, validateFiveStepEvidence, validateStartPhaseEvidence } from './five-step.js'
 // [修复] 七项字数下限简报（five-step.ts 单一事实源）转发给 host.ts 等消费方。
@@ -2792,6 +2795,12 @@ export function buildDegradedMessage(options: any) {
     '自动任务分解失败，部门 Agent 未启动。',
     '请先向用户说明失败原因，并询问是否重试；在用户确认前不要开始执行任务。',
     '',
+    '可行动方向（按可能性排序，供你向用户解释并征求选择）：',
+    `1) 任务太大：拆成两轮——第一轮先交付核心成果，第二轮再做扩展与打磨。每轮子任务更少、规划更稳（当前规划上限：${MAX_STAGES} 个阶段、${MAX_SUBTASKS} 个子任务）。`,
+    `2) 部门分工人数超限：复杂任务专家上限 ${MAX_COMPLEX_DELEGATE_MEMBERS} 人（可用环境变量 DSH_WORKPLAN_MAX_COMPLEX_DELEGATE_MEMBERS 调整，默认 25）；超限会被拒收并提示精简名单或拆两轮派发，不会静默丢人无痕。`,
+    '3) 子代理并发排队超时：在「设置 → 子代理」调大 subagent.maxActiveSubagents，或设 DSH_WORKPLAN_ACTIVATION_QUEUE_MAX_WAIT_MS 调大排队等待上限（默认 10 分钟）。',
+    '4) 规划超时或被限流：直接说「重试」即可重新分解（每次规划最多 3 次尝试）。',
+    '',
     PLAN_MARKER_BEGIN,
     JSON.stringify(payload),
     PLAN_MARKER_END,
@@ -3250,8 +3259,15 @@ export function buildCancelMessage(planId: any, reason: any = '用户取消', te
    * [T7] 可见文本收敛＋信封迁移（选项 A）：取消是计划级终态事件（C1b），
    * 保留一行关键进度与「取消≠完成」输出契约；全量信封随 source.durable
    * 落盘，parseCancelMessage 先读元数据回退旧文本标记（旧消息零迁移）。
+   *
+   * [3.1.0] 双写回归修复（W5 探针断言 6 实测红灯）：T7 把信封迁出可见文本后，
+   * 1.8.19 等旧版读端只剩文本标记通道（source.durable 是 2.2.x 才有的形态），
+   * 旧回放读不到取消/取代 → 安全降级契约破坏（v3.0.0–v3.0.9 回归）。恢复
+   * 标记块双写：新读端仍优先 source.durable（可见文本零变化），旧读端按
+   * cancelled 安全降级。w5-cross-version-check 六断言全 PASS 为准入。
    */
   const keyText = capKeyProgressText(`${summary}｜取消≠完成：未完成项不得交付、不得声称完成；不要调用 present；答复开头须写「未完成：剩余 N 项（列出 ID）与原因」（按需：dsh_workplan_status）`)
+    + `\n\n${CANCEL_MARKER_BEGIN}\n${JSON.stringify(payload)}\n${CANCEL_MARKER_END}`
   return makeUserMessage(keyText, {
     kind: 'workplan-cancel',
     form: 'notice',
@@ -3296,8 +3312,11 @@ function buildSupersededMessage(planId: any, reason: any, terminal: any) {
     supersededAt,
     supersededBy: by,
   }
-  /* [T7] 可见文本收敛＋信封迁移（选项 A）：取代是计划级终态事件（C1b）。 */
+  /* [T7] 可见文本收敛＋信封迁移（选项 A）：取代是计划级终态事件（C1b）。
+   * [3.1.0] 同上恢复标记块双写：旧版读端（1.8.19）只认文本标记，缺它会
+   * 把 superseded 安全降级退化成「读不到终态」——W5 探针断言 6 钉住。 */
   const keyText = capKeyProgressText(`${summary}｜被取代≠完成：原计划记录原样保留，未完成项不会因转移变成完成；交付只用承接计划通过就绪检查的产物（按需：dsh_workplan_status）`)
+    + `\n\n${CANCEL_MARKER_BEGIN}\n${JSON.stringify(payload)}\n${CANCEL_MARKER_END}`
   return makeUserMessage(keyText, {
     kind: 'workplan-cancel',
     form: 'notice',
@@ -5014,11 +5033,9 @@ export function applyStatus(statuses: any, subtaskId: any, patch: any) {
          * 经开工闸 validateStartPhaseEvidence 判据。consolidation 只留分工表与等级配置。
          */
         assignments: (Array.isArray(patch.consolidation.assignments) ? patch.consolidation.assignments : [])
-          // [2.5.4][T4] D1/D2 配套：消毒上限须 ≥ 合法分工表最大人数（复杂 12，与 llm-rules.ts
-          // MAX_COMPLEX_DELEGATE_MEMBERS 同值——因 llm-rules 依赖 plan 会循环引用，此处不 import，
-          // 改一处须同步另一处）；人数判据唯一权威仍是 planDelegations 门禁：非复杂在
-          // review/dispatch 照旧截 6，持久化放宽不绕任何闸。
-          .slice(0, 12)
+          // [3.1.0] 消毒上限随 caps.ts（复杂 12→25，单一真源；历史注释「改一处须
+          // 同步另一处」的耦合自此解除）；人数判据唯一权威仍是 planDelegations 门禁。
+          .slice(0, MAX_COMPLEX_DELEGATE_MEMBERS)
           .map((item: any) => ({
             member: truncate(String(item?.member ?? ''), 80),
             role: normalizeDeptRole(item?.role),
@@ -5094,8 +5111,8 @@ export function applyStatus(statuses: any, subtaskId: any, patch: any) {
       }
     }
     next.delegates = (Array.isArray(patch.delegates) ? patch.delegates : [])
-      // [T8][D2 同步] 与 MAX_COMPLEX_DELEGATE_MEMBERS=12 对齐，人数权威仍是 planDelegations 门禁
-      .slice(0, 12)
+      // [T8][D2 同步][3.1.0] 与 caps.ts MAX_COMPLEX_DELEGATE_MEMBERS 同源（不再手写 12）
+      .slice(0, MAX_COMPLEX_DELEGATE_MEMBERS)
       .map((item: any) => ({
         member: truncate(String(item?.member ?? ''), 80),
         role: normalizeDeptRole(item?.role),
@@ -5165,7 +5182,7 @@ export function applyStatus(statuses: any, subtaskId: any, patch: any) {
     else if (isRecord(patch.delegateSelfEfforts)) {
       const entries = Object.entries(patch.delegateSelfEfforts)
         .filter(([, value]) => typeof value === 'string' && REASONING_EFFORTS.includes(value))
-        .slice(0, 12)
+        .slice(0, MAX_COMPLEX_DELEGATE_MEMBERS)
       next.delegateSelfEfforts = Object.fromEntries(entries.map(([key, value]) => [truncate(String(key), 80), value]))
     } else {
       throw new PlanError('delegateSelfEfforts 必须是 member→档位 对象或 null', 'INVALID_DELEGATE_SELF_EFFORTS')
@@ -5183,7 +5200,7 @@ export function applyStatus(statuses: any, subtaskId: any, patch: any) {
       const entries = Object.entries(patch.delegateStartPhases)
         .map(([key, value]) => [truncate(String(key), 80), sanitizeStartPhaseEvidence(value)] as const)
         .filter(([, value]) => value !== null)
-        .slice(0, 12)
+        .slice(0, MAX_COMPLEX_DELEGATE_MEMBERS)
       next.delegateStartPhases = Object.fromEntries(entries)
     } else {
       throw new PlanError('delegateStartPhases 必须是 member→开工证据 对象或 null', 'INVALID_DELEGATE_START_PHASES')
@@ -5194,8 +5211,7 @@ export function applyStatus(statuses: any, subtaskId: any, patch: any) {
    * 重置保留（与 delegateSelfEfforts/delegateStartPhases 同语义）；重派读档据此
    * 判定「预估已登记」。逐成员经 sanitizeDelegateEstimate 消毒（非法丢弃），
    * 非法形状抛 INVALID_DELEGATE_ESTIMATES（与 delegateSelfEfforts 同错误码口径）。
-   * 上限 12 与 delegates slice(0,12)/MAX_COMPLEX_DELEGATE_MEMBERS 对齐：契约 A2
-   * 要求 8 人预估全部存活，不得沿用旧台账的 6 人截断。
+   * [3.1.0] 上限随 caps.ts（不再手写 12）：契约 A2 要求全部预估存活。
    */
   if (patch.delegateEstimates !== undefined) {
     if (patch.delegateEstimates === null) next.delegateEstimates = null
@@ -5203,7 +5219,7 @@ export function applyStatus(statuses: any, subtaskId: any, patch: any) {
       const entries = Object.entries(patch.delegateEstimates)
         .map(([key, value]) => [truncate(String(key), 80), sanitizeDelegateEstimate(value)] as const)
         .filter(([, value]) => value !== null)
-        .slice(0, 12)
+        .slice(0, MAX_COMPLEX_DELEGATE_MEMBERS)
       next.delegateEstimates = Object.fromEntries(entries)
     } else {
       throw new PlanError('delegateEstimates 必须是 member→预估对象 或 null', 'INVALID_DELEGATE_ESTIMATES')
@@ -6859,7 +6875,7 @@ export function buildChildPrompt({
     // + 更简单的多人分工。与 llm-rules.ts buildLlmRulesBrief 同一口径。
     '本部门再分配权限与推理等级配置（用户强制要求，平台机制保障）：',
     // [2.5.4][T4] D1/D2 人数口径同步（与 llm-rules.ts buildLlmRulesBrief 同源逐字一致）
-    '- 你是本子任务的部门负责人，拥有再分配权限：先用 dsh_workplan_delegate(action="review") 提交第 1/2/3 步开工证据（startPhases={ planning{ problemAnalysis[], approach[], approachBasis[], resources[], tools[] }, preparation{ prepared[], evidence[] } }）与分工表，再用 action="dispatch" 把任务分配给本部门多名相关领域全球顶尖专家（角色只保留 expert，部门组员已按用户要求 9 取消，至少 1 名；low/未配置任务禁止下派——负责人亲自执行，开工证据经 dsh_workplan_delegate(action="direct") 登记（' + START_EVIDENCE_MIN_CHARS_BRIEF + '；可选 reasoningEffort="low"）；复杂任务（medium/high/xhigh/max）合计不少于 8 人且最多 12 人，少于 8 人硬性阻断）；未提交开工证据与分工表前 dispatch 会被平台硬门禁拒绝。',
+    `- 你是本子任务的部门负责人，拥有再分配权限：先用 dsh_workplan_delegate(action="review") 提交第 1/2/3 步开工证据（startPhases={ planning{ problemAnalysis[], approach[], approachBasis[], resources[], tools[] }, preparation{ prepared[], evidence[] } }）与分工表，再用 action="dispatch" 把任务分配给本部门多名相关领域全球顶尖专家（角色只保留 expert，部门组员已按用户要求 9 取消，至少 1 名；low/未配置任务禁止下派——负责人亲自执行，开工证据经 dsh_workplan_delegate(action="direct") 登记（${START_EVIDENCE_MIN_CHARS_BRIEF}；可选 reasoningEffort="low"）；复杂任务（medium/high/xhigh/max）合计不少于 ${MIN_COMPLEX_DELEGATE_MEMBERS} 人且最多 ${MAX_COMPLEX_DELEGATE_MEMBERS} 人，少于 ${MIN_COMPLEX_DELEGATE_MEMBERS} 人硬性阻断，超过上限平台拒收）；未提交开工证据与分工表前 dispatch 会被平台硬门禁拒绝。`,
     '- 分配必须更简单：每位下级只承担单一目标、单一主产物、可独立验收的一项工作；任务描述完整自包含，让下级拿到就能做，不要把多个交付物压给同一个人。',
     '- 先配置后开工（平台硬规则）：你以 phase-0（low 档）启动，唯一职责是评估你接到任务的复杂度，并在 consolidation.taskReasoningEffort 里配置你自己的整体推理等级（轻度=low；qwen 中等=medium、非 qwen 中等=high；qwen 非常复杂=xhigh、非 qwen 非常复杂=max）；登记后平台立即以你的自配档接续本会话进入 phase-1（派活/协调/验收/重试决策整个分配过程全程用自配档，重试/续跑不丢）。分工表 per-expert 档仅为建议：每位专家必须在 phase-0 经 self_effort 按自己分到的单项任务复杂度自配自己的等级，专家自配为权威，越界档由平台按当前模型家族合法集合自动钳制并留痕。low（轻度）/未配置任务禁止下派：负责人亲自执行，开工证据经 action="direct" 登记；复杂任务才走 review+dispatch。',
     '- 第三层专家是叶子层：他们不得再派生第四层；下级结论会送回本会话，收齐后由你汇总核验（必须覆盖全部已派发专家，不得只汇总一部分），再写最终结果块。用 action="status" 随时查看梳理登记与下级进度。',

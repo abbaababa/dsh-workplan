@@ -27,6 +27,8 @@ import {
   adjudicateResult,
   buildChildPrompt,
 } from '../src/plan.js'
+// [3.1.0] F11 sources 上限与 caps.ts 同源断言。
+import { MAX_SOURCES_ITEMS } from '../src/v3-contract.js'
 
 function block(payload: any) {
   return `做完了。\n${EVIDENCE_MARKER_BEGIN}\n${JSON.stringify(payload)}\n${EVIDENCE_MARKER_END}`
@@ -116,14 +118,15 @@ test('下发：子任务提示词附带统一格式规范，且与核验用的�
 })
 
 /*
- * [3.0.6] 文案同步：门禁 v3-contract 已把 departmentSummary.sources 放宽到 16
- * （MAX_SOURCES_ITEMS=16，覆盖全部已派发专家是诚实硬要求），F11 下发文案必须
- * 同源——keyResults/keyInfo/importantInfo 仍每项 6 条，sources 最多 16 条，
+ * [3.0.6→3.1.0] 文案同步：门禁 v3-contract 已把 departmentSummary.sources 放宽到 16
+ * （MAX_SOURCES_ITEMS=16，覆盖全部已派发专家是诚实硬要求）；[3.1.0] 专家上限 12→25
+ * 配套放宽到 30（caps.ts MAX_SOURCES_ITEMS，可用 DSH_WORKPLAN_MAX_SOURCES_ITEMS 覆盖），
+ * F11 下发文案必须同源——keyResults/keyInfo/importantInfo 仍每项 6 条，sources 最多 30 条，
  * 不得再渲染「每数组最多 6 条」旧口径（7–12 人部门旧口径下永远交不出合法汇总）。
  */
-test('下发：负责人层 F11 文案与门禁同源（sources 最多 16 条，其余数组仍 6 条）', () => {
+test('下发：负责人层 F11 文案与门禁同源（sources 最多 30 条，其余数组仍 6 条）', () => {
   const spec = renderCommFormatSpec('leader')
-  assert.match(spec, /sources 最多 16 条/, '负责人层必须写明 sources 上限 16 条')
+  assert.match(spec, new RegExp(`sources 最多 ${MAX_SOURCES_ITEMS} 条`), '负责人层必须写明 sources 上限（与 caps.ts 同源）')
   assert.match(spec, /keyResults\/keyInfo\/importantInfo 每项最多 6 条/, '其余三个数组仍保持 6 条精简上限')
   assert.doesNotMatch(spec, /每数组最多 6 条/, 'F11 不得再保留「每数组最多 6 条」旧口径')
 })

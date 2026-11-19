@@ -23,6 +23,8 @@ import {
   updateToolOutputSchema,
 } from './runtime.js'
 import { DEPARTMENT_IDS, isRecord, START_EVIDENCE_MIN_CHARS_BRIEF } from './plan.js'
+// [3.1.0] 人数上限单一真源（caps.ts）：工具说明书与门禁/消毒/提示词同源。
+import { MAX_COMPLEX_DELEGATE_MEMBERS, MIN_COMPLEX_DELEGATE_MEMBERS } from './caps.js'
 import { autoResumeEnabledFrom } from './auto-resume.js'
 import { pruneJournal } from './dept-journal.js'
 
@@ -103,7 +105,7 @@ const PROMPT_SECTION = [
   '3.0.0 任务书质量要求（用户要求 3/6）：插件派给部门负责人的每个子任务都携带 qualityRequirements（结果质量要求），部门负责人派给专家的每条任务也必须携带 qualityRequirements。负责人→专家缺它平台直接拒绝派发（DELEGATE_QUALITY_REQUIREMENTS_MISSING）；主 Agent→部门负责人缺它则该子任务在派发时被直接拒发（DISPATCH_QUALITY_REQUIREMENTS_MISSING，不启动部门 Agent），须 replan 补齐后重派。你审阅计划时先看每个子任务是否写了清楚的质量要求。',
   '3.0.0 极简任务（用户要求 5，用户裁决 A＝硬门槛）：部门负责人派出的每条任务必须简单到像 1+1=2——一个动作、一个主产物、一项可独立验收，单句、≤300 字符、不含「并且/同时/另外/还要/以及/分别/顺便」等并列词；不满足即被拒绝并给出拆分提示（DELEGATE_TASK_NOT_ATOMIC）。',
   '3.0.0 角色与汇报（用户要求 7/8/9/10/11/12）：部门组员角色已取消，只保留部门负责人与全球顶尖专家（role 只允许 expert）；专家完成后必须以 JSON 汇报（证据块里的 report：keyResults/keyInfo/importantInfo/leadRequirements，精简、禁止重复，F10）；部门负责人必须全面汇总本部门全部专家汇报后，以 JSON 交回主 Agent（departmentSummary：keyResults/keyInfo/importantInfo/sources，精简、禁止累赘重复，F11）；等所有部门的汇总都交回后，由你再全面、深入整理汇总成最终成果交付给用户（用户要求 12）。',
-  '3.0.9 版本（用户要求 13）：本插件当前版本为 3.0.9。涉及版本号的对外表述一律写 3.0.9。',
+  '3.1.0 版本（用户要求 13）：本插件当前版本为 3.1.0。涉及版本号的对外表述一律写 3.1.0。',
   /*
    * [3.0.8] 主 Agent 五步开工证据协议（取代 2.5.1 两轮深度思考，用户已批准）：
    * 部门三层执行者已有开工/结算双门禁，主 Agent 自己也必须做到同一协议——
@@ -871,8 +873,8 @@ function createDelegateTool(runtime: any) {
       + '第一步全面、全盘、深入梳理、研究、思考自己的任务；第二步基于第一步完成好的所有结果研究需要哪些资源、哪些工具、具体实施方案（方法、流程、步骤，含依据）；'
       + '第三步把资源与工具真正备齐并给出就绪证据。'
       + '先 action="review" 提交第 1/2/3 步开工证据（startPhases）'
-      // [2.5.4][T4] D1/D2 人数口径同步（与 llm-rules.ts 负责人任务书同源逐字一致）
-      + '（planning{ problemAnalysis, resources, tools, approach, approachBasis } + preparation{ prepared, evidence }，开工证据字数下限：' + START_EVIDENCE_MIN_CHARS_BRIEF + ' + 分工表：每位下级的 member/role/task/reasoningEffort，至少 1 名 expert 顶尖专家（部门组员角色已按用户要求 9 取消）；low/未配置任务禁止下派——负责人亲自执行，开工证据经 dsh_workplan_delegate(action="direct") 登记（' + START_EVIDENCE_MIN_CHARS_BRIEF + '；可选 reasoningEffort="low"）；复杂任务（medium/high/xhigh/max）合计不少于 8 人且最多 12 人，少于 8 人硬性阻断；'
+      // [2.5.4][T4] D1/D2 人数口径同步（与 llm-rules.ts 负责人任务书同源逐字一致；3.1.0 上限 25）
+      + `（planning{ problemAnalysis, resources, tools, approach, approachBasis } + preparation{ prepared, evidence }，开工证据字数下限：${START_EVIDENCE_MIN_CHARS_BRIEF} + 分工表：每位下级的 member/role/task/reasoningEffort，至少 1 名 expert 顶尖专家（部门组员角色已按用户要求 9 取消）；low/未配置任务禁止下派——负责人亲自执行，开工证据经 dsh_workplan_delegate(action="direct") 登记（${START_EVIDENCE_MIN_CHARS_BRIEF}；可选 reasoningEffort="low"）；复杂任务（medium/high/xhigh/max）合计不少于 ${MIN_COMPLEX_DELEGATE_MEMBERS} 人且最多 ${MAX_COMPLEX_DELEGATE_MEMBERS} 人，少于 ${MIN_COMPLEX_DELEGATE_MEMBERS} 人硬性阻断；`
       + '并可用 consolidation.taskReasoningEffort 为整个任务配置整体推理等级，配置后本任务重试/续跑全程沿用；下级档位以成员 self_effort 自配为权威（分工表档仅建议）），'
       + '再 action="dispatch" 把任务派给本部门相关领域全球顶尖专家（部门组员角色已取消，只保留 expert；固定一层下级、叶子层，第四层一律被拒）。'
       + '分配必须更简单：每位专家只承担一个动作、一个主产物、一项可独立验收的工作（简单到像 1+1=2：单句、≤300 字符、不含并列词，且每条必须带至少 1 条 qualityRequirements 质量要求；不满足即拒绝派发）。'
@@ -950,8 +952,8 @@ function createDelegateTool(runtime: any) {
             },
             assignments: {
               type: 'array',
-              // [3.0.0] 用户 2026-11-14 第 5/6/9 条：组员角色取消、任务极简、质量要求必填。
-              description: '分工表：至少 1 名 expert（本部门相关领域全球顶尖专家；部门组员角色已按用户要求 9 取消，role 只允许 expert）；low/未配置任务禁止下派——负责人亲自执行，开工证据经 dsh_workplan_delegate(action="direct") 登记（' + START_EVIDENCE_MIN_CHARS_BRIEF + '；可选 reasoningEffort="low"）；复杂任务（medium/high/xhigh/max）合计不少于 8 人且最多 12 人，少于 8 人硬性阻断。每一条任务必须简单到像 1+1=2：一个动作、一个主产物、一项可独立验收（≤300 字符、单句、不含并列词），且必须带 qualityRequirements（至少 1 条可检查的质量要求）；不满足即拒绝派发。',
+              // [3.0.0] 用户 2026-11-14 第 5/6/9 条：组员角色取消、任务极简、质量要求必填；3.1.0 上限随 caps.ts。
+              description: `分工表：至少 1 名 expert（本部门相关领域全球顶尖专家；部门组员角色已按用户要求 9 取消，role 只允许 expert）；low/未配置任务禁止下派——负责人亲自执行，开工证据经 dsh_workplan_delegate(action="direct") 登记（${START_EVIDENCE_MIN_CHARS_BRIEF}；可选 reasoningEffort="low"）；复杂任务（medium/high/xhigh/max）合计不少于 ${MIN_COMPLEX_DELEGATE_MEMBERS} 人且最多 ${MAX_COMPLEX_DELEGATE_MEMBERS} 人，少于 ${MIN_COMPLEX_DELEGATE_MEMBERS} 人硬性阻断，超过上限平台拒收（可精简名单或拆两轮派发，绝不静默丢人无痕）。每一条任务必须简单到像 1+1=2：一个动作、一个主产物、一项可独立验收（≤300 字符、单句、不含并列词），且必须带 qualityRequirements（至少 1 条可检查的质量要求）；不满足即拒绝派发。`,
               items: {
                 type: 'object',
                 properties: {
@@ -2126,7 +2128,7 @@ export function apply(ctx: any, config: WorkplanConfig = {}) {
 
 export const meta = {
   name,
-  version: '3.0.9',
+  version: '3.1.0',
   promptOrder: PROMPT_ORDER,
   routes: ['/dsh-workplan/plans', '/dsh-workplan/vendor/chart.umd.js'],
 }

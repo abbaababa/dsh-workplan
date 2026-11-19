@@ -159,6 +159,10 @@ import {
 } from './lessons.js'
 import { computeMappingDigest, verifyMappingDigest } from './supersede-digest.js'
 import { supersedePlanRecord } from './supersede.js'
+// [3.1.0] 人数上限单一真源（caps.ts）：报错文案与门禁同源。
+import { MAX_COMPLEX_DELEGATE_MEMBERS } from './caps.js'
+// [3.1.0] 排队等待上限环境变量化（默认 10 分钟不变）＋规划器并发预算环境变量化。
+import { envPositiveInt } from './caps.js'
 import { createProgressWatchdog, describeError } from './watchdog.js'
 import { AUTO_RESUME_DEFAULTS, autoResumeAttemptCap, decideAutoResume, liveResumeCounts } from './auto-resume.js'
 /*
@@ -371,8 +375,12 @@ export function describeSubagentActivationError(error: any, context: string): Er
  * 多个等待者共享一个模块级冷却时间，避免同一毫秒一起撞门（惊群）。
  * 这不是“精确信号量”（宿主没有暴露当前活跃数），而是“有界排队退避”：
  * 空位一出现，等待者按退避节奏自然补位。
+ *
+ * [3.1.0] 等待上限可用 DSH_WORKPLAN_ACTIVATION_QUEUE_MAX_WAIT_MS 覆盖
+ * （默认 10 分钟不变）；新增 onWait 回调：每次退避决策后通知调用方，
+ * 供派发循环向用户暴露「排队中」状态（排队可见化）。
  */
-export const ACTIVATION_QUEUE_MAX_WAIT_MS = 10 * 60 * 1000
+export const ACTIVATION_QUEUE_MAX_WAIT_MS = envPositiveInt('DSH_WORKPLAN_ACTIVATION_QUEUE_MAX_WAIT_MS', 10 * 60 * 1000)
 const ACTIVATION_QUEUE_BASE_DELAY_MS = 1000
 const ACTIVATION_QUEUE_MAX_DELAY_MS = 15000
 let activationQueueCooldownUntil = 0
@@ -386,6 +394,7 @@ export async function startActivationQueued<T>(
   start: () => Promise<T>,
   signal: any,
   context: string,
+  onWait?: (info: { waits: number; elapsedMs: number }) => void,
 ): Promise<T> {
   const beganAt = Date.now()
   let waits = 0
@@ -411,6 +420,10 @@ export async function startActivationQueued<T>(
       // 全局冷却只增不减：所有等待者共用同一个“下一次可以再试”的时刻。
       activationQueueCooldownUntil = Math.max(activationQueueCooldownUntil, now + backoff)
       const delay = Math.max(250, activationQueueCooldownUntil - now)
+      // [3.1.0] 排队可见化：退避决策通知调用方（派发循环据此发用户可见通知）。
+      if (onWait) {
+        try { onWait({ waits, elapsedMs: Date.now() - beganAt }) } catch { /* 通知回调失败不影响排队 */ }
+      }
       await sleepAbortable(signal, delay + Math.floor(Math.random() * 250))
       if (signal?.aborted) throw new PlanError('排队等待子代理空位时被取消', 'ABORTED')
     }
@@ -9160,7 +9173,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
           ok: false,
           code: 'MISSING_CONSOLIDATION',
           subtaskId,
-          error: 'review 必须携带 consolidation 分工表：{ assignments[{member, role:"expert", task, qualityRequirements[], reasoningEffort}] }，并随附 startPhases={ planning{ problemAnalysis[], approach[], approachBasis[], resources[], tools[] }, preparation{ prepared[], evidence[] } }——五步第 1/2/3 步开工证据（第一步任务梳理；第二步基于第一步全部结果研究资源、工具与具体实施方案；第三步把资源与工具真正备齐并给出就绪证据）+ 分工表（至少 1 名、最多 12 名本部门全球顶尖专家；组员角色已取消；每项任务必须极简并附质量要求）。',
+          error: `review 必须携带 consolidation 分工表：{ assignments[{member, role:"expert", task, qualityRequirements[], reasoningEffort}] }，并随附 startPhases={ planning{ problemAnalysis[], approach[], approachBasis[], resources[], tools[] }, preparation{ prepared[], evidence[] } }——五步第 1/2/3 步开工证据（第一步任务梳理；第二步基于第一步全部结果研究资源、工具与具体实施方案；第三步把资源与工具真正备齐并给出就绪证据）+ 分工表（至少 1 名、最多 ${MAX_COMPLEX_DELEGATE_MEMBERS} 名本部门全球顶尖专家；组员角色已取消；每项任务必须极简并附质量要求）。`,
         }
       }
       // [3.0.8] 负责人 review 开工闸：与 direct/dispatch/self_effort 同一
@@ -9276,6 +9289,10 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         ? parentSession.header.cwd
         : undefined)
     const delegates: any[] = []
+    // [3.1.0] 排队可见化：派发期间每次「首次退避」记一条用户可见通知，循环结束
+    // 后统一投递（不在工具执行中途重入会话事件流）；每成员至多一条，防刷屏。
+    const queueNotices: string[] = []
+    let skippedDone = 0
     /*
      * [2.5.0][R4] 重试/续跑不丢已完成部分（第三层落点）：重派时 row.delegates
      * 仍是上一次尝试的台账——为每位下级附上次状态/失败原因/已回报结论与已核实
@@ -9287,6 +9304,17 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     // 读取（consolidation 不再携带两轮思考产物）。
     const consolidationApproach = Array.isArray((row as any)?.startPhases?.planning?.approach) ? (row as any).startPhases.planning.approach : []
     for (const assignment of delegationPlan.members) {
+      const prior = priorDelegates.find((item: any) => item?.member === assignment.member) ?? null
+      /*
+       * [3.1.0] 重派跳过已完成成员：done 结论已经过 F10 汇报核验，是已交付的
+       * 有效成果；旧实现对分工表成员无条件重新拉起，已完成专家被重复派活
+       * （浪费 token，还可能覆盖已验收产物）。跳过激活、原样保留台账条目。
+       */
+      if (prior?.status === 'done') {
+        delegates.push(prior)
+        skippedDone += 1
+        continue
+      }
       const rulesBrief = buildLlmRulesBrief({
         model,
         effort: assignment.effort,
@@ -9296,7 +9324,6 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         memberName: assignment.member,
         memberRole: assignment.role,
       })
-      const prior = priorDelegates.find((item: any) => item?.member === assignment.member) ?? null
       const retryBrief = prior
         ? buildDelegateRetryBrief(prior, probeDelegateLandedArtifacts(cwd, assignment.member), consolidationApproach)
         : ''
@@ -9347,6 +9374,10 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       let childId: string | null = null
       let memberStatus = 'running'
       let memberError: string | null = null
+      // [3.1.0] 排队计量：只有真的发生退避等待才记录 queuedMs（不把正常激活
+      // 延迟误标成排队）。
+      let memberQueued = false
+      const activationBeganAt = Date.now()
       try {
         // [3.0.1][P1a] 宿主 subagent.maxDepth < 2 时一次性告警（scope=计划根会话）。
         notifyDepthOverrideConflict(ctx, typeof parentSession?.header?.parentSession === 'string' ? parentSession.header.parentSession : (typeof parentId === 'string' ? parentId : null))
@@ -9372,6 +9403,13 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         }),
           signal,
           `派发成员 ${assignment.member}（${subtaskId}）`,
+          (info) => {
+            // [3.1.0] 排队可见化：首次退避时记录一条用户可见通知（循环结束后
+            // 统一投递，不在工具执行中途重入会话事件流）；按成员去重，防刷屏。
+            memberQueued = true
+            if (queueNotices.some((line) => line.includes(`成员 ${assignment.member}（`))) return
+            queueNotices.push(`【排队中】成员 ${assignment.member}（${subtaskId}）：子代理并发空位已满，已等待约 ${Math.round(info.elapsedMs / 1000)} 秒。这不是失败——空位一出现就会自动开始；长时间无进展可在「设置 → 子代理」调大 subagent.maxActiveSubagents，或设 DSH_WORKPLAN_ACTIVATION_QUEUE_MAX_WAIT_MS 调大排队等待上限。`)
+          },
         )
         childId = typeof activation?.childId === 'string' ? activation.childId : null
         if (activation && typeof activation.result?.then === 'function') {
@@ -9440,7 +9478,16 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         error: memberError,
         startedAt: Date.now(),
         finishedAt: null,
+        // [3.1.0] 排队留痕：status=queued 期间实际等待毫秒数，供看板/复盘展示。
+        ...(memberQueued ? { queuedMs: Date.now() - activationBeganAt } : {}),
       })
+    }
+    // [3.1.0] 排队可见化：派发期间发生过的排队等待，统一向根会话投递用户可见
+    // 通知（每成员一条）；投递失败不影响派发结果。
+    for (const line of queueNotices) {
+      try {
+        appendUserMessage(parentSession, makeUserMessage(line, { kind: 'workplan', form: 'notice', summary: line.slice(0, 80) }))
+      } catch { /* 通知投递失败不影响派发结果 */ }
     }
     // [2.5.4][T3R1] 分派门禁放行留痕（A3）：并入台账 persist，同一动作不二次
     // persist（避免 revision 竞争）；gateAudit 经 applyStatus 消毒 + durable 回放。
@@ -9459,7 +9506,8 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       taskEffort: delegationPlan.taskEffort,
       effortOverride: written?.effortOverride ?? row.effortOverride ?? null,
       ...(rejected.length ? { rejected: rejected.map((item) => ({ member: item.member, error: item.error })) } : {}),
-      hint: '第三层已派发（一层下级、叶子层，第四层会被硬拒）。每位全球顶尖专家的完成结论会送回本会话（delivery=caller）；收齐后由你汇总核验，再写最终结果块。用 action="status" 查看进度。成员遇阻会经 dsh_workplan_escalate 在你这里落「待指示」（delegates[].closure=escalated）：必须当轮用 dsh_workplan_instruct（subtaskId=本部门行 ID，多个成员同时请示时加 member）答复，投递成功后该成员恢复执行。3.0.5 硬规则：任何成员待指示期间，review/dispatch/direct 一律拒绝改派，必须由原成员继续执行。',
+      ...(skippedDone ? { skippedDone } : {}),
+      hint: '第三层已派发（一层下级、叶子层，第四层会被硬拒）。每位全球顶尖专家的完成结论会送回本会话（delivery=caller）；收齐后由你汇总核验，再写最终结果块。用 action="status" 查看进度。成员遇阻会经 dsh_workplan_escalate 在你这里落「待指示」（delegates[].closure=escalated）：必须当轮用 dsh_workplan_instruct（subtaskId=本部门行 ID，多个成员同时请示时加 member）答复，投递成功后该成员恢复执行。3.0.5 硬规则：任何成员待指示期间，review/dispatch/direct 一律拒绝改派，必须由原成员继续执行。' + (skippedDone ? ` 本次重派跳过 ${skippedDone} 名已完成成员（成果已保留，未重复拉起）。` : ''),
     }
   }
 
@@ -11625,7 +11673,10 @@ async function maybePlan(ctx: any, state: any, payload: any, downstream: any, op
       budget: {
         totalMinutes: 0,
         childMinutes: 0,
-        concurrency: MAX_CONCURRENT,
+        // [3.1.0] 规划器并发预算环境变量化：宿主不向插件暴露 maxActiveSubagents，
+        // 故以 DSH_WORKPLAN_PLANNER_CONCURRENCY 显式可配（默认不变 = MAX_CONCURRENT）。
+        // 调大宿主 subagent.maxActiveSubagents 后，同步调大此值让规划器按真实并行度排预算。
+        concurrency: envPositiveInt('DSH_WORKPLAN_PLANNER_CONCURRENCY', MAX_CONCURRENT),
         maxResumes: Number(options?.limits?.maxResumes ?? MAX_PLAN_RESUMES),
       },
     })

@@ -34,6 +34,16 @@ if (!process.env.DSH_WORKPLAN_NOTICES_FILE) {
   )
 }
 
+/*
+ * [3.1.0] 部门台账（dept-journal）全局隔离：默认写 ~/.dsh/workplan/journal/<planId>.jsonl，
+ * 测试派发/结算会往真实用户目录追加 wp-*.jsonl 残留，跨轮回放触发「僵尸行回收」等
+ * 断言外行为（2026-11-19 实证：wp-stall-fix.jsonl 残留影响后续运行）。与上方 notices
+ * 同一模式：每进程临时目录（显式设置过该变量的文件不受影响）。
+ */
+if (!process.env.DSH_WORKPLAN_JOURNAL_DIR) {
+  process.env.DSH_WORKPLAN_JOURNAL_DIR = mkdtempSync(join(tmpdir(), 'dsh-workplan-test-journal-'))
+}
+
 const anchor = setInterval(() => {}, 1_000)
 const failsafe = setTimeout(() => clearInterval(anchor), 600_000)
 failsafe.unref?.()
