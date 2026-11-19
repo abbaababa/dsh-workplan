@@ -131,7 +131,7 @@ preflight() {
   fi
   # 目标版本不得与线上已发布版本重复（除非两端都已发布完毕 = 幂等直通）
   if [[ $DRY_RUN -eq 0 ]] && npm_done && gh_release_done; then
-    log "npm latest 与 GitHub Release 均已是 $VERSION：发布早已完成，幂等退出 ✓"
+    log "npm latest 与 GitHub Release 均已是 ${VERSION}：发布早已完成，幂等退出 ✓"
     exit 0
   fi
   if [[ $DRY_RUN -eq 0 ]] && tool_ok npm && [[ -n $(npm view "$NPM_PKG@$VERSION" version 2>/dev/null) ]]; then
@@ -148,7 +148,7 @@ do_prepare() {
   local cur
   cur="$(node -p "require('./package.json').version")"
   if [[ $cur == "$VERSION" ]]; then
-    log "package.json 已是 $VERSION，跳过版本同步（幂等）"
+    log "package.json 已是 ${VERSION}，跳过版本同步（幂等）"
   else
     # 版本同步逻辑与 release.sh 步骤②保持一致（含 src/host.ts 唯一行校验，防误改）
     if [[ $DRY_RUN -eq 1 ]]; then
@@ -213,7 +213,7 @@ do_push() {
     return 0
   fi
   if remote_has_tag; then
-    log "远端已存在 $TAG，跳过打 tag/推送（幂等）；发布状态转 verify 复核"
+    log "远端已存在 ${TAG}，跳过打 tag/推送（幂等）；发布状态转 verify 复核"
   else
     git rev-parse -q --verify "refs/tags/$TAG" >/dev/null 2>&1 || git tag -a "$TAG" -m "$TAG $SUMMARY"
     git push origin "$BRANCH"
@@ -248,7 +248,7 @@ do_verify() {
   local code
   code="$(curl -sIL -o /dev/null -w '%{http_code}' \
     "https://github.com/$GH_REPO/releases/download/$TAG/dsh-workplan-$VERSION.tgz" || true)"
-  [[ $code == 200 ]] || die "Release 制品下载校验失败（HTTP $code）"
+  [[ $code == 200 ]] || die "Release 制品下载校验失败（HTTP ${code}）"
   log "GitHub Release ✓（含 $assets 个资产，下载 HTTP 200）"
   npm_done || die "npm latest 尚未指向 $VERSION"
   npm view "$NPM_PKG@$VERSION" version dist.tarball
