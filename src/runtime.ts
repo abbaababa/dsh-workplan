@@ -10257,9 +10257,27 @@ ${renderStartPhaseEvidence(stashedStartPhases)}`
     const message = payload?.message
     if (humanMessages([message]).length === 0) return
     const taskText = taskTextFromMessages([message])
-    // [3.0.7] 确认回复不取代在途后台规划：它会被 pre-step 标记为 userConfirmed，
-    // 计划落地即自动放行派发；此处若不排除，确认消息会先把原规划中止掉。
-    if (!taskText || isSocialMessage(taskText) || isVagueContinuation(taskText) || isStatusQuestion(taskText) || isUserConfirmation(taskText)) return
+    // [3.1.2] 确认回复：不取代在途后台规划，并当场盖「已确认」章——规划完成时
+    // settlement 读 planning.userConfirmed 即自动放行派发。盖章必须落在收件箱
+    // 侧：pre-step 的确认路由用全量拼接文本判断，单条确认会被历史任务文本淹没
+    // （3.0.7 只完工了「不取代」这一半，「标记 userConfirmed」从未真正落地，
+    // 是「用户认可后插件不再运行」死锁的第一根因）。
+    if (taskText && isUserConfirmation(taskText)) {
+      if (planning.userConfirmed !== true) {
+        planning.userConfirmed = true
+        try {
+          appendUserMessage(session, makeUserMessage(
+            '✅ 已收到您的确认回复：原计划的后台分解不会被本条消息取代；任务分解完成后将自动放行并派发，无需再次确认。',
+            { kind: 'workplan-confirm-received', form: 'notice', summary: '确认已接收：计划生成后将自动派发' },
+          ))
+        } catch (error) {
+          pushRecordError(state.records.get(session.id) ?? {}, error)
+        }
+      }
+      return
+    }
+    // [3.0.7] 社交/空泛续跑/状态提问同样不取代在途后台规划。
+    if (!taskText || isSocialMessage(taskText) || isVagueContinuation(taskText) || isStatusQuestion(taskText)) return
     if (planning.taskText === taskText) return
     const alreadySuperseded = planning.superseded === true
     planning.superseded = true
@@ -11255,10 +11273,18 @@ async function maybePlan(ctx: any, state: any, payload: any, downstream: any, op
   const goalTask = human.length === 0 ? goalRoundPlanningTask(ctx, payload, existing) : undefined
   if (human.length === 0 && goalTask === undefined) return downstream
   const taskText = goalTask?.text ?? taskTextFromMessages(payload.messages)
+  // [3.1.2] 单条口径：消息分类只看最新一条人类消息。全量拼接文本会把短跟进
+  // （认可/谢谢/继续/进度如何）淹没在原始任务里，分类器集体失效——这是
+  // 「用户确认后插件不再运行」死锁的第一根因（与 onInboxInserted 口径对齐；
+  // goal 轮次无人类消息时为空串，分类判断自然跳过，不影响原 goal 分支）。
+  const lastHumanText = (() => {
+    const list = humanMessages(payload.messages)
+    return list.length ? messageText(list[list.length - 1]).trim() : ''
+  })()
   if (!taskText) return downstream
-  if (isSocialMessage(taskText)) return downstream
-  if (isVagueContinuation(taskText)) return downstream
-  if (isStatusQuestion(taskText)) return downstream
+  if (lastHumanText && isSocialMessage(lastHumanText)) return downstream
+  if (lastHumanText && isVagueContinuation(lastHumanText)) return downstream
+  if (lastHumanText && isStatusQuestion(lastHumanText)) return downstream
   /*
    * [3.0.7] 确认回复路由（用户想法，原话）：「收到用户确认回复后，你应该结合所
    * 有上下文全面、深入分析、思考、研究后，开始依据得出的所有结果分配任务」。
@@ -11277,7 +11303,10 @@ async function maybePlan(ctx: any, state: any, payload: any, downstream: any, op
    *  ③ 其余（无计划/已在执行/终态）→ 交还主 Agent 结合上下文正常答复，绝不做
    *     任务分解——确认消息不再是新任务。
    */
-  if (isUserConfirmation(taskText)) {
+  // [3.1.2] 触发条件用最新单条消息（lastHumanText），不再用全量拼接文本：
+  // 否则单条确认（如「认可」）永远进不了本路由，出口①解闸派发 / 出口②盖章
+  // 全部空转，确认消息反而落到下方真实任务路径取代并杀死在途后台规划。
+  if (isUserConfirmation(lastHumanText)) {
     if (existing?.plan && !existing.dispatchedAt && !isTerminalPhase(existing.phase)
       && !existing.dispatchPromise && existing.phase !== 'executing' && !existing.degraded
       && existing.planner?.outcome !== 'SALVAGED') {
@@ -11288,7 +11317,7 @@ async function maybePlan(ctx: any, state: any, payload: any, downstream: any, op
         existing.dispatchHold = null
         existing.gateHistory = [
           ...(Array.isArray(existing.gateHistory) ? existing.gateHistory : []),
-          { hold, releasedAt: Date.now(), note: `用户确认消息自动放行：${truncate(taskText, 60)}`, by: 'user' },
+          { hold, releasedAt: Date.now(), note: `用户确认消息自动放行：${truncate(lastHumanText, 60)}`, by: 'user' },
         ].slice(-10)
       }
       existing.conversationContext = recentConversation(session)
@@ -11302,7 +11331,7 @@ async function maybePlan(ctx: any, state: any, payload: any, downstream: any, op
         }))
         appendUserMessage(session, makeUserMessage(
           [
-            `✅ 已收到并采纳您的确认回复（"${truncate(taskText, 40)}"）：${wasHeld ? '认可闸门已按您的确认解除。' : ''}`,
+            `✅ 已收到并采纳您的确认回复（"${truncate(lastHumanText, 40)}"）：${wasHeld ? '认可闸门已按您的确认解除。' : ''}`,
             '【主 Agent 指令·必须执行】您必须结合当前所有上下文和用户的这条确认回复，全面、深入地开展分析、思考、研究；然后依据得出的所有结果，调用 dsh_workplan_dispatch 开始分配任务（dispatch 时必须提交 startPhases，即您刚才的完整分析——五步第 1/2/3 步开工证据，它会作为登记在案的分析依据）。',
             '若分析发现计划需要按用户意图调整：先调用 dsh_workplan_replan 调整，再派发调整后的计划。',
             '禁止：不分析直接派发；把计划重新按住；把本条确认当成新任务重新分解。',
@@ -11351,6 +11380,10 @@ async function maybePlan(ctx: any, state: any, payload: any, downstream: any, op
   const priorPlanning = state.planningInFlight?.get(session.id)
   if (priorPlanning) {
     if (priorPlanning.taskText === taskText) return downstream
+    // [3.1.2] 单条豁免：最新一条消息若是寒暄/空泛续跑/状态提问/确认回复，
+    // 不视为新任务，不得取代在途后台规划——拼接锚点会让每条跟进消息都
+    // 「改变任务文本」而误杀规划（确认/社交类消息即使走到这里也必须放行）。
+    if (lastHumanText && (isSocialMessage(lastHumanText) || isVagueContinuation(lastHumanText) || isStatusQuestion(lastHumanText) || isUserConfirmation(lastHumanText))) return downstream
     /*
      * [T3][M2 取代显式通知] 原任务的后台自动分解被本条新消息取代。T1 根因：此处置旧规划
      * 只置 superseded + abort，全程静默，用户看到的就是"任务没分配"且无任何解释。这里补一条
