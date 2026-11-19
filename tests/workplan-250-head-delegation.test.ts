@@ -216,12 +216,11 @@ test('要求2 端到端：review 配置整体等级 → 状态行 effortOverride
   assert.equal(status.effortOverride, 'medium')
 })
 
-// [3.0.8] 版本声明统一 3.0.8（3.0.8 重构定版；package.json 与 src/host.ts meta 已升 3.0.8）。
-// 注意：tests/fixtures/tool-surface.json 的 version 字段仍停在上版（共享夹具，不在本
-// 文件可编辑范围）——断言保持与包版本一致，夹具升版后自然恢复通过。
-test('要求5：版本声明统一 3.0.8（2.5.0 断言随定版升级）', () => {
+// [3.0.9] 版本声明统一 3.0.9（断言随定版升级；package.json、src/host.ts meta 与
+// tests/fixtures/tool-surface.json 四处由 publish-release.sh 同步）。
+test('要求5：版本声明统一 3.0.9（2.5.0 断言随定版升级）', () => {
   const pkg = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8'))
-  assert.equal(pkg.version, '3.0.8')
+  assert.equal(pkg.version, '3.0.9')
   const fixture = JSON.parse(readFileSync(join(process.cwd(), 'tests/fixtures/tool-surface.json'), 'utf8'))
-  assert.equal(fixture.version, pkg.version, 'tool-surface 清单版本必须与包版本统一（共享夹具待升 3.0.8）')
+  assert.equal(fixture.version, pkg.version, 'tool-surface 清单版本必须与包版本统一')
 })

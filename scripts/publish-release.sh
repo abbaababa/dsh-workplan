@@ -156,7 +156,7 @@ do_prepare() {
       log "[dry-run] 将执行: sed 修改 src/host.ts meta.version → $VERSION"
       log "[dry-run] 将在 CHANGELOG.md 顶部插入 ## $VERSION — $(date +%F)"
       log "[dry-run] 将同步三语 README 徽章与 tests/fixtures/tool-surface.json → $VERSION"
-      log "[dry-run] 将执行: npm run check && npm test && npm run build && git diff --exit-code -- lib client.js"
+      log "[dry-run] 将执行: 版本同步（npm version/sed/CHANGELOG/README/tool-surface）"
     else
       npm version "$VERSION" --no-git-tag-version
       local cnt
@@ -184,10 +184,15 @@ do_prepare() {
       printf '# %s\n\n%s\n\n- tag: %s\n- date: %s\n- npm: https://www.npmjs.com/package/%s/v/%s\n' \
         "$TAG" "$SUMMARY" "$TAG" "$(date +%F)" "$NPM_PKG" "$VERSION" > "docs/release-notes-$VERSION.md"
       log "版本四处同步完成 ✓（含三语 README 与 tool-surface.json，规避 #399/#400 CI 红叉）"
-      npm run check && npm test && npm run build
-      git diff --exit-code -- lib client.js || die "构建产物不可复现，禁止发布"
-      log "check/test/build 全绿且产物可复现 ✓"
     fi
+  fi
+  # 检查与构建：任何路径（含版本同步幂等跳过）都必须全量执行——3.0.9 曾因幂等
+  # 路径跳过本地测试，硬编码旧版本号的测试漏网、CI 才暴露失败。
+  if [[ $DRY_RUN -eq 1 ]]; then
+    log "[dry-run] 将执行: npm run check && npm test && npm run build（无论版本是否已同步）"
+  else
+    npm run check && npm test && npm run build
+    log "check/test/build 全绿 ✓"
   fi
   # 提交（幂等：无变更则跳过）
   if [[ $DRY_RUN -eq 1 ]]; then
@@ -198,6 +203,14 @@ do_prepare() {
     log "提交完成 ✓"
   else
     log "工作区干净，无新提交（幂等跳过）"
+  fi
+  # 构建产物可复现校验（提交后）：刚重新构建的 lib/ 与 client.js 必须与提交内容一致，
+  # 防止带着过期构建产物发布。放在提交之后，脏工作区不再误判。
+  if [[ $DRY_RUN -eq 1 ]]; then
+    log "[dry-run] 将执行: git diff --exit-code HEAD -- lib client.js（提交后校验构建产物可复现）"
+  else
+    git diff --exit-code HEAD -- lib client.js || die "构建产物不可复现（提交的 lib/client.js 与重新构建结果不一致），禁止发布"
+    log "构建产物可复现 ✓"
   fi
 }
 
