@@ -22,7 +22,7 @@ import { join } from 'node:path'
 
 import { buildPlanMessage } from '../../src/plan.js'
 import { createWorkplanRuntime } from '../../src/runtime.js'
-import { MAIN_DEEP_THINK_FIXTURE } from './main-deep-think.js'
+import { MAIN_START_PHASES_FIXTURE } from './main-deep-think.js'
 import { seedLeaderSelfEffort } from './self-effort-contract.js'
 
 export const ACTIVE_ENV = { DSH_WORKPLAN_CRITERION_V2: '1', DSH_WORKPLAN_CRITERION_V2_SINCE: '1000000' }
@@ -119,7 +119,7 @@ export async function rowOf(runtime: any, session: any, subtaskId = 'T1'): Promi
 }
 
 export async function dispatch(h: RuntimeHarness): Promise<void> {
-  await h.runtime.dispatchTool({ session: h.session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
+  await h.runtime.dispatchTool({ session: h.session, options: {} }, { startPhases: MAIN_START_PHASES_FIXTURE, mode: 'async' }, new AbortController().signal)
   if (!await waitFor(h.hasStarted, 5_000)) throw new Error('T1 应已派发')
 }
 

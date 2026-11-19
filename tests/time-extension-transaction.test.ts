@@ -29,7 +29,7 @@ import assert from 'node:assert/strict'
 import { createUpdateTool } from '../src/host.js'
 import { buildPlanMessage } from '../src/plan.js'
 import { createWorkplanRuntime } from '../src/runtime.js'
-import { MAIN_DEEP_THINK_FIXTURE } from './helpers/main-deep-think.js'
+import { MAIN_START_PHASES_FIXTURE } from './helpers/main-deep-think.js'
 
 const eventLoopAnchor = setInterval(() => {}, 1_000)
 const dropEventLoopAnchor = setTimeout(() => clearInterval(eventLoopAnchor), 60_000)
@@ -148,7 +148,7 @@ test('无时限：运行中 extendMs 返回 TIME_LIMITS_DISABLED，不写 deadli
   const { session, runtime, gate, hasStarted } = makeRuntime({}, { childTimeoutMs: 1_200 })
   const dispatchP = runtime.dispatchTool(
     { session, options: {} },
-    { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' },
+    { startPhases: MAIN_START_PHASES_FIXTURE, mode: 'async' },
     new AbortController().signal,
   )
   assert.ok(await waitFor(hasStarted), 'T1 应已派发')
@@ -178,7 +178,7 @@ test('无时限：旧 timeoutMs/childTimeoutMs 下重复 extendMs 均拒绝，�
   const { session, runtime, gate, hasStarted } = makeRuntime({ timeoutMs: 2_000 }, { childTimeoutMs: 2_000 })
   const dispatchP = runtime.dispatchTool(
     { session, options: {} },
-    { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' },
+    { startPhases: MAIN_START_PHASES_FIXTURE, mode: 'async' },
     new AbortController().signal,
   )
   assert.ok(await waitFor(hasStarted), 'T1 应已派发')

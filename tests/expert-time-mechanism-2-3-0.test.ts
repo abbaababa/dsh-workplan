@@ -19,7 +19,7 @@ import {
   buildTakeoverBrief,
   mergePreservedArtifacts,
 } from '../src/runtime.js'
-import { MAIN_DEEP_THINK_FIXTURE } from './helpers/main-deep-think.js'
+import { MAIN_START_PHASES_FIXTURE } from './helpers/main-deep-think.js'
 
 const eventLoopAnchor = setInterval(() => {}, 1_000)
 const dropEventLoopAnchor = setTimeout(() => clearInterval(eventLoopAnchor), 60_000)
@@ -147,7 +147,7 @@ test('A2 旧 childTimeoutMs/extendMs 不创建或延长执行时限', async () =
   const { session, runtime, gate, sent, hasStarted } = makeRuntime({ childTimeoutMs: 1_000 })
   const dispatchP = runtime.dispatchTool(
     { session, options: {} },
-    { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' },
+    { startPhases: MAIN_START_PHASES_FIXTURE, mode: 'async' },
     new AbortController().signal,
   )
   assert.ok(await waitFor(hasStarted), 'T1 应已派发')
@@ -177,7 +177,7 @@ test('A3 旧 1 秒/20 天窗口到期不自动 blocked、不二次接手；显�
   const controller = new AbortController()
   const dispatchP = runtime.dispatchTool(
     { session, options: {} },
-    { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' },
+    { startPhases: MAIN_START_PHASES_FIXTURE, mode: 'async' },
     controller.signal,
   )
   assert.ok(await waitFor(hasStarted), 'T1 应已派发')

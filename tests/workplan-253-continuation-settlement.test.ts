@@ -16,7 +16,7 @@
  *       parent=负责人 agent、effort=自配档、signal 独立于调用方且不中止、
  *       childId 台账更新；安全访问器绝不触碰代理属性。
  *  D1-2 agents 服务不可用 ⇒ 不中断 phase-0、显式 SELF_EFFORT_CONTINUATION_FAILED、
- *       自配档与思考产物登记保留，重派读档直连 phase-1。
+ *       自配档与开工证据登记保留，重派读档直连 phase-1。
  *  D1-3 startActivation 连续两次失败 ⇒ 既有失败台账路径不回归。
  *  D2-1 陈旧备份（mtime<startedAt）⇒ 拒绝采纳、errors 审计留痕、落回
  *       EVIDENCE_MISSING 有界回喂。
@@ -41,7 +41,7 @@ import {
   createStatuses,
 } from '../src/plan.js'
 import { seedLeaderSelfEffort } from './helpers/self-effort-contract.js'
-import { MAIN_DEEP_THINK_FIXTURE } from './helpers/main-deep-think.js'
+import { MAIN_START_PHASES_FIXTURE } from './helpers/main-deep-think.js'
 
 process.env.DSH_WORKPLAN_LESSONS_FILE = join(
   tmpdir(),
@@ -143,12 +143,12 @@ const effortOf = (s: any) => s.request.agentOptions.reasoningEffort
 
 test('D1-1：属性访问 agents 抛错但 ctx.get 可用 ⇒ 解析先于 interrupt、parent=负责人 agent、自配档接续、signal 独立不中止、childId 台账更新', async () => {
   const { runtime, record, spawned, interrupts, order, leaderAgent, agentsPropertyHits } = makeD1Runtime()
-  await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation() })
+  await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation(), startPhases: MAIN_START_PHASES_FIXTURE })
   await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
   const caller = new AbortController()
   const r = await runtime.delegateTool(
     leafAgent('member-1'),
-    { action: 'self_effort', reasoningEffort: 'medium', complexityRationale: '跨模块根因排查，验证难度中等偏上', deepThink: MAIN_DEEP_THINK_FIXTURE, timeNotice: { declaredMinutes: 15, reason: '跨模块根因排查，验证难度中等偏上' } },
+    { action: 'self_effort', reasoningEffort: 'medium', complexityRationale: '跨模块根因排查，验证难度中等偏上', startPhases: MAIN_START_PHASES_FIXTURE, timeNotice: { declaredMinutes: 15, reason: '跨模块根因排查，验证难度中等偏上' } },
     caller.signal,
   )
   assert.equal(r.ok, true, JSON.stringify(r))
@@ -173,9 +173,9 @@ test('D1-1：属性访问 agents 抛错但 ctx.get 可用 ⇒ 解析先于 inter
 
 test('D1-2：agents 服务不可用 ⇒ 不中断 phase-0、显式 SELF_EFFORT_CONTINUATION_FAILED、登记保留且重派读档直连 phase-1', async () => {
   const { runtime, record, spawned, interrupts, leaderAgent } = makeD1Runtime({ agentsUnavailable: true })
-  await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation() })
+  await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation(), startPhases: MAIN_START_PHASES_FIXTURE })
   await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
-  const r = await runtime.delegateTool(leafAgent('member-1'), { action: 'self_effort', reasoningEffort: 'medium', complexityRationale: '中等复杂度', deepThink: MAIN_DEEP_THINK_FIXTURE, timeNotice: { declaredMinutes: 15, reason: '中等复杂度' } })
+  const r = await runtime.delegateTool(leafAgent('member-1'), { action: 'self_effort', reasoningEffort: 'medium', complexityRationale: '中等复杂度', startPhases: MAIN_START_PHASES_FIXTURE, timeNotice: { declaredMinutes: 15, reason: '中等复杂度' } })
   assert.equal(r.ok, false)
   assert.equal(r.code, 'SELF_EFFORT_CONTINUATION_FAILED', '解析失败必须显式报错，绝不静默')
   assert.match(String(r.error), /agents 服务不可用/)
@@ -183,13 +183,13 @@ test('D1-2：agents 服务不可用 ⇒ 不中断 phase-0、显式 SELF_EFFORT_C
   assert.equal(spawned.length, 2, '不产生接续会话')
   const row = record.statuses[0]
   assert.equal(row.delegateSelfEfforts['Expert-A'], 'medium', '自配档登记保留')
-  assert.ok(row.delegateDeepThinks['Expert-A'], '两轮思考产物登记保留')
+  assert.ok(row.delegateStartPhases['Expert-A'], '五步开工证据登记保留')
   assert.equal(row.delegates[0].status, 'failed', '失败台账可见，负责人可重派')
   // 重派读档：重置后重新 review+dispatch，Expert-A 直接以自配档 phase-1 接续。
   record.statuses = applyStatus(record.statuses, 'T1', { status: 'pending' })
   record.statuses[0].status = 'in_progress'
   record.statuses[0].childId = 'child-leader'
-  const reReview = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation() })
+  const reReview = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation(), startPhases: MAIN_START_PHASES_FIXTURE })
   assert.equal(reReview.ok, true, JSON.stringify(reReview))
   const again = await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
   assert.equal(again.ok, true, JSON.stringify(again))
@@ -199,9 +199,9 @@ test('D1-2：agents 服务不可用 ⇒ 不中断 phase-0、显式 SELF_EFFORT_C
 
 test('D1-3：startActivation 连续两次失败 ⇒ 既有失败台账路径不回归（重试恰 1 次、禁止静默降档、自配档保留）', async () => {
   const { runtime, record, spawned, spawnAttempts, interrupts, leaderAgent } = makeD1Runtime({ failContinuation: true })
-  await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation() })
+  await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation(), startPhases: MAIN_START_PHASES_FIXTURE })
   await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
-  const r = await runtime.delegateTool(leafAgent('member-1'), { action: 'self_effort', reasoningEffort: 'medium', complexityRationale: '中等复杂度', deepThink: MAIN_DEEP_THINK_FIXTURE, timeNotice: { declaredMinutes: 15, reason: '中等复杂度' } })
+  const r = await runtime.delegateTool(leafAgent('member-1'), { action: 'self_effort', reasoningEffort: 'medium', complexityRationale: '中等复杂度', startPhases: MAIN_START_PHASES_FIXTURE, timeNotice: { declaredMinutes: 15, reason: '中等复杂度' } })
   assert.equal(r.ok, false)
   assert.equal(r.code, 'SELF_EFFORT_CONTINUATION_FAILED')
   assert.equal(spawnAttempts.count, 4, '2 次 phase-0 成功 + 2 次接续尝试失败（恰重试 1 次）')
@@ -341,7 +341,7 @@ test('D2-1：陈旧备份（mtime<startedAt）+结果块缺失 ⇒ 拒绝采纳�
   const cwd = makeBackupCwd()
   writeBackup(cwd, JSON.stringify(backupPayload({ planId: 'wp-253-settle', subtaskId: 'T1' })), new Date(Date.now() - 3_600_000))
   const { session, runtime, prompts } = makeD2Runtime([proseOnly(), compliantOutput()], cwd)
-  const result: any = await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE }, new AbortController().signal)
+  const result: any = await runtime.dispatchTool({ session, options: {} }, { startPhases: MAIN_START_PHASES_FIXTURE }, new AbortController().signal)
   const row = rowOf(result)
   assert.equal(prompts.length, 2, '陈旧备份不得采纳：必须落回 EVIDENCE_MISSING 有界回喂')
   assert.match(prompts[1], /结果块缺失/, '回喂文案点名缺失')
@@ -360,7 +360,7 @@ test('D2-2：新鲜且归属匹配的备份（含额外顶层字段）⇒ 单次
   const future = new Date(Date.now() + 60_000)
   writeBackup(cwd, JSON.stringify(backupPayload({ planId: 'wp-253-settle', subtaskId: 'T1', childId: 'child-253-x' })), future)
   const { session, runtime, prompts } = makeD2Runtime([proseOnly()], cwd)
-  const result: any = await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE }, new AbortController().signal)
+  const result: any = await runtime.dispatchTool({ session, options: {} }, { startPhases: MAIN_START_PHASES_FIXTURE }, new AbortController().signal)
   const row = rowOf(result)
   assert.equal(prompts.length, 1, '新鲜且归属匹配 ⇒ 不回喂不重做（[2.2.9] 恢复能力不回归）')
   assert.equal(row?.status, 'done')
@@ -380,7 +380,7 @@ test('D2-3：新鲜但 planId 不匹配 ⇒ 拒绝采纳、审计留痕、落回
   const cwd = makeBackupCwd()
   writeBackup(cwd, JSON.stringify(backupPayload({ planId: 'wp-other-plan', subtaskId: 'T1' })), new Date(Date.now() + 60_000))
   const { session, runtime, prompts } = makeD2Runtime([proseOnly(), compliantOutput()], cwd)
-  const result: any = await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE }, new AbortController().signal)
+  const result: any = await runtime.dispatchTool({ session, options: {} }, { startPhases: MAIN_START_PHASES_FIXTURE }, new AbortController().signal)
   assert.equal(prompts.length, 2, '跨计划备份不得采纳')
   assert.equal(rowOf(result)?.status, 'done', '回喂补交后正常结算')
   const record = recordOf(runtime, session)
@@ -395,7 +395,7 @@ test('D2-4：新鲜但 subtaskId 不匹配（标记块包裹的第二入口）�
   const wrapped = `备份说明。\n${EVIDENCE_MARKER_BEGIN}\n${JSON.stringify(backupPayload({ planId: 'wp-253-settle', subtaskId: 'T9' }))}\n${EVIDENCE_MARKER_END}`
   writeBackup(cwd, wrapped, new Date(Date.now() + 60_000))
   const { session, runtime, prompts } = makeD2Runtime([proseOnly(), compliantOutput()], cwd)
-  const result: any = await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE }, new AbortController().signal)
+  const result: any = await runtime.dispatchTool({ session, options: {} }, { startPhases: MAIN_START_PHASES_FIXTURE }, new AbortController().signal)
   assert.equal(prompts.length, 2, '跨子任务备份不得采纳（标记块内 JSON 同样过归属闸）')
   assert.equal(rowOf(result)?.status, 'done')
   const record = recordOf(runtime, session)

@@ -27,7 +27,7 @@ import {
 import { createWorkplanRuntime, reconstructFromSession } from '../src/runtime.js'
 import { computeMappingDigest, verifyMappingDigest } from '../src/supersede-digest.js'
 import { SUPERSEDE_CODES } from '../src/supersede.js'
-import { MAIN_DEEP_THINK_FIXTURE } from './helpers/main-deep-think.js'
+import { MAIN_START_PHASES_FIXTURE } from './helpers/main-deep-think.js'
 
 const SESSION_ID = 'session-supersede'
 
@@ -232,7 +232,7 @@ test('T6-1 写入 superseded 后 replay/冷启动/dispatch/present 看到同一�
 
   // 读侧 3：dispatch 不得再启动任何部门 Agent。
   const dispatch = await runtime.dispatchTool(
-    { session }, { deepThink: MAIN_DEEP_THINK_FIXTURE, planId: 'wp-a', mode: 'async' },
+    { session }, { startPhases: MAIN_START_PHASES_FIXTURE, planId: 'wp-a', mode: 'async' },
     new AbortController().signal,
   )
   assert.equal(dispatch.ok, false)

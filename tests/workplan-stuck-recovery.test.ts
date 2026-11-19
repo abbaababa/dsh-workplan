@@ -31,7 +31,7 @@ import {
   normaliseIdleTimeout,
 } from '../src/runtime.js'
 import { createProgressWatchdog, describeError, pickTimeoutReason } from '../src/watchdog.js'
-import { MAIN_DEEP_THINK_FIXTURE } from './helpers/main-deep-think.js'
+import { MAIN_START_PHASES_FIXTURE } from './helpers/main-deep-think.js'
 
 /*
  * The idle and hard timeout timers under test are unref'd on purpose: a
@@ -339,7 +339,7 @@ test('旧 idle/单次窗口到点不再把子任务判卡住；只有显式取�
   })
   runtime.state.records.set(session.id, record)
   const agent = { session, options: {} }
-  const running = runtime.dispatchTool(agent, { deepThink: MAIN_DEEP_THINK_FIXTURE }, new AbortController().signal)
+  const running = runtime.dispatchTool(agent, { startPhases: MAIN_START_PHASES_FIXTURE }, new AbortController().signal)
   await new Promise((resolve) => setTimeout(resolve, 1_200))
 
   const stats = derivePlanSnapshot(record.statuses).stats
@@ -368,7 +368,7 @@ test('re-dispatching a blocked plan with no resume budget left fails loudly', as
   const runtime = createWorkplanRuntime(ctx)
   runtime.state.records.set(session.id, record)
 
-  const result = await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE,}, new AbortController().signal)
+  const result = await runtime.dispatchTool({ session, options: {} }, { startPhases: MAIN_START_PHASES_FIXTURE,}, new AbortController().signal)
   assert.equal(result.ok, false)
   assert.match(String(result.error), /续跑次数已用尽/)
   assert.match(String(result.hint), /直接完成/)
@@ -387,7 +387,7 @@ test('cancel stops a running dispatch instead of being refused', async () => {
   })
   runtime.state.records.set(session.id, record)
 
-  const running = runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE,}, new AbortController().signal)
+  const running = runtime.dispatchTool({ session, options: {} }, { startPhases: MAIN_START_PHASES_FIXTURE,}, new AbortController().signal)
   await new Promise((resolve) => setTimeout(resolve, 50))
   assert.ok(record.dispatchPromise, 'the dispatch should still be in flight')
 
@@ -413,7 +413,7 @@ test('长时间运行的 dispatch 不再被墙钟判“已卡住”，而是如�
   const runtime = createWorkplanRuntime(ctx, { totalTimeoutMs: 60_000 })
   runtime.state.records.set(session.id, record)
 
-  const result = await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
+  const result = await runtime.dispatchTool({ session, options: {} }, { startPhases: MAIN_START_PHASES_FIXTURE, mode: 'async' }, new AbortController().signal)
   assert.equal(result.ok, true)
   assert.equal(result.alreadyRunning, true)
   assert.equal(result.running, true)

@@ -1,22 +1,30 @@
 /*
- * [2.5.4][T3R1] 分派前深度梳理质量闸——聚焦回归（gate-tests，T3）。
+ * [3.0.8] 负责人 review 开工闸（startPhases 五步开工证据）＋分工表闸——聚焦回归。
  *
- * 锁负责人分派门禁的合格性判据（与主 Agent validateMainDeepThink / 叶子
- * self_effort 同一口径，单一事实源 = three-phase MIN_PLANNING_*_CHARS）：
- *  G1 缺 consolidation ⇒ dispatch 拒 DELEGATE_CONSOLIDATION_MISSING；
- *  G2 problemAnalysis 合计 <40 字 ⇒ review 与 dispatch 两入口均拒
- *     DELEGATE_CONSOLIDATION_INCOMPLETE；
- *  G3 approach 合计 <40 字 ⇒ 两入口均拒；
- *  G4 approachBasis 合计 <20 字 ⇒ 两入口均拒；
- *  G5 恰好达标（40/40/20）⇒ review 登记成功、dispatch 放行；
- *  G6 合格富产物 ⇒ 放行（合计字数=各项长度之和；空白修剪后不计字）；
- *  G7 durable 读回（reconstructFromSession）后 dispatch 仍拒薄产物；
- *  G8 effortOverride 继承不回归（taskEffortFallback / 显式优先 / 家族钳制，
- *     复杂声明档按 [2.5.4][T4] D1/D2 须 ≥8 人）；
- *  G9 gateAudit 拒绝/放行记录随 durable workplan-update 落盘、回放可复核。
+ * 3.0.8 单框架收口后，原「两轮深度思考产物闸」（consolidation 携带
+ * problemAnalysis/approach/approachBasis 并卡 40/40/20 字）已废除：
+ * consolidation 只剩 { taskReasoningEffort?, taskReasoningEffortDeclared?, assignments }
+ * （再传梳理字段为编译错），planDelegations 不再有字数闸。第 1/2/3 步开工证据改经
+ * startPhases 提交，由 validateStartPhaseEvidence 判据（与主 Agent/叶子同一口径，
+ * 常量真源 src/five-step.ts MIN_*）在 review 入口硬拒：
+ *  G1  缺 consolidation ⇒ dispatch 拒 DELEGATE_CONSOLIDATION_MISSING；
+ *  G1b review 缺 startPhases ⇒ START_EVIDENCE_MISSING（不登记、留痕）；
+ *  G2  startPhases.planning.problemAnalysis 合计 <40 字 ⇒ review 拒
+ *      START_EVIDENCE_INCOMPLETE（approach <40 / approachBasis <20 / resources <20 /
+ *      tools <10 / prepared <20 / evidence <20 同一判据）；
+ *  G3  恰好达标（经 MIN_* 常量构造 40/40/20/20/10/20/20）⇒ review 登记、dispatch 放行；
+ *  G4  空白修剪后计数；空数组按缺内容拒；MAIN_START_PHASES_FIXTURE 富证据放行；
+ *  G5  行上遗留旧持久化产物 ⇒ dispatch 仍按同一判据拒（assignments 空 ⇒
+ *      DELEGATE_CONSOLIDATION_INCOMPLETE；low 声明 ⇒ DELEGATE_LOW_TASK_FORBIDDEN）；
+ *  G6  durable 回放（buildUpdateMessage + reconstructFromSession）后 dispatch 判据不放松；
+ *  G7  effortOverride 继承不回归（taskEffortFallback / 显式优先 / 家族钳制，
+ *      复杂声明档按 D1/D2 须 ≥8 人）；
+ *  G8  gateAudit（拒绝/放行审计 ≤20 条 durable 回放）机制保留，薄证据拒因改
+ *      START_EVIDENCE_INCOMPLETE 口径。
  * 夹具风格复用 delegate-tool.test.ts（makeRuntime/fake subagents）与
- * workplan-251-deep-think.test.ts（durable 回放）；达标补充项与 ≥8 人分工表
- * 复用 tests/helpers/delegate-consolidation.ts。
+ * workplan-251-deep-think.test.ts（durable 回放）；≥8 人分工表复用
+ * tests/helpers/delegate-consolidation.ts；合格开工证据复用
+ * tests/helpers/main-deep-think.ts 的 MAIN_START_PHASES_FIXTURE。
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -28,8 +36,13 @@ import {
   MIN_PLANNING_APPROACH_CHARS,
   MIN_PLANNING_BASIS_CHARS,
   MIN_PLANNING_PROBLEM_CHARS,
-} from '../src/three-phase.js'
+  MIN_PREPARATION_CHARS,
+  MIN_RESOURCE_CHARS,
+  MIN_TOOL_CHARS,
+  validateStartPhaseEvidence,
+} from '../src/five-step.js'
 import { GATE_PAD_APPROACH, GATE_PAD_PROBLEM, gateMembers } from './helpers/delegate-consolidation.js'
+import { MAIN_START_PHASES_FIXTURE } from './helpers/main-deep-think.js'
 
 /** 恰好 n 个字符（非空白，trim 不影响）——边界精确构造。 */
 const ch = (n: number) => '梳'.repeat(n)
@@ -109,44 +122,60 @@ const assignments2 = () => [
   { member: 'Member-B', role: 'expert', task: '整理验收证据清单', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
 ]
 
-/** 恰好达标夹具：problemAnalysis 20+20=40、approach 20+20=40、approachBasis 20。 */
-function boundaryConsolidation(overrides: any = {}) {
-  return {
-    problemAnalysis: [ch(20), ch(20)],
-    constraints: [],
-    unknowns: [],
-    approach: [ch(20), ch(20)],
-    approachBasis: [ch(20)],
-    assignments: assignments2(),
-    ...overrides,
-  }
+/*
+ * [3.0.8] consolidation 瘦身为分工表＋等级配置（梳理产物已改由 startPhases 承载，
+ * 再传 problemAnalysis 等字段会编译错）。GATE_PAD_* 现用作 startPhases 补充项。
+ */
+function slimConsolidation(overrides: any = {}) {
+  return { assignments: assignments2(), ...overrides }
 }
 
-/** 合格富产物（真实文案口径）。 */
-function richConsolidation(overrides: any = {}) {
-  return boundaryConsolidation({
-    problemAnalysis: ['现状：部门任务需要拆给专家与组员', GATE_PAD_PROBLEM],
-    approach: ['专家做核心实现', GATE_PAD_APPROACH],
-    approachBasis: ['第二轮分工基于第一轮全部梳理结果：质量与时间矛盾决定专家做核心实现、组员做证据。'],
-    ...overrides,
-  })
+/** 恰好达标的开工证据：40/40/20/20/10/20/20 全边界，经 MIN_* 常量构造。 */
+function exactStartPhases(overrides: any = {}) {
+  const base: any = {
+    planning: {
+      problemAnalysis: [ch(MIN_PLANNING_PROBLEM_CHARS / 2), ch(MIN_PLANNING_PROBLEM_CHARS / 2)],
+      approach: [ch(MIN_PLANNING_APPROACH_CHARS / 2), ch(MIN_PLANNING_APPROACH_CHARS / 2)],
+      approachBasis: [ch(MIN_PLANNING_BASIS_CHARS)],
+      resources: [ch(MIN_RESOURCE_CHARS)],
+      tools: [ch(MIN_TOOL_CHARS)],
+    },
+    preparation: { prepared: [ch(MIN_PREPARATION_CHARS)], evidence: [ch(MIN_PREPARATION_CHARS)] },
+  }
+  for (const [key, value] of Object.entries(overrides)) {
+    if (key in base.planning) base.planning[key] = value
+    else base.preparation[key] = value
+  }
+  return base
+}
+
+/** 合格富开工证据（共享夹具深拷贝，可按字段覆盖）。 */
+function richStartPhases(overrides: any = {}) {
+  const base: any = JSON.parse(JSON.stringify(MAIN_START_PHASES_FIXTURE))
+  for (const [key, value] of Object.entries(overrides)) {
+    if (key in base.planning) base.planning[key] = value
+    else base.preparation[key] = value
+  }
+  return base
 }
 
 /*
- * [2.5.5] 夹具适配：以下单元用例验证的是深度梳理质量闸与等级继承，不是
- * 「low 禁派」闸；按门禁判定链（src/llm-rules.ts banDeclared）给任务行补
- * taskRowEffort='high' 即放行第三层派发，且不改变复杂档判定（人数闸仍只由
- * consolidation.taskReasoningEffort / taskEffortFallback 决定）。
- * 断言意图零删改：只补前置数据。
+ * [2.5.5] 夹具适配：以下单元用例验证的是分工表闸与等级继承，不是「low 禁派」
+ * 闸；按门禁判定链（src/llm-rules.ts banDeclared）给任务行补 taskRowEffort='high'
+ * 即放行第三层派发，且不改变复杂档判定（人数闸仍只由 consolidation.taskReasoningEffort
+ * / taskEffortFallback 决定）。断言意图零删改：只补前置数据。
  */
 const pd = (args: any) => planDelegations({ taskRowEffort: 'high', ...args })
 
 /* ---------- G0 判据单一事实源 ---------- */
 
-test('G0：质量闸下限与主 Agent/叶子同一事实源（40/40/20）', () => {
+test('G0：开工证据下限与主 Agent/叶子同一事实源（40/40/20＋3.1.0 新增 20/10/20）', () => {
   assert.equal(MIN_PLANNING_PROBLEM_CHARS, 40)
   assert.equal(MIN_PLANNING_APPROACH_CHARS, 40)
   assert.equal(MIN_PLANNING_BASIS_CHARS, 20)
+  assert.equal(MIN_RESOURCE_CHARS, 20)
+  assert.equal(MIN_TOOL_CHARS, 10)
+  assert.equal(MIN_PREPARATION_CHARS, 20)
 })
 
 /* ---------- G1 缺产物 ---------- */
@@ -156,74 +185,113 @@ test('G1 单元：缺 consolidation ⇒ DELEGATE_CONSOLIDATION_MISSING', () => {
     const result = pd({ consolidation: input as any, model: 'qwen3.8-flash' })
     assert.equal(result.ok, false)
     assert.equal(result.code, 'DELEGATE_CONSOLIDATION_MISSING')
-    assert.match(result.error!, /梳理/)
+    assert.match(result.error!, /分工表/)
   }
 })
 
-/* ---------- G2/G3/G4 单元：合计字数下限与恰好达标 ---------- */
+test('G1b 运行时 review 入口：缺 startPhases 开工证据 ⇒ START_EVIDENCE_MISSING，不登记、留痕', async () => {
+  const { runtime, leaderAgent, record } = makeRuntime()
+  const result = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: slimConsolidation() })
+  assert.equal(result.ok, false)
+  assert.equal(result.code, 'START_EVIDENCE_MISSING')
+  assert.match(result.error!, /startPhases/)
+  assert.equal(record.statuses[0].consolidation, undefined, '开工证据缺失不得登记')
+  assert.equal(record.statuses[0].startPhases, undefined, '开工证据缺失不得登记')
+  const audit = record.statuses[0].gateAudit
+  assert.deepEqual(
+    [audit[audit.length - 1].action, audit[audit.length - 1].ok, audit[audit.length - 1].code],
+    ['review', false, 'START_EVIDENCE_MISSING'],
+  )
+})
 
-test('G2 单元：problemAnalysis 合计 39 字 ⇒ INCOMPLETE；多项求和同判据；恰好 40 放行', () => {
-  const thin = pd({ consolidation: boundaryConsolidation({ problemAnalysis: [ch(39)] }), model: 'qwen3.8-flash' })
+/* ---------- G2 单元：开工证据合计字数下限与恰好达标（判据真源 validateStartPhaseEvidence） ---------- */
+
+test('G2 单元：problemAnalysis 合计 39 字 ⇒ START_EVIDENCE_INCOMPLETE；多项求和同判据；恰好 40 放行', () => {
+  const thin = validateStartPhaseEvidence(exactStartPhases({ problemAnalysis: [ch(39)] }))
   assert.equal(thin.ok, false)
-  assert.equal(thin.code, 'DELEGATE_CONSOLIDATION_INCOMPLETE')
+  assert.equal(thin.code, 'START_EVIDENCE_INCOMPLETE')
   assert.match(thin.error!, /problemAnalysis/)
   assert.match(thin.error!, /40/)
-  // 合计=各项长度之和：19+20=39 仍拒（不是逐项判）。
-  const split = pd({ consolidation: boundaryConsolidation({ problemAnalysis: [ch(19), ch(20)] }), model: 'qwen3.8-flash' })
+  // 合计=各项长度之和：19+20=39 仍拒（不是逐项判），拒因报告实际合计。
+  const split = validateStartPhaseEvidence(exactStartPhases({ problemAnalysis: [ch(19), ch(20)] }))
   assert.equal(split.ok, false)
-  assert.equal(split.code, 'DELEGATE_CONSOLIDATION_INCOMPLETE')
+  assert.equal(split.code, 'START_EVIDENCE_INCOMPLETE')
+  assert.match(split.error!, /39/)
   // 20+20=40 恰好达标。
-  const exact = pd({ consolidation: boundaryConsolidation(), model: 'qwen3.8-flash' })
+  const exact = validateStartPhaseEvidence(exactStartPhases())
   assert.equal(exact.ok, true, JSON.stringify(exact))
 })
 
-test('G3 单元：approach 合计 39 字 ⇒ INCOMPLETE；恰好 40 放行', () => {
-  const thin = pd({ consolidation: boundaryConsolidation({ approach: [ch(39)] }), model: 'qwen3.8-flash' })
+test('G3 单元：approach 合计 39 字 ⇒ START_EVIDENCE_INCOMPLETE；恰好 40 放行', () => {
+  const thin = validateStartPhaseEvidence(exactStartPhases({ approach: [ch(39)] }))
   assert.equal(thin.ok, false)
-  assert.equal(thin.code, 'DELEGATE_CONSOLIDATION_INCOMPLETE')
+  assert.equal(thin.code, 'START_EVIDENCE_INCOMPLETE')
   assert.match(thin.error!, /approach/)
   assert.match(thin.error!, /40/)
-  const exact = pd({ consolidation: boundaryConsolidation({ approach: [ch(20), ch(20)] }), model: 'qwen3.8-flash' })
+  const exact = validateStartPhaseEvidence(exactStartPhases({ approach: [ch(20), ch(20)] }))
   assert.equal(exact.ok, true, JSON.stringify(exact))
 })
 
-test('G4 单元：approachBasis 合计 19 字 ⇒ INCOMPLETE；恰好 20 放行', () => {
-  const thin = pd({ consolidation: boundaryConsolidation({ approachBasis: [ch(19)] }), model: 'qwen3.8-flash' })
+test('G4 单元：approachBasis 合计 19 字 ⇒ START_EVIDENCE_INCOMPLETE；恰好 20 放行', () => {
+  const thin = validateStartPhaseEvidence(exactStartPhases({ approachBasis: [ch(19)] }))
   assert.equal(thin.ok, false)
-  assert.equal(thin.code, 'DELEGATE_CONSOLIDATION_INCOMPLETE')
+  assert.equal(thin.code, 'START_EVIDENCE_INCOMPLETE')
   assert.match(thin.error!, /approachBasis/)
   assert.match(thin.error!, /20/)
-  const exact = pd({ consolidation: boundaryConsolidation({ approachBasis: [ch(20)] }), model: 'qwen3.8-flash' })
+  const exact = validateStartPhaseEvidence(exactStartPhases({ approachBasis: [ch(20)] }))
   assert.equal(exact.ok, true, JSON.stringify(exact))
 })
 
-test('G5 单元：恰好达标（40/40/20）⇒ ok，分工与缺省等级正常', () => {
-  const result = pd({ consolidation: boundaryConsolidation(), model: 'qwen3.8-flash' })
+test('G2b 单元：resources <20 / tools <10 / prepared <20 / evidence <20 ⇒ 同一 INCOMPLETE 判据', () => {
+  const resources = validateStartPhaseEvidence(exactStartPhases({ resources: [ch(MIN_RESOURCE_CHARS - 1)] }))
+  assert.equal(resources.code, 'START_EVIDENCE_INCOMPLETE')
+  assert.match(resources.error!, /resources/)
+  assert.match(resources.error!, /20/)
+  const tools = validateStartPhaseEvidence(exactStartPhases({ tools: [ch(MIN_TOOL_CHARS - 1)] }))
+  assert.equal(tools.code, 'START_EVIDENCE_INCOMPLETE')
+  assert.match(tools.error!, /tools/)
+  assert.match(tools.error!, /10/)
+  const prepared = validateStartPhaseEvidence(exactStartPhases({ prepared: [ch(MIN_PREPARATION_CHARS - 1)] }))
+  assert.equal(prepared.code, 'START_EVIDENCE_INCOMPLETE')
+  assert.match(prepared.error!, /prepared/)
+  const evidence = validateStartPhaseEvidence(exactStartPhases({ evidence: [ch(MIN_PREPARATION_CHARS - 1)] }))
+  assert.equal(evidence.code, 'START_EVIDENCE_INCOMPLETE')
+  assert.match(evidence.error!, /evidence/)
+})
+
+/* ---------- G3 单元：分工表闸（consolidation 瘦身后仍有 assignments 闸） ---------- */
+
+test('G3 单元：恰好达标开工证据＋合格分工表 ⇒ ok，分工与缺省等级正常', () => {
+  const result = pd({ consolidation: slimConsolidation(), model: 'qwen3.8-flash' })
   assert.equal(result.ok, true, JSON.stringify(result))
   assert.equal(result.members.length, 2)
   assert.deepEqual(result.members.map((m: any) => m.effort), ['low', 'low'])
   assert.equal(result.taskEffort, null)
 })
 
-test('G6 单元：空白不计字（先 trim 再求和）；空数组按缺交拒；合格富产物放行', () => {
-  const spaces = pd({ consolidation: boundaryConsolidation({ problemAnalysis: [' '.repeat(60)] }), model: 'qwen3.8-flash' })
+test('G4 单元：空白不计字（先 trim 再求和）；空数组按缺内容拒；合格富证据放行', () => {
+  const spaces = validateStartPhaseEvidence(exactStartPhases({ problemAnalysis: [' '.repeat(60)] }))
   assert.equal(spaces.ok, false)
-  assert.equal(spaces.code, 'DELEGATE_CONSOLIDATION_INCOMPLETE')
-  const padded = pd({ consolidation: boundaryConsolidation({ problemAnalysis: [ch(39) + '   '] }), model: 'qwen3.8-flash' })
+  assert.equal(spaces.code, 'START_EVIDENCE_INCOMPLETE')
+  const padded = validateStartPhaseEvidence(exactStartPhases({ problemAnalysis: [ch(39) + '   '] }))
   assert.equal(padded.ok, false)
   assert.match(padded.error!, /39/)
-  for (const overrides of [{ problemAnalysis: [] }, { approach: [] }, { approachBasis: [] }]) {
-    const empty = pd({ consolidation: boundaryConsolidation(overrides), model: 'qwen3.8-flash' })
-    assert.equal(empty.ok, false)
-    assert.equal(empty.code, 'DELEGATE_CONSOLIDATION_INCOMPLETE')
+  for (const overrides of [{ problemAnalysis: [] }, { approach: [] }, { approachBasis: [] }, { prepared: [] }]) {
+    const empty = validateStartPhaseEvidence(exactStartPhases(overrides))
+    assert.equal(empty.ok, false, JSON.stringify(overrides))
+    assert.equal(empty.code, 'START_EVIDENCE_INCOMPLETE')
+    assert.match(empty.error!, /至少需要 1 条/)
   }
-  const rich = pd({ consolidation: richConsolidation(), model: 'qwen3.8-flash' })
+  const rich = validateStartPhaseEvidence(richStartPhases())
   assert.equal(rich.ok, true, JSON.stringify(rich))
+  // GATE_PAD 补充项单独使用也达标（helper 仍服务于开工证据口径）。
+  const pad = validateStartPhaseEvidence(exactStartPhases({ problemAnalysis: [GATE_PAD_PROBLEM], approach: [GATE_PAD_APPROACH] }))
+  assert.equal(pad.ok, true, JSON.stringify(pad))
 })
 
 /* ---------- G1 运行时：未 review 直接 dispatch ---------- */
 
-test('G1 运行时：未提交梳理直接 dispatch ⇒ MISSING，gateAudit 记录拒绝并随 durable 落盘', async () => {
+test('G1 运行时：未提交分工表直接 dispatch ⇒ MISSING，gateAudit 记录拒绝并随 durable 落盘', async () => {
   const { runtime, leaderAgent, record, rootSession } = makeRuntime()
   const result = await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
   assert.equal(result.ok, false)
@@ -238,59 +306,74 @@ test('G1 运行时：未提交梳理直接 dispatch ⇒ MISSING，gateAudit 记�
   assert.match(JSON.stringify(rootSession.events), /gateAudit/, '拒绝留痕必须随 durable workplan-update 落盘')
 })
 
-/* ---------- G2/G3/G4 运行时：review 入口 ---------- */
+/* ---------- G2 运行时：review 入口开工证据闸 ---------- */
 
-test('G2-G4 运行时 review 入口：三字段任一太薄 ⇒ INCOMPLETE，不登记、留痕', async () => {
+test('G2 运行时 review 入口：七字段任一太薄 ⇒ START_EVIDENCE_INCOMPLETE，不登记、留痕', async () => {
   const cases = [
     { field: 'problemAnalysis', thin: { problemAnalysis: [ch(39)] } },
     { field: 'approach', thin: { approach: [ch(39)] } },
     { field: 'approachBasis', thin: { approachBasis: [ch(19)] } },
+    { field: 'resources', thin: { resources: [ch(19)] } },
+    { field: 'tools', thin: { tools: [ch(9)] } },
+    { field: 'prepared', thin: { prepared: [ch(19)] } },
+    { field: 'evidence', thin: { evidence: [ch(19)] } },
   ]
   for (const { field, thin } of cases) {
     const { runtime, leaderAgent, record } = makeRuntime()
-    const result = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: boundaryConsolidation(thin) })
+    const result = await runtime.delegateTool(leaderAgent, {
+      action: 'review',
+      consolidation: slimConsolidation(),
+      startPhases: exactStartPhases(thin),
+    })
     assert.equal(result.ok, false, field)
-    assert.equal(result.code, 'DELEGATE_CONSOLIDATION_INCOMPLETE', field)
-    assert.match(result.error, new RegExp(field), `${field} 拒因必须点名薄字段`)
+    assert.equal(result.code, 'START_EVIDENCE_INCOMPLETE', field)
+    assert.match(result.error, new RegExp(`startPhases\\.(planning|preparation)\\.${field}`), `${field} 拒因必须点名薄字段`)
     assert.equal(record.statuses[0].consolidation, undefined, `${field} 太薄不得登记`)
+    assert.equal(record.statuses[0].startPhases, undefined, `${field} 太薄不得登记`)
     const audit = record.statuses[0].gateAudit
-    assert.equal(audit[audit.length - 1].action, 'review')
-    assert.equal(audit[audit.length - 1].ok, false)
-    assert.equal(audit[audit.length - 1].code, 'DELEGATE_CONSOLIDATION_INCOMPLETE')
+    assert.deepEqual(
+      [audit[audit.length - 1].action, audit[audit.length - 1].ok, audit[audit.length - 1].code],
+      ['review', false, 'START_EVIDENCE_INCOMPLETE'],
+    )
   }
 })
 
-/* ---------- G2/G3/G4 运行时：dispatch 入口（行上遗留薄产物） ---------- */
+/* ---------- G5 运行时：dispatch 入口（行上遗留旧持久化产物） ---------- */
 
-test('G2-G4 运行时 dispatch 入口：行上已落薄产物（旧持久化）⇒ dispatch 仍拒 INCOMPLETE', async () => {
-  const cases = [
-    { field: 'problemAnalysis', thin: { problemAnalysis: [ch(39)] } },
-    { field: 'approach', thin: { approach: [ch(39)] } },
-    { field: 'approachBasis', thin: { approachBasis: [ch(19)] } },
+test('G5 运行时 dispatch 入口：行上已落旧持久化产物 ⇒ dispatch 仍按同一判据拒', async () => {
+  // 绕过 review 直接写行：模拟开工闸上线前/旧形态已持久化的产物。
+  const emptyCases = [
+    { name: 'assignments 空', consolidation: slimConsolidation({ assignments: [] }), code: 'DELEGATE_CONSOLIDATION_INCOMPLETE', match: /assignments/ },
+    { name: 'low 声明', consolidation: slimConsolidation({ taskReasoningEffort: 'low' }), code: 'DELEGATE_LOW_TASK_FORBIDDEN', match: /direct/ },
   ]
-  for (const { field, thin } of cases) {
+  for (const { name, consolidation, code, match } of emptyCases) {
     const { runtime, leaderAgent, record } = makeRuntime()
-    // 绕过 review 直接写行：模拟质量闸上线前已持久化的薄梳理产物。
-    record.statuses = applyStatus(record.statuses, 'T1', { consolidation: boundaryConsolidation(thin) })
+    record.statuses = applyStatus(record.statuses, 'T1', { consolidation })
     const result = await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
-    assert.equal(result.ok, false, field)
-    assert.equal(result.code, 'DELEGATE_CONSOLIDATION_INCOMPLETE', field)
-    assert.match(result.error, new RegExp(field), `${field} 拒因必须点名薄字段`)
+    assert.equal(result.ok, false, name)
+    assert.equal(result.code, code, name)
+    assert.match(result.error, match, `${name} 拒因必须可复核`)
     const audit = record.statuses[0].gateAudit
     assert.equal(audit[audit.length - 1].action, 'dispatch')
     assert.equal(audit[audit.length - 1].ok, false)
   }
 })
 
-/* ---------- G5 运行时：恰好达标 ⇒ 登记 + 放行 ---------- */
+/* ---------- G3 运行时：恰好达标 ⇒ 登记 + 放行 ---------- */
 
-test('G5 运行时：恰好达标（40/40/20）⇒ review 登记成功、dispatch 放行派生 2 叶子', async () => {
+test('G3 运行时：恰好达标开工证据 ⇒ review 登记成功、dispatch 放行派生 2 叶子', async () => {
   const { runtime, leaderAgent, record, subagents } = makeRuntime()
-  const review = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: boundaryConsolidation() })
+  const review = await runtime.delegateTool(leaderAgent, {
+    action: 'review',
+    consolidation: slimConsolidation(),
+    startPhases: exactStartPhases(),
+  })
   assert.equal(review.ok, true, JSON.stringify(review))
   const row = record.statuses[0]
-  assert.ok(row.consolidation, '恰好达标的梳理产物必须登记')
-  assert.deepEqual(row.consolidation.problemAnalysis, [ch(20), ch(20)])
+  assert.ok(row.consolidation, '合格分工表必须登记')
+  assert.equal(row.consolidation.assignments.length, 2)
+  assert.ok(row.startPhases, '合格开工证据必须登记（行级 startPhases）')
+  assert.deepEqual(row.startPhases.planning.problemAnalysis, [ch(20), ch(20)])
   const audit = row.gateAudit
   assert.equal(audit[audit.length - 1].action, 'review')
   assert.equal(audit[audit.length - 1].ok, true)
@@ -298,12 +381,12 @@ test('G5 运行时：恰好达标（40/40/20）⇒ review 登记成功、dispatc
   assert.equal(dispatch.ok, true, JSON.stringify(dispatch))
   assert.equal(subagents.spawned.length, 2)
   for (const spawned of subagents.spawned) {
-    assert.equal(spawned.request.maxDepth, 2, '叶子层边界不因质量闸改变')
+    assert.equal(spawned.request.maxDepth, 2, '叶子层边界不因开工闸改变')
   }
   assert.equal(record.statuses[0].delegates.length, 2)
 })
 
-/* ---------- G7 durable 读回 ---------- */
+/* ---------- G6 durable 读回 ---------- */
 
 function replayRuntime(consolidation: any) {
   const plan: any = makePlan()
@@ -326,52 +409,52 @@ function replayRuntime(consolidation: any) {
   return { runtime, leaderAgent, subagents, rebuilt, session }
 }
 
-test('G7 durable：薄产物读回后 dispatch 仍拒 INCOMPLETE（回放不补字、门禁不失效）', () => {
-  const thin = boundaryConsolidation({ problemAnalysis: [ch(39)] })
-  const { runtime, leaderAgent, rebuilt } = replayRuntime(thin)
-  // 消毒回放保持薄产物原样（不回补、不美化）。
-  assert.deepEqual(rebuilt.statuses[0].consolidation.problemAnalysis, [ch(39)])
+test('G6 durable：旧存档分工表（assignments 空）读回后 dispatch 仍拒（回放不补字、门禁不失效）', () => {
+  const { runtime, leaderAgent, rebuilt } = replayRuntime(slimConsolidation({ assignments: [] }))
+  // 消毒回放保持原样（不回补、不美化）。
+  assert.equal(rebuilt.statuses[0].consolidation.assignments.length, 0)
   return runtime.delegateTool(leaderAgent, { action: 'dispatch' }).then((result: any) => {
     assert.equal(result.ok, false)
     assert.equal(result.code, 'DELEGATE_CONSOLIDATION_INCOMPLETE')
-    assert.match(result.error, /problemAnalysis/)
+    assert.match(result.error, /assignments/)
   })
 })
 
-test('G7 durable：合格产物读回后 dispatch 放行（同一回放口径）', async () => {
-  const { runtime, leaderAgent, subagents } = replayRuntime(richConsolidation())
+test('G6 durable：合格分工表读回后 dispatch 放行（同一回放口径）', async () => {
+  const { runtime, leaderAgent, subagents } = replayRuntime(slimConsolidation())
   const result = await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
   assert.equal(result.ok, true, JSON.stringify(result))
   assert.equal(subagents.spawned.length, 2)
 })
 
-/* ---------- G8 effortOverride 继承不回归 ---------- */
+/* ---------- G7 effortOverride 继承不回归 ---------- */
 
-test('G8 单元：taskEffortFallback 继承（复杂档 ≥8 人）、显式优先、家族钳制、无配置回落 low', () => {
+test('G7 单元：taskEffortFallback 继承（复杂档 ≥8 人）、显式优先、家族钳制、无配置回落 low', () => {
   const model = 'qwen3.8-flash'
-  const inherited = pd({ consolidation: richConsolidation({ assignments: gateMembers(8) }), model, taskEffortFallback: 'xhigh' })
+  const inherited = pd({ consolidation: slimConsolidation({ assignments: gateMembers(8) }), model, taskEffortFallback: 'xhigh' })
   assert.equal(inherited.ok, true, JSON.stringify(inherited))
   assert.equal(inherited.taskEffort, 'xhigh')
   assert.deepEqual(inherited.members.map((m: any) => m.effort), Array(8).fill('xhigh'))
   // [2.5.5] 显式 low ⇒ 禁止第三层下派（用户裁决 D1–D5）：本用例锁定该新契约。
-  const explicit = pd({ consolidation: richConsolidation({ taskReasoningEffort: 'low' }), model, taskEffortFallback: 'xhigh' })
+  const explicit = pd({ consolidation: slimConsolidation({ taskReasoningEffort: 'low' }), model, taskEffortFallback: 'xhigh' })
   assert.equal(explicit.ok, false)
   assert.equal(explicit.code, 'DELEGATE_LOW_TASK_FORBIDDEN')
   // 回落源同样按家族钳制并留痕（qwen high→medium）。
-  const clamped = pd({ consolidation: richConsolidation({ assignments: gateMembers(8) }), model, taskEffortFallback: 'high' })
+  const clamped = pd({ consolidation: slimConsolidation({ assignments: gateMembers(8) }), model, taskEffortFallback: 'high' })
   assert.equal(clamped.ok, true, JSON.stringify(clamped))
   assert.equal(clamped.taskEffort, 'medium')
   assert.equal(clamped.taskEffortClamped?.requested, 'high')
   // 无整体配置回落 low 的旧行为不变。
-  const none = pd({ consolidation: richConsolidation(), model })
+  const none = pd({ consolidation: slimConsolidation(), model })
   assert.deepEqual(none.members.map((m: any) => m.effort), ['low', 'low'])
 })
 
-test('G8 端到端：重置清 consolidation 保留 effortOverride ⇒ 重新 review 继承、dispatch 贯穿', async () => {
+test('G7 端到端：重置清 consolidation 保留 effortOverride ⇒ 重新 review 继承、dispatch 贯穿', async () => {
   const { runtime, leaderAgent, record, subagents } = makeRuntime()
   const review = await runtime.delegateTool(leaderAgent, {
     action: 'review',
-    consolidation: richConsolidation({ taskReasoningEffort: 'xhigh', assignments: gateMembers(8) }),
+    consolidation: slimConsolidation({ taskReasoningEffort: 'xhigh', assignments: gateMembers(8) }),
+    startPhases: richStartPhases(),
   })
   assert.equal(review.ok, true, JSON.stringify(review))
   assert.equal(record.statuses[0].effortOverride, 'xhigh')
@@ -382,9 +465,13 @@ test('G8 端到端：重置清 consolidation 保留 effortOverride ⇒ 重新 re
   record.statuses[0].status = 'in_progress'
   record.statuses[0].childId = 'child-leader'
   // 重新 review 未再配整体等级 ⇒ 继承 effortOverride（复杂档 ⇒ ≥8 人）。
-  const reReview = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: richConsolidation({ assignments: gateMembers(8) }) })
+  const reReview = await runtime.delegateTool(leaderAgent, {
+    action: 'review',
+    consolidation: slimConsolidation({ assignments: gateMembers(8) }),
+    startPhases: richStartPhases(),
+  })
   assert.equal(reReview.ok, true, JSON.stringify(reReview))
-  assert.equal(reReview.taskEffort, 'xhigh', '质量闸下继承不回归')
+  assert.equal(reReview.taskEffort, 'xhigh', '开工闸下继承不回归')
   const dispatch = await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
   assert.equal(dispatch.ok, true, JSON.stringify(dispatch))
   assert.equal(dispatch.effortOverride, 'xhigh')
@@ -394,14 +481,23 @@ test('G8 端到端：重置清 consolidation 保留 effortOverride ⇒ 重新 re
   }
 })
 
-/* ---------- G9 gateAudit durable 回放 ---------- */
+/* ---------- G8 gateAudit durable 回放 ---------- */
 
-test('G9：拒绝→放行审计随 durable 回放可复核（顺序保持、有界 ≤20）', async () => {
+test('G8：拒绝→放行审计随 durable 回放可复核（顺序保持、有界 ≤20）', async () => {
   const { runtime, leaderAgent, rootSession, record } = makeRuntime()
   rootSession.append('user/message', buildPlanMessage(record.plan))
-  const rejected = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: boundaryConsolidation({ approach: [ch(39)] }) })
+  const rejected = await runtime.delegateTool(leaderAgent, {
+    action: 'review',
+    consolidation: slimConsolidation(),
+    startPhases: exactStartPhases({ approach: [ch(39)] }),
+  })
   assert.equal(rejected.ok, false)
-  const accepted = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: richConsolidation() })
+  assert.equal(rejected.code, 'START_EVIDENCE_INCOMPLETE')
+  const accepted = await runtime.delegateTool(leaderAgent, {
+    action: 'review',
+    consolidation: slimConsolidation(),
+    startPhases: richStartPhases(),
+  })
   assert.equal(accepted.ok, true, JSON.stringify(accepted))
   const dispatched = await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
   assert.equal(dispatched.ok, true, JSON.stringify(dispatched))
@@ -411,7 +507,7 @@ test('G9：拒绝→放行审计随 durable 回放可复核（顺序保持、有
   assert.ok(Array.isArray(row.gateAudit) && row.gateAudit.length >= 3, '回放后审计记录仍在')
   assert.ok(row.gateAudit.length <= 20, '审计有界')
   const reviewReject = row.gateAudit.find((e: any) => e.action === 'review' && e.ok === false)
-  assert.equal(reviewReject.code, 'DELEGATE_CONSOLIDATION_INCOMPLETE')
+  assert.equal(reviewReject.code, 'START_EVIDENCE_INCOMPLETE')
   const reviewOk = row.gateAudit.find((e: any) => e.action === 'review' && e.ok === true)
   assert.ok(reviewOk)
   const dispatchOk = row.gateAudit.find((e: any) => e.action === 'dispatch' && e.ok === true)

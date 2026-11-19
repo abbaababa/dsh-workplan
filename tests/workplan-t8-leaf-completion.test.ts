@@ -44,7 +44,7 @@ import {
 import { createWorkplanRuntime, reconstructFromSession } from '../src/runtime.js'
 import { readDeptMessages } from '../src/dept-journal.js'
 import { seedLeaderSelfEffort } from './helpers/self-effort-contract.js'
-import { MAIN_DEEP_THINK_FIXTURE } from './helpers/main-deep-think.js'
+import { MAIN_START_PHASES_FIXTURE } from './helpers/main-deep-think.js'
 
 const ROOT = 'session-root-t8'
 const HEAD = 'child-leader-t8'
@@ -223,7 +223,7 @@ async function makeHarness(planId: string, names: string[] = MEMBER_NAMES) {
   const record: any = { plan, statuses, updatedAt: 0, errors: [], notices: [] }
   runtime.state.records.set(ROOT, record)
 
-  const review = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidationFor(names) })
+  const review = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidationFor(names), startPhases: MAIN_START_PHASES_FIXTURE })
   assert.equal(review.ok, true, JSON.stringify(review))
   const dispatch = await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
   assert.equal(dispatch.ok, true, JSON.stringify(dispatch))
@@ -542,7 +542,7 @@ test('A5 根会话回归：主计划 async 轮次完成仍即时通知根会话�
     },
   }
   const runtime: any = createWorkplanRuntime(ctx, { totalTimeoutMs: 60_000, idleTimeoutMs: 30_000, strictEvidence: false })
-  await runtime.dispatchTool({ id: ROOT, session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
+  await runtime.dispatchTool({ id: ROOT, session, options: {} }, { startPhases: MAIN_START_PHASES_FIXTURE, mode: 'async' }, new AbortController().signal)
 
   const evidence = {
     status: 'done',

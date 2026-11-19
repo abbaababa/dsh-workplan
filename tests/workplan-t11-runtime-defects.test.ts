@@ -23,7 +23,7 @@ import { join } from 'node:path'
 
 import { createStatuses } from '../src/plan.js'
 import { createWorkplanRuntime } from '../src/runtime.js'
-import { MAIN_DEEP_THINK_FIXTURE } from './helpers/main-deep-think.js'
+import { MAIN_START_PHASES_FIXTURE } from './helpers/main-deep-think.js'
 
 const ROOT = 'session-root'
 const HEAD = 'child-leader'
@@ -69,10 +69,9 @@ function fakeSession(id: string, parentId: string | null, catalog: string[] = []
   }
 }
 
+// [3.0.8] 夹具适配：consolidation 只携带分工表（两轮思考产物已废除）；第 1/2/3 步
+// 开工证据经 startPhases 随 review 提交（见下方 dispatched() 的 review 调用）。
 const consolidation2 = () => ({
-  problemAnalysis: ['现状：任务拆给专家与组员；目标是保质保量完成；约束是不改无关文件；边界是只做分内工作。', '主要矛盾：质量与时间'],
-  approach: ['专家做核心实现：先确认入口再最小改动，并附聚焦单测自测', '组员做证据：逐条核对验收标准并落盘留证'],
-  approachBasis: ['第二轮分工基于第一轮全部梳理结果：质量与时间矛盾决定专家做核心实现、组员做证据。'],
   assignments: [
     { member: 'Expert-A', role: 'expert', task: '实现核心逻辑后自测', reasoningEffort: 'low', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
     { member: 'Member-B', role: 'expert', task: '整理验收证据清单', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
@@ -129,7 +128,7 @@ function makeFixture(planId: string) {
 
 async function dispatched(planId: string) {
   const f = makeFixture(planId)
-  const review = await f.runtime.delegateTool(f.leaderAgent, { action: 'review', consolidation: consolidation2() })
+  const review = await f.runtime.delegateTool(f.leaderAgent, { action: 'review', consolidation: consolidation2(), startPhases: MAIN_START_PHASES_FIXTURE })
   assert.equal(review.ok, true, JSON.stringify(review))
   const dispatch = await f.runtime.delegateTool(f.leaderAgent, { action: 'dispatch' })
   assert.equal(dispatch.ok, true, JSON.stringify(dispatch))
@@ -139,7 +138,7 @@ async function dispatched(planId: string) {
 const selfArgs = (minutes: any, over: any = {}) => ({
   action: 'self_effort', reasoningEffort: 'xhigh',
   complexityRationale: '非常复杂：多夹具融合与冻结契约逐条锁定',
-  deepThink: MAIN_DEEP_THINK_FIXTURE,
+  startPhases: MAIN_START_PHASES_FIXTURE,
   timeNotice: { declaredMinutes: minutes, reason: '夹具预估' },
   ...over,
 })

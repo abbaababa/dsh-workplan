@@ -23,7 +23,7 @@ import {
 } from '../src/plan.js'
 import { dispatchPlan, timeoutBlockedPatch } from '../src/runtime.js'
 import { pickTimeoutReason } from '../src/watchdog.js'
-import { MAIN_DEEP_THINK_FIXTURE } from './helpers/main-deep-think.js'
+import { MAIN_START_PHASES_FIXTURE } from './helpers/main-deep-think.js'
 
 const anchor = setInterval(() => {}, 1_000)
 const dropAnchor = setTimeout(() => clearInterval(anchor), 60_000)
@@ -180,7 +180,7 @@ test('E4：旧 1 秒 childTimeout 到点后仍执行，不自动重试/接手', 
     childTimeoutMs: 1_000,
     totalTimeoutMs: 400_000,
     strictEvidence: false,
-    deepThink: MAIN_DEEP_THINK_FIXTURE,
+    startPhases: MAIN_START_PHASES_FIXTURE,
   } as any)
   assert.ok(await waitFor(() => activations === 1), '应启动一次负责人')
   await delay(1_300)

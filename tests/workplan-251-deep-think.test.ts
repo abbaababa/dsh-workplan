@@ -1,18 +1,18 @@
 /*
- * [2.5.1] 两轮深度思考协议（用户 2026-11-11 强制要求）底层机制回归。
+ * [3.0.8] 五步工作法单框架（用户 2026-11-18 收口）底层机制回归。
  *
- * 锁五件事：
- *  1. 三层执行者（部门负责人 / 全球顶尖专家 / 组员）的任务书都注入同一份
- *     两轮深度思考协议：先全面、全盘、深入梳理、研究、思考自己的任务 →
- *     基于第一轮完成好的所有结果再全面、全盘、深入地开展梳理、研究和思考，
- *     理清方法、流程和步骤 → 最后基于第二轮的方法、流程、步骤开始执行；
- *  2. 第二轮依据 approachBasis 是结算门禁的必填结构化证据：缺失/太薄 ⇒
+ * 历史口径：2.5.1 的「两轮深度思考」协议已并入五步工作法第 1/2 步，独立的
+ * deepThink 开工门禁废除。本文件锁五件事：
+ *  1. 三层执行者（部门负责人 / 全球顶尖专家）的任务书都注入同一份五步工作法
+ *     协议：第一步任务梳理 → 第二步资源/工具/实施方案研究（含依据 approachBasis）
+ *     → 第三步准备 → 第四步执行与验证 → 第五步 JSON 交付；
+ *  2. 第二步依据 approachBasis 仍是结算门禁的必填结构化证据：缺失/太薄 ⇒
  *     规划阶段判未完成（PHASE_GATE），不得记 done；
- *  3. 负责人再分配硬门禁同口径：approach + approachBasis 各至少 1 条，
- *     缺一 DELEGATE_CONSOLIDATION_INCOMPLETE；旧拒因顺序不变；
- *  4. approachBasis 随 consolidation 消毒落档 + durable workplan-update
- *     回放，刷新/重启不丢；
- *  5. 契约版本 THREE_PHASE_VERSION = 2，摘要可读（两轮深度思考）。
+ *  3. 负责人再分配硬门禁（planDelegations）3.0.8 口径：consolidation 只留分工表
+ *     assignments 与整体等级 taskReasoningEffort，不再校验 40/40/20 两轮产物
+ *     （改由 review 的 startPhases 开工闸同一判据校验）；拒因顺序不变；
+ *  4. consolidation 消毒落档 + durable workplan-update 回放，刷新/重启不丢；
+ *  5. 契约版本 FIVE_STEP_CONTRACT_VERSION = 4，摘要可读（五步工作法）。
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -28,12 +28,12 @@ import { reconstructFromSession } from '../src/runtime.js'
 import { buildDelegateePrompt, buildLlmRulesBrief, planDelegations } from '../src/llm-rules.js'
 import {
   MIN_PLANNING_BASIS_CHARS,
-  THREE_PHASE_VERSION,
+  FIVE_STEP_CONTRACT_VERSION,
   phaseGateFromErrors,
   phaseSummaryLine,
-  threePhasePromptLines,
-  validatePhaseEvidence,
-} from '../src/three-phase.js'
+  fiveStepPromptLines,
+  validateFiveStepEvidence,
+} from '../src/five-step.js'
 
 const BASIS = '第二轮的方法、流程、步骤基于第一轮完成好的全部结果：现状与主要矛盾决定先确认入口再最小改动，约束决定不改无关文件，验收标准决定每一步的留证方式。'
 
@@ -78,7 +78,7 @@ function makePlan() {
     sessionId: 'session-root',
     createdTurn: 1,
     createdAt: 1000,
-    title: '两轮深度思考回归',
+    title: '五步工作法回归',
     taskUnderstanding: { originalRequest: '优化插件底层机制', deliverable: '补丁' },
     contradictions: { primary: { statement: '质量与时间' } },
     stages: [{
@@ -89,21 +89,20 @@ function makePlan() {
         id: 'T1', title: '部门任务', department: 'engineering', role: '资深架构师',
         objective: '完成机制改造', method: ['改代码'], inputs: [], outputs: ['补丁'],
         acceptance: ['有单测证据'], risk: '无', dependsOn: [],
-        // [2.5.5] 夹具适配：本文件测两轮产物闸，不测低档禁派；任务行声明 high 放行第三层派发。
+        // 夹具适配：本文件测结算/分工表闸，不测低档禁派；任务行声明 high 放行第三层判定链。
         reasoningEffort: 'high',
       }],
     }],
   }
 }
 
+/**
+ * [3.0.8] consolidation 只留分工表与整体等级配置：{ assignments[], taskReasoningEffort? }。
+ * 第 1/2/3 步证据（problemAnalysis/approach/approachBasis 等）改由 review 的
+ * startPhases 开工闸承载，不再随 consolidation 提交与校验。
+ */
 function consolidation(overrides: any = {}) {
   return {
-    // [2.5.4][T3R1] 夹具适配：补足合计字数 ≥40/40/20（断言意图零改动）。
-    problemAnalysis: ['现状：部门任务需要拆给专家与组员；目标是保质保量完成；约束是不改无关文件；主要矛盾是质量与时间。', '主要矛盾：质量与时间'],
-    constraints: ['不得改动无关文件'],
-    unknowns: [],
-    approach: ['专家做核心实现：先确认入口再最小改动，并附聚焦单测自测', '组员做自测：逐条核对验收标准并落盘留证'],
-    approachBasis: ['第二轮分工的方法、流程、步骤基于第一轮全部梳理结果：质量与时间矛盾决定专家做核心实现、组员做自测。'],
     assignments: [
       { member: 'Expert-A', role: 'expert', task: '实现核心逻辑后自测', reasoningEffort: 'xhigh', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
       { member: 'Member-B', role: 'expert', task: '补充核心路径回归用例', reasoningEffort: 'low', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
@@ -114,14 +113,15 @@ function consolidation(overrides: any = {}) {
 
 /* ---------- 1. 协议文案：三层同一口径 ---------- */
 
-test('协议文案：两轮深度思考的顺序、依赖与用户原文口径', () => {
-  const text = threePhasePromptLines().join('\n')
+test('协议文案：五步工作法的顺序、依赖与用户原文口径', () => {
+  const text = fiveStepPromptLines().join('\n')
   assert.match(text, /先全面、全盘、深入梳理、研究、思考自己的任务/)
   assert.match(text, /基于第一步完成好的所有结果，再全面、全盘、深入地梳理、研究、思考/)
   assert.match(text, /以最高效率执行、确保完美完成自己任务的方法、流程和步骤/)
   assert.match(text, /基于第三步备齐的成果和既定实施方案，开始具体执行/)
   assert.match(text, /approachBasis/)
   assert.match(text, /五步工作法/)
+  assert.doesNotMatch(text, /两轮深度思考/, '3.0.8 起两轮深度思考协议已并入五步，文案不得再出现')
   const first = text.indexOf('【第一步 · 任务梳理')
   const second = text.indexOf('【第二步 · 资源、工具与实施方案研究')
   const third = text.indexOf('【第三步 · 准备')
@@ -130,7 +130,7 @@ test('协议文案：两轮深度思考的顺序、依赖与用户原文口径',
   assert.ok(first >= 0 && first < second && second < third && third < fourth && fourth < fifth, '五步顺序不可颠倒')
 })
 
-test('部门负责人任务书（二级）注入两轮深度思考协议与执行要求', () => {
+test('部门负责人任务书（二级）注入五步协议与执行要求', () => {
   const plan: any = makePlan()
   const prompt = buildChildPrompt({
     plan,
@@ -141,47 +141,49 @@ test('部门负责人任务书（二级）注入两轮深度思考协议与执�
     conversationContext: '',
     statuses: createStatuses(plan),
   })
-  assert.match(prompt, /两轮深度思考/)
+  assert.match(prompt, /五步工作法/)
   assert.match(prompt, /先全面、全盘、深入梳理、研究、思考自己的任务/)
   assert.match(prompt, /approachBasis/)
-  assert.match(prompt, /最后才基于第二轮的方法、流程、步骤开始具体执行与再分配/)
+  assert.match(prompt, /前三步证据经 review 的 startPhases 一并提交并登记，未登记合格证据前禁止进入执行与再分配/)
+  assert.doesNotMatch(prompt, /两轮深度思考/)
 })
 
-test('专家任务书（三级）注入两轮深度思考协议——组员角色已取消，仅专家口径', () => {
-  for (const role of ['expert'] as const) {
-    const rulesBrief = buildLlmRulesBrief({ model: 'qwen3.8-flash', effort: 'xhigh', tier: 'delegate', memberName: 'X', memberRole: role })
-    const prompt = buildDelegateePrompt({
-      departmentLabel: '工程',
-      leaderSubtaskId: 'T1',
-      leaderSubtaskTitle: '部门任务',
-      member: { member: 'X', role, task: '单项工作', effort: 'xhigh', qualityRequirements: ['必须给出命令输出'] },
-      rulesBrief,
-      cwd: '/tmp',
-    })
-    assert.match(prompt, /两轮深度思考/, `${role} 任务书必须含协议`)
-    assert.match(prompt, /先全面、全盘、深入梳理、研究、思考自己的任务/, `${role} 第一轮口径`)
-    assert.match(prompt, /基于刚才前一步完成好的所有结果，再全面、全盘、深入地开展梳理、研究和思考/, `${role} 第二轮依赖口径`)
-    assert.match(prompt, /方法、流程和步骤/, `${role} 第二轮产物口径`)
-    assert.match(prompt, /approachBasis/, `${role} 依据字段告知`)
-  }
+test('专家任务书（三级）注入五步工作法协议——仅专家口径', () => {
+  const rulesBrief = buildLlmRulesBrief({ model: 'qwen3.8-flash', effort: 'xhigh', tier: 'delegate', memberName: 'X', memberRole: 'expert' })
+  const prompt = buildDelegateePrompt({
+    departmentLabel: '工程',
+    leaderSubtaskId: 'T1',
+    leaderSubtaskTitle: '部门任务',
+    member: { member: 'X', role: 'expert', task: '单项工作', effort: 'xhigh', qualityRequirements: ['必须给出命令输出'] },
+    rulesBrief,
+    cwd: '/tmp',
+  })
+  assert.match(prompt, /五步工作法/, '专家任务书必须含五步协议')
+  assert.match(prompt, /先全面、全盘、深入梳理、研究、思考自己的任务/, '专家第一步口径')
+  assert.match(prompt, /基于第一步完成好的所有结果研究需要哪些资源、哪些工具、具体实施方案/, '专家第二步依赖口径')
+  assert.match(prompt, /方法、流程、步骤/, '专家第二步产物口径')
+  assert.match(prompt, /approachBasis/, '依据字段告知')
+  assert.match(prompt, /startPhases/, '开工证据提交方式告知')
+  assert.doesNotMatch(prompt, /两轮深度思考/)
 })
 
-test('buildLlmRulesBrief：负责人 tier 与专家/组员 tier 都携带协议', () => {
+test('buildLlmRulesBrief：负责人 tier 与专家 tier 都携带五步协议', () => {
   const head = buildLlmRulesBrief({ model: 'qwen3.8-flash', tier: 'department' })
-  assert.match(head, /执行自己的任务必须先走两轮深度思考/)
-  assert.match(head, /problemAnalysis=第一轮任务深研/)
-  assert.match(head, /approachBasis=第二轮基于第一轮全部结果的依据对应/)
+  assert.match(head, /执行自己的任务必须先完成五步前三步/)
+  assert.match(head, /startPhases/)
+  assert.match(head, /approachBasis/)
   const leaf = buildLlmRulesBrief({ model: 'qwen3.8-flash', tier: 'delegate', memberRole: 'expert' })
-  assert.match(leaf, /执行自己的任务必须先走两轮深度思考/)
+  assert.match(leaf, /执行自己的任务必须遵守五步工作法的前三步/)
+  assert.match(leaf, /startPhases/)
 })
 
 /* ---------- 2. 结算门禁：approachBasis 必填 ---------- */
 
-test('契约版本 2：两轮产物齐全 ⇒ ok，摘要可读', () => {
-  assert.equal(THREE_PHASE_VERSION, 3)
-  const check = validatePhaseEvidence(phases(), ['有单测证据'])
+test('契约版本 4：五步产物齐全 ⇒ ok，摘要可读', () => {
+  assert.equal(FIVE_STEP_CONTRACT_VERSION, 4)
+  const check = validateFiveStepEvidence(phases(), ['有单测证据'])
   assert.equal(check.ok, true, JSON.stringify(check.errors))
-  assert.equal(check.phases!.version, 3)
+  assert.equal(check.phases!.version, 4)
   assert.deepEqual(check.phases!.planning.approachBasis, [BASIS])
   assert.match(phaseSummaryLine(check.phases!), /第二步 资源\/工具\/方案研究/)
   assert.match(phaseSummaryLine(check.phases!), /依据 1 条/)
@@ -190,18 +192,18 @@ test('契约版本 2：两轮产物齐全 ⇒ ok，摘要可读', () => {
 test('缺 approachBasis ⇒ 规划阶段未完成（PHASE_GATE），不得记 done', () => {
   const input: any = phases()
   delete input.planning.approachBasis
-  const check = validatePhaseEvidence(input)
+  const check = validateFiveStepEvidence(input)
   assert.equal(check.ok, false)
   assert.equal(check.failedPhase, 'planning')
   assert.match(check.errors.join('；'), /approachBasis/)
-  assert.equal(phaseGateFromErrors(check.errors), 'phase-1-3')
+  assert.equal(phaseGateFromErrors(check.errors), 'steps-1-3')
 })
 
 test('approachBasis 太薄（一句空话冒充依赖对应）⇒ 规划阶段未完成', () => {
   const input: any = phases()
   input.planning.approachBasis = ['基于第一轮']
   assert.ok('基于第一轮'.length < MIN_PLANNING_BASIS_CHARS)
-  const check = validatePhaseEvidence(input)
+  const check = validateFiveStepEvidence(input)
   assert.equal(check.ok, false)
   assert.equal(check.failedPhase, 'planning')
   assert.match(check.errors.join('；'), /approachBasis 太薄/)
@@ -210,68 +212,94 @@ test('approachBasis 太薄（一句空话冒充依赖对应）⇒ 规划阶段�
 test('approachBasis 非数组 ⇒ 明确拒因', () => {
   const input: any = phases()
   input.planning.approachBasis = '一段文字'
-  const check = validatePhaseEvidence(input)
+  const check = validateFiveStepEvidence(input)
   assert.equal(check.ok, false)
   assert.match(check.errors.join('；'), /approachBasis 必须是数组/)
 })
 
-/* ---------- 3. 负责人再分配硬门禁同口径 ---------- */
+/* ---------- 3. 负责人再分配硬门禁（3.0.8 consolidation 口径） ---------- */
 
 /*
- * [2.5.5] 夹具适配：以下单元用例验证两轮产物闸，不测「low 禁派」；按判定链
- * 给任务行补 taskRowEffort='high' 放行第三层派发，复杂档判定不受影响。
+ * 夹具适配：以下单元用例验证分工表闸，不测「low 禁派」；按判定链
+ * 给任务行补 taskRowEffort='high' 放行第三层判定，复杂档判定不受影响。
  */
 const pd = (args: any) => planDelegations({ taskRowEffort: 'high', ...args })
 
-test('缺第二轮方法流程步骤（approach）⇒ DELEGATE_CONSOLIDATION_INCOMPLETE', () => {
-  const result = pd({ consolidation: consolidation({ approach: [] }), model: 'qwen3.8-flash' })
+test('未提交 consolidation ⇒ DELEGATE_CONSOLIDATION_MISSING（分工表硬门禁仍在）', () => {
+  const result = pd({})
+  assert.equal(result.ok, false)
+  assert.equal(result.code, 'DELEGATE_CONSOLIDATION_MISSING')
+  assert.match(result.error!, /分工表/)
+})
+
+test('consolidation 缺 assignments ⇒ DELEGATE_CONSOLIDATION_INCOMPLETE', () => {
+  const result = pd({ consolidation: {} })
   assert.equal(result.ok, false)
   assert.equal(result.code, 'DELEGATE_CONSOLIDATION_INCOMPLETE')
-  assert.match(result.error!, /第二轮/)
-  assert.match(result.error!, /方法、流程和步骤/)
+  assert.match(result.error!, /assignments/)
 })
 
-test('有第二轮但缺依据（approachBasis）⇒ DELEGATE_CONSOLIDATION_INCOMPLETE', () => {
-  const result = pd({ consolidation: consolidation({ approachBasis: [] }), model: 'qwen3.8-flash' })
-  assert.equal(result.ok, false)
-  assert.equal(result.code, 'DELEGATE_CONSOLIDATION_INCOMPLETE')
-  assert.match(result.error!, /approachBasis/)
-  assert.match(result.error!, /基于第一轮完成好的所有结果/)
+/*
+ * [3.0.8 收口] 原断言「缺 approach ⇒ DELEGATE_CONSOLIDATION_INCOMPLETE」与
+ * 「缺 approachBasis ⇒ DELEGATE_CONSOLIDATION_INCOMPLETE」随两轮产物闸一并废除：
+ * planDelegations 不再读取 problemAnalysis/approach/approachBasis（40/40/20 判据
+ * 改由 review 的 startPhases 开工闸执行）。等价值回归 = 携带/缺失这些旧字段都
+ * 不再影响分工表闸，且 consolidation 返回值只含 {assignments, taskReasoningEffort}。
+ */
+test('3.0.8 收口：consolidation 的旧两轮产物字段不再被校验或随结果返回', () => {
+  const legacyFields = {
+    problemAnalysis: ['现状：部门任务需要拆给专家与组员；目标是保质保量完成；约束是不改无关文件；主要矛盾是质量与时间。'],
+    constraints: ['不得改动无关文件'],
+    unknowns: [],
+    approach: [],
+    approachBasis: [],
+  }
+  const withLegacy = pd({ consolidation: { ...legacyFields, ...consolidation() }, model: 'qwen3.8-flash' })
+  assert.equal(withLegacy.ok, true, JSON.stringify(withLegacy))
+  const withoutLegacy = pd({ consolidation: consolidation(), model: 'qwen3.8-flash' })
+  assert.equal(withoutLegacy.ok, true, JSON.stringify(withoutLegacy))
+  assert.deepEqual(withoutLegacy.consolidation, { assignments: 2, taskReasoningEffort: null })
+  assert.ok(!('approachBasis' in withLegacy.consolidation!), '旧字段不得随 consolidation 返回')
+  assert.ok(!('problemAnalysis' in withLegacy.consolidation!), '旧字段不得随 consolidation 返回')
 })
 
-test('两轮产物齐全 ⇒ 放行，approachBasis 随梳理产物返回', () => {
-  const result = pd({ consolidation: consolidation(), model: 'qwen3.8-flash' })
-  assert.equal(result.ok, true, JSON.stringify(result))
-  assert.equal(result.consolidation!.approachBasis.length, 1)
-  assert.match(result.consolidation!.approachBasis[0], /基于第一轮/)
-})
-
-test('旧拒因顺序不变：problemAnalysis → assignments 先于两轮产物闸', () => {
-  const noAnalysis = pd({ consolidation: { assignments: consolidation().assignments }, model: 'qwen3.8-flash' })
-  assert.match(noAnalysis.error!, /problemAnalysis/)
-  // [2.5.4][T3R1] 补足字数，使拒因落在被测的 assignments 缺口（断言意图不变）。
-  const noAssignments = pd({ consolidation: { problemAnalysis: ['现状：部门任务需要拆给专家与组员；目标是保质保量完成；约束是不改无关文件；主要矛盾是质量与时间。'] }, model: 'qwen3.8-flash' })
-  assert.match(noAssignments.error!, /assignments/)
-  /*
-   * [3.0.0][用户要求 9] 角色配比闸已取消：分工表只有专家是合法形态。
-   * 该断言改为验证「两轮深度思考产物闸仍在既有拒因之后生效」，
-   * 分工表本身合格时拒因必须落在缺 approach 上。
-   */
-  const expertOnly = pd({
-    consolidation: { problemAnalysis: ['现状：部门任务需要拆给专家与组员；目标是保质保量完成；约束是不改无关文件；主要矛盾是质量与时间。'], assignments: [{ member: 'A', role: 'expert', task: '读取目标文件得出一份结论', reasoningEffort: 'low', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] }] },
+test('拒因顺序（3.0.8 口径）不变：未提交分工表 → 空 assignments → 分工表行不完整', () => {
+  // 1) 连 consolidation 都没有 ⇒ 最先拒：分工表缺失。
+  const missing = pd({})
+  assert.equal(missing.code, 'DELEGATE_CONSOLIDATION_MISSING')
+  // 2) consolidation 存在但 assignments 为空 ⇒ 分工表不完整（先于行级校验）。
+  const emptyAssignments = pd({ consolidation: {} })
+  assert.equal(emptyAssignments.code, 'DELEGATE_CONSOLIDATION_INCOMPLETE')
+  assert.match(emptyAssignments.error!, /assignments/)
+  // 3) assignments 非空但行字段缺失（member 为空）⇒ 行级校验拒因。
+  const brokenRow = pd({
+    consolidation: { assignments: [{ member: '', role: 'expert', task: '读取目标文件得出一份结论', reasoningEffort: 'low', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] }] },
     model: 'qwen3.8-flash',
   })
-  assert.equal(expertOnly.code, 'DELEGATE_CONSOLIDATION_INCOMPLETE')
-  assert.match(expertOnly.error!, /approach/)
+  assert.equal(brokenRow.code, 'DELEGATE_ASSIGNMENT_INVALID')
 })
 
 /* ---------- 4. 持久化与回放 ---------- */
 
-test('approachBasis 随 consolidation 消毒落档 + durable workplan-update 回放不丢', () => {
+/*
+ * [3.0.8 收口] 原断言「approachBasis 随 consolidation 消毒落档 + 回放不丢」废除：
+ * consolidation 只留分工表与等级配置（applyStatus 白名单落档，旧梳理字段被丢弃）。
+ * 等价值回归 = 分工表 assignments 经消毒落档 + durable workplan-update 回放不丢，
+ * 且旧两轮产物字段不落档。
+ */
+test('分工表（assignments）随 consolidation 消毒落档 + durable workplan-update 回放不丢', () => {
   const plan: any = makePlan()
   const statuses = createStatuses(plan)
-  const patched = applyStatus(statuses, 'T1', { consolidation: consolidation() })
-  assert.deepEqual(patched[0].consolidation.approachBasis, consolidation().approachBasis)
+  const submitted = consolidation()
+  const patched = applyStatus(statuses, 'T1', { consolidation: { ...submitted, approachBasis: ['不应落档'], problemAnalysis: ['不应落档'] } })
+  assert.equal(patched[0].consolidation.assignments.length, 2)
+  assert.equal(patched[0].consolidation.assignments[0].member, 'Expert-A')
+  assert.equal(patched[0].consolidation.assignments[0].role, 'expert')
+  assert.deepEqual(patched[0].consolidation.assignments[0].qualityRequirements, ['必须给出可复核的命令输出或文件证据'])
+  assert.equal(patched[0].consolidation.assignments[0].reasoningEffort, 'xhigh')
+  assert.equal(typeof patched[0].consolidation.submittedAt, 'number')
+  assert.ok(!('approachBasis' in patched[0].consolidation), '3.0.8 起旧两轮产物字段不得随 consolidation 落档')
+  assert.ok(!('problemAnalysis' in patched[0].consolidation), '3.0.8 起旧两轮产物字段不得随 consolidation 落档')
 
   const events: any[] = []
   const session: any = {
@@ -288,8 +316,12 @@ test('approachBasis 随 consolidation 消毒落档 + durable workplan-update 回
     subtaskId: 'T1',
     status: 'in_progress',
     revision: 2,
-    consolidation: consolidation(),
+    consolidation: submitted,
   }))
   const rebuilt: any = reconstructFromSession(session)
-  assert.deepEqual(rebuilt.statuses[0].consolidation.approachBasis, consolidation().approachBasis, '刷新/重启回放后第二轮依据仍在')
+  assert.equal(rebuilt.statuses[0].consolidation.assignments.length, 2, '刷新/重启回放后分工表仍在')
+  assert.deepEqual(
+    rebuilt.statuses[0].consolidation.assignments.map((item: any) => item.member),
+    ['Expert-A', 'Member-B'],
+  )
 })

@@ -12,9 +12,9 @@
  *
  * 设计约束：
  *  - 本模块只做「格式/结构」核验，不做语义真伪判断（F9 为提示词级诚信约束，
- *    由三阶段门禁与人工复核兜底，这里不自动判）；
+ *    由五步证据门禁与人工复核兜底，这里不自动判）；
  *  - 规范是纯数据，可序列化进提示词，也可独立校验，版本号随内容变更递增；
- *  - 与既有门禁正交：解析失败、验收缺口、三阶段缺失仍由原门禁先拦，
+ *  - 与既有门禁正交：解析失败、验收缺口、五步证据缺失仍由原门禁先拦，
  *    本门禁只负责把「其它门禁都过了、但格式仍不合规」的 done 退回。
  */
 
@@ -95,7 +95,7 @@ export const COMM_FORMAT_SPEC = Object.freeze({
      * 冻结条目，本次只增不改；两条新条目按接收者层级启用（见 check 的 tier）。
      */
     Object.freeze({ id: 'F10', category: 'report',
-      description: '专家（第三层执行者）结果必须包含 report 对象，只允许 keyResults/keyInfo/importantInfo/leadRequirements 四个字符串数组字段，至少各有 1 条非空内容（keyInfo/important 可为空数组但须存在），每数组最多 6 条、每条最多 200 字符，内部与跨字段不得出现重复表述',
+      description: '专家（第三层执行者）结果必须包含 report 对象，只允许 keyResults/keyInfo/importantInfo/leadRequirements 四个字符串数组字段：keyResults / leadRequirements 各至少 1 条非空内容，keyInfo / importantInfo 可为空数组但字段必须存在，每数组最多 6 条、每条最多 200 字符，内部与跨字段不得出现重复表述',
       rationale: '用户要求 7：专家成果必须非常精简地汇报给部门负责人，只要关键信息、关键成果、重要信息和负责人要求的东西，并以 JSON mode 结构化输出' }),
     Object.freeze({ id: 'F11', category: 'report',
       description: '部门负责人结果必须包含 departmentSummary 对象，只允许 keyResults/keyInfo/importantInfo/sources 四个字符串数组字段，keyResults 至少 1 条非空，keyResults/keyInfo/importantInfo 每项最多 6 条、每条最多 200 字符；sources 最多 16 条且必须逐人覆盖本部门全部已派发专家，内部与跨字段不得出现重复表述',
@@ -161,7 +161,7 @@ export function checkCommFormatCompliance(
       message: `status 字段缺失或取值非法（"${String(parsed.status ?? '')}"），只能是 done / blocked / partial` })
   }
 
-  // F3: 三阶段证据齐全
+  // F3: 五步证据齐全（planning / preparation / execution / verification）
   const phases = parsed.phases
   if (!phases || typeof phases !== 'object') {
     violations.push({ ruleId: 'F3', category: 'phases',
@@ -231,7 +231,7 @@ export function checkCommFormatCompliance(
 
   /*
    * F10/F11（用户 2026-11-14 第 7、10、11 条）：按接收者层级启用。
-   * 只拦 done 路径——受阻结果已有更针对性的诊断（F8/三阶段），
+   * 只拦 done 路径——受阻结果已有更针对性的诊断（F8/五步证据），
    * 不再叠加精简性条目，避免一条 blocked 被反复退回在格式上。
    */
   if (options.tier === 'expert' && parsed.status === 'done') {

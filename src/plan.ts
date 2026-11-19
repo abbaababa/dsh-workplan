@@ -19,7 +19,9 @@ import {
 } from './criterion.js'
 import { MAX_TASK_ANCHOR_CHARS } from './understanding.js'
 import { isMappingDigest, verifyMappingDigest } from './supersede-digest.js'
-import { phaseSummaryLine, sanitizeMainDeepThink, threePhasePromptLines, validatePhaseEvidence } from './three-phase.js'
+import { checkStartEvidenceCarryover, fiveStepPromptLines, MAX_PHASE_ITEM_CHARS, MAX_PHASE_LIST_ITEMS, MAX_PHASE_TOTAL_CHARS, phaseSummaryLine, sanitizeStartPhaseEvidence, START_EVIDENCE_MIN_CHARS_BRIEF, validateFiveStepEvidence, validateStartPhaseEvidence } from './five-step.js'
+// [修复] 七项字数下限简报（five-step.ts 单一事实源）转发给 host.ts 等消费方。
+export { START_EVIDENCE_MIN_CHARS_BRIEF } from './five-step.js'
 import {
   NOTICE_TARGET_MISSING_TEXT,
   leadNoticeCallForm,
@@ -652,6 +654,49 @@ export function isStatusQuestion(value: any) {
   // question, even though it contains the word 进度.
   if (/(改进|优化|设计|修复|实现|增加|调整|开发|重构|排查|诊断|改造|排版)/.test(original)) return false
   return STATUS_PATTERNS.some((pattern) => pattern.test(original))
+}
+
+/*
+ * [3.0.7] 确认回复（用户想法，原话）：「收到用户确认回复后，你应该结合所有上
+ * 下文全面、深入分析、思考、研究后，开始依据得出的所有结果分配任务」。
+ *
+ * 背景事故（2026-11-18 本会话）：用户对计划回复「按你的建议执行」，分类器
+ * （社交/空泛追问/进度提问三类）不认确认回复，它就被当成全新任务——先把原
+ * 任务在途的后台分解取代中止，再对这句确认本身启动新一轮分解；下一条消息
+ * 又取代这一轮，任务永远开不了跑。
+ *
+ * 判定保守、可证：文本必须短（≤24 字符）、必须含至少一个认可信号词、必须
+ * 不含任何否定词，且去掉所有信号词与填充词后必须一个不剩——任何实质内容
+ * 都会落选。落选者（如「可以，但范围改成X」）回落到常规新任务路径：以该
+ * 消息为最新任务输入、结合全部会话上下文重新分解（＝深入分析），再依据新
+ * 分析得出的计划分配任务——正是用户裁决的语义（2026-11-18：「是结合…类
+ * 似意思和所有上下文，全面、深入开展分析、思考、研究，然后依据得出的所有
+ * 结果开始分配任务」），而不是把它们误当纯确认直接开跑旧计划。
+ * 纯函数、无状态，与上面三个分类器同层。
+ */
+const CONFIRMATION_NEGATIONS = /(?:不同意|不认可|不批准|不确认|不可以|不行|不能|不要|不用|不必|无需|先别|别急|暂不|先不|还没|拒绝)/
+
+/** 认可信号词（命中其一才进入消耗判定；单字词靠"全消耗"约束防误伤）。 */
+const CONFIRMATION_CUE = /(?:同意|认可|批准|确认|确定|可以|没问题|没错|照办|照做|按你|按您|按此|按该|就按|就这么|就这样|采用|执行|开始|动手|去做|去办|好|行|嗯|是|对|干|办|okay|ok|go|yes|yeah|yep|sure|approved|approve|confirmed|confirm|agreed|agree|execute|proceed|lgtm|do\s*it|sounds?\s*good)/gi
+
+/** 确认语境里的填充词（"按你的建议执行"中的 的/建议 等，可安全剥掉）。 */
+const CONFIRMATION_FILLER = /(?:我们|你们|我|你|您|这个|这么|这样|这|那|该|此|照|的|了|呢|啊|吧|呀|哦|噢|嗯|哈|嘛|喽|咯|喔|嘿|呵|滴|哒|地|得|说|讲|建议|方案|计划|想法|意见|就|都|也|还|最|先|定|一下|个|把|被|让|给|要|想|会|能|请|来|ahead|it|this|that|the|yours|your|ur|please)/gi
+
+export function isUserConfirmation(value: any) {
+  if (typeof value !== 'string') return false
+  const original = value.trim()
+  if (original.length === 0 || original.length > 24) return false
+  if (CONFIRMATION_NEGATIONS.test(original)) return false
+  const compact = original.toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '')
+  if (!new RegExp(CONFIRMATION_CUE.source, 'i').test(compact)) return false
+  // 迭代剥到不动点：信号词与填充词交替出现（"按你的建议执行" = 按你→的→建议→执行）。
+  let rest = compact
+  let previous = ''
+  while (rest !== previous) {
+    previous = rest
+    rest = rest.replace(CONFIRMATION_CUE, '').replace(CONFIRMATION_FILLER, '')
+  }
+  return rest.length === 0
 }
 
 function push(errors: string[], path: string, message: string) {
@@ -1686,7 +1731,7 @@ export function buildPlannerPrompt(taskText: any, cwd: any, conversationContext:
     // （dsh_workplan_delegate），会把子任务再拆给多名顶尖专家与组员，因此
     // 主计划层保持单一目标/单一主产物的简单子任务，执行细节下沉到部门内分工。
     '- 分解必须更简单（用户强制要求）：每个子任务只写单一目标、单一主产物、可独立验收的一件事；不要把多个交付物压进同一个子任务。部门负责人接到子任务后，会用 dsh_workplan_delegate 把它再拆成更简单的单项工作，分配给本部门多名相关领域全球顶尖专家共同承担（部门组员角色已按用户要求 9 取消）——所以主计划子任务保持简单清晰即可，执行细节由部门内分工细化，不要越俎代庖替部门预拆全部细节。再分配只按工作边界与验收拆分；预估可汇总用于协调，但不设分钟上限，也不影响达标判定。',
-    '- 子任务由部门负责人子 Agent 牵头执行：负责人拥有本部门内的再分配权限（dsh_workplan_delegate，先 review 提交两轮深度思考产物后 dispatch 派给本部门专家（只保留 expert 角色）），但没有主计划派发权限、不能重启服务、不能安装或升级依赖。禁止把「调用 dsh_workplan_dispatch」「重启/停止 dsh web」「安装或升级插件」这类只有主 Agent 才能执行的动作写进子任务；确实需要时，写成“给出结论或建议，由主 Agent 执行”。',
+    '- 子任务由部门负责人子 Agent 牵头执行：负责人拥有本部门内的再分配权限（dsh_workplan_delegate，先 review 提交第 1/2/3 步开工证据（startPhases）与分工表后 dispatch 派给本部门专家（只保留 expert 角色）），但没有主计划派发权限、不能重启服务、不能安装或升级依赖。禁止把「调用 dsh_workplan_dispatch」「重启/停止 dsh web」「安装或升级插件」这类只有主 Agent 才能执行的动作写进子任务；确实需要时，写成“给出结论或建议，由主 Agent 执行”。',
     '- 执行无时限：部门负责人和全球顶尖专家没有总时长、单次时长、空闲或回执硬截止；不要设置 timeoutMs，不要按分钟数拆任务，也不要把预估或实际耗时作为 done 的验收条件。用户显式取消、真实错误与证据/质量门禁仍须保留。',
     // [2.3.2][D2-P2] 半角/逗号/括号自检硬约束：与解析层兜底（P0）互为防线，中文模型全角标点高发。
     '- JSON 只允许半角标点（, : " { } [ ]）；对象与数组的相邻成员之间必须有逗号；输出前自检括号成对、每个字符串以半角"闭合。',
@@ -2627,7 +2672,7 @@ export function buildPhaseZeroLeaderPrompt(input: { subtaskId?: string; title?: 
     `你是「${input.departmentLabel ?? '部门'}」部门的执行负责人，当前处于 phase-0（先配置后开工，low 档启动）。`,
     `你的子任务：${input.subtaskId ?? ''} ${input.title ?? ''}`,
     `任务目标：${input.objective ?? '（未记录）'}`,
-    '本阶段唯一职责：全面评估你接到任务的复杂度，然后调用 dsh_workplan_delegate(action="review") 提交两轮深度思考产物（第一轮任务深研 + 第二轮方法流程步骤 + 依据 approachBasis）与分工表，并在 consolidation.taskReasoningEffort 里配置你自己的整体推理等级（轻度=low；qwen 中等=medium、非 qwen 中等=high；qwen 非常复杂=xhigh、非 qwen 非常复杂=max）。若评估为 low（轻度）或未配置：禁止下派——不要提交分工表，改经 dsh_workplan_delegate(action="direct") 登记两轮思考产物（deepThink，40/40/20 字，可选 reasoningEffort="low"），平台以 low 档接续你亲自执行。',
+    '本阶段唯一职责：全面评估你接到任务的复杂度，完成五步工作法前三步（任务梳理 + 资源/工具/方案研究 + 准备就绪），然后调用 dsh_workplan_delegate(action="review") 提交第 1/2/3 步开工证据（startPhases={ planning{ problemAnalysis[], approach[], approachBasis[], resources[], tools[] }, preparation{ prepared[], evidence[] } }）与分工表，并在 consolidation.taskReasoningEffort 里配置你自己的整体推理等级（轻度=low；qwen 中等=medium、非 qwen 中等=high；qwen 非常复杂=xhigh、非 qwen 非常复杂=max）。若评估为 low（轻度）或未配置：禁止下派——不要提交分工表，改经 dsh_workplan_delegate(action="direct") 登记开工证据（startPhases，' + '字数下限：' + START_EVIDENCE_MIN_CHARS_BRIEF + '；可选 reasoningEffort="low"），平台以 low 档接续你亲自执行。',
     '不要执行任务本身，不要派发下级（review 登记前 dispatch 会被硬门禁拒绝）。提交 review 后结束本回合；平台会立即以你的自配档接续本会话进入 phase-1（正式分配流程）。',
   ].join('\n')
 }
@@ -2637,7 +2682,7 @@ export function buildPhaseZeroContinuationHint(effort: string, phaseZeroOutput: 
   // [2.5.5][T3] W11：low 直执行（effortOverride='low' 且分工表为空）时指路 direct 亲自执行；
   // 缺省 false，既有调用零影响（调用点派生量由 runtime 传入）。
   const nextStep = lowDirect
-    ? 'low 任务亲自执行：禁止 review/dispatch（low 禁派闸）；两轮思考产物未登记先经 action="direct" 补齐，然后直接执行任务'
+    ? 'low 任务亲自执行：禁止 review/dispatch（low 禁派闸）；第 1/2/3 步开工证据未登记先经 action="direct" 补齐，然后直接执行任务'
     : '直接进入正式分配流程（review 已登记则 dispatch，未登记先补齐 review）'
   return `【phase-0→phase-1 接续——继续勿重做】你已在 phase-0 完成复杂度评估并配置整体推理等级 \`${effort}\`（effortOverride 已登记，重试/续跑全程生效）。平台已按你的自配档接续本会话；phase-0 输出：${truncate(String(phaseZeroOutput ?? ''), 600) || '（无）'}。${nextStep}，不要重新评估复杂度，不要重做 phase-0 已完成的工作。`
 }
@@ -3965,7 +4010,7 @@ export interface AdjudicateResult {
   [extra: string]: unknown
 }
 
-export function adjudicateResult({ output, strict = true, expectedAcceptance = [], requirePhases = true, formatTier, expectedExperts = [] }: any): AdjudicateResult {
+export function adjudicateResult({ output, strict = true, expectedAcceptance = [], requirePhases = true, formatTier, expectedExperts = [], startPhases }: any): AdjudicateResult {
   const text = typeof output === 'string' ? output : ''
   const parsed = parseEvidenceBlock(text)
   if (!strict) {
@@ -4037,6 +4082,11 @@ export function adjudicateResult({ output, strict = true, expectedAcceptance = [
       artifacts: [],
       needs: [],
       error: '子 Agent 未提供结构化证据块（完成必回报）：结果块缺失，无法确认验收项是否真的通过',
+      /*
+       * [修复] 结构化标志：调用方（runtime 结算/备份采纳）以此识别「缺块」，
+       * 不再对 error 文案做正则匹配（文案一改闸门就失灵）。
+       */
+      missingBlock: true,
     }
   }
   const hoistedEvidence = hoistEvidenceFields(parsed.payload)
@@ -4155,22 +4205,24 @@ export function adjudicateResult({ output, strict = true, expectedAcceptance = [
       artifacts,
       needs,
       error: `验收项未被逐条回应（${coverage.covered}/${coverage.total}）：缺少 ${coverage.missing
-        .map((item: string) => truncate(String(item), 120)).slice(0, 5).join('；')}${hint}。请按计划验收逐条给出证据后再回报。`,
+        .map((item: string) => truncate(String(item), 120)).slice(0, 5).join('；')}${hint}。请按计划验收逐条给出证据后再回报（顶层 acceptance[] 与 phases.verification.checks 是同一道闸的两次核验，必须逐条覆盖同一张验收表，缺一处即退回）。`,
+      /* [修复] 结果块已解析、缺口可经回喂补报：允许有界重试回喂。 */
+      rereport: true,
     }
   }
   /*
-   * [1.13.0] 完成前必须交出三阶段证据（用户 2026-11-05 的强制要求）。
-   *
-   * 这是「先规划后执行」从口号变成契约的唯一落点：子 Agent 只在提示词里
-   * 被要求时，仍可以先动手、最后补一句「已规划」；只有把规划内容做成
-   * 收尾证据的一部分并在这里校验，缺规划/缺验证的结果才不可能被记成 done。
-   *
-   * 兼容边界：`requirePhases:false` 保留给历史回放与明确关闭该门禁的部署；
-   * `strict:false` 的旧语义不受影响（前面已经返回）。
+   * [3.0.8] 结算闸 = 五步全量证据 + 开工-结算一致性比对：
+   *  - 第 1–4 组证据（planning/preparation/execution/verification）经
+   *    validateFiveStepEvidence 校验（1.13.0 三阶段→3.1.0 五步的同一落点）；
+   *  - 调用方传入开工登记的 startPhases（dispatch/review/self_effort/direct
+   *    开工闸的登记值）时，结算 phases 的第 1/2/3 步内容不得变薄
+   *    （checkStartEvidenceCarryover）——防止开工登记一套、收尾另写一套；
+   *  - 兼容边界：`requirePhases:false` 保留给历史回放与明确关闭该门禁的部署；
+   *    `strict:false` 的旧语义不受影响（前面已经返回）。
    */
   const phaseCheck = requirePhases === false
     ? null
-    : validatePhaseEvidence(payload.phases, expectedAcceptance)
+    : validateFiveStepEvidence(payload.phases, expectedAcceptance)
   if (phaseCheck && !phaseCheck.ok) {
     return {
       ...advisoryTime,
@@ -4181,6 +4233,29 @@ export function adjudicateResult({ output, strict = true, expectedAcceptance = [
       needs,
       error: `五步证据不完整（未按「任务梳理→资源工具方案研究→准备→执行验证→JSON 交付」回报）：${phaseCheck.errors.slice(0, 6).join('；')}`,
       phases: null,
+      /* [修复] 结果块已解析、缺口可经回喂补报：允许有界重试回喂。 */
+      rereport: true,
+    }
+  }
+  /*
+   * [3.0.8] 开工-结算一致性比对：第 4/5 步证据齐全后，再核对第 1/2/3 步没有
+   * 在收尾时被稀释。历史回放无登记值（undefined）跳过，不误伤旧日志。
+   */
+  if (phaseCheck?.ok && startPhases) {
+    const carryover = checkStartEvidenceCarryover(startPhases, payload.phases)
+    if (carryover.length > 0) {
+      return {
+        ...advisoryTime,
+        status: 'blocked',
+        verification: 'unverified',
+        acceptance,
+        artifacts,
+        needs,
+        error: `开工-结算证据不一致（收尾证据不得稀释开工时登记的第 1/2/3 步证据）：${carryover.slice(0, 4).join('；')}`,
+        phases: null,
+        /* [修复] 结果块已解析、缺口可经回喂补报：允许有界重试回喂。 */
+        rereport: true,
+      }
     }
   }
   /*
@@ -4192,7 +4267,7 @@ export function adjudicateResult({ output, strict = true, expectedAcceptance = [
    * 即将判 done」的结果做最终核验：任一不合规即退回（blocked/comm-format），
    * 不合规条目随下一次激活的 previousFailure 发回，通知其重新自查后重交。
    *
-   * 只拦 done 路径：解析失败、验收缺口、三阶段缺失等已被上方门禁拦下的结果，
+   * 只拦 done 路径：解析失败、验收缺口、五步证据缺失等已被上方门禁拦下的结果，
    * 维持原受阻原因，不用格式条目覆盖更有针对性的诊断。
    */
   const commFormat = requirePhases === false
@@ -4325,11 +4400,19 @@ export function buildUpdateMessage(update: any) {
      * 第三层的数据源，同理。
      */
     ...(update.consolidation === undefined ? {} : { consolidation: update.consolidation }),
-    // [2.5.1] 主 Agent 两轮深度思考产物（计划级，subtaskId=null）随 durable
-    // workplan-update 回放：写入侧 dispatchTool 门禁登记，消费侧 reconstruct
-    // 消毒抬升，刷新/重启后续跑读档放行（G1：写入与消费双侧接线）。
-    ...(update.mainDeepThink === undefined ? {} : { mainDeepThink: update.mainDeepThink }),
-    ...(update.mainDeepThinkPlanId === undefined ? {} : { mainDeepThinkPlanId: update.mainDeepThinkPlanId }),
+    /*
+     * [3.0.8] 行级开工证据（负责人 review/direct 登记）随 durable workplan-update
+     * 回放：结算闸开工-结算一致性比对（adjudicateResult）与重试执行蓝图
+     * （runtime dispatch 读 row.startPhases.planning.approach）在刷新/重启后不丢。
+     */
+    ...(update.startPhases === undefined ? {} : { startPhases: update.startPhases }),
+    /*
+     * [3.0.8] 主 Agent 五步第 1/2/3 步开工证据（计划级，subtaskId=null）随 durable
+     * workplan-update 回放：写入侧 dispatchTool 开工闸登记，消费侧 reconstruct
+     * 消毒抬升，刷新/重启后续跑读档放行（G1：写入与消费双侧接线）。
+     */
+    ...(update.mainStartPhases === undefined ? {} : { mainStartPhases: update.mainStartPhases }),
+    ...(update.mainStartPhasesPlanId === undefined ? {} : { mainStartPhasesPlanId: update.mainStartPhasesPlanId }),
     /*
      * [3.0.1] 认可闸门（计划级）随 durable workplan-update 回放：刷新/重启后
      * 「计划被按住、等用户认可」这条事实不丢，dispatch 门禁读档仍然生效；
@@ -4342,8 +4425,8 @@ export function buildUpdateMessage(update: any) {
     // 拒绝/放行记录刷新/重启后仍可复核，与 consolidation 同一回放口径。
     ...(update.gateAudit === undefined ? {} : { gateAudit: update.gateAudit }),
     ...(update.delegateSelfEfforts === undefined ? {} : { delegateSelfEfforts: update.delegateSelfEfforts }),
-    // [2.5.2] 叶子执行前两轮思考台账随 durable workplan-update 回放（G1 双侧）。
-    ...(update.delegateDeepThinks === undefined ? {} : { delegateDeepThinks: update.delegateDeepThinks }),
+    // [3.0.8] 叶子执行前五步第 1/2/3 步证据台账随 durable workplan-update 回放（G1 双侧）。
+    ...(update.delegateStartPhases === undefined ? {} : { delegateStartPhases: update.delegateStartPhases }),
     // [T6][契约v1 §3] 叶子开工前预估台账随 durable workplan-update 回放（G1 双侧）：
     // 刷新/重启后重派读档仍能判定「预估已登记」，8 人预估逐键可查（A2）。
     ...(update.delegateEstimates === undefined ? {} : { delegateEstimates: update.delegateEstimates }),
@@ -4364,8 +4447,8 @@ export function buildUpdateMessage(update: any) {
    *   文本置空，信封仍随事件落盘——回放台账不丢（C4），模型上下文零噪音。
    * - update.keyProgress/title/stateLabel 只是渲染输入，不进 payload。
    */
-  if (update.mainDeepThink !== undefined && update.subtaskId == null) {
-    const summary = truncate('【两轮深度思考已登记】主 Agent 已完成第一轮任务深研与第二轮方法、流程、步骤（含依据），后续执行按此进行；续跑/重启自动读档，无需重复提交。', 300)
+  if (update.mainStartPhases !== undefined && update.subtaskId == null) {
+    const summary = truncate('【开工证据已登记】主 Agent 已完成五步第 1/2/3 步（任务梳理 + 资源/工具/方案研究 + 准备就绪），后续执行按此进行；续跑/重启自动读档，无需重复提交。', 300)
     return makeUserMessage('', { kind: 'workplan-update', form: 'notice', summary, durable: payload })
   }
   const summary = truncate(`【状态改判】${update.subtaskId} → ${update.status}`, 300)
@@ -4924,17 +5007,12 @@ export function applyStatus(statuses: any, subtaskId: any, patch: any) {
   if (patch.consolidation !== undefined) {
     if (patch.consolidation === null) next.consolidation = null
     else if (isRecord(patch.consolidation)) {
-      const briefStrings = (value: any, limit: number, itemMax: number) => (Array.isArray(value) ? value : [])
-        .map((entry: any) => truncate(String(entry ?? '').trim(), itemMax))
-        .filter(Boolean)
-        .slice(0, limit)
       next.consolidation = {
-        problemAnalysis: briefStrings(patch.consolidation.problemAnalysis, 12, 500),
-        constraints: briefStrings(patch.consolidation.constraints, 12, 300),
-        unknowns: briefStrings(patch.consolidation.unknowns, 12, 300),
-        approach: briefStrings(patch.consolidation.approach, 12, 500),
-        // [2.5.1] 两轮深度思考协议：第二轮依据随梳理产物消毒落档 + durable 回放。
-        approachBasis: briefStrings(patch.consolidation.approachBasis, 12, 500),
+        /*
+         * [3.0.8] 第 1/2/3 步证据不再随 consolidation 落档：开工证据由 startPhases
+         * 承载（行级 startPhases / 计划级 mainStartPhases / 台账 delegateStartPhases），
+         * 经开工闸 validateStartPhaseEvidence 判据。consolidation 只留分工表与等级配置。
+         */
         assignments: (Array.isArray(patch.consolidation.assignments) ? patch.consolidation.assignments : [])
           // [2.5.4][T4] D1/D2 配套：消毒上限须 ≥ 合法分工表最大人数（复杂 12，与 llm-rules.ts
           // MAX_COMPLEX_DELEGATE_MEMBERS 同值——因 llm-rules 依赖 plan 会循环引用，此处不 import，
@@ -5030,9 +5108,9 @@ export function applyStatus(statuses: any, subtaskId: any, patch: any) {
         ...(REASONING_EFFORTS.includes(item?.selfEffort) ? { selfEffort: item.selfEffort } : {}),
         ...(item?.selfEffortRequested && item.selfEffortRequested !== item.selfEffort ? { selfEffortRequested: String(item.selfEffortRequested) } : {}),
         ...(typeof item?.complexityRationale === 'string' && item.complexityRationale.trim() ? { complexityRationale: truncate(item.complexityRationale.trim(), 300) } : {}),
-        // [2.5.2] 叶子执行前两轮深度思考产物（与自配档同为任务级配置）。
-        ...(sanitizeMainDeepThink(item?.deepThink) ? { deepThink: sanitizeMainDeepThink(item?.deepThink) } : {}),
-        // [T6][契约v1 §3] 叶子开工前预估（与 selfEffort/deepThink 同为任务级配置）：
+        // [3.0.8] 叶子执行前五步第 1/2/3 步开工证据（与自配档同为任务级配置）。
+        ...(sanitizeStartPhaseEvidence(item?.startPhases) ? { startPhases: sanitizeStartPhaseEvidence(item?.startPhases) } : {}),
+        // [T6][契约v1 §3] 叶子开工前预估（与 selfEffort/startPhases 同为任务级配置）：
         // fail-closed 消毒见 sanitizeDelegateEstimate；非法整体丢弃，8 人预估全部存活（A2）。
         ...(sanitizeDelegateEstimate(item?.estimate) ? { estimate: sanitizeDelegateEstimate(item?.estimate) } : {}),
         childId: typeof item?.childId === 'string' ? truncate(item.childId, 200) : null,
@@ -5094,26 +5172,26 @@ export function applyStatus(statuses: any, subtaskId: any, patch: any) {
     }
   }
   /*
-   * [2.5.2] 叶子执行前两轮深度思考台账（member→产物）：任务级配置，尝试重置
-   * 保留（与 delegateSelfEfforts 同语义）；重派时读它直接以已登记思考接续
-   * phase-1。逐成员经 sanitizeMainDeepThink 消毒（非法/篡改丢弃），与写入侧
-   * 同一判据（G1 双侧接线）。
+   * [3.0.8] 叶子执行前五步第 1/2/3 步开工证据台账（member→startPhases）：任务级
+   * 配置，尝试重置保留（与 delegateSelfEfforts 同语义）；重派时读它直接以已登记
+   * 证据接续 phase-1。逐成员经 sanitizeStartPhaseEvidence 消毒（非法/篡改丢弃），
+   * 与写入侧同一判据（G1 双侧接线）。
    */
-  if (patch.delegateDeepThinks !== undefined) {
-    if (patch.delegateDeepThinks === null) next.delegateDeepThinks = null
-    else if (isRecord(patch.delegateDeepThinks)) {
-      const entries = Object.entries(patch.delegateDeepThinks)
-        .map(([key, value]) => [truncate(String(key), 80), sanitizeMainDeepThink(value)] as const)
+  if (patch.delegateStartPhases !== undefined) {
+    if (patch.delegateStartPhases === null) next.delegateStartPhases = null
+    else if (isRecord(patch.delegateStartPhases)) {
+      const entries = Object.entries(patch.delegateStartPhases)
+        .map(([key, value]) => [truncate(String(key), 80), sanitizeStartPhaseEvidence(value)] as const)
         .filter(([, value]) => value !== null)
         .slice(0, 12)
-      next.delegateDeepThinks = Object.fromEntries(entries)
+      next.delegateStartPhases = Object.fromEntries(entries)
     } else {
-      throw new PlanError('delegateDeepThinks 必须是 member→两轮思考产物 对象或 null', 'INVALID_DELEGATE_DEEP_THINKS')
+      throw new PlanError('delegateStartPhases 必须是 member→开工证据 对象或 null', 'INVALID_DELEGATE_START_PHASES')
     }
   }
   /*
    * [T6][契约v1 §3] 叶子开工前预估台账（member→预估对象）：任务级配置，尝试
-   * 重置保留（与 delegateSelfEfforts/delegateDeepThinks 同语义）；重派读档据此
+   * 重置保留（与 delegateSelfEfforts/delegateStartPhases 同语义）；重派读档据此
    * 判定「预估已登记」。逐成员经 sanitizeDelegateEstimate 消毒（非法丢弃），
    * 非法形状抛 INVALID_DELEGATE_ESTIMATES（与 delegateSelfEfforts 同错误码口径）。
    * 上限 12 与 delegates slice(0,12)/MAX_COMPLEX_DELEGATE_MEMBERS 对齐：契约 A2
@@ -5147,6 +5225,15 @@ export function applyStatus(statuses: any, subtaskId: any, patch: any) {
         code: item.ok === true ? null : truncate(String(item.code ?? 'UNKNOWN'), 80),
       }))
       .slice(-20)
+  }
+  /*
+   * [3.0.8] 行级开工证据（负责人 review/direct 登记）：与 consolidation 同一条
+   * 状态行、durable 回放同口径；经 sanitizeStartPhaseEvidence 消毒（非法丢弃、
+   * null 清除）。结算闸（adjudicateResult startPhases + carryover 比对）与
+   * dispatch 读档（执行蓝图）的消费源。
+   */
+  if (patch.startPhases !== undefined) {
+    next.startPhases = patch.startPhases === null ? undefined : sanitizeStartPhaseEvidence(patch.startPhases)
   }
   /*
    * [2.5.0] 用户要求 2：负责人为整个任务配置的整体推理等级（effortOverride）。
@@ -5295,6 +5382,8 @@ export function applyStatus(statuses: any, subtaskId: any, patch: any) {
      */
     if (patch.consolidation === undefined) next.consolidation = undefined
     if (patch.delegates === undefined) next.delegates = undefined
+    // [3.0.8] 行级开工证据同属尝试痕迹：重置后新负责人必须重新 review/direct 登记。
+    if (patch.startPhases === undefined) next.startPhases = undefined
     /*
      * [2.5.0][自配档] 叶子自配档是任务级配置不是尝试痕迹：重置时把 delegates
      * 已登记的 selfEffort 收进 delegateSelfEfforts 保留（显式 patch 优先）。
@@ -5307,16 +5396,16 @@ export function applyStatus(statuses: any, subtaskId: any, patch: any) {
       if (Object.keys(selfMap).length > 0) next.delegateSelfEfforts = selfMap
     }
     /*
-     * [2.5.2] 叶子两轮思考产物同为任务级配置：重置时把 delegates 已登记的
-     * deepThink 收进 delegateDeepThinks 保留（显式 patch 优先），重派读档放行。
+     * [3.0.8] 叶子开工证据同为任务级配置：重置时把 delegates 已登记的
+     * startPhases 收进 delegateStartPhases 保留（显式 patch 优先），重派读档放行。
      */
-    if (patch.delegateDeepThinks === undefined) {
-      const thinkMap: Record<string, any> = { ...(isRecord(next.delegateDeepThinks) ? next.delegateDeepThinks : {}) }
+    if (patch.delegateStartPhases === undefined) {
+      const startMap: Record<string, any> = { ...(isRecord(next.delegateStartPhases) ? next.delegateStartPhases : {}) }
       for (const item of Array.isArray(current.delegates) ? current.delegates : []) {
-        const sanitized = item ? sanitizeMainDeepThink(item.deepThink) : null
-        if (item && typeof item.member === 'string' && sanitized) thinkMap[item.member] = sanitized
+        const sanitized = item ? sanitizeStartPhaseEvidence(item.startPhases) : null
+        if (item && typeof item.member === 'string' && sanitized) startMap[item.member] = sanitized
       }
-      if (Object.keys(thinkMap).length > 0) next.delegateDeepThinks = thinkMap
+      if (Object.keys(startMap).length > 0) next.delegateStartPhases = startMap
     }
     /*
      * [T6][契约v1 §3] 叶子开工前预估同为任务级配置：重置时把 delegates 已登记
@@ -6745,13 +6834,13 @@ export function buildChildPrompt({
     ...(pendingInstruction ? [pendingInstruction] : []),
     ...(reviveBlock ? [reviveBlock] : []),
     '',
-    ...threePhasePromptLines(),
+    ...fiveStepPromptLines(),
     ...(typeof lessonsBrief === 'string' && lessonsBrief.trim() !== ''
       ? ['', lessonsBrief.trim(), '']
       : []),
     '',
     '执行要求：',
-    '- 执行自己的任务必须先完成上方「三阶段工作法」的两轮深度思考（2.5.1 强制）：第一轮全面、全盘、深入梳理、研究、思考自己的任务；第二轮基于第一轮完成好的所有结果再全面、全盘、深入地开展梳理、研究和思考，理清具体一步步执行、完美完成任务的方法、流程和步骤（含依据 approachBasis）；最后才基于第二轮的方法、流程、步骤开始具体执行与再分配，两轮未完成前禁止动手。',
+    '- 执行自己的任务必须先完成上方「五步工作法」的前三步（3.0.8 单一框架）：第一步全面、全盘、深入梳理、研究、思考自己的任务；第二步基于第一步完成好的所有结果研究需要哪些资源、哪些工具、具体实施方案（方法、流程、步骤，含依据 approachBasis）；第三步把资源与工具真正备齐并给出就绪证据。前三步证据经 review 的 startPhases 一并提交并登记，未登记合格证据前禁止进入执行与再分配。',
     '- 以全球顶尖专家标准执行：先诊断根因再动手，产出与证据要能通过同行复核，不交浅层补丁、不遗留问题。',
     // [2.5.0] 根因修复（用户要求 1）：旧文案「不要派生新的 Agent / 你没有派发
     // 权限」与 dsh_workplan_delegate 授权正面冲突，负责人收到两套矛盾指令后
@@ -6770,9 +6859,9 @@ export function buildChildPrompt({
     // + 更简单的多人分工。与 llm-rules.ts buildLlmRulesBrief 同一口径。
     '本部门再分配权限与推理等级配置（用户强制要求，平台机制保障）：',
     // [2.5.4][T4] D1/D2 人数口径同步（与 llm-rules.ts buildLlmRulesBrief 同源逐字一致）
-    '- 你是本子任务的部门负责人，拥有再分配权限：先用 dsh_workplan_delegate(action="review") 提交两轮深度思考产物（第一轮全面、全盘、深入梳理研究思考自己的任务=problemAnalysis；第二轮基于第一轮全部结果理清方法、流程、步骤=approach；依据对应=approachBasis）与分工表，再用 action="dispatch" 把任务分配给本部门多名相关领域全球顶尖专家（角色只保留 expert，部门组员已按用户要求 9 取消，至少 1 名；low/未配置任务禁止下派——负责人亲自执行，两轮思考产物经 dsh_workplan_delegate(action="direct") 登记（40/40/20 字判据，可选 reasoningEffort="low"）；复杂任务（medium/high/xhigh/max）合计不少于 8 人且最多 12 人，少于 8 人硬性阻断）；未提交梳理产物前 dispatch 会被平台硬门禁拒绝。',
+    '- 你是本子任务的部门负责人，拥有再分配权限：先用 dsh_workplan_delegate(action="review") 提交第 1/2/3 步开工证据（startPhases={ planning{ problemAnalysis[], approach[], approachBasis[], resources[], tools[] }, preparation{ prepared[], evidence[] } }）与分工表，再用 action="dispatch" 把任务分配给本部门多名相关领域全球顶尖专家（角色只保留 expert，部门组员已按用户要求 9 取消，至少 1 名；low/未配置任务禁止下派——负责人亲自执行，开工证据经 dsh_workplan_delegate(action="direct") 登记（' + START_EVIDENCE_MIN_CHARS_BRIEF + '；可选 reasoningEffort="low"）；复杂任务（medium/high/xhigh/max）合计不少于 8 人且最多 12 人，少于 8 人硬性阻断）；未提交开工证据与分工表前 dispatch 会被平台硬门禁拒绝。',
     '- 分配必须更简单：每位下级只承担单一目标、单一主产物、可独立验收的一项工作；任务描述完整自包含，让下级拿到就能做，不要把多个交付物压给同一个人。',
-    '- 先配置后开工（平台硬规则）：你以 phase-0（low 档）启动，唯一职责是评估你接到任务的复杂度，并在 consolidation.taskReasoningEffort 里配置你自己的整体推理等级（轻度=low；qwen 中等=medium、非 qwen 中等=high；qwen 非常复杂=xhigh、非 qwen 非常复杂=max）；登记后平台立即以你的自配档接续本会话进入 phase-1（派活/协调/验收/重试决策整个分配过程全程用自配档，重试/续跑不丢）。分工表 per-expert 档仅为建议：每位专家必须在 phase-0 经 self_effort 按自己分到的单项任务复杂度自配自己的等级，专家自配为权威，越界档由平台按当前模型家族合法集合自动钳制并留痕。low（轻度）/未配置任务禁止下派：负责人亲自执行，两轮思考产物经 action="direct" 登记；复杂任务才走 review+dispatch。',
+    '- 先配置后开工（平台硬规则）：你以 phase-0（low 档）启动，唯一职责是评估你接到任务的复杂度，并在 consolidation.taskReasoningEffort 里配置你自己的整体推理等级（轻度=low；qwen 中等=medium、非 qwen 中等=high；qwen 非常复杂=xhigh、非 qwen 非常复杂=max）；登记后平台立即以你的自配档接续本会话进入 phase-1（派活/协调/验收/重试决策整个分配过程全程用自配档，重试/续跑不丢）。分工表 per-expert 档仅为建议：每位专家必须在 phase-0 经 self_effort 按自己分到的单项任务复杂度自配自己的等级，专家自配为权威，越界档由平台按当前模型家族合法集合自动钳制并留痕。low（轻度）/未配置任务禁止下派：负责人亲自执行，开工证据经 action="direct" 登记；复杂任务才走 review+dispatch。',
     '- 第三层专家是叶子层：他们不得再派生第四层；下级结论会送回本会话，收齐后由你汇总核验（必须覆盖全部已派发专家，不得只汇总一部分），再写最终结果块。用 action="status" 随时查看梳理登记与下级进度。',
     // [T6][契约v1 §6] 负责人须知：下属开工预估即时送达 + 留痕 + 未上报拦截（时长求和归 T7，此处不实现）。
     '- 下属经 self_effort 上报的开工预估（整数分钟）会即时送达你会话并留痕（kind=estimate）；未上报者被平台拦截开工。',
@@ -6809,7 +6898,7 @@ export function buildChildPrompt({
     '',
     '结果回传（必填）：在汇报的最后附上一个结构化结果块，主 Agent 会按它逐项核对，不再只依赖自述。',
     EVIDENCE_MARKER_BEGIN,
-    '{"status":"done","blockedReason":"","phases":{"planning":{"problemAnalysis":["要解决的问题 1（含现状/约束/未知/主要矛盾）"],"constraints":["..."],"unknowns":["..."],"resources":["完成本任务需要的资源：数据/文件/权限/人/知识/时间（逐项写用途与获取方式）"],"tools":["需要的工具及用途（为什么选它）"],"approach":["第 1 步：做什么 → 产出什么 → 如何证明"]},"preparation":{"prepared":["已备齐的资源/工具：准备了什么、在哪里、是否可用"],"evidence":["每项就绪证据：命令输出/文件路径/配置项/版本号/引用"]},"execution":{"steps":["实际执行的步骤"],"deviations":[]},"verification":{"allPassed":true,"checks":[{"criterion":"A1","method":"怎么验证","evidence":"命令输出/文件/引用"}],"requirementCheck":"逐条核对用户原要求的结果","retrospective":{"problems":["本次遇到的问题（现象+根因）"],"detours":["走过的弯路/返工/无效尝试；确实没有就写 []"],"resolutions":["最终是如何解决的"],"prevention":["以后如何预防再犯：遇到…先…"]}}},"acceptance":[{"criterion":"A1 把上面的验收标准原文抄在这里","result":"pass","evidence":"用命令输出、文件路径或引用证明"}],"artifacts":[{"kind":"file","ref":"相对工作目录的路径"}],"needs":[],"question":"","options":[],"timeSpentMinutes":0,"finalEstimateMinutes":0}',
+    '{"status":"done","blockedReason":"","phases":{"planning":{"problemAnalysis":["要解决的问题 1（含现状/约束/未知/主要矛盾）"],"constraints":["..."],"unknowns":["..."],"resources":["完成本任务需要的资源：数据/文件/权限/人/知识/时间（逐项写用途与获取方式）"],"tools":["需要的工具及用途（为什么选它）"],"approach":["第 1 步：做什么 → 产出什么 → 如何证明"],"approachBasis":["第一步的哪条事实/约束/矛盾 → 决定了第二步的哪项资源/工具/步骤（逐条对应）"]},"preparation":{"prepared":["已备齐的资源/工具：准备了什么、在哪里、是否可用"],"evidence":["每项就绪证据：命令输出/文件路径/配置项/版本号/引用"]},"execution":{"steps":["实际执行的步骤"],"deviations":[]},"verification":{"allPassed":true,"checks":[{"criterion":"A1","method":"怎么验证","evidence":"命令输出/文件/引用"}],"requirementCheck":"逐条核对用户原要求的结果","retrospective":{"problems":["本次遇到的问题（现象+根因）"],"detours":["走过的弯路/返工/无效尝试；确实没有就写 []"],"resolutions":["最终是如何解决的"],"prevention":["以后如何预防再犯：遇到…先…"]}}},"acceptance":[{"criterion":"A1 把上面的验收标准原文抄在这里","result":"pass","evidence":"用命令输出、文件路径或引用证明"}],"artifacts":[{"kind":"file","ref":"相对工作目录的路径"}],"needs":[],"question":"","options":[],"timeSpentMinutes":0,"finalEstimateMinutes":0}',
     EVIDENCE_MARKER_END,
     '- [2.2.9] 盘上结算备份（必做）：发送结果块之前，先把同一份 JSON 写入 reports/wp-settlement-<你的子任务 ID>.json（相对工作目录）。收尾消息因异常（error/截断/超时）丢失时，宿主会自动采纳该备份结算，避免「已完成的工作」被误判为「缺失回报」而受阻并级联冻结下游。[2.5.2][T4b] 备份 JSON 顶层必须带 planId 与 subtaskId（childId 若已知也带上），且必须是本次执行新写（覆盖同名旧文件）：宿主采纳前会校验新鲜度（文件修改时间不早于本次尝试开始时间）与归属（planId/subtaskId 必须匹配本计划/本子任务），陈旧或跨计划的备份会被拒绝采纳并留审计痕。',
     '- status 只能是 done / blocked / partial；partial 会被当作受阻处理。',
@@ -6824,7 +6913,7 @@ export function buildChildPrompt({
      * 「时间字段纯 advisory」）。
      */
     '- timeSpentMinutes / finalEstimateMinutes（可选，整数分钟）：完成后把实际耗时与最终预估回填进结果块，未知可省略；两项仅供参考与协商审计，不影响验收判定。',
-    '- 整块不超过 12000 字符；不要把这段模板本身抄进结果块。',
+    `- 硬上限（校验器逐字执行）：每个清单（数组）最多 ${MAX_PHASE_LIST_ITEMS} 条、每条最多 ${MAX_PHASE_ITEM_CHARS} 字；phases 四组合计最多 ${MAX_PHASE_TOTAL_CHARS} 字；整块标记内 JSON 的解析参考长度为 ${MAX_EVIDENCE_BLOCK_CHARS} 字符（只影响定位，不构成额外字数豁免）；不要把这段模板本身抄进结果块。`,
     '',
     /*
      * [2.1.0] 派发工作时附带统一沟通交流格式要求（用户 2026-11-06 的强制要求）。

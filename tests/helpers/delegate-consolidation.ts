@@ -1,7 +1,7 @@
 /*
  * [2.5.4][T3R1] 分派前深度梳理质量闸——共享测试夹具（gate-tests）。
  *
- * 质量闸与主 Agent（validateMainDeepThink）/叶子（self_effort）同一判据：
+ * 质量闸与主 Agent（validateStartPhaseEvidence）/叶子（self_effort）同一判据：
  * problemAnalysis/approach/approachBasis 合计 ≥40/40/20 字（three-phase
  * MIN_PLANNING_*_CHARS 单一事实源）。既有 delegate 夹具多为「一句话」薄产物，
  * 在新闸下被拒属预期；本 helper 提供达标补充项与复杂任务 ≥8 人分工表，

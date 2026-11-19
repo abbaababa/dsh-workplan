@@ -1,13 +1,15 @@
 /*
- * [1.13.0] 三阶段工作法的可执行契约（用户 2026-11-05 强制要求）。
+ * [1.13.0→3.0.8] 五步工作法的可执行契约（用户 2026-11-05 首次强制，2026-11-17
+ * 升级为五步工作法，2026-11-18 3.0.8 单框架收口）。
  *
  * 锁四件事：
- *  1. 每个部门子任务的提示词都明确要求「先梳理问题 → 再形成可执行思路 →
- *     执行 → 验证」，并把「阶段三才可核验、缺前两阶段证据返回 PHASE_GATE」写进去；
- *  2. 完成（done）必须带 planning / execution / verification 三阶段证据，
- *     缺一段就判未完成，不能靠一句「已完成」收尾；
- *  3. 阶段三核验工具（dsh_workplan_verify）在阶段一/二返回 PHASE_GATE，
- *     只有三阶段齐全且验证全部通过才回 passed；
+ *  1. 每个部门子任务的提示词都明确要求「第一步任务梳理 → 第二步资源/工具/
+ *     实施方案研究 → 第三步准备 → 第四步执行与验证 → 第五步 JSON 交付」，
+ *     并把「缺前几步证据时 dsh_workplan_verify 返回 PHASE_GATE」写进去；
+ *  2. 完成（done）必须带 planning / preparation / execution / verification
+ *     四组五步证据，缺一组就判未完成，不能靠一句「已完成」收尾；
+ *  3. 第四步核验工具（dsh_workplan_verify）在第 1–3 步证据不全时返回
+ *     PHASE_GATE（phase='steps-1-3'），五步齐全且验证全部通过才回 passed；
  *  4. 阶段摘要可读，主 Agent 能看出每个部门梳理了什么、执行了什么、验证了什么。
  */
 import { test } from 'node:test'
@@ -23,11 +25,13 @@ import {
 } from '../src/plan.js'
 import { createWorkplanRuntime } from '../src/runtime.js'
 import {
+  FIVE_STEP_CONTRACT_VERSION,
+  FIVE_STEP_EVIDENCE_KEYS,
   phaseGateFromErrors,
   phaseSummaryLine,
-  threePhasePromptLines,
-  validatePhaseEvidence,
-} from '../src/three-phase.js'
+  fiveStepPromptLines,
+  validateFiveStepEvidence,
+} from '../src/five-step.js'
 
 function phases(overrides: any = {}) {
   return {
@@ -117,7 +121,6 @@ test('子 Agent 提示词包含三阶段顺序、禁止跳步与阶段三插件�
   })
   assert.match(prompt, /五步工作法/)
   assert.match(prompt, /第一步 · 任务梳理/)
-  // [2.5.1] 两轮深度思考协议：第一轮任务深研 + 第二轮基于第一轮全部结果理清方法、流程、步骤。
   assert.match(prompt, /先全面、全盘、深入梳理、研究、思考自己的任务/)
   assert.match(prompt, /基于第一步完成好的所有结果，再全面、全盘、深入地梳理、研究、思考/)
   assert.match(prompt, /方法、流程和步骤/)
@@ -134,50 +137,54 @@ test('子 Agent 提示词包含三阶段顺序、禁止跳步与阶段三插件�
   )
 })
 
-test('三阶段证据：齐全且验证通过才 ok', () => {
-  const check = validatePhaseEvidence(phases(), ['同一请求连发两次只写一条记录'])
+test('五步证据：齐全且验证通过才 ok（契约版本 4、四组证据键）', () => {
+  // [3.0.8] 单框架收口：四组证据键与契约版本钉死，防止回退到三阶段/两轮口径。
+  assert.deepEqual([...FIVE_STEP_EVIDENCE_KEYS], ['planning', 'preparation', 'execution', 'verification'])
+  assert.equal(FIVE_STEP_CONTRACT_VERSION, 4)
+  const check = validateFiveStepEvidence(phases(), ['同一请求连发两次只写一条记录'])
   assert.equal(check.ok, true)
   assert.ok(check.phases)
+  assert.equal(check.phases!.version, FIVE_STEP_CONTRACT_VERSION)
   assert.equal(check.errors.length, 0)
   assert.match(phaseSummaryLine(check.phases!), /第一步 任务梳理/)
   assert.match(phaseSummaryLine(check.phases!), /第四步 执行与验证/)
 })
 
-test('三阶段证据：缺 planning 直接失败，并指向阶段一', () => {
+test('五步证据：缺 planning 直接失败，并指向第一步', () => {
   const input: any = phases()
   delete input.planning
-  const check = validatePhaseEvidence(input)
+  const check = validateFiveStepEvidence(input)
   assert.equal(check.ok, false)
   assert.equal(check.failedPhase, 'planning')
   assert.match(check.errors.join('；'), /planning 缺失/)
-  assert.equal(phaseGateFromErrors(check.errors), 'phase-1-3')
+  assert.equal(phaseGateFromErrors(check.errors), 'steps-1-3')
 })
 
-test('三阶段证据：规划太薄（一句目标冒充思路）不算规划', () => {
+test('五步证据：第二步方法太薄（一句目标冒充思路）不算规划', () => {
   const input = phases()
   input.planning.approach = ['把代码改好']
-  const check = validatePhaseEvidence(input)
+  const check = validateFiveStepEvidence(input)
   assert.equal(check.ok, false)
   assert.match(check.errors.join('；'), /approach 太薄/)
   assert.equal(check.failedPhase, 'planning')
 })
 
-test('三阶段证据：验证未全部通过不得报 done', () => {
+test('五步证据：验证未全部通过不得报 done', () => {
   const input = phases()
   input.verification.allPassed = false
-  const check = validatePhaseEvidence(input)
+  const check = validateFiveStepEvidence(input)
   assert.equal(check.ok, false)
   assert.equal(check.failedPhase, 'verification')
   assert.equal(phaseGateFromErrors(check.errors), 'verification')
 })
 
-test('三阶段证据：验证记录少于验收标准数 → 漏验', () => {
-  const check = validatePhaseEvidence(phases(), ['验收一', '验收二', '验收三'])
+test('五步证据：验证记录少于验收标准数 → 漏验', () => {
+  const check = validateFiveStepEvidence(phases(), ['验收一', '验收二', '验收三'])
   assert.equal(check.ok, false)
   assert.match(check.errors.join('；'), /只验证了 1 项，少于验收标准的 3 项/)
 })
 
-test('三阶段证据：验证条数够但未逐条对号入座，仍算漏验', () => {
+test('五步证据：验证条数够但未逐条对号入座，仍算漏验', () => {
   const input = phases({
     verification: {
       allPassed: true,
@@ -188,7 +195,7 @@ test('三阶段证据：验证条数够但未逐条对号入座，仍算漏验',
       requirementCheck: '两条验收都通过。',
     },
   })
-  const check = validatePhaseEvidence(input, ['验收一', '验收二'])
+  const check = validateFiveStepEvidence(input, ['验收一', '验收二'])
   assert.equal(check.ok, false)
   assert.equal(check.failedPhase, 'verification')
   assert.match(check.errors.join('\n'), /缺少 A2/)
@@ -209,7 +216,7 @@ test('完成判定：没有 phases 的 done 被降级为 blocked/unverified', ()
   assert.match(String(verdict.error), /planning/)
 })
 
-test('完成判定：三阶段齐全的 done 仍按原规则判 structured', () => {
+test('完成判定：五步证据齐全的 done 仍按原规则判 structured', () => {
   const output = evidence({
     status: 'done',
     phases: phases(),
@@ -237,7 +244,7 @@ test('兼容边界：requirePhases=false 保留旧完成语义（历史回放/�
 })
 
 test('提示词段落：阶段三核验 + 缺证据 PHASE_GATE，且不再声明全局禁用', () => {
-  const text = threePhasePromptLines().join('\n')
+  const text = fiveStepPromptLines().join('\n')
   assert.doesNotMatch(text, /插件禁用/, '2.0.2 起不得把「阶段一、二禁用插件」写成永久规则')
   assert.match(text, /会因缺少前几步证据返回 PHASE_GATE/)
   assert.match(text, /第四步：可以调用 dsh_workplan_verify/)
@@ -285,7 +292,7 @@ function runtimeFixture() {
   return { runtime, child }
 }
 
-test('阶段三核验工具：缺前两阶段证据被 PHASE_GATE 拒绝（证据门禁，不是插件禁用）', async () => {
+test('第四步核验工具：缺前几步证据被 PHASE_GATE 拒绝（证据门禁，不是插件禁用）', async () => {
   const { runtime, child } = runtimeFixture()
   const out = await runtime.verifyTool({ session: child }, {
     phases: {
@@ -295,11 +302,11 @@ test('阶段三核验工具：缺前两阶段证据被 PHASE_GATE 拒绝（证�
   assert.equal(out.ok, false)
   assert.equal(out.passed, false)
   assert.equal(out.code, 'PHASE_GATE')
-  assert.equal(out.phase, 'phase-1-3')
+  assert.equal(out.phase, 'steps-1-3')
   assert.match(String(out.error), /缺少前几步证据/)
 })
 
-test('阶段三核验工具：三阶段齐全且验证通过 → passed', async () => {
+test('第四步核验工具：五步齐全且验证通过 → passed', async () => {
   const { runtime, child } = runtimeFixture()
   const out = await runtime.verifyTool({ session: child }, { phases: phases() })
   assert.equal(out.ok, true)
@@ -308,7 +315,7 @@ test('阶段三核验工具：三阶段齐全且验证通过 → passed', async 
   assert.match(String(out.summary), /第一步 任务梳理/)
 })
 
-test('阶段三核验工具：验证未全部通过 → VERIFICATION_INCOMPLETE', async () => {
+test('第四步核验工具：验证未全部通过 → VERIFICATION_INCOMPLETE', async () => {
   const { runtime, child } = runtimeFixture()
   const input = phases()
   input.verification.allPassed = false

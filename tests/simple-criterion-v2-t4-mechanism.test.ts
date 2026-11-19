@@ -43,7 +43,7 @@ import {
   modelStatusLines,
   reconstructFromSession,
 } from '../src/runtime.js'
-import { MAIN_DEEP_THINK_FIXTURE } from './helpers/main-deep-think.js'
+import { MAIN_START_PHASES_FIXTURE } from './helpers/main-deep-think.js'
 import { seedLeaderSelfEffort } from './helpers/self-effort-contract.js'
 
 const eventLoopAnchor = setInterval(() => {}, 1_000)
@@ -268,7 +268,7 @@ const completed = (text = '任务完成') => ({ stopReason: 'completed', output:
 test('C05 集成（新契约）：环境变量/时间再满足旧条件，extendMs 也只返回 TIME_LIMITS_DISABLED', async () => {
   await withEnv(ACTIVE_ENV, async () => {
     const { session, runtime, release, hasStarted } = makeRuntime(2_000_000, { childTimeoutMs: 60_000 })
-    await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
+    await runtime.dispatchTool({ session, options: {} }, { startPhases: MAIN_START_PHASES_FIXTURE, mode: 'async' }, new AbortController().signal)
     assert.ok(await waitFor(hasStarted, 5_000), 'T1 应已派发')
     const denied: any = await runtime.updateStatus({ session }, { subtaskId: 'T1', extendMs: 2_000, reason: '无批准放宽' })
     assert.equal(denied.ok, false)
@@ -290,7 +290,7 @@ test('C05 集成（新契约）：环境变量/时间再满足旧条件，extend
 test('Q3-B 集成（新契约）：无 timeNotice、无判据也可以 done，不再因时长被 blocked', async () => {
   await withEnv(ACTIVE_ENV, async () => {
     const { session, runtime, release, hasStarted } = makeRuntime(2_000_000, { childTimeoutMs: 60_000 })
-    await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
+    await runtime.dispatchTool({ session, options: {} }, { startPhases: MAIN_START_PHASES_FIXTURE, mode: 'async' }, new AbortController().signal)
     assert.ok(await waitFor(hasStarted, 5_000))
     release(completed())
     let row: any = null
@@ -305,7 +305,7 @@ test('Q3-B 集成（新契约）：无 timeNotice、无判据也可以 done，�
 
 test('Q7-B 集成（新契约）：旧 1 秒窗口到点不 blocked、不落判据，真实完成仍 done', async () => {
   const { session, runtime, release, hasStarted } = makeRuntime(2_000_000, { childTimeoutMs: 1_000 })
-  await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
+  await runtime.dispatchTool({ session, options: {} }, { startPhases: MAIN_START_PHASES_FIXTURE, mode: 'async' }, new AbortController().signal)
   assert.ok(await waitFor(hasStarted, 5_000))
   await new Promise((resolve) => setTimeout(resolve, 1_300))
   let row: any = await rowOf(runtime, session)

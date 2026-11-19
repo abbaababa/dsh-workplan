@@ -9,12 +9,18 @@
  *     （12 为实现取值）；非复杂保持 6 人上限 + 原有静默截断，旧行为零变化。
  * [2.5.5][T3] 夹具适配（负责人裁决，门禁实现与夹具适配同批交付）：D1–D3 low/未配置
  *     禁派后，A3/A4/边界的 low 子案改断言 DELEGATE_LOW_TASK_FORBIDDEN＋direct 指路；
- *     提示词同步改 W1 新串。复杂档各案与拒因顺序断言意图零删改。
+ *     提示词同步改 W1 新串。复杂档各案断言意图零删改。
+ * [3.0.8] 单框架收口：consolidation 的 40/40/20 字数梳理闸已废除（第 1/2/3 步证据
+ *     改由 review 的 startPhases 开工闸承载，与本文件人数闸无关），consolidation
+ *     夹具瘦身为 { taskReasoningEffort?, assignments }；拒因顺序回归用例按新顺序重写。
  *
- * 拒因顺序（新闸放最后，既有 8 道完全不变）：
- *   CONSOLIDATION_MISSING → problemAnalysis INCOMPLETE → assignments 空 INCOMPLETE
- *   → TASK_EFFORT_INVALID → ASSIGNMENT_INVALID → DELEGATE_EXPERTS_REQUIRED
- *   → approach/approachBasis INCOMPLETE → DELEGATE_HEADCOUNT_MIN。
+ * 拒因顺序（planDelegations 实际顺序，3.0.8 口径）：
+ *   CONSOLIDATION_MISSING → LOW_TASK_FORBIDDEN（low/未配置禁派，2.5.5 新增）
+ *   → CONSOLIDATION_INCOMPLETE（assignments 空）→ TASK_EFFORT_INVALID
+ *   → ASSIGNMENT_INVALID → DELEGATE_EXPERTS_REQUIRED → DELEGATE_HEADCOUNT_MIN
+ *   → TASK_NOT_ATOMIC / QUALITY_REQUIREMENTS_MISSING（3.0.0 极简/质量闸）。
+ * （3.0.8 起 review 入口最前还有 startPhases 开工证据闸 START_EVIDENCE_MISSING/
+ *   START_EVIDENCE_INCOMPLETE，在 runtime 层；本文件只测 planDelegations 分工表闸。）
  *
  * 持久化边界（负责人补充说明 2）：强制点在 review 入口（宿主把钳制后值写回
  *   consolidation/effortOverride，dispatch 读回钳制后声明，为纵深复核）；
@@ -30,6 +36,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { buildLlmRulesBrief, planDelegations } from '../src/llm-rules.js'
+import { START_EVIDENCE_MIN_CHARS_BRIEF } from '../src/five-step.js'
 
 const QWEN = 'qwen3-max-preview'
 const NON_QWEN = 'gpt-4o'
@@ -47,17 +54,9 @@ function assignmentsOf(count: number, role: 'mixed' | 'expert' | 'member' = 'mix
 }
 
 function consolidation(overrides: any = {}) {
+  // [3.0.8] 瘦身：分工表闸不再读取梳理字段（problemAnalysis/approach/approachBasis
+  // 已随两轮思考 deepThink 门禁废除，改由 review 的 startPhases 开工闸承载）。
   return {
-    // 夹具须满足 [2.5.4][T3R1] 质量闸：problemAnalysis≥40 字、approach≥40 字、approachBasis≥20 字。
-    problemAnalysis: [
-      '现状与事实：复杂任务需要拆给多名相关领域全球顶尖专家与本部门组员共同承担，单一负责人无法兼顾质量与进度。',
-      '主要矛盾与约束：质量与人数下限的矛盾决定必须扩充分工表，约束决定只改授权文件且保持既有拒因顺序完全不变。',
-    ],
-    approach: [
-      '第二轮方法流程步骤：先按单一目标、单一主产物、可独立验收把任务拆得更简单，再合理分配给专家与组员并逐条验收。',
-      '执行与证明：专家承担核心实现并附聚焦单测，组员整理验收证据清单，最后跑构建与测试取证，确保保质保量完美交付。',
-    ],
-    approachBasis: ['第二轮分工的方法、流程、步骤基于第一轮完成好的全部结果：质量与人数下限的主要矛盾决定扩充分工表，约束决定不改无关文件。'],
     assignments: assignmentsOf(2),
     ...overrides,
   }
@@ -179,35 +178,55 @@ test('边界：复杂 8 人全 expert → 放行（组员角色已取消，配�
   assert.equal(plan.members.length, 8)
 })
 
-test('拒因顺序回归：复杂 7 人但缺梳理产物时，旧拒因先于人数闸', () => {
+test('拒因顺序回归：人数闸前的既有闸仍先拒（3.0.8 新顺序：缺表→禁派→空分工表→非法档→分工不完整）', () => {
+  // [3.0.8] 原「problemAnalysis/approach/approachBasis 字数闸」已废除：consolidation
+  // 不再携带梳理字段，下面各案按 planDelegations 实际拒因顺序断言。
   const noConsolidation = planDelegations({ consolidation: null, model: null })
   assert.equal(noConsolidation.code, 'DELEGATE_CONSOLIDATION_MISSING')
-  const noAnalysis = planDelegations({
+  // low 禁派闸先于 assignments 空检查（2.5.5 起）。
+  const lowSeven = planDelegations({ consolidation: consolidation({ taskReasoningEffort: 'low', assignments: assignmentsOf(7) }), model: null })
+  assert.equal(lowSeven.code, 'DELEGATE_LOW_TASK_FORBIDDEN')
+  // assignments 空先于人数闸。
+  const emptyAssignments = planDelegations({
+    consolidation: consolidation({ taskReasoningEffort: 'max', assignments: [] }),
+    model: null,
+  })
+  assert.equal(emptyAssignments.code, 'DELEGATE_CONSOLIDATION_INCOMPLETE')
+  assert.ok(emptyAssignments.error!.includes('assignments'))
+  // 非法档先于人数闸。
+  const invalid = planDelegations({
+    consolidation: consolidation({ taskReasoningEffort: 'ultra', assignments: assignmentsOf(7) }),
+    model: null,
+  })
+  assert.equal(invalid.code, 'DELEGATE_TASK_EFFORT_INVALID')
+  // 分工表 member/role/task 不完整先于人数闸。
+  const brokenAssignment = planDelegations({
+    consolidation: consolidation({
+      taskReasoningEffort: 'max',
+      assignments: [{ member: '成员1', role: 'expert', task: '', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] }, ...assignmentsOf(6).slice(1)],
+    }),
+    model: null,
+  })
+  console.log(`[254-min-headcount] 顺序 分工不完整 → code=${brokenAssignment.code}（先于人数闸）`)
+  assert.equal(brokenAssignment.code, 'DELEGATE_ASSIGNMENT_INVALID')
+  // 不带梳理字段不再拒（字数闸已废除）：复杂 7 人 ⇒ 落到人数闸。
+  const bare = planDelegations({
     consolidation: { taskReasoningEffort: 'max', assignments: assignmentsOf(7) },
     model: null,
   })
-  assert.equal(noAnalysis.code, 'DELEGATE_CONSOLIDATION_INCOMPLETE')
-  const noApproach = planDelegations({
-    consolidation: consolidation({ taskReasoningEffort: 'max', assignments: assignmentsOf(7), approach: [] }),
-    model: null,
-  })
-  console.log(`[254-min-headcount] 顺序 缺approach → code=${noApproach.code}（先于人数闸）`)
-  assert.equal(noApproach.code, 'DELEGATE_CONSOLIDATION_INCOMPLETE')
-  assert.ok(noApproach.error!.includes('approach'))
-  const noBasis = planDelegations({
-    consolidation: consolidation({ taskReasoningEffort: 'max', assignments: assignmentsOf(7), approachBasis: [] }),
-    model: null,
-  })
-  assert.equal(noBasis.code, 'DELEGATE_CONSOLIDATION_INCOMPLETE')
-  assert.ok(noBasis.error!.includes('approachBasis'))
+  console.log(`[254-min-headcount] 顺序 无梳理字段 7人 → code=${bare.code}（字数闸已废除，落到人数闸）`)
+  assert.equal(bare.code, 'DELEGATE_HEADCOUNT_MIN')
 })
 
-test('提示词同步：负责人任务书人数口径改为 low 禁派＋direct 直执 / 复杂≥8 且 ≤12（D1/D2＋T3 W1）', () => {
+test('提示词同步：负责人任务书人数口径改为 low 禁派＋direct 直执 / 复杂≥8 且 ≤12（D1/D2＋T3 W1，3.0.8 五步口径）', () => {
   const brief = buildLlmRulesBrief({ tier: 'department', model: QWEN })
   console.log('[254-min-headcount] 提示词同步断言')
-  // [2.5.5][T3] W1 文案同步（原则③）：与 src/llm-rules.ts 负责人告知块逐字一致。
-  assert.ok(brief.includes('low/未配置任务禁止下派——负责人亲自执行，两轮思考产物经 dsh_workplan_delegate(action="direct") 登记（40/40/20 字判据，可选 reasoningEffort="low"）'))
+  // [2.5.5][T3] W1 文案同步（原则③）：与 src/llm-rules.ts 负责人告知块逐字一致；
+  // [3.0.8] 「两轮思考产物」表述改为「第 1/2/3 步证据」（单框架收口）。
+  assert.ok(brief.includes('low/未配置任务禁止下派——负责人亲自执行，第 1/2/3 步证据经 dsh_workplan_delegate(action="direct") 登记（' + START_EVIDENCE_MIN_CHARS_BRIEF + '；可选 reasoningEffort="low"）'))
   assert.ok(brief.includes('复杂任务（medium/high/xhigh/max）合计不少于 8 人且最多 12 人，少于 8 人硬性阻断'))
+  assert.ok(brief.includes('startPhases={ planning{ problemAnalysis[], approach[], approachBasis[], resources[], tools[] }, preparation{ prepared[], evidence[] } }'), '3.0.8 负责人告知块必须带 startPhases 开工证据口径')
+  assert.ok(!brief.includes('两轮思考产物'), '旧「两轮思考产物」表述须已移除')
   assert.ok(!brief.includes('非复杂任务（low/未配置）最多 6 人'), '旧「非复杂≤6 人」表述须已移除')
   assert.ok(!brief.includes('各至少 1 名，最多 6 人'), '旧「最多 6 人」表述须已移除')
 })

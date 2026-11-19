@@ -14,7 +14,7 @@ import assert from 'node:assert/strict'
 import { buildPlanMessage, parseResultMessage } from '../src/plan.js'
 import { createWorkplanRuntime } from '../src/runtime.js'
 import { QUALITY_GATE_ACTIVATED_AT } from '../src/v3-contract.js'
-import { MAIN_DEEP_THINK_FIXTURE } from './helpers/main-deep-think.js'
+import { MAIN_START_PHASES_FIXTURE } from './helpers/main-deep-think.js'
 import { seedLeaderSelfEffort } from './helpers/self-effort-contract.js'
 
 const eventLoopAnchor = setInterval(() => {}, 1_000)
@@ -112,7 +112,7 @@ const noticeText = (session: any) => session.events
 
 test('Q1 新计划：缺质量要求的子任务被拒发，合格子任务照常执行完成', async () => {
   const { session, spawned, runtime } = boot(QUALITY_GATE_ACTIVATED_AT + 1000, [OK_SUBTASK, { ...BAD_SUBTASK }])
-  const out: any = await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
+  const out: any = await runtime.dispatchTool({ session, options: {} }, { startPhases: MAIN_START_PHASES_FIXTURE, mode: 'async' }, new AbortController().signal)
   assert.equal(out.ok, true)
 
   // 只启动合格子任务 T1；T2 被质量闸拒发。
@@ -140,7 +140,7 @@ test('Q1 新计划：缺质量要求的子任务被拒发，合格子任务照�
 
 test('Q2 旧计划：缺失质量要求也放行（零回归）', async () => {
   const { session, spawned, runtime } = boot(1000, [OK_SUBTASK, { ...BAD_SUBTASK, id: 'T2', title: '旧计划缺质量要求' }])
-  const out: any = await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
+  const out: any = await runtime.dispatchTool({ session, options: {} }, { startPhases: MAIN_START_PHASES_FIXTURE, mode: 'async' }, new AbortController().signal)
   assert.equal(out.ok, true)
   // 两个子任务都启动（旧计划豁免）。
   assert.ok(await waitFor(() => spawned.length === 2), '旧计划两个子任务都应启动')
@@ -153,7 +153,7 @@ test('Q2 旧计划：缺失质量要求也放行（零回归）', async () => {
 
 test('Q3 全部缺失时：一个部门 Agent 都不启动，且不会死循环', async () => {
   const { session, spawned, runtime } = boot(QUALITY_GATE_ACTIVATED_AT + 1000, [{ ...BAD_SUBTASK }])
-  const out: any = await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
+  const out: any = await runtime.dispatchTool({ session, options: {} }, { startPhases: MAIN_START_PHASES_FIXTURE, mode: 'async' }, new AbortController().signal)
   assert.equal(out.ok, true)
   // 给调度循环一点时间执行拒发分支。
   await new Promise((resolve) => setTimeout(resolve, 300))

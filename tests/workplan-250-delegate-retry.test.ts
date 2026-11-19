@@ -18,6 +18,8 @@ import { join } from 'node:path'
 import { createWorkplanRuntime, probeDelegateLandedArtifacts, buildDelegateRetryBrief, reconstructFromSession } from '../src/runtime.js'
 import { applyStatus, buildPlanMessage, buildUpdateMessage, createStatuses } from '../src/plan.js'
 import { planDelegations } from '../src/llm-rules.js'
+// [3.0.8] 五步开工证据共享夹具：review 随附 startPhases（第 1/2/3 步证据）过开工闸。
+import { MAIN_START_PHASES_FIXTURE } from './helpers/main-deep-think.js'
 
 const QWEN = 'qwen3-max-preview'
 
@@ -75,17 +77,35 @@ function makeRuntime(cwd: string) {
   return { runtime, record, spawned, leaderAgent }
 }
 
+// [3.0.8] 夹具适配：consolidation 只携带分工表——两轮思考产物（problemAnalysis/
+// approach/approachBasis）已随 deepThink 门禁废除；planDelegations 纯函数测试不经
+// 开工闸，无需 startPhases（开工闸在 runtime 的 review 入口，端到端用例随附）。
 const consolidation = (overrides: any = {}) => ({
-  // [2.5.4][T3R1] 夹具适配：补足合计字数 ≥40/40/20（保留「专家做核心实现」子串供重试简报断言）。
-  problemAnalysis: ['现状：部门任务需要拆给专家与组员；目标是保质保量完成；约束是不改无关文件；主要矛盾是质量与时间。'],
-  approach: ['专家做核心实现：先确认入口再最小改动，并附聚焦单测自测', '组员做证据清单：逐条核对验收标准并落盘留证'],
-  approachBasis: ["第二轮分工的方法、流程、步骤基于第一轮完成好的全部结果：质量与时间的主要矛盾决定专家承担核心实现、组员承担自测与证据，约束决定不改无关文件。"],
   assignments: [
     { member: 'Expert-A', role: 'expert', task: '实现核心逻辑后自测', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
     { member: 'Member-B', role: 'expert', task: '整理验收证据清单', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
   ],
   ...overrides,
 })
+
+/*
+ * [3.0.8] 负责人开工证据夹具：重试简报的执行蓝图现从行级 startPhases.planning.approach
+ * 读取（runtime.ts consolidationApproach），本用例断言「负责人梳理思路随重试简报下发」
+ * 依赖 approach 里的「专家做核心实现」子串，故不用共享 MAIN_START_PHASES_FIXTURE。
+ */
+const LEADER_START_PHASES = {
+  planning: {
+    problemAnalysis: ['第一步任务梳理：现状是部门任务待拆分派发；目标是保质保量交付；约束是不改无关文件；未知是各成员实际耗时；主要矛盾是质量与时间；边界是只做本部门分内工作。'],
+    resources: ['第二步资源研究：需要部门任务清单、验收标准、成员名单与派发通道，均已具备。'],
+    tools: ['第二步工具研究：dsh_workplan_delegate 用于派发与重派，dsh_workplan_status 用于督战核对。'],
+    approach: ['专家做核心实现：先确认入口再最小改动，并附聚焦单测自测', '组员做证据清单：逐条核对验收标准并落盘留证'],
+    approachBasis: ['第二步基于第一步全部结果：质量与时间的主要矛盾决定专家承担核心实现、组员承担证据清单，约束决定不改无关文件。'],
+  },
+  preparation: {
+    prepared: ['第三步已备齐：任务清单与验收标准已在会话内确认可用，成员名单与派发通道就绪。'],
+    evidence: ['第三步就绪证据：派发通道已连通并返回受理回执，验收标准清单可读取核对。'],
+  },
+}
 
 // [2.5.4][T4] 按 D1/D2 新契约适配，意图不变：复杂档（medium/high/xhigh/max）分工表须合计 ≥8 人。
 // 默认 consolidation() 保持 2 人（非复杂子案依赖上限 6）；复杂子案专用 8 人表（≥1expert+≥1member）。
@@ -152,7 +172,8 @@ test('R4 端到端：叶子 failed/done 后重派——新任务书附上次失�
     mkdirSync(join(cwd, 'reports'))
     writeFileSync(join(cwd, 'reports', 'wp-member-Expert-A-t1.json'), '{"status":"partial"}')
     const { runtime, spawned, leaderAgent } = makeRuntime(cwd)
-    const review = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation() })
+    // [3.0.8] review 随附 startPhases 过开工闸；approach 子串供重试简报断言（见文件头注释）。
+    const review = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation(), startPhases: LEADER_START_PHASES })
     assert.equal(review.ok, true, JSON.stringify(review))
     const first = await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
     assert.equal(first.ok, true, JSON.stringify(first))
@@ -216,6 +237,7 @@ test('R2×R4 端到端：重置清掉 consolidation 后重新 review/dispatch—
     const review = await runtime.delegateTool(leaderAgent, {
       action: 'review',
       consolidation: consolidation({ taskReasoningEffort: 'xhigh', assignments: assignments8() }),
+      startPhases: MAIN_START_PHASES_FIXTURE,
     })
     assert.equal(review.ok, true)
     assert.equal(record.statuses[0].effortOverride, 'xhigh')
@@ -228,7 +250,7 @@ test('R2×R4 端到端：重置清掉 consolidation 后重新 review/dispatch—
     record.statuses[0].childId = 'child-leader'
     // 重新 review 未再配整体等级、下级也未单独配档 ⇒ 必须继承 effortOverride。
     // [2.5.4][T4] 按 D1/D2 新契约适配，意图不变：effortOverride=xhigh 回落判复杂 ⇒ reReview 同样扩到 8 人。
-    const reReview = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation({ assignments: assignments8() }) })
+    const reReview = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation({ assignments: assignments8() }), startPhases: MAIN_START_PHASES_FIXTURE })
     assert.equal(reReview.ok, true, JSON.stringify(reReview))
     assert.equal(reReview.taskEffort, 'xhigh', '重新 review 不得丢失已配置的整体等级')
     assert.deepEqual(reReview.members.map((m: any) => m.effort), Array(8).fill('xhigh'))
@@ -262,15 +284,13 @@ test('R2/G1：刷新/重启回放后 effortOverride/consolidation/delegates 全�
   }
   session.append('user/message', buildPlanMessage(plan))
   // 与 delegateTool review/dispatch 落盘同形的 durable workplan-update。
+  // [3.0.8] consolidation 只携带分工表 + 整体等级（两轮思考产物已废除，开工证据在行级 startPhases）。
   session.append('user/message', buildUpdateMessage({
     planId: plan.planId,
     subtaskId: 'T1',
     status: 'in_progress',
     effortOverride: 'xhigh',
     consolidation: {
-      problemAnalysis: ['梳理：任务拆给专家与组员'],
-      approach: ['专家做核心实现'],
-      approachBasis: ["第二轮分工的方法、流程、步骤基于第一轮完成好的全部结果：质量与时间的主要矛盾决定专家承担核心实现、组员承担自测与证据，约束决定不改无关文件。"],
       assignments: [
         { member: 'Expert-A', role: 'expert', task: '实现核心逻辑', reasoningEffort: 'xhigh', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
         { member: 'Member-B', role: 'expert', task: '证据清单', reasoningEffort: 'low', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },

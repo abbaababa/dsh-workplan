@@ -44,7 +44,7 @@ import {
   validateNoticeChannel,
 } from '../src/notice-channel.js'
 import { createWorkplanRuntime, reconstructFromSession } from '../src/runtime.js'
-import { MAIN_DEEP_THINK_FIXTURE } from './helpers/main-deep-think.js'
+import { MAIN_START_PHASES_FIXTURE } from './helpers/main-deep-think.js'
 
 const LEAD_ID = 'session-root-4ce46ec9'
 const CHILD_ID = 'child-3759600a'
@@ -417,7 +417,7 @@ test('运行时集成：派发写 awaiting（真实 target/caller），转达消
     idleTimeoutMs: 30_000,
     strictEvidence: false,
   })
-  await runtime.dispatchTool({ id: LEAD_ID, session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
+  await runtime.dispatchTool({ id: LEAD_ID, session, options: {} }, { startPhases: MAIN_START_PHASES_FIXTURE, mode: 'async' }, new AbortController().signal)
 
   // async 派发只保证「开始」，不保证子会话已进入 assigned；轮询到通道条目出现。
   const row = await waitForNoticeRow(runtime, session, 'T1')
@@ -640,7 +640,7 @@ test('F4 运行时：无活 agent 时不得把 plan.sessionId 当发送目标（
   }
   const runtime = createWorkplanRuntime(ctx, { totalTimeoutMs: 60_000, idleTimeoutMs: 30_000, strictEvidence: false })
   // 只给会话、不给活 agent：这是 T4 D5 的「injected 为空且无活 agent」场景。
-  await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
+  await runtime.dispatchTool({ session, options: {} }, { startPhases: MAIN_START_PHASES_FIXTURE, mode: 'async' }, new AbortController().signal)
 
   const row = await waitForNoticeRow(runtime, session, 'T1')
   assert.ok(row?.noticeChannel, '派发后状态行必须留下通道条目（即使目标不可用也要如实记录）')

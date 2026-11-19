@@ -17,7 +17,7 @@ import assert from 'node:assert/strict'
 
 import { buildPlanMessage, parseResultMessage } from '../src/plan.js'
 import { createWorkplanRuntime, reconstructFromSession } from '../src/runtime.js'
-import { MAIN_DEEP_THINK_FIXTURE } from './helpers/main-deep-think.js'
+import { MAIN_START_PHASES_FIXTURE } from './helpers/main-deep-think.js'
 
 const eventLoopAnchor = setInterval(() => {}, 1_000)
 const dropEventLoopAnchor = setTimeout(() => clearInterval(eventLoopAnchor), 60_000)
@@ -107,7 +107,7 @@ async function waitFor(check: () => boolean, timeoutMs = 5_000) {
 test('计划执行中改判被拒绝（TASK_RUNNING），并给出当前状态', async () => {
   const gate = deferred()
   const { session, runtime } = makeRuntime(gate.promise)
-  await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
+  await runtime.dispatchTool({ session, options: {} }, { startPhases: MAIN_START_PHASES_FIXTURE, mode: 'async' }, new AbortController().signal)
 
   const refused = await runtime.updateStatus({ session }, { subtaskId: 'T1', status: 'blocked', note: '先标记' })
   assert.equal(refused.ok, false, '运行中的写入必须被拒绝而不是抛出')
@@ -132,7 +132,7 @@ test('计划执行中改判被拒绝（TASK_RUNNING），并给出当前状态',
 
 test('基于旧 revision 的写入被拒绝（STALE_WRITE），不覆盖新证据', async () => {
   const { session, runtime } = makeRuntime(Promise.resolve(completed('完成')))
-  await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE,}, new AbortController().signal)
+  await runtime.dispatchTool({ session, options: {} }, { startPhases: MAIN_START_PHASES_FIXTURE,}, new AbortController().signal)
 
   const snapshot: any = await runtime.statusTool({ session }, {})
   const current = snapshot.statuses[0]

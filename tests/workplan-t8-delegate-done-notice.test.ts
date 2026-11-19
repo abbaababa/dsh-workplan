@@ -29,7 +29,8 @@ import { join } from 'node:path'
 import { createWorkplanRuntime } from '../src/runtime.js'
 import { applyStatus, createStatuses, flushPendingWorkplanUpdates } from '../src/plan.js'
 import { readDeptMessages } from '../src/dept-journal.js'
-import { MAIN_DEEP_THINK_FIXTURE } from './helpers/main-deep-think.js'
+import { MAIN_START_PHASES_FIXTURE } from './helpers/main-deep-think.js'
+import { memberDoneOutcome } from './helpers/member-done-outcome.js'
 
 process.env.DSH_WORKPLAN_LESSONS_FILE = join(tmpdir(), `t8-lessons-${process.pid}.jsonl`)
 process.env.DSH_WORKPLAN_JOURNAL_DIR = mkdtempSync(join(tmpdir(), `t8-journal-${process.pid}-`))
@@ -119,11 +120,12 @@ const consolidation = () => ({
   ],
 })
 const leafAgent = (childId: string) => ({ session: { id: childId, header: { parentSession: 'child-leader', cwd: '/tmp/t8-cwd' } }, options: { provider: 'qw', model: QWEN } })
-const doneOutcome = (text: string) => ({ stopReason: 'completed', output: [{ type: 'text', text }] })
+/* [修复] 完成回报必须携带结构化结果块（status=done + F10 report），否则结算判 failed。 */
+const doneOutcome = (text: string) => memberDoneOutcome(text)
 const rowOf = (record: any) => record.statuses[0]
 
 async function dispatchTwo(f: any) {
-  const review = await f.runtime.delegateTool(f.leaderAgent, { action: 'review', consolidation: consolidation() })
+  const review = await f.runtime.delegateTool(f.leaderAgent, { action: 'review', consolidation: consolidation(), startPhases: MAIN_START_PHASES_FIXTURE })
   assert.equal(review.ok, true, JSON.stringify(review))
   const r = await f.runtime.delegateTool(f.leaderAgent, { action: 'dispatch' })
   assert.equal(r.ok, true, JSON.stringify(r))
@@ -246,7 +248,7 @@ test('T8-6：selfEffort 接续结算同款路由到负责人会话（第二处�
       action: 'self_effort',
       reasoningEffort: 'medium',
       complexityRationale: '单点路由扩展，中等复杂度',
-      deepThink: MAIN_DEEP_THINK_FIXTURE,
+      startPhases: MAIN_START_PHASES_FIXTURE,
       // [2.3.0][T6] 开工前预估硬门禁：self_effort 必须携带 timeNotice。
       timeNotice: { declaredMinutes: 5, reason: '单点接线并自测' },
     },
@@ -302,7 +304,7 @@ const consolidation8 = () => ({
 
 test('T8-8：同一 tick 连续触发 8 个结算回调 ⇒ 恰 8 次投递、8 条留痕、每成员恰一条、结算互不覆盖（竞态治本）', async () => {
   const f = makeRuntime({}, '8')
-  await f.runtime.delegateTool(f.leaderAgent, { action: 'review', consolidation: consolidation8() })
+  await f.runtime.delegateTool(f.leaderAgent, { action: 'review', consolidation: consolidation8(), startPhases: MAIN_START_PHASES_FIXTURE })
   const r = await f.runtime.delegateTool(f.leaderAgent, { action: 'dispatch' })
   assert.equal(r.ok, true, JSON.stringify(r))
   assert.equal(f.spawned.length, 8, '复杂任务 8 人分工必须全部派生')

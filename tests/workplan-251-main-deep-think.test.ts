@@ -1,19 +1,15 @@
 /*
- * [2.5.1] 主 Agent 两轮深度思考协议（用户 2026-11-11 补充要求）底层机制回归。
+ * [3.0.8] 主 Agent 五步开工证据协议（用户 2026-11-18 单框架收口）底层机制回归。
  *
- * 用户要求：插件底层机制必须确保主 Agent 自己也做到——执行自己的任务时先
- * 全面、全盘、深入梳理、研究、思考自己的任务（第一轮），再基于第一轮完成好
- * 的所有结果再全面、全盘、深入地开展梳理、研究和思考，理清方法、流程和步骤
- * （第二轮），最后基于第二轮的方法、流程、步骤开始具体执行。
- *
- * 锁六件事：
- *  1. validateMainDeepThink 与执行者层同一口径（40/40/20 字下限），缺产物/
- *     太薄/缺依据都有明确拒因；
- *  2. dsh_workplan_dispatch 首次派发硬门禁：未交 MAIN_DEEP_THINK_MISSING、
- *     不合格 MAIN_DEEP_THINK_INCOMPLETE，拒绝不启动任何子 Agent、不刷派发预告；
+ * 历史口径：2.5.1 的「两轮深度思考」开工门禁已废除——两轮内容本就是五步工作法
+ * 第 1、2 步的子集，全系统只剩一套五步契约。本文件锁六件事：
+ *  1. validateStartPhaseEvidence 与执行者层同一口径（40/40/20/20/10/20 字下限，
+ *     缺产物/太薄/缺依据都有明确拒因）；
+ *  2. dsh_workplan_dispatch 首次派发硬门禁：未交 START_EVIDENCE_MISSING、
+ *     不合格 START_EVIDENCE_INCOMPLETE，拒绝不启动任何子 Agent、不刷派发预告；
  *  3. 合格产物登记到计划记录 + durable workplan-update（计划级，subtaskId=null）；
  *  4. 续跑/重试读档放行；重启回放（reconstructFromSession）消毒抬升不丢；
- *  5. 按 planId 记账：重规划的新计划必须重新两轮思考；终态拒绝顺序不变；
+ *  5. 按 planId 记账：重规划的新计划必须重新提交开工证据；终态拒绝顺序不变；
  *  6. PROMPT_SECTION 与工具 schema 同源告知协议与门禁。
  */
 import test, { after } from 'node:test'
@@ -21,9 +17,9 @@ import assert from 'node:assert/strict'
 
 import { buildPlanMessage, buildUpdateMessage, createStatuses } from '../src/plan.js'
 import { createWorkplanRuntime, reconstructFromSession } from '../src/runtime.js'
-import { sanitizeMainDeepThink, validateMainDeepThink } from '../src/three-phase.js'
+import { sanitizeStartPhaseEvidence, validateStartPhaseEvidence } from '../src/five-step.js'
 import { PROMPT_SECTION, createDispatchTool } from '../src/host.js'
-import { MAIN_DEEP_THINK_FIXTURE } from './helpers/main-deep-think.js'
+import { MAIN_START_PHASES_FIXTURE } from './helpers/main-deep-think.js'
 import { seedLeaderSelfEffort } from './helpers/self-effort-contract.js'
 
 const eventLoopAnchor = setInterval(() => {}, 1_000)
@@ -54,7 +50,7 @@ function makePlan() {
     sessionId: 'session-root',
     createdTurn: 1,
     createdAt: 1000,
-    title: '主 Agent 两轮深度思考回归',
+    title: '主 Agent 五步开工证据回归',
     taskUnderstanding: { originalRequest: '优化插件底层机制', deliverable: '补丁' },
     contradictions: { primary: { statement: '质量与时间' }, secondary: [], transformationConditions: [] },
     stages: [{
@@ -125,99 +121,132 @@ function releaseAll(spawned: any[]) {
   }
 }
 
+/**
+ * 归一化比对：validateStartPhaseEvidence/sanitizeStartPhaseEvidence 返回的 evidence
+ * 会在 planning 上补空 constraints/unknowns 数组（结算侧形状的同一解析器），
+ * 因此逐字段比对实质内容，而不是整体 deepEqual（键集合 intentionally 不同）。
+ */
+function assertEvidenceMatchesFixture(evidence: any) {
+  assert.ok(evidence, 'evidence 不能为空')
+  assert.deepEqual(evidence.planning.problemAnalysis, MAIN_START_PHASES_FIXTURE.planning.problemAnalysis)
+  assert.deepEqual(evidence.planning.approach, MAIN_START_PHASES_FIXTURE.planning.approach)
+  assert.deepEqual(evidence.planning.approachBasis, MAIN_START_PHASES_FIXTURE.planning.approachBasis)
+  assert.deepEqual(evidence.planning.resources, MAIN_START_PHASES_FIXTURE.planning.resources)
+  assert.deepEqual(evidence.planning.tools, MAIN_START_PHASES_FIXTURE.planning.tools)
+  assert.deepEqual(evidence.preparation, MAIN_START_PHASES_FIXTURE.preparation)
+}
+
+function fixtureWith(mutate: (input: any) => void) {
+  const input: any = structuredClone(MAIN_START_PHASES_FIXTURE)
+  mutate(input)
+  return input
+}
+
 /* ---------- 1. 纯逻辑判据（与执行者层同一口径） ---------- */
 
-test('validateMainDeepThink：两轮产物齐全 ⇒ ok 并归一化', () => {
-  const check = validateMainDeepThink(MAIN_DEEP_THINK_FIXTURE)
+test('validateStartPhaseEvidence：五步第 1/2/3 步产物齐全 ⇒ ok 并归一化', () => {
+  const check = validateStartPhaseEvidence(MAIN_START_PHASES_FIXTURE)
   assert.equal(check.ok, true, JSON.stringify(check))
-  assert.deepEqual(check.deepThink, MAIN_DEEP_THINK_FIXTURE)
+  assertEvidenceMatchesFixture(check.evidence)
 })
 
-test('validateMainDeepThink：缺产物/非对象 ⇒ MAIN_DEEP_THINK_MISSING，文案含协议与提交方式', () => {
+test('validateStartPhaseEvidence：缺产物/非对象 ⇒ START_EVIDENCE_MISSING，文案含协议与提交方式', () => {
   for (const value of [undefined, null, '一段文字', 42]) {
-    const check = validateMainDeepThink(value)
+    const check = validateStartPhaseEvidence(value)
     assert.equal(check.ok, false)
-    assert.equal(check.code, 'MAIN_DEEP_THINK_MISSING')
+    assert.equal(check.code, 'START_EVIDENCE_MISSING')
     assert.match(check.error!, /全面、全盘、深入梳理、研究、思考自己的任务/)
-    assert.match(check.error!, /deepThink/)
+    assert.match(check.error!, /startPhases/)
   }
 })
 
-test('validateMainDeepThink：第一轮太薄 ⇒ INCOMPLETE', () => {
-  const check = validateMainDeepThink({ ...MAIN_DEEP_THINK_FIXTURE, problemAnalysis: ['看一下任务'] })
+test('validateStartPhaseEvidence：第一步任务梳理太薄 ⇒ START_EVIDENCE_INCOMPLETE', () => {
+  const check = validateStartPhaseEvidence(fixtureWith((input) => {
+    input.planning.problemAnalysis = ['看一下任务']
+  }))
   assert.equal(check.ok, false)
-  assert.equal(check.code, 'MAIN_DEEP_THINK_INCOMPLETE')
+  assert.equal(check.code, 'START_EVIDENCE_INCOMPLETE')
   assert.match(check.error!, /problemAnalysis 太薄/)
 })
 
-test('validateMainDeepThink：缺第二轮依据 ⇒ INCOMPLETE（依赖不可审计不得放行）', () => {
-  const input: any = { ...MAIN_DEEP_THINK_FIXTURE }
-  delete input.approachBasis
-  const check = validateMainDeepThink(input)
+test('validateStartPhaseEvidence：缺第二步依据 ⇒ START_EVIDENCE_INCOMPLETE（依赖不可审计不得放行）', () => {
+  const check = validateStartPhaseEvidence(fixtureWith((input) => {
+    delete input.planning.approachBasis
+  }))
   assert.equal(check.ok, false)
-  assert.equal(check.code, 'MAIN_DEEP_THINK_INCOMPLETE')
+  assert.equal(check.code, 'START_EVIDENCE_INCOMPLETE')
   assert.match(check.error!, /approachBasis/)
 })
 
-test('validateMainDeepThink：第二轮方法流程步骤太薄 / 依据太薄 ⇒ INCOMPLETE', () => {
-  const thinApproach = validateMainDeepThink({ ...MAIN_DEEP_THINK_FIXTURE, approach: ['把任务做好'] })
+test('validateStartPhaseEvidence：第二步方法流程步骤太薄 / 依据太薄 ⇒ START_EVIDENCE_INCOMPLETE', () => {
+  const thinApproach = validateStartPhaseEvidence(fixtureWith((input) => {
+    input.planning.approach = ['把任务做好']
+  }))
   assert.equal(thinApproach.ok, false)
+  assert.equal(thinApproach.code, 'START_EVIDENCE_INCOMPLETE')
   assert.match(thinApproach.error!, /approach 太薄/)
-  const thinBasis = validateMainDeepThink({ ...MAIN_DEEP_THINK_FIXTURE, approachBasis: ['基于第一轮'] })
+  const thinBasis = validateStartPhaseEvidence(fixtureWith((input) => {
+    input.planning.approachBasis = ['基于第一步']
+  }))
   assert.equal(thinBasis.ok, false)
+  assert.equal(thinBasis.code, 'START_EVIDENCE_INCOMPLETE')
   assert.match(thinBasis.error!, /approachBasis 太薄/)
 })
 
-test('sanitizeMainDeepThink：回放消毒——合法归一化、非法/篡改 ⇒ null', () => {
-  assert.deepEqual(sanitizeMainDeepThink(MAIN_DEEP_THINK_FIXTURE), MAIN_DEEP_THINK_FIXTURE)
-  assert.equal(sanitizeMainDeepThink({ problemAnalysis: ['薄'] }), null)
-  assert.equal(sanitizeMainDeepThink(undefined), null)
+test('sanitizeStartPhaseEvidence：回放消毒——合法归一化、非法/篡改 ⇒ null', () => {
+  assertEvidenceMatchesFixture(sanitizeStartPhaseEvidence(MAIN_START_PHASES_FIXTURE))
+  assert.equal(sanitizeStartPhaseEvidence({ planning: { problemAnalysis: ['薄'] } }), null)
+  assert.equal(sanitizeStartPhaseEvidence(undefined), null)
+  assert.equal(sanitizeStartPhaseEvidence('一段文字'), null)
 })
 
 /* ---------- 2. 派发硬门禁 ---------- */
 
-test('dispatchTool：未交两轮产物 ⇒ MAIN_DEEP_THINK_MISSING 硬拒，不启动子 Agent、不刷派发预告', async () => {
+test('dispatchTool：未交开工证据 ⇒ START_EVIDENCE_MISSING 硬拒，不启动子 Agent、不刷派发预告', async () => {
   const { runtime, rootAgent, session, spawned } = makeRuntime()
   const out: any = await runtime.dispatchTool(rootAgent, { mode: 'async' }, new AbortController().signal)
   assert.equal(out.ok, false)
-  assert.equal(out.code, 'MAIN_DEEP_THINK_MISSING')
-  assert.match(out.error, /第一轮/)
+  assert.equal(out.code, 'START_EVIDENCE_MISSING')
+  assert.match(out.error, /全面、全盘、深入梳理、研究、思考自己的任务/)
   assert.match(out.hint, /approachBasis/)
   assert.equal(spawned.length, 0, '门禁拒绝不得启动任何子 Agent')
   assert.ok(!JSON.stringify(session.events).includes('派发预告'), '拒绝路径不得刷派发预告')
 })
 
-test('dispatchTool：产物不合格 ⇒ MAIN_DEEP_THINK_INCOMPLETE 硬拒，不启动子 Agent', async () => {
+test('dispatchTool：产物不合格 ⇒ START_EVIDENCE_INCOMPLETE 硬拒，不启动子 Agent', async () => {
   const { runtime, rootAgent, spawned } = makeRuntime()
   const out: any = await runtime.dispatchTool(rootAgent, {
     mode: 'async',
-    deepThink: { ...MAIN_DEEP_THINK_FIXTURE, approachBasis: [] },
+    startPhases: fixtureWith((input) => {
+      input.planning.approachBasis = []
+    }),
   }, new AbortController().signal)
   assert.equal(out.ok, false)
-  assert.equal(out.code, 'MAIN_DEEP_THINK_INCOMPLETE')
+  assert.equal(out.code, 'START_EVIDENCE_INCOMPLETE')
+  assert.match(out.error, /approachBasis/)
   assert.equal(spawned.length, 0)
 })
 
-test('dispatchTool：两轮产物合格 ⇒ 放行派发，登记到记录 + durable 持久化', async () => {
+test('dispatchTool：开工证据合格 ⇒ 放行派发，登记到记录 + durable 持久化', async () => {
   const { runtime, rootAgent, record, session, spawned } = makeRuntime()
-  const out: any = await runtime.dispatchTool(rootAgent, { mode: 'async', deepThink: MAIN_DEEP_THINK_FIXTURE }, new AbortController().signal)
+  const out: any = await runtime.dispatchTool(rootAgent, { mode: 'async', startPhases: MAIN_START_PHASES_FIXTURE }, new AbortController().signal)
   assert.equal(out.ok, true, JSON.stringify(out))
-  assert.ok(spawned.length >= 1, '合格产物必须放行派发')
-  assert.deepEqual(record.mainDeepThink, MAIN_DEEP_THINK_FIXTURE)
-  assert.equal(record.mainDeepThinkPlanId, 'wp-251-main')
-  const durable = session.events.filter((e: any) => e.type === 'user/message' && JSON.stringify(e.data).includes('mainDeepThink'))
+  assert.ok(spawned.length >= 1, '合格证据必须放行派发')
+  assertEvidenceMatchesFixture(record.mainStartPhases)
+  assert.equal(record.mainStartPhasesPlanId, 'wp-251-main')
+  const durable = session.events.filter((e: any) => e.type === 'user/message' && JSON.stringify(e.data).includes('mainStartPhases'))
   assert.ok(durable.length >= 1, '登记必须写 durable workplan-update（重启不丢）')
   assert.ok(JSON.stringify(durable[durable.length - 1]).includes('workplan-update'))
   releaseAll(spawned)
   await new Promise((resolve) => setTimeout(resolve, 20))
 })
 
-test('dispatchTool：登记后续跑不带 deepThink ⇒ 读档放行（不重复要求提交）', async () => {
+test('dispatchTool：登记后续跑不带 startPhases ⇒ 读档放行（不重复要求提交）', async () => {
   const { runtime, rootAgent, spawned } = makeRuntime()
-  const first: any = await runtime.dispatchTool(rootAgent, { mode: 'async', deepThink: MAIN_DEEP_THINK_FIXTURE }, new AbortController().signal)
+  const first: any = await runtime.dispatchTool(rootAgent, { mode: 'async', startPhases: MAIN_START_PHASES_FIXTURE }, new AbortController().signal)
   assert.equal(first.ok, true)
   const second: any = await runtime.dispatchTool(rootAgent, { mode: 'async' }, new AbortController().signal)
-  assert.ok(second.code !== 'MAIN_DEEP_THINK_MISSING' && second.code !== 'MAIN_DEEP_THINK_INCOMPLETE', `续跑被门禁误拦：${JSON.stringify(second)}`)
+  assert.ok(second.code !== 'START_EVIDENCE_MISSING' && second.code !== 'START_EVIDENCE_INCOMPLETE', `续跑被门禁误拦：${JSON.stringify(second)}`)
   assert.equal(second.ok, true)
   releaseAll(spawned)
   await new Promise((resolve) => setTimeout(resolve, 20))
@@ -225,39 +254,39 @@ test('dispatchTool：登记后续跑不带 deepThink ⇒ 读档放行（不重�
 
 /* ---------- 3. 回放与记账 ---------- */
 
-test('重启回放：durable 计划级产物消毒抬升 ⇒ 续跑读档放行', async () => {
+test('重启回放：durable 计划级证据消毒抬升 ⇒ 续跑读档放行', async () => {
   const plan = makePlan()
   const session = makeSession()
   session.append('user/message', buildPlanMessage(plan))
   session.append('user/message', buildUpdateMessage({
     planId: plan.planId,
     subtaskId: null,
-    mainDeepThink: MAIN_DEEP_THINK_FIXTURE,
-    mainDeepThinkPlanId: plan.planId,
+    mainStartPhases: MAIN_START_PHASES_FIXTURE,
+    mainStartPhasesPlanId: plan.planId,
   }))
   const rebuilt: any = reconstructFromSession(session)
-  assert.deepEqual(rebuilt.mainDeepThink, MAIN_DEEP_THINK_FIXTURE, '回放必须抬升计划级两轮产物')
-  assert.equal(rebuilt.mainDeepThinkPlanId, plan.planId)
+  assertEvidenceMatchesFixture(rebuilt.mainStartPhases)
+  assert.equal(rebuilt.mainStartPhasesPlanId, plan.planId)
 
   const { runtime, rootAgent, spawned } = makeRuntime()
   runtime.state.records.set(session.id, rebuilt)
   const out: any = await runtime.dispatchTool(rootAgent, { mode: 'async' }, new AbortController().signal)
-  assert.ok(out.code !== 'MAIN_DEEP_THINK_MISSING', '重启后续跑必须读档放行')
+  assert.ok(out.code !== 'START_EVIDENCE_MISSING', '重启后续跑必须读档放行')
   assert.equal(out.ok, true, JSON.stringify(out))
   releaseAll(spawned)
   await new Promise((resolve) => setTimeout(resolve, 20))
 })
 
-test('按 planId 记账：重规划的新计划是新任务 ⇒ 必须重新两轮思考', async () => {
+test('按 planId 记账：重规划的新计划是新任务 ⇒ 必须重新提交开工证据', async () => {
   const { runtime, rootAgent, record } = makeRuntime()
-  record.mainDeepThink = MAIN_DEEP_THINK_FIXTURE
-  record.mainDeepThinkPlanId = 'wp-old-plan'
+  record.mainStartPhases = MAIN_START_PHASES_FIXTURE
+  record.mainStartPhasesPlanId = 'wp-old-plan'
   const out: any = await runtime.dispatchTool(rootAgent, { mode: 'async' }, new AbortController().signal)
   assert.equal(out.ok, false)
-  assert.equal(out.code, 'MAIN_DEEP_THINK_MISSING')
+  assert.equal(out.code, 'START_EVIDENCE_MISSING')
 })
 
-test('终态拒绝顺序不变：已取消计划未交 deepThink 仍回 PLAN_CANCELLED', async () => {
+test('终态拒绝顺序不变：已取消计划未交 startPhases 仍回 PLAN_CANCELLED', async () => {
   const { runtime, rootAgent, record } = makeRuntime()
   record.cancelled = true
   record.phase = 'cancelled'
@@ -268,17 +297,23 @@ test('终态拒绝顺序不变：已取消计划未交 deepThink 仍回 PLAN_CAN
 
 /* ---------- 4. 提示词与工具 schema 同源告知 ---------- */
 
-test('PROMPT_SECTION 与 dispatch schema：协议全文 + 门禁码 + deepThink 必填三字段', () => {
+test('PROMPT_SECTION 与 dispatch schema：五步协议全文 + 门禁码 + startPhases 必填形状', () => {
   const text = String(PROMPT_SECTION)
-  assert.match(text, /主 Agent 两轮深度思考协议/)
-  assert.match(text, /先全面、全盘、深入梳理、研究、思考自己的任务/)
-  assert.match(text, /基于刚才第一轮完成好的所有结果，再全面、全盘、深入地开展梳理、研究和思考/)
+  assert.match(text, /主 Agent 五步开工证据协议/)
+  assert.match(text, /全面、全盘、深入梳理、研究、思考自己的任务/)
+  assert.match(text, /基于刚才第一步完成好的所有结果，再全面、全盘、深入地开展梳理、研究和思考/)
   assert.match(text, /方法、流程和步骤/)
-  assert.match(text, /MAIN_DEEP_THINK_MISSING/)
-  assert.match(text, /MAIN_DEEP_THINK_INCOMPLETE/)
+  assert.match(text, /START_EVIDENCE_MISSING/)
+  assert.match(text, /START_EVIDENCE_INCOMPLETE/)
+  assert.doesNotMatch(text, /两轮深度思考/, '3.0.8 起两轮深度思考协议已废除，不得再出现')
+  assert.doesNotMatch(text, /MAIN_DEEP_THINK/, '旧门禁码已废除，不得再出现')
   const tool: any = createDispatchTool({})
-  const deepThink = tool.parameters.properties.deepThink
-  assert.ok(deepThink, 'dispatch 工具必须暴露 deepThink 参数')
-  assert.deepEqual(deepThink.required, ['problemAnalysis', 'approach', 'approachBasis'])
-  assert.match(tool.description, /两轮深度思考/)
+  const startPhases = tool.parameters.properties.startPhases
+  assert.ok(startPhases, 'dispatch 工具必须暴露 startPhases 参数')
+  assert.deepEqual(startPhases.required, ['planning', 'preparation'])
+  assert.deepEqual(startPhases.properties.planning.required, ['problemAnalysis', 'approach', 'approachBasis', 'resources', 'tools'])
+  assert.deepEqual(startPhases.properties.preparation.required, ['prepared', 'evidence'])
+  assert.match(tool.description, /五步开工证据协议/)
+  assert.match(tool.description, /START_EVIDENCE_MISSING/)
+  assert.doesNotMatch(tool.description, /两轮深度思考/)
 })

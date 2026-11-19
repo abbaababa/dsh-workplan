@@ -12,6 +12,7 @@ import assert from 'node:assert/strict'
 import { createWorkplanRuntime } from '../src/runtime.js'
 import { createStatuses } from '../src/plan.js'
 import { buildDelegateePrompt } from '../src/llm-rules.js'
+import { MAIN_START_PHASES_FIXTURE } from './helpers/main-deep-think.js'
 
 function makeSession(id: string, parentSession?: string) {
   const events: any[] = []
@@ -102,7 +103,9 @@ function makeRuntime() {
 test('3.0.5：专家请示后禁止改派，负责人答复后必须原专家继续执行', async () => {
   const { runtime, record, leaderAgent, leafAgent } = makeRuntime()
 
-  const review = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation() })
+  // [3.0.8] 负责人 review 开工闸：必须随附五步第 1/2/3 步证据 startPhases（与
+  // 全仓库其他 delegate 用例同一合格夹具），缺交/不合格硬拒 START_EVIDENCE_*。
+  const review = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation(), startPhases: MAIN_START_PHASES_FIXTURE })
   assert.equal(review.ok, true, JSON.stringify(review))
   const dispatch = await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
   assert.equal(dispatch.ok, true, JSON.stringify(dispatch))

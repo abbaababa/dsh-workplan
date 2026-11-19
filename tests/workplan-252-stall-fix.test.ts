@@ -13,6 +13,8 @@
  *
  * 断言口径：R1 行为级（中断计数）；R3 文案/工厂行为级（假时钟）+ 接线源码锚定；
  * R2 源码锚定（runPlanner 需真实 LLM，行为验证留待主 Agent 重启后真实规划）。
+ * [3.0.8] review 同收 startPhases 开工证据（负责人开工闸）：本文件 review 调用
+ * 一律附共享合格夹具，被测的中断/心跳/门禁语义不变。
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -21,7 +23,7 @@ import { join } from 'node:path'
 
 import { buildDispatchHeartbeat, createPlanningHeartbeat, createStatuses } from '../src/plan.js'
 import { createWorkplanRuntime } from '../src/runtime.js'
-import { MAIN_DEEP_THINK_FIXTURE } from './helpers/main-deep-think.js'
+import { MAIN_START_PHASES_FIXTURE } from './helpers/main-deep-think.js'
 // [2.5.4][T4] 复杂档 ≥8 人分工表补充（D1/D2）：只补人数，断言意图零删改。
 import { gateMembers } from './helpers/delegate-consolidation.js'
 
@@ -94,7 +96,7 @@ const consolidation = (effort?: string) => ({
 
 test('R1：首次 review 登记整体档（真 phase-0）⇒ 中断接续保留', async () => {
   const { runtime, interrupts, leaderAgent } = makeRuntime()
-  const r = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation('xhigh') })
+  const r = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation('xhigh'), startPhases: MAIN_START_PHASES_FIXTURE })
   assert.equal(r.ok, true, JSON.stringify(r))
   assert.equal(interrupts.length, 1, 'phase-0 登记整体档必须中断以接续 phase-1（既有语义保留）')
   assert.deepEqual(interrupts[0], { childId: 'child-leader', parentId: 'session-root', mode: 'continuable' })
@@ -102,15 +104,15 @@ test('R1：首次 review 登记整体档（真 phase-0）⇒ 中断接续保留'
 
 test('R1：已登记整体档后重新 review（phase-1）⇒ 绝不中断（缺陷根因修复）', async () => {
   const { runtime, record, interrupts, leaderAgent } = makeRuntime()
-  await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation('xhigh') })
+  await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation('xhigh'), startPhases: MAIN_START_PHASES_FIXTURE })
   assert.equal(interrupts.length, 1)
   assert.equal(record.statuses[0].effortOverride, 'xhigh', '整体档已登记（模拟已进入 phase-1）')
   // phase-1 负责人重新 review：同档、换档、不带档三种形态都不得中断。
-  const same = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation('xhigh') })
+  const same = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation('xhigh'), startPhases: MAIN_START_PHASES_FIXTURE })
   assert.equal(same.ok, true)
-  const changed = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation('medium') })
+  const changed = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation('medium'), startPhases: MAIN_START_PHASES_FIXTURE })
   assert.equal(changed.ok, true)
-  const inherit = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation() })
+  const inherit = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation(), startPhases: MAIN_START_PHASES_FIXTURE })
   assert.equal(inherit.ok, true)
   assert.equal(interrupts.length, 1, 'phase-1 重新 review 不得产生任何新中断（旧缺陷：无条件中断致子会话 aborted、台账停摆）')
   assert.equal(record.statuses[0].effortOverride, 'medium', '换档 review 仍正常更新整体档（只修中断，不修登记）')
@@ -213,25 +215,25 @@ test('R2：规划器默认档=家族中等档（qwen=medium/非qwen=high），en
 
 /* ---------- 既有门禁语义不回归（冒烟） ---------- */
 
-test('冒烟：主 Agent deepThink 门禁与叶子 self_effort+deepThink 门禁语义保持', async () => {
+test('冒烟：主 Agent startPhases 门禁与叶子 self_effort+startPhases 门禁语义保持', async () => {
   const { runtime, leaderAgent, spawned } = makeRuntime()
-  // 主 Agent 门禁：无 deepThink 的 dispatch 仍被硬拒（不启动子 Agent）。
+  // 主 Agent 门禁：无 startPhases 的 dispatch 仍被硬拒（不启动子 Agent）。
   const rejected: any = await runtime.dispatchTool({ session: { id: 'session-root', header: { createdAt: 1000 } }, options: {} }, { mode: 'async' }, new AbortController().signal)
   assert.equal(rejected.ok, false)
-  assert.equal(rejected.code, 'MAIN_DEEP_THINK_MISSING')
+  assert.equal(rejected.code, 'START_EVIDENCE_MISSING')
   assert.equal(spawned.length, 0)
-  // 负责人 review 门禁：缺两轮产物仍被硬拒。
-  // [2.5.4][T3R1] 补足字数，使拒因仍落在被测的「缺两轮产物」（断言意图不变）。
-  const badReview = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: { problemAnalysis: ['现状：部门任务需要拆给专家与组员；目标是保质保量完成；约束是不改无关文件；主要矛盾是质量与时间。'], assignments: consolidation().assignments } })
+  // 负责人 review 门禁：缺分工表仍被硬拒（3.0.8 两轮产物闸已废除，薄/缺证据改由
+  // startPhases 开工闸承接——见 252-leaf 用例；本断言锁定 review 分工表闸不回归）。
+  const badReview = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: { assignments: [] }, startPhases: MAIN_START_PHASES_FIXTURE })
   assert.equal(badReview.ok, false)
   assert.equal(badReview.code, 'DELEGATE_CONSOLIDATION_INCOMPLETE')
-  // 叶子门禁：self_effort 缺 deepThink 仍被硬拒。
-  await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation() })
+  // 叶子门禁：self_effort 缺 startPhases 仍被硬拒。
+  await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation(), startPhases: MAIN_START_PHASES_FIXTURE })
   await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
   const leaf = { session: { id: 'member-1', header: { parentSession: 'child-leader', cwd: '/tmp/stall-cwd' } }, options: { provider: 'qw', model: QWEN } }
   const noThink = await runtime.delegateTool(leaf, { action: 'self_effort', reasoningEffort: 'xhigh', complexityRationale: '复杂' })
   assert.equal(noThink.ok, false)
-  assert.equal(noThink.code, 'DEEP_THINK_MISSING')
-  const withThink = await runtime.delegateTool(leaf, { action: 'self_effort', reasoningEffort: 'xhigh', complexityRationale: '复杂', deepThink: MAIN_DEEP_THINK_FIXTURE, timeNotice: { declaredMinutes: 15, reason: '复杂' } })
+  assert.equal(noThink.code, 'START_EVIDENCE_MISSING')
+  const withThink = await runtime.delegateTool(leaf, { action: 'self_effort', reasoningEffort: 'xhigh', complexityRationale: '复杂', startPhases: MAIN_START_PHASES_FIXTURE, timeNotice: { declaredMinutes: 15, reason: '复杂' } })
   assert.equal(withThink.ok, true, JSON.stringify(withThink))
 })

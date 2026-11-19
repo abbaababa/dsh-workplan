@@ -2,9 +2,10 @@
  * [2.3.9][T4b] 第三层派发工具（dsh_workplan_delegate）回归。
  *
  * 用户强制要求 4/5 的可执行形式：
- *  - 要求 4：部门负责人必须先「全面、全盘、深入梳理」，再把任务分配给本部门
- *    相关领域全球顶尖专家（expert）与本部门组员（member）——review 硬门禁 +
- *    角色配比（各至少 1 名）由服务端强制，提示词绕不过；
+ *  - 要求 4：[3.0.8] 部门负责人先完成五步前三步（任务梳理 + 资源/工具/方案研究 +
+ *    准备就绪，随 review 的 startPhases 提交，开工闸 validateStartPhaseEvidence 硬拒
+ *    缺交/不合格：START_EVIDENCE_MISSING / START_EVIDENCE_INCOMPLETE），再把任务分配给
+ *    本部门相关领域全球顶尖专家（expert）——review 硬门禁由服务端强制，提示词绕不过；
  *  - 要求 5：每位下级按自己分到任务的复杂度配置推理等级并全程应用——等级随
  *    spawn 的 agentOptions 下发，越界档按模型家族合法集合钳制并留痕
  *    （qwen→low/medium/xhigh；非qwen→low/high/max）；
@@ -18,6 +19,9 @@ import assert from 'node:assert/strict'
 
 import { createWorkplanRuntime } from '../src/runtime.js'
 import { createStatuses, flushPendingWorkplanUpdates } from '../src/plan.js'
+// [3.0.8] 五步开工证据共享夹具：review 随附 startPhases（第 1/2/3 步证据）过开工闸。
+import { MAIN_START_PHASES_FIXTURE } from './helpers/main-deep-think.js'
+import { memberDoneOutcome } from './helpers/member-done-outcome.js'
 
 function makePlan() {
   return {
@@ -95,13 +99,11 @@ function makeRuntime(model: string, provider = 'qw') {
   return { runtime, record, rootSession, subagents, leaderAgent }
 }
 
+// [3.0.8] 夹具适配：consolidation 只携带分工表——problemAnalysis/approach/approachBasis
+// 等两轮思考产物已随 deepThink 门禁废除，第 1/2/3 步证据改由 startPhases 开工闸校验
+//（与主 Agent/专家同一判据，缺交 ⇒ START_EVIDENCE_MISSING）。low 禁派闸仍由任务行
+// 声明档（reasoningEffort:'high'）放行，2 人分工与既有断言保持不变。
 const goodConsolidation = (efforts: { expert: string; member: string }) => ({
-  // [2.5.4][T3R1] 夹具适配：补足合计字数 ≥40/40/20（断言意图零改动）。
-  problemAnalysis: ['现状：需要把部门任务拆给专家与组员；目标是保质保量完成；约束是不改无关文件；主要矛盾是质量与时间。', '主要矛盾：质量与时间'],
-  constraints: ['不得改动无关文件'],
-  unknowns: [],
-  approach: ['专家做核心实现：先确认入口再最小改动，并附聚焦单测自测', '组员做自测：逐条核对验收标准并落盘留证'],
-  approachBasis: ["第二轮分工的方法、流程、步骤基于第一轮完成好的全部结果：质量与时间的主要矛盾决定专家承担核心实现、组员承担自测与证据，约束决定不改无关文件。"],
   assignments: [
     { member: 'Expert-A', role: 'expert', task: '实现核心逻辑后自测', reasoningEffort: efforts.expert, qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
     { member: 'Member-B', role: 'expert', task: '补充核心路径回归用例', reasoningEffort: efforts.member, qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
@@ -143,31 +145,36 @@ test('delegateTool：childId 未登记的子会话被拒（NO_SUBTASK）', async
   assert.equal(result.code, 'NO_SUBTASK')
 })
 
-/* ---------- 2. 梳理硬门禁（要求 4） ---------- */
+/* ---------- 2. 开工/分工硬门禁（要求 4，3.0.8 startPhases 口径） ---------- */
 
-test('delegateTool：未提交梳理产物直接 dispatch ⇒ DELEGATE_CONSOLIDATION_MISSING（硬门禁）', async () => {
+test('delegateTool：未提交分工表直接 dispatch ⇒ DELEGATE_CONSOLIDATION_MISSING（硬门禁）', async () => {
   const { runtime, leaderAgent } = makeRuntime('qwen3.8-flash')
   const result = await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
   assert.equal(result.ok, false)
   assert.equal(result.code, 'DELEGATE_CONSOLIDATION_MISSING')
-  assert.match(result.error, /梳理/)
+  assert.match(result.error, /分工表/)
 })
 
-test('delegateTool：review 缺 problemAnalysis / assignments ⇒ 拒绝并给出缺口', async () => {
+test('delegateTool：review 缺 startPhases / 缺 assignments ⇒ 拒绝并给出缺口', async () => {
   const { runtime, leaderAgent } = makeRuntime('qwen3.8-flash')
-  const noAnalysis = await runtime.delegateTool(leaderAgent, {
+  // [3.0.8] 新契约：review 的开工证据走 startPhases（原「consolidation 缺 problemAnalysis」
+  // 两轮闸口径已废除）——分工表合格但第 1/2/3 步证据缺交 ⇒ START_EVIDENCE_MISSING。
+  const noStartPhases = await runtime.delegateTool(leaderAgent, {
     action: 'review',
     consolidation: { assignments: [{ member: 'A', role: 'expert', task: '读取目标文件得出一份结论', reasoningEffort: 'low', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] }] },
   })
-  assert.equal(noAnalysis.ok, false)
-  assert.match(noAnalysis.error, /problemAnalysis/)
+  assert.equal(noStartPhases.ok, false)
+  assert.equal(noStartPhases.code, 'START_EVIDENCE_MISSING')
+  assert.match(noStartPhases.error, /startPhases/)
 
+  // 开工证据合格但 consolidation 缺分工表 ⇒ 拒因落在被测的 assignments 缺口（断言意图不变）。
   const noAssignments = await runtime.delegateTool(leaderAgent, {
     action: 'review',
-    // [2.5.4][T3R1] 补足字数，使拒因落在被测的 assignments 缺口（断言意图不变）。
-    consolidation: { problemAnalysis: ['现状：部门任务需要拆给专家与组员；目标是保质保量完成；约束是不改无关文件；主要矛盾是质量与时间。'] },
+    consolidation: {},
+    startPhases: MAIN_START_PHASES_FIXTURE,
   })
   assert.equal(noAssignments.ok, false)
+  assert.equal(noAssignments.code, 'DELEGATE_CONSOLIDATION_INCOMPLETE')
   assert.match(noAssignments.error, /assignments/)
 })
 
@@ -175,11 +182,11 @@ test('delegateTool：组员角色取消后，非 expert 角色入参 ⇒ DELEGAT
   const { runtime, leaderAgent } = makeRuntime('qwen3.8-flash')
   const result = await runtime.delegateTool(leaderAgent, {
     action: 'review',
+    // [3.0.8] consolidation 只携带分工表；startPhases 随附过开工闸，使拒因落在被测的角色校验。
     consolidation: {
-      // [2.5.4][T3R1] 补足字数，使拒因落在被测的角色配比（断言意图不变）。
-      problemAnalysis: ['现状：部门任务需要拆给专家与组员；目标是保质保量完成；约束是不改无关文件；主要矛盾是质量与时间。'],
       assignments: [{ member: 'A', role: 'worker', task: '读取目标文件得出一份结论', reasoningEffort: 'low', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] }],
     },
+    startPhases: MAIN_START_PHASES_FIXTURE,
   })
   assert.equal(result.ok, false)
   assert.equal(result.code, 'DELEGATE_ASSIGNMENT_INVALID')
@@ -193,6 +200,7 @@ test('delegateTool：qwen 模型上 review 通过；越界档 max→xhigh 钳制
   const result = await runtime.delegateTool(leaderAgent, {
     action: 'review',
     consolidation: goodConsolidation({ expert: 'max', member: 'low' }),
+    startPhases: MAIN_START_PHASES_FIXTURE,
   })
   assert.equal(result.ok, true, JSON.stringify(result))
   const expert = result.members.find((m: any) => m.role === 'expert')
@@ -214,16 +222,14 @@ test('delegateTool：非 qwen 模型上 medium→low、xhigh→high 钳制；max
   const { runtime, leaderAgent } = makeRuntime('gpt-5', 'openai')
   const result = await runtime.delegateTool(leaderAgent, {
     action: 'review',
+    // [3.0.8] consolidation 只携带分工表；第 1/2/3 步证据经 startPhases 过开工闸。
     consolidation: {
-      // [2.5.4][T3R1] 夹具适配：补足合计字数 ≥40/40/20（断言意图零改动）。
-      problemAnalysis: ['现状：部门任务需要拆给专家与组员；目标是保质保量完成；约束是不改无关文件；主要矛盾是质量与时间。'],
-      approach: ['专家做复杂任务：先确认入口再最小改动，并附聚焦单测自测', '组员做轻度任务：逐条核对验收标准并落盘留证'],
-      approachBasis: ['第二轮分工基于第一轮梳理：任务复杂度差异决定专家承担复杂任务、组员承担轻度任务。'],
       assignments: [
         { member: 'E', role: 'expert', task: '承担复杂核心任务', reasoningEffort: 'max', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
         { member: 'M', role: 'expert', task: '承担轻度辅助任务', reasoningEffort: 'medium', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
       ],
     },
+    startPhases: MAIN_START_PHASES_FIXTURE,
   })
   assert.equal(result.ok, true, JSON.stringify(result))
   /*
@@ -244,6 +250,7 @@ test('delegateTool：dispatch 为每位下级派生第三层子会话——等�
   const review = await runtime.delegateTool(leaderAgent, {
     action: 'review',
     consolidation: goodConsolidation({ expert: 'xhigh', member: 'low' }),
+    startPhases: MAIN_START_PHASES_FIXTURE,
   })
   assert.equal(review.ok, true)
   const result = await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
@@ -279,7 +286,7 @@ test('delegateTool：dispatch 为每位下级派生第三层子会话——等�
 
 test('delegateTool：下级仍有 running 时重复 dispatch ⇒ DELEGATE_ALREADY_RUNNING', async () => {
   const { runtime, leaderAgent } = makeRuntime('qwen3.8-flash')
-  await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: goodConsolidation({ expert: 'medium', member: 'low' }) })
+  await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: goodConsolidation({ expert: 'medium', member: 'low' }), startPhases: MAIN_START_PHASES_FIXTURE })
   const first = await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
   assert.equal(first.ok, true)
   const second = await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
@@ -289,12 +296,9 @@ test('delegateTool：下级仍有 running 时重复 dispatch ⇒ DELEGATE_ALREAD
 
 test('delegateTool：下级结算后台账更新为 done/failed，summary 与 error 落档', async () => {
   const { runtime, leaderAgent, subagents, record } = makeRuntime('qwen3.8-flash')
-  await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: goodConsolidation({ expert: 'medium', member: 'low' }) })
+  await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: goodConsolidation({ expert: 'medium', member: 'low' }), startPhases: MAIN_START_PHASES_FIXTURE })
   await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
-  subagents.spawned[0].resolveResult({
-    stopReason: 'completed',
-    output: [{ type: 'text', text: '专家结论：已完成并自测通过' }],
-  })
+  subagents.spawned[0].resolveResult(memberDoneOutcome('专家结论：已完成并自测通过'))
   subagents.spawned[1].resolveResult({ stopReason: 'error', diagnostic: '子会话异常' })
   await new Promise((resolve) => setTimeout(resolve, 10))
   const row = record.statuses[0]
@@ -342,7 +346,7 @@ test('delegateTool：spawn 抛错时该成员记为 rejected，其余成员不�
     session: { id: 'child-leader', header: { parentSession: 'session-root' } },
     options: { provider: 'qw', model: 'qwen3.8-flash' },
   }
-  await rt.delegateTool(agent, { action: 'review', consolidation: goodConsolidation({ expert: 'medium', member: 'low' }) })
+  await rt.delegateTool(agent, { action: 'review', consolidation: goodConsolidation({ expert: 'medium', member: 'low' }), startPhases: MAIN_START_PHASES_FIXTURE })
   const result = await rt.delegateTool(agent, { action: 'dispatch' })
   assert.equal(result.ok, false, '全部成员派发被拒时 ok=false')
   assert.equal(result.rejected.length, 2)

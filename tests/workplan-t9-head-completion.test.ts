@@ -38,7 +38,7 @@ import {
 import { createWorkplanRuntime, reconstructFromSession } from '../src/runtime.js'
 import { readDeptMessages } from '../src/dept-journal.js'
 import { seedLeaderSelfEffort } from './helpers/self-effort-contract.js'
-import { MAIN_DEEP_THINK_FIXTURE } from './helpers/main-deep-think.js'
+import { MAIN_START_PHASES_FIXTURE } from './helpers/main-deep-think.js'
 
 const ROOT_ID = 'session-t9-root'
 /* 工作区内临时目录（沙箱 workspace-write；cwd 恒为插件根目录）。 */
@@ -249,7 +249,7 @@ test('A1+A3：wait 模式三部门分别完成，主会话各收 1 条独立汇�
   makeJournalDir('a1')
   const plan = makePlan([subtask('T1', 'engineering'), subtask('T2', 'research'), subtask('T3', 'design')])
   const { session, runtime, gates } = makeRuntime(plan)
-  const dispatching = runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'wait' }, new AbortController().signal)
+  const dispatching = runtime.dispatchTool({ session, options: {} }, { startPhases: MAIN_START_PHASES_FIXTURE, mode: 'wait' }, new AbortController().signal)
   await releaseInOrder(gates, [doneOutput('T1'), doneOutput('T2'), doneOutput('T3')])
   const out: any = await dispatching
   assert.equal(out.ok, true, JSON.stringify(out))
@@ -316,7 +316,7 @@ test('A2：wait 模式结果块缺失但盘上备份新鲜且归属匹配 ⇒ �
   const future = new Date(Date.now() + 60_000)
   utimesSync(backupFile, future, future)
   const { session, runtime, gates } = makeRuntime(plan, { cwd, strictEvidence: true })
-  const dispatching = runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'wait' }, new AbortController().signal)
+  const dispatching = runtime.dispatchTool({ session, options: {} }, { startPhases: MAIN_START_PHASES_FIXTURE, mode: 'wait' }, new AbortController().signal)
   assert.ok(await waitFor(() => gates.length >= 1), 'T1 应被派发')
   /* 子会话只交散文（忘记结果块）：插件侧采纳备份结算——汇报不依赖子 Agent
    * 执行 dispatch、也不依赖任何重启/安装动作。 */
@@ -343,7 +343,7 @@ test('D7 反例：unverified/空验收/缺失产物都保留结算通知但明�
   makeJournalDir('d7')
   const plan = makePlan([subtask('T1', 'engineering'), subtask('T2', 'research', { acceptance: [] }), subtask('T3', 'design')])
   const { session, runtime, gates } = makeRuntime(plan)
-  const dispatching = runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'wait' }, new AbortController().signal)
+  const dispatching = runtime.dispatchTool({ session, options: {} }, { startPhases: MAIN_START_PHASES_FIXTURE, mode: 'wait' }, new AbortController().signal)
   await releaseInOrder(gates, [
     /* T1：验收 unverified → done 但证据未验证。 */
     doneOutput('T1', { acceptance: [{ criterion: 'T1 交付物存在', result: 'unverified', evidence: '' }] }),
@@ -383,7 +383,7 @@ test('D6：通知写失败置 reportPending＋failed 留痕（不静默）；恢
     if (failNotice && type === 'user/message' && text.includes('【关键进度】T1 完成')) throw new Error('log full')
     return originalAppend(type, data)
   }
-  await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
+  await runtime.dispatchTool({ session, options: {} }, { startPhases: MAIN_START_PHASES_FIXTURE, mode: 'async' }, new AbortController().signal)
   assert.ok(await waitFor(() => gates.length >= 1), 'T1 应被派发')
   gates[0].release(completed(doneOutput('T1')))
   /* 写失败：failed 留痕落盘、reportPending=true、绝不记无证据的 reported。 */

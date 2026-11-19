@@ -3,8 +3,8 @@
  *
  * 单一事实源：两条会话固定文案、部门任务质量要求、极简任务硬门槛、专家精简
  * JSON 汇报、部门负责人精简 JSON 汇总。渲染函数与校验函数同源，保证提示词里
- * 写的规则与门禁实际执行的规则不可能分叉（与 2.x 的 comm-format / three-phase
- * 同一哲学）。
+ * 写的规则与门禁实际执行的规则不可能分叉（与 2.x 的 comm-format / three-phase、
+ * 3.0.8 的 five-step 同一哲学）。
  *
  * 纯函数、零依赖（不 import plan.ts，避免循环依赖），可被 host/plan/runtime/
  * llm-rules 与测试同口径消费。
@@ -408,7 +408,7 @@ export interface ReportCheck {
 /**
  * 校验专家精简 JSON 汇报（用户要求 7）。
  *
- * 只做结构/精简判定，不判语义真伪（诚信由 F9 与三阶段门禁兜底）。
+ * 只做结构/精简判定，不判语义真伪（诚信由 F9 与五步证据门禁兜底）。
  */
 export function checkExpertReport(report: unknown): ReportCheck {
   if (!report || typeof report !== 'object' || Array.isArray(report)) {

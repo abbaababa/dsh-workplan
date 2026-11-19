@@ -26,6 +26,8 @@ import {
 } from '../src/plan.js'
 import { planDelegations, resolveTaskEffort } from '../src/llm-rules.js'
 import { createWorkplanRuntime } from '../src/runtime.js'
+// [3.0.8] 五步开工证据共享夹具：runtime review 随附 startPhases（第 1/2/3 步证据）过开工闸。
+import { MAIN_START_PHASES_FIXTURE } from './helpers/main-deep-think.js'
 
 const QWEN = 'qwen3-max-preview'
 
@@ -45,12 +47,11 @@ function assignments8(extra: any[] = []) {
   return [...assignments(extra), ...fillers]
 }
 
+// [3.0.8] 夹具适配：consolidation 只携带分工表——两轮思考产物（problemAnalysis/
+// approach/approachBasis）已随 deepThink 门禁废除；planDelegations 纯函数测试不经
+// 开工闸，runtime 端到端用例随附 startPhases（见下方「要求2 端到端」）。
 function consolidation(overrides: any = {}) {
   return {
-    // [2.5.4][T3R1] 夹具适配：补足合计字数 ≥40/40/20（断言意图零改动）。
-    problemAnalysis: ['现状：部门任务需要拆给专家与组员；目标是保质保量完成；约束是不改无关文件；主要矛盾是质量与时间。', '主要矛盾：质量与时间'],
-    approach: ['专家做实现：先确认入口再最小改动，并附聚焦单测自测', '组员做证据：逐条核对验收标准并落盘留证'],
-    approachBasis: ["第二轮分工的方法、流程、步骤基于第一轮完成好的全部结果：质量与时间的主要矛盾决定专家承担核心实现、组员承担自测与证据，约束决定不改无关文件。"],
     assignments: assignments(),
     ...overrides,
   }
@@ -195,6 +196,7 @@ test('要求2 端到端：review 配置整体等级 → 状态行 effortOverride
   const review = await runtime.delegateTool(leaderAgent, {
     action: 'review',
     consolidation: consolidation({ taskReasoningEffort: 'high', assignments: assignments8() }),
+    startPhases: MAIN_START_PHASES_FIXTURE,
   })
   assert.equal(review.ok, true)
   assert.equal(review.taskEffort, 'medium')
@@ -214,9 +216,12 @@ test('要求2 端到端：review 配置整体等级 → 状态行 effortOverride
   assert.equal(status.effortOverride, 'medium')
 })
 
-test('要求5：版本声明统一 3.0.6（2.5.0 断言随定版升级）', () => {
+// [3.0.8] 版本声明统一 3.0.8（3.0.8 重构定版；package.json 与 src/host.ts meta 已升 3.0.8）。
+// 注意：tests/fixtures/tool-surface.json 的 version 字段仍停在上版（共享夹具，不在本
+// 文件可编辑范围）——断言保持与包版本一致，夹具升版后自然恢复通过。
+test('要求5：版本声明统一 3.0.8（2.5.0 断言随定版升级）', () => {
   const pkg = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8'))
-  assert.equal(pkg.version, '3.0.6')
+  assert.equal(pkg.version, '3.0.8')
   const fixture = JSON.parse(readFileSync(join(process.cwd(), 'tests/fixtures/tool-surface.json'), 'utf8'))
-  assert.equal(fixture.version, '3.0.6')
+  assert.equal(fixture.version, pkg.version, 'tool-surface 清单版本必须与包版本统一（共享夹具待升 3.0.8）')
 })

@@ -25,7 +25,7 @@ import {
   parseCancelMessage,
 } from '../src/plan.js'
 import { createWorkplanRuntime, reconstructFromSession } from '../src/runtime.js'
-import { MAIN_DEEP_THINK_FIXTURE } from './helpers/main-deep-think.js'
+import { MAIN_START_PHASES_FIXTURE } from './helpers/main-deep-think.js'
 
 function makePlan(planId = 'wp-a') {
   return {
@@ -95,7 +95,7 @@ test('取消之后的 dispatch 必须被拒绝，且不会启动任何部门 Age
   const cancelled = await runtime.cancelPlan({ session }, { planId: 'wp-a', reason: '用户取消' })
   assert.equal(cancelled.phase, 'cancelled')
 
-  const out = await runtime.dispatchTool({ session }, { deepThink: MAIN_DEEP_THINK_FIXTURE, planId: 'wp-a', mode: 'async' }, new AbortController().signal)
+  const out = await runtime.dispatchTool({ session }, { startPhases: MAIN_START_PHASES_FIXTURE, planId: 'wp-a', mode: 'async' }, new AbortController().signal)
   assert.equal(out.ok, false, 'a cancelled plan must never answer ok:true')
   assert.equal(out.code, 'PLAN_CANCELLED')
   assert.match(String(out.error), /不会再启动任何部门 Agent/)
@@ -110,7 +110,7 @@ test('派发途中连续两次取消只写一条取消消息', async () => {
     totalTimeoutMs: 300,
   })
 
-  const started = await runtime.dispatchTool({ session }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
+  const started = await runtime.dispatchTool({ session }, { startPhases: MAIN_START_PHASES_FIXTURE, mode: 'async' }, new AbortController().signal)
   assert.equal(started.running, true)
   const inflight = runtime.state.records.get(session.id).dispatchPromise
 

@@ -128,7 +128,7 @@ test('tool-output-contract: hold/release 的 render 语义（门禁文案三分�
     /已设为认可闸门按住/,
   )
 
-  // 「闸门已解除但 deepThink 门禁拒派发」不得误报成未解除（ok=false 但 gateReleased=true）
+  // 「闸门已解除但 startPhases 门禁拒派发」不得误报成未解除（ok=false 但 gateReleased=true）
   assert.match(
     renderText('dsh_workplan_release', { ok: false, gateReleased: true, hold: { reason: 'r' }, dispatch: { ok: false, error: 'e', code: 'X' } }),
     /已解除，但派发未通过/,

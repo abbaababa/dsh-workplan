@@ -23,7 +23,7 @@ import {
   createWorkplanRuntime,
   modelStatusLines,
 } from '../src/runtime.js'
-import { MAIN_DEEP_THINK_FIXTURE } from './helpers/main-deep-think.js'
+import { MAIN_START_PHASES_FIXTURE } from './helpers/main-deep-think.js'
 
 const eventLoopAnchor = setInterval(() => {}, 1_000)
 const dropEventLoopAnchor = setTimeout(() => clearInterval(eventLoopAnchor), 60_000)
@@ -139,7 +139,7 @@ test('场景A：预估上报后通知含预估分钟与「告知用户」义务�
   // 专家才上报预估。派发前无活跃 record，timeNotice 属契约外输入（QA 记录为
   // 观察项 D-T3-1，非 2.3.0 回归：2.2.0 O-2a 起行为相同），本用例走真实时序。
   const { session, runtime, gate, hasStarted } = makeRuntime('wp-qa-a', ['T1_report.md'], { childTimeoutMs: 30_000 })
-  await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
+  await runtime.dispatchTool({ session, options: {} }, { startPhases: MAIN_START_PHASES_FIXTURE, mode: 'async' }, new AbortController().signal)
   assert.ok(await waitFor(hasStarted, 5_000), 'T1 应已派发')
   const res: any = await runtime.updateStatus({ session }, {
     subtaskId: 'T1',
@@ -166,7 +166,7 @@ test('场景A：预估上报后通知含预估分钟与「告知用户」义务�
 
 test('场景B（新契约）：旧 extendMs 只返回 TIME_LIMITS_DISABLED，不写截止/不投延期告知', async () => {
   const { session, runtime, gate, sent, hasStarted } = makeRuntime('wp-qa-b', ['T1_report.md'], { childTimeoutMs: 30_000 })
-  await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
+  await runtime.dispatchTool({ session, options: {} }, { startPhases: MAIN_START_PHASES_FIXTURE, mode: 'async' }, new AbortController().signal)
   assert.ok(await waitFor(hasStarted, 5_000), 'T1 应已派发')
   const before = await rowOf(runtime, session)
   assert.equal(before?.deadlineAt ?? null, null, '运行中状态行不再有 deadlineAt')
@@ -186,7 +186,7 @@ test('场景B（新契约）：旧 extendMs 只返回 TIME_LIMITS_DISABLED，不
 
 test('场景B（新契约）：旧 400ms 窗口到点仍执行，不产生执行中断/放宽/接手通知', async () => {
   const { session, runtime, gate, hasStarted } = makeRuntime('wp-qa-b2', ['T1_report.md'], { childTimeoutMs: 400, totalTimeoutMs: 400_000 })
-  await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
+  await runtime.dispatchTool({ session, options: {} }, { startPhases: MAIN_START_PHASES_FIXTURE, mode: 'async' }, new AbortController().signal)
   assert.ok(await waitFor(hasStarted, 5_000), 'T1 应已派发')
   await new Promise((resolve) => setTimeout(resolve, 900))
   const row = await rowOf(runtime, session)
@@ -207,7 +207,7 @@ test('场景C（新契约）：旧 900ms 窗口运行两倍时长仍不接手，
   writeFileSync(artifact, earlyWork)
   const hashBefore = sha256(artifact)
   const { session, runtime, gate, hasStarted } = makeRuntime('wp-qa-c', ['T1_report.md', 'T1_tests.md'], { childTimeoutMs: 900, totalTimeoutMs: 400_000 })
-  await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
+  await runtime.dispatchTool({ session, options: {} }, { startPhases: MAIN_START_PHASES_FIXTURE, mode: 'async' }, new AbortController().signal)
   assert.ok(await waitFor(hasStarted, 5_000), 'T1 应已派发')
   await new Promise((resolve) => setTimeout(resolve, 1_800))
   const row: any = await rowOf(runtime, session)
@@ -226,7 +226,7 @@ test('场景C（新契约）：旧 900ms 窗口运行两倍时长仍不接手，
 
 test('场景D：不超时正常完成——既有结算路径零变化，无接手/放宽/预估通知、专家零打扰', async () => {
   const { session, runtime, gate, sent, hasStarted } = makeRuntime('wp-qa-d', ['T1_report.md'], { childTimeoutMs: 30_000 })
-  await runtime.dispatchTool({ session, options: {} }, { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' }, new AbortController().signal)
+  await runtime.dispatchTool({ session, options: {} }, { startPhases: MAIN_START_PHASES_FIXTURE, mode: 'async' }, new AbortController().signal)
   assert.ok(await waitFor(hasStarted, 5_000), 'T1 应已派发')
   const running = await rowOf(runtime, session)
   assert.match(String(running?.status ?? ''), /in_progress|running/, '运行中状态行应为执行中')

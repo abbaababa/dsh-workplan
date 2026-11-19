@@ -26,6 +26,8 @@ import { join } from 'node:path'
 import { applyStatus, buildPlanMessage, buildUpdateMessage, createStatuses, parseUpdateMessage } from '../src/plan.js'
 import { createWorkplanRuntime, reconstructFromSession } from '../src/runtime.js'
 import { readDeptMessages } from '../src/dept-journal.js'
+// [3.0.8] 五步开工证据共享夹具：review 随附 startPhases（第 1/2/3 步证据）过开工闸。
+import { MAIN_START_PHASES_FIXTURE } from './helpers/main-deep-think.js'
 
 const ROOT = 'session-root'
 const HEAD = 'child-leader'
@@ -500,12 +502,9 @@ test('消毒：非法子对象 fail-closed 丢弃；超限字段截断（不入�
  *    断言对齐契约 v1 子对象形状；原扁平字段用例已废弃，不留两套契约）
  * ------------------------------------------------------------------ */
 
+// [3.0.8] 夹具适配：consolidation 只携带分工表（两轮思考产物已废除）；第 1/2/3 步
+// 开工证据经 startPhases 随 review 提交（见下方 dispatched() 的 review 调用）。
 const consolidation = {
-  problemAnalysis: ['现状：需要把部门任务拆给专家与组员；目标是保质保量完成；约束是不改无关文件；主要矛盾是质量与时间。', '主要矛盾：质量与时间'],
-  constraints: ['不得改动无关文件'],
-  unknowns: [],
-  approach: ['专家做核心实现：先确认入口再最小改动，并附聚焦单测自测', '组员做自测：逐条核对验收标准并落盘留证'],
-  approachBasis: ['第二轮分工的方法、流程、步骤基于第一轮完成好的全部结果：质量与时间的主要矛盾决定专家承担核心实现、组员承担自测与证据。'],
   assignments: [
     { member: 'Expert-A', role: 'expert', task: '实现核心逻辑后自测', reasoningEffort: 'medium', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
     { member: 'Member-B', role: 'expert', task: '补充核心路径回归用例', reasoningEffort: 'low', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
@@ -557,7 +556,7 @@ async function dispatched(planId: string) {
   const leaf1Agent = { session: leaf1, options: { provider: 'qw', model: 'qwen3.8-flash' } }
   const leaf2Agent = { session: leaf2, options: { provider: 'qw', model: 'qwen3.8-flash' } }
   const rootAgent = { session: rootSession, options: {} }
-  const review = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation })
+  const review = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation, startPhases: MAIN_START_PHASES_FIXTURE })
   assert.equal(review.ok, true, JSON.stringify(review))
   const dispatch = await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
   assert.equal(dispatch.ok, true, JSON.stringify(dispatch))

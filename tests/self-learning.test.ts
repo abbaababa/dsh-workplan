@@ -20,7 +20,7 @@ import {
   adjudicateResult,
   buildChildPrompt,
 } from '../src/plan.js'
-import { validatePhaseEvidence } from '../src/three-phase.js'
+import { validateFiveStepEvidence } from '../src/five-step.js'
 import {
   fingerprintLesson,
   lessonStats,
@@ -97,12 +97,12 @@ test('复盘校验：四项齐全且有实质内容才通过', () => {
 test('阶段三证据：缺复盘无法判 done，补齐后通过并保留复盘内容', () => {
   const noRetro = phases()
   delete (noRetro.verification as any).retrospective
-  const rejected = validatePhaseEvidence(noRetro, ['A1'])
+  const rejected = validateFiveStepEvidence(noRetro, ['A1'])
   assert.equal(rejected.ok, false)
   assert.match(rejected.errors.join('；'), /retrospective/)
   assert.equal(rejected.failedPhase, 'verification')
 
-  const ok = validatePhaseEvidence(phases(), ['A1'])
+  const ok = validateFiveStepEvidence(phases(), ['A1'])
   assert.equal(ok.ok, true)
   assert.equal(ok.phases?.verification.retrospective.prevention.length, 1)
 })

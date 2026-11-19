@@ -12,7 +12,7 @@
  *   A1② 非法值（0/-3/2.5/'abc'/缺 declaredMinutes/＞10080/非对象）⇒ ESTIMATE_INVALID（含 D9 原话）
  *   A1③ 合法正整数 ⇒ ok:true＋estimate 附回＋自配档接续；边界 1/10080；reason 缺省文案「理由：无」
  *   A1④ 重派读档：已配档+已思考但无预估 ⇒ leafPhaseZero 回 phase-0；三者齐全 ⇒ 直接 phase-1（含分钟数）
- *   A1序 校验顺序 reasoningEffort→complexityRationale→deepThink→timeNotice（旧拒因保持）
+ *   A1序 校验顺序 reasoningEffort→complexityRationale→startPhases→timeNotice（旧拒因保持）
  *   A2⑤ 8 成员逐一上报不同分钟数 ⇒ delegateEstimates 8 键＋delegates[].estimate 8 条＋journal 8 条
  *        kind=estimate，from.member/from.sessionId/to.sessionId 归属逐一正确（临时目录留痕）
  *   A2路由 row.childId 缺失回退 leaderId（契约 §4）
@@ -38,7 +38,7 @@ import { createWorkplanRuntime, modelStatusLines, reconstructFromSession } from 
 import { readDeptMessages } from '../src/dept-journal.js'
 import { buildDelegateePrompt, buildLlmRulesBrief, buildPhaseZeroDelegateePrompt } from '../src/llm-rules.js'
 import { createDelegateTool } from '../src/host.js'
-import { MAIN_DEEP_THINK_FIXTURE } from './helpers/main-deep-think.js'
+import { MAIN_START_PHASES_FIXTURE } from './helpers/main-deep-think.js'
 
 const ROOT = 'session-root'
 const HEAD = 'child-leader'
@@ -150,7 +150,7 @@ const consolidation8 = () => ({
 
 async function dispatched(planId: string, consolidation: any = consolidation8()) {
   const f = makeFixture(planId)
-  const review = await f.runtime.delegateTool(f.leaderAgent, { action: 'review', consolidation })
+  const review = await f.runtime.delegateTool(f.leaderAgent, { action: 'review', consolidation, startPhases: MAIN_START_PHASES_FIXTURE })
   assert.equal(review.ok, true, JSON.stringify(review))
   const dispatch = await f.runtime.delegateTool(f.leaderAgent, { action: 'dispatch' })
   assert.equal(dispatch.ok, true, JSON.stringify(dispatch))
@@ -160,7 +160,7 @@ async function dispatched(planId: string, consolidation: any = consolidation8())
 const selfArgs = (minutes: any, over: any = {}) => ({
   action: 'self_effort', reasoningEffort: 'xhigh',
   complexityRationale: '非常复杂：多夹具融合与冻结契约逐条锁定',
-  deepThink: MAIN_DEEP_THINK_FIXTURE,
+  startPhases: MAIN_START_PHASES_FIXTURE,
   timeNotice: { declaredMinutes: minutes, reason: '夹具预估' },
   ...over,
 })
@@ -191,7 +191,7 @@ test('A1① 缺 timeNotice ⇒ ESTIMATE_MISSING：不登记、startActivation �
   assert.equal(f.spawned.length, before, '拒绝不得产生 phase-1 接续激活（成员未进入执行态）')
   const row = rowOf(f)
   assert.equal(row.delegateSelfEfforts, undefined, '拒绝不得登记自配档')
-  assert.equal(row.delegateDeepThinks, undefined, '拒绝不得登记思考产物')
+  assert.equal(row.delegateStartPhases, undefined, '拒绝不得登记思考产物')
   assert.equal(row.delegateEstimates, undefined, '拒绝不得登记预估')
   assert.equal(row.delegates[0].selfEffort, undefined)
   assert.equal(row.delegates[0].estimate, undefined)
@@ -273,9 +273,9 @@ test('A1序 校验顺序不变：非法档/缺依据/缺思考先于 timeNotice�
   const noWhy = await f.runtime.delegateTool(f.leafAgent('member-1'), { action: 'self_effort', reasoningEffort: 'medium' })
   assert.equal(noWhy.code, 'SELF_EFFORT_RATIONALE_MISSING')
   const noThink = await f.runtime.delegateTool(f.leafAgent('member-1'), { action: 'self_effort', reasoningEffort: 'xhigh', complexityRationale: '非常复杂' })
-  assert.equal(noThink.code, 'DEEP_THINK_MISSING', 'deepThink 先于 timeNotice 校验')
-  const thin = await f.runtime.delegateTool(f.leafAgent('member-1'), selfArgs(17, { deepThink: { ...MAIN_DEEP_THINK_FIXTURE, problemAnalysis: ['看一下'] } }))
-  assert.equal(thin.code, 'DEEP_THINK_INCOMPLETE')
+  assert.equal(noThink.code, 'START_EVIDENCE_MISSING', 'startPhases 先于 timeNotice 校验')
+  const thin = await f.runtime.delegateTool(f.leafAgent('member-1'), selfArgs(17, { startPhases: { planning: { ...MAIN_START_PHASES_FIXTURE.planning, problemAnalysis: ['看一下'] }, preparation: MAIN_START_PHASES_FIXTURE.preparation } }))
+  assert.equal(thin.code, 'START_EVIDENCE_INCOMPLETE')
   assert.equal(f.spawned.length, 8)
 })
 
@@ -294,9 +294,9 @@ test('A1③边界 declaredMinutes=1 与 10080 放行；reason 缺省文案「理
 
 test('A1④a 重派读档：已配档+已思考但无预估 ⇒ leafPhaseZero 回 phase-0 补交', async () => {
   const f = await dispatched('wp-t6est-a1replay0')
-  const legacy = rowOf(f).delegates.map((d: any) => ({ ...d, status: 'failed', ...(d.member === 'Expert-A' ? { selfEffort: 'xhigh', deepThink: MAIN_DEEP_THINK_FIXTURE } : {}) }))
+  const legacy = rowOf(f).delegates.map((d: any) => ({ ...d, status: 'failed', ...(d.member === 'Expert-A' ? { selfEffort: 'xhigh', startPhases: MAIN_START_PHASES_FIXTURE } : {}) }))
   f.record.statuses = applyStatus(f.record.statuses, 'T1', {
-    delegates: legacy, delegateSelfEfforts: { 'Expert-A': 'xhigh' }, delegateDeepThinks: { 'Expert-A': MAIN_DEEP_THINK_FIXTURE },
+    delegates: legacy, delegateSelfEfforts: { 'Expert-A': 'xhigh' }, delegateStartPhases: { 'Expert-A': MAIN_START_PHASES_FIXTURE },
   })
   const again = await f.runtime.delegateTool(f.leaderAgent, { action: 'dispatch' })
   assert.equal(again.ok, true, JSON.stringify(again))
@@ -310,9 +310,9 @@ test('A1④a 重派读档：已配档+已思考但无预估 ⇒ leafPhaseZero �
 test('A1④b 重派读档：自配档+思考+预估三者齐全 ⇒ 直接 phase-1，接续文案含预估分钟数', async () => {
   const f = await dispatched('wp-t6est-a1replay1')
   const estimate = { declaredMinutes: 17, reason: '读档预估', at: 1500, messageId: 'msg-r', delivery: 'sent' }
-  const legacy = rowOf(f).delegates.map((d: any) => ({ ...d, status: 'failed', ...(d.member === 'Expert-A' ? { selfEffort: 'xhigh', deepThink: MAIN_DEEP_THINK_FIXTURE, estimate } : {}) }))
+  const legacy = rowOf(f).delegates.map((d: any) => ({ ...d, status: 'failed', ...(d.member === 'Expert-A' ? { selfEffort: 'xhigh', startPhases: MAIN_START_PHASES_FIXTURE, estimate } : {}) }))
   f.record.statuses = applyStatus(f.record.statuses, 'T1', {
-    delegates: legacy, delegateSelfEfforts: { 'Expert-A': 'xhigh' }, delegateDeepThinks: { 'Expert-A': MAIN_DEEP_THINK_FIXTURE }, delegateEstimates: { 'Expert-A': estimate },
+    delegates: legacy, delegateSelfEfforts: { 'Expert-A': 'xhigh' }, delegateStartPhases: { 'Expert-A': MAIN_START_PHASES_FIXTURE }, delegateEstimates: { 'Expert-A': estimate },
   })
   const again = await f.runtime.delegateTool(f.leaderAgent, { action: 'dispatch' })
   assert.equal(again.ok, true, JSON.stringify(again))

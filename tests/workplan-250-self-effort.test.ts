@@ -9,6 +9,8 @@
  * 成员自配为权威；继承仅旧计划回放兼容。持久化：effortOverride（既有）+
  * delegates[].selfEffort/delegateSelfEfforts（新增）消毒+durable 写入与回放消费
  * 双侧接线+重置保留+重试/续跑沿用。
+ * [3.0.8] review 同收 startPhases 五步开工证据（负责人开工闸）：本文件 review
+ * 调用一律附共享合格夹具，自配档被测语义不变。
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -16,7 +18,8 @@ import assert from 'node:assert/strict'
 import { createWorkplanRuntime, reconstructFromSession, dispatchPlan } from '../src/runtime.js'
 import { applyStatus, buildPlanMessage, buildUpdateMessage, createStatuses, flushPendingWorkplanUpdates } from '../src/plan.js'
 import { planDelegations } from '../src/llm-rules.js'
-import { MAIN_DEEP_THINK_FIXTURE } from './helpers/main-deep-think.js'
+import { MAIN_START_PHASES_FIXTURE } from './helpers/main-deep-think.js'
+import { memberDoneOutcome } from './helpers/member-done-outcome.js'
 
 const QWEN = 'qwen3-max-preview'
 
@@ -98,7 +101,7 @@ const effortOf = (s: any) => s.request.agentOptions.reasoningEffort
 test('自配档：dispatch 叶子 phase-0 一律 low 启动，任务书唯一职责=self_effort 自配（分工表档降为建议）', async () => {
   const { runtime, spawned, leaderAgent } = makeRuntime()
   // [2.5.4][T4] 按 D1/D2 新契约适配，意图不变：声明 xhigh=复杂 ⇒ 分工表扩到 8 人，phase-0 强制 low 的被测行为不变。
-  await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation({ taskReasoningEffort: 'xhigh', assignments: assignments8() }) })
+  await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation({ taskReasoningEffort: 'xhigh', assignments: assignments8() }), startPhases: MAIN_START_PHASES_FIXTURE })
   const r = await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
   assert.equal(r.ok, true, JSON.stringify(r))
   for (const s of spawned) {
@@ -113,9 +116,9 @@ test('自配档 e2e：叶子 self_effort 登记（钳制留痕）→ 平台以�
   const { runtime, record, rootSession, spawned, interrupts, leaderAgent } = makeRuntime()
   // [2.5.5][T3] 原则①：review 补复杂声明＋8 人表绕过禁派闸；self_effort/接续被测意图不变，
   // 接续激活索引随 8 叶子顺延（spawned[2]→spawned[8]）。
-  await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation({ taskReasoningEffort: 'xhigh', assignments: assignments8() }) })
+  await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation({ taskReasoningEffort: 'xhigh', assignments: assignments8() }), startPhases: MAIN_START_PHASES_FIXTURE })
   await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
-  const r = await runtime.delegateTool(leafAgent('member-1'), { action: 'self_effort', reasoningEffort: 'max', complexityRationale: '跨模块根因排查，验证难度高', deepThink: MAIN_DEEP_THINK_FIXTURE, timeNotice: { declaredMinutes: 20, reason: '跨模块根因排查，验证难度高' } })
+  const r = await runtime.delegateTool(leafAgent('member-1'), { action: 'self_effort', reasoningEffort: 'max', complexityRationale: '跨模块根因排查，验证难度高', startPhases: MAIN_START_PHASES_FIXTURE, timeNotice: { declaredMinutes: 20, reason: '跨模块根因排查，验证难度高' } })
   assert.equal(r.ok, true, JSON.stringify(r))
   assert.equal(r.selfEffort, 'xhigh', 'qwen 家族 max→xhigh 钳制')
   assert.equal(r.clamped.requested, 'max')
@@ -138,7 +141,7 @@ test('自配档 e2e：叶子 self_effort 登记（钳制留痕）→ 平台以�
   flushPendingWorkplanUpdates(rootSession)
   assert.match(JSON.stringify(rootSession.events), /selfEffort/, 'durable workplan-update 携带 selfEffort')
   // phase-1 结算正常落档
-  spawned[8].resolveResult({ stopReason: 'completed', output: [{ type: 'text', text: '专家结论：完成' }] })
+  spawned[8].resolveResult(memberDoneOutcome('专家结论：完成'))
   await new Promise((resolve) => setTimeout(resolve, 10))
   assert.equal(record.statuses[0].delegates[0].status, 'done')
 })
@@ -146,7 +149,7 @@ test('自配档 e2e：叶子 self_effort 登记（钳制留痕）→ 平台以�
 test('自配档：非法档拒绝/缺依据拒绝/非叶子拒绝（平台硬校验）', async () => {
   const { runtime, leaderAgent } = makeRuntime()
   // [2.5.5][T3] 原则①：review 补复杂声明＋8 人表绕过禁派闸，self_effort 硬校验断言逐字保留。
-  await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation({ taskReasoningEffort: 'xhigh', assignments: assignments8() }) })
+  await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation({ taskReasoningEffort: 'xhigh', assignments: assignments8() }), startPhases: MAIN_START_PHASES_FIXTURE })
   await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
   const bad = await runtime.delegateTool(leafAgent('member-1'), { action: 'self_effort', reasoningEffort: 'ultra', complexityRationale: 'x' })
   assert.equal(bad.ok, false); assert.equal(bad.code, 'SELF_EFFORT_INVALID')
@@ -161,9 +164,9 @@ test('自配档：非法档拒绝/缺依据拒绝/非叶子拒绝（平台硬校
 test('自配档：接续失败重试 1 次仍败 ⇒ SELF_EFFORT_CONTINUATION_FAILED 显式报错，禁止静默降档，自配档保留', async () => {
   const { runtime, record, spawned, spawnAttempts, leaderAgent } = makeRuntime({ failPhase1: true })
   // [2.5.5][T3] 原则①：review 补复杂声明＋8 人表；failPhase1 阈值同步为 8 次 phase-0 之后。
-  await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation({ taskReasoningEffort: 'xhigh', assignments: assignments8() }) })
+  await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation({ taskReasoningEffort: 'xhigh', assignments: assignments8() }), startPhases: MAIN_START_PHASES_FIXTURE })
   await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
-  const r = await runtime.delegateTool(leafAgent('member-1'), { action: 'self_effort', reasoningEffort: 'medium', complexityRationale: '中等复杂度', deepThink: MAIN_DEEP_THINK_FIXTURE, timeNotice: { declaredMinutes: 15, reason: '中等复杂度' } })
+  const r = await runtime.delegateTool(leafAgent('member-1'), { action: 'self_effort', reasoningEffort: 'medium', complexityRationale: '中等复杂度', startPhases: MAIN_START_PHASES_FIXTURE, timeNotice: { declaredMinutes: 15, reason: '中等复杂度' } })
   assert.equal(r.ok, false)
   assert.equal(r.code, 'SELF_EFFORT_CONTINUATION_FAILED')
   assert.equal(spawnAttempts.count, 10, '必须恰好重试 1 次（8 次 phase-0 成功 + 2 次接续尝试失败）')
@@ -178,9 +181,9 @@ test('自配档：接续失败重试 1 次仍败 ⇒ SELF_EFFORT_CONTINUATION_FA
 test('自配档：重置保留 delegateSelfEfforts；重派直接以自配档接续 phase-1（不再 phase-0）', async () => {
   const { runtime, record, spawned, leaderAgent } = makeRuntime()
   // [2.5.5][T3] 原则①：review 补复杂声明＋8 人表绕过禁派闸；重置保留/重派读档意图不变。
-  await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation({ taskReasoningEffort: 'xhigh', assignments: assignments8() }) })
+  await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation({ taskReasoningEffort: 'xhigh', assignments: assignments8() }), startPhases: MAIN_START_PHASES_FIXTURE })
   await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
-  await runtime.delegateTool(leafAgent('member-1'), { action: 'self_effort', reasoningEffort: 'xhigh', complexityRationale: '非常复杂', deepThink: MAIN_DEEP_THINK_FIXTURE, timeNotice: { declaredMinutes: 25, reason: '非常复杂' } })
+  await runtime.delegateTool(leafAgent('member-1'), { action: 'self_effort', reasoningEffort: 'xhigh', complexityRationale: '非常复杂', startPhases: MAIN_START_PHASES_FIXTURE, timeNotice: { declaredMinutes: 25, reason: '非常复杂' } })
   // 全部结算后重派：Expert-A 已自配 ⇒ phase-1 直连；Member-B 未自配 ⇒ 仍 phase-0。
   // [2.5.5][T3] 8 叶子＋1 接续全部以中断结算（原 2 叶子逐个 resolve 的等价扩展）。
   for (const s of spawned) s.resolveResult({ stopReason: 'error', diagnostic: '中断' })
@@ -191,7 +194,7 @@ test('自配档：重置保留 delegateSelfEfforts；重派直接以自配档接
   record.statuses[0].status = 'in_progress'
   record.statuses[0].childId = 'child-leader'
   // 重置清掉 consolidation（尝试痕迹）⇒ 重新 review 后才可 dispatch；自配档台账保留。
-  const reReview = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation({ taskReasoningEffort: 'xhigh', assignments: assignments8() }) })
+  const reReview = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation({ taskReasoningEffort: 'xhigh', assignments: assignments8() }), startPhases: MAIN_START_PHASES_FIXTURE })
   assert.equal(reReview.ok, true, JSON.stringify(reReview))
   const again = await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
   assert.equal(again.ok, true, JSON.stringify(again))
@@ -241,7 +244,7 @@ test('自配档：负责人 phase-0 low → review 自配 → 平台以自配档
         reviewDone = await runtime.delegateTool(
           { session: { id: act.childId, header: { parentSession: 'session-root', cwd: '/tmp/self-cwd' } }, options: { provider: 'qw', model: QWEN } },
           // [2.5.4][T4] 按 D1/D2 新契约适配，意图不变：声明 xhigh=复杂 ⇒ 分工表扩到 8 人，负责人 phase-0→phase-1 接续意图不变。
-          { action: 'review', consolidation: consolidation({ taskReasoningEffort: 'xhigh', assignments: assignments8() }) },
+          { action: 'review', consolidation: consolidation({ taskReasoningEffort: 'xhigh', assignments: assignments8() }), startPhases: MAIN_START_PHASES_FIXTURE },
         )
         spawned[spawned.length - 1].resolveResult({ stopReason: 'completed', output: [{ type: 'text', text: 'phase-0 梳理完成：主要矛盾是质量与时间' }] })
       }, 0)

@@ -4,8 +4,12 @@
  * 预期唯一来源：spec:192-194（AC-Q5-1…AC-Q5-3）。
  * GAP-6：C-Q5-01 依赖 T7 变更说明落盘；未落盘 ⇒ pending-unverified（t.todo），
  * 由 T8 复核清单承接，不伪造通过。
- * GAP-2：基线清单＝T6 首跑前快照 reports/simple-criterion-v2-history-baseline.txt
- * （候选三文件实测均在盘：T10R-final-acceptance / T11-acceptance / evidence-index）。
+ * GAP-2：基线清单＝T6 首跑前快照 reports/simple-criterion-v2-history-baseline.txt。
+ * 2026-11-18 按同一快照程序刷新（shasum -a 256 重拍、shasum -c 复核）：T10R-final-acceptance /
+ * T11-acceptance 两份历史验收报告在 2026-11-18 仓库清理（2.8GB→108MB，commit 26fddc2 同批）
+ * 中从规范位置移除——移除前留存的副本（_t4_regression_final_20261113/after-copy/reports/）经
+ * shasum -a 256 复核与基线哈希逐位一致（内容未被改写），故自清单移除；evidence-index 仍在盘
+ * 且哈希与 T6 快照一致，继续作为防改写锚点。
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'

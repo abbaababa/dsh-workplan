@@ -14,7 +14,7 @@ import assert from 'node:assert/strict'
 import { buildChildPrompt, validatePlan } from '../src/plan.js'
 import { buildPlanMessage } from '../src/plan.js'
 import { createWorkplanRuntime } from '../src/runtime.js'
-import { MAIN_DEEP_THINK_FIXTURE } from './helpers/main-deep-think.js'
+import { MAIN_START_PHASES_FIXTURE } from './helpers/main-deep-think.js'
 
 const eventLoopAnchor = setInterval(() => {}, 1_000)
 const dropEventLoopAnchor = setTimeout(() => clearInterval(eventLoopAnchor), 60_000)
@@ -253,7 +253,7 @@ async function dispatchAndReadStatus(subtask: any, sessionId: string) {
   })
   const dispatchP = runtime.dispatchTool(
     { session, options: {} },
-    { deepThink: MAIN_DEEP_THINK_FIXTURE, mode: 'async' },
+    { startPhases: MAIN_START_PHASES_FIXTURE, mode: 'async' },
     new AbortController().signal,
   )
   assert.ok(await waitFor(() => started), 'T1 应已派发')

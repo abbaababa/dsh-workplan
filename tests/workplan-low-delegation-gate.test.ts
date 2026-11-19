@@ -1,22 +1,28 @@
 /*
  * [2.5.5][T3] low 任务禁止下派 ＋ direct 负责人亲自执行登记 · 聚焦测试矩阵。
+ * [3.0.8] 五步工作法单框架收口适配：direct/review 的开工证据改经 startPhases
+ * 提交（validateStartPhaseEvidence 同一判据，与主 Agent/叶子同口径），
+ * DELEGATE_DIRECT_THINK_* 拒因码改名为 DELEGATE_DIRECT_START_*；
+ * consolidation 瘦身为 { taskReasoningEffort?, taskReasoningEffortDeclared?, assignments }。
  *
  * 唯一规格：plugins/dsh-workplan/reports/wp-T3-impl-spec-20261114.md（§3/§4/§5/§9）。
  * 真源：llm-rules.ts planDelegations（禁派闸 DELEGATE_LOW_TASK_FORBIDDEN，判定链
  *   taskReasoningEffortDeclared ?? declaredEffort ?? taskRowEffort ?? 视同 low，
  *   钳制前判定、独立于 complexTask）；runtime.ts delegateTool（review/dispatch 两
- *   入口同判据＋direct 分支＋防注入剥离＋status low 直执 hint）；three-phase.ts
- *   validateMainDeepThink（40/40/20 同一判据）。
+ *   入口同判据＋direct 分支＋防注入剥离＋status low 直执 hint）；five-step.ts
+ *   validateStartPhaseEvidence（40/40/20＋20/10/20/20 同一判据）。
  * 夹具仿照 tests/workplan-254-t3-deep-gate.test.ts 与 workplan-250-head-delegation.test.ts
  *   （createWorkplanRuntime + makePlan/makeSession + fake subagents + durable 回放）。
  * 矩阵分组（用例↔矩阵映射见 reports/wp-T3-tests-note.md）：
  *   A 四态（显式 low／皆缺视同 low／行级兜底 low／medium+ 放行）
  *   B 非法值仍 DELEGATE_TASK_EFFORT_INVALID＋拒因顺序不变
  *   C review/dispatch 双入口同判据＋钳制前声明记忆防误杀＋防注入剥离
- *   D direct：low 登记＋effortOverride 落位／复杂档拒／带分工表拒／40/40/20 门禁／防旁路
+ *   D direct：low 登记＋effortOverride 落位／复杂档拒／带分工表拒／startPhases 开工
+ *     证据门禁／防旁路
  *   E 钳制前判定（非 qwen medium 仍按复杂判）
  *   F 非 low 既有行为回归（≥8 闸／角色配比／钳制留痕／S4 独立链）
  *   G direct 全链 e2e（规格 §9 direct 专项：phase-0 结算闸接续，attempt 不耗）
+ *   X durable 缺口备案（3.0.8 行级 startPhases 回放口径实测）
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -28,7 +34,9 @@ import {
   MIN_PLANNING_APPROACH_CHARS,
   MIN_PLANNING_BASIS_CHARS,
   MIN_PLANNING_PROBLEM_CHARS,
-} from '../src/three-phase.js'
+  START_EVIDENCE_MIN_CHARS_BRIEF,
+} from '../src/five-step.js'
+import { MAIN_START_PHASES_FIXTURE } from './helpers/main-deep-think.js'
 
 const QWEN = 'qwen3.8-flash'
 const OTHER = 'gpt-5'
@@ -37,22 +45,19 @@ const LOW_FORBIDDEN = 'DELEGATE_LOW_TASK_FORBIDDEN'
 /** 确定性字数夹具：n 个汉字，length 恰为 n。 */
 const chars = (n: number) => '字'.repeat(n)
 
-/** 合格两轮思考产物（恰好 40/40/20 边界，判据真源 three-phase 常量）。 */
-function goodThink(overrides: any = {}) {
-  return {
-    problemAnalysis: [chars(MIN_PLANNING_PROBLEM_CHARS)],
-    approach: [chars(MIN_PLANNING_APPROACH_CHARS)],
-    approachBasis: [chars(MIN_PLANNING_BASIS_CHARS)],
-    ...overrides,
+/** 合格五步开工证据（共享夹具深拷贝；flat 覆盖：planning 键入 planning，其余入 preparation）。 */
+function goodPhases(overrides: any = {}) {
+  const base: any = JSON.parse(JSON.stringify(MAIN_START_PHASES_FIXTURE))
+  for (const [key, value] of Object.entries(overrides)) {
+    if (key in base.planning) base.planning[key] = value
+    else base.preparation[key] = value
   }
+  return base
 }
 
-/** 合格梳理产物（真实文本，字数沿用 254-t3 已核验夹具：48/46/70）。 */
+/** 合格分工表（3.0.8 瘦身后：只带 assignments，可覆盖 taskReasoningEffort 等）。 */
 function goodConsolidation(overrides: any = {}) {
   return {
-    problemAnalysis: ['现状：部门任务需要拆给专家与组员；目标是保质保量完成；约束是不改无关文件；主要矛盾是质量与时间。'],
-    approach: ['专家做核心实现：先确认入口再最小改动，并附聚焦单测自测', '组员做自测：逐条核对验收标准并落盘留证'],
-    approachBasis: ['第二轮分工的方法、流程、步骤基于第一轮完成好的全部结果：质量与时间的主要矛盾决定专家承担核心实现、组员承担自测与证据，约束决定不改无关文件。'],
     assignments: [
       { member: 'Expert-A', role: 'expert', task: '实现核心逻辑后自测', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
       { member: 'Member-B', role: 'expert', task: '补充核心路径回归用例', qualityRequirements: ['必须给出可复核的命令输出或文件证据'] },
@@ -61,7 +66,7 @@ function goodConsolidation(overrides: any = {}) {
   }
 }
 
-/** 复杂任务合规分工表：1 expert + 7 member = 8 人（D1/D2 ≥8 闸）。 */
+/** 复杂任务合规分工表：8 名专家（D1/D2 ≥8 闸；组员角色已取消）。 */
 function eight(extra: any[] = []) {
   const fillers = Array.from({ length: 6 }, (_, i) => ({
     member: `组员${'丙丁戊己庚辛'[i]}`, role: 'expert', task: `单一目标子任务 ${i + 3}（单一主产物、可独立验收）`, qualityRequirements: ['必须给出可复核的命令输出或文件证据'],
@@ -148,13 +153,14 @@ const lastAudit = (record: any) => {
 
 /* ---------- A 四态 ---------- */
 
-test('A1 单元：显式 low 声明 ⇒ DELEGATE_LOW_TASK_FORBIDDEN＋文案四要素（亲自执行/direct、40/40/20、无例外、不回溯）', () => {
+test('A1 单元：显式 low 声明 ⇒ DELEGATE_LOW_TASK_FORBIDDEN＋文案四要素（亲自执行/direct、七项字数下限、无例外、不回溯）', () => {
   const r = planDelegations({ consolidation: goodConsolidation({ taskReasoningEffort: 'low' }), model: QWEN })
   assert.equal(r.ok, false)
   assert.equal(r.code, LOW_FORBIDDEN)
   assert.match(r.error!, /亲自执行/)
   assert.match(r.error!, /action="direct"/)
-  assert.match(r.error!, /40\/40\/20/)
+  // [修复] 判据从「40/40/20」简写升级为与校验器同源的完整七项下限简报。
+  assert.ok(r.error!.includes(START_EVIDENCE_MIN_CHARS_BRIEF))
   assert.match(r.error!, /无任何例外通道/)
   assert.match(r.error!, /不回溯/)
   assert.deepEqual(r.members, [])
@@ -187,25 +193,25 @@ test('A4 单元：medium/high/xhigh/max 声明放行（qwen，≥8 人）＋钳�
 
 test('A5 runtime：review 四态——显式 low／皆缺／行级兜底 low 均拒＋gateAudit 留痕；medium 放行', async () => {
   const explicit = makeRuntime(QWEN)
-  const r1 = await explicit.runtime.delegateTool(explicit.leaderAgent, { action: 'review', consolidation: goodConsolidation({ taskReasoningEffort: 'low' }) })
+  const r1 = await explicit.runtime.delegateTool(explicit.leaderAgent, { action: 'review', consolidation: goodConsolidation({ taskReasoningEffort: 'low' }), startPhases: goodPhases() })
   assert.equal(r1.ok, false)
   assert.equal(r1.code, LOW_FORBIDDEN)
   assert.deepEqual(lastAudit(explicit.record), ['review', false, LOW_FORBIDDEN])
   const missing = makeRuntime(QWEN) // 计划行无 reasoningEffort、行上无 effortOverride、梳理无声明
-  const r2 = await missing.runtime.delegateTool(missing.leaderAgent, { action: 'review', consolidation: goodConsolidation() })
+  const r2 = await missing.runtime.delegateTool(missing.leaderAgent, { action: 'review', consolidation: goodConsolidation(), startPhases: goodPhases() })
   assert.equal(r2.code, LOW_FORBIDDEN)
   const rowLow = makeRuntime(QWEN, { rowEffort: 'low' })
-  const r3 = await rowLow.runtime.delegateTool(rowLow.leaderAgent, { action: 'review', consolidation: goodConsolidation() })
+  const r3 = await rowLow.runtime.delegateTool(rowLow.leaderAgent, { action: 'review', consolidation: goodConsolidation(), startPhases: goodPhases() })
   assert.equal(r3.code, LOW_FORBIDDEN)
   const ok = makeRuntime(QWEN)
-  const r4 = await ok.runtime.delegateTool(ok.leaderAgent, { action: 'review', consolidation: goodConsolidation({ taskReasoningEffort: 'medium', assignments: eight() }) })
+  const r4 = await ok.runtime.delegateTool(ok.leaderAgent, { action: 'review', consolidation: goodConsolidation({ taskReasoningEffort: 'medium', assignments: eight() }), startPhases: goodPhases() })
   assert.equal(r4.ok, true, JSON.stringify(r4))
   assert.equal(ok.record.statuses[0].effortOverride, 'medium')
 })
 
 test('A6 runtime：medium review→dispatch 全链放行，派生 8 个叶子（两入口同判据）', async () => {
   const { runtime, leaderAgent, spawned, record } = makeRuntime(QWEN)
-  const review = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: goodConsolidation({ taskReasoningEffort: 'medium', assignments: eight() }) })
+  const review = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: goodConsolidation({ taskReasoningEffort: 'medium', assignments: eight() }), startPhases: goodPhases() })
   assert.equal(review.ok, true)
   assert.equal(record.statuses[0].consolidation.taskReasoningEffortDeclared, 'medium', '钳制前声明记忆必须持久化')
   const dispatch = await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
@@ -236,26 +242,36 @@ test('B2 行级非法值：单元层不触发新闸（穿透）；runtime 层五
   const unit = planDelegations({ consolidation: goodConsolidation(), model: QWEN, taskRowEffort: 'turbo' })
   assert.equal(unit.ok, true, '非法行级值 banConsumable=false ⇒ 跳过新闸，旧行为不变')
   const { runtime, leaderAgent } = makeRuntime(QWEN, { rowEffort: 'turbo' })
-  const r = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: goodConsolidation() })
+  const r = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: goodConsolidation(), startPhases: goodPhases() })
   assert.equal(r.code, LOW_FORBIDDEN, 'runtime 调用方把非法行级值消毒为 undefined ⇒ 皆缺视同 low')
 })
 
-test('B3 拒因顺序：缺 consolidation 最先／薄梳理先于新闸／low 空分工表新闸先／medium 空分工表旧 INCOMPLETE', () => {
+test('B3 拒因顺序：缺 consolidation 最先／review 开工证据闸先于分工表各闸／low 空分工表新闸先／medium 空分工表旧 INCOMPLETE', async () => {
   const missing = planDelegations({ model: QWEN, taskRowEffort: 'low' })
   assert.equal(missing.code, 'DELEGATE_CONSOLIDATION_MISSING')
-  const thin = planDelegations({ consolidation: goodConsolidation({ problemAnalysis: [chars(39)], taskReasoningEffort: 'low' }), model: QWEN })
-  assert.equal(thin.code, 'DELEGATE_CONSOLIDATION_INCOMPLETE', '薄梳理闸在禁派闸之前（既有顺序不变）')
+  // [3.0.8] 旧「consolidation 薄梳理闸」已废除（梳理产物改由 startPhases 承载），
+  // consolidation 里的字数字段被忽略，薄开工证据由 review 的 startPhases 闸判。
   const lowEmpty = planDelegations({ consolidation: goodConsolidation({ taskReasoningEffort: 'low', assignments: [] }), model: QWEN })
   assert.equal(lowEmpty.code, LOW_FORBIDDEN, '规格 §3.3：low 空分工表也先得到禁派＋direct 指路')
   const mediumEmpty = planDelegations({ consolidation: goodConsolidation({ taskReasoningEffort: 'medium', assignments: [] }), model: QWEN })
   assert.equal(mediumEmpty.code, 'DELEGATE_CONSOLIDATION_INCOMPLETE', '非 low 空分工表仍是旧拒因')
+  // review 入口拒因顺序：startPhases 开工证据闸先于 planDelegations 各闸（含禁派闸）。
+  const { runtime, leaderAgent } = makeRuntime(QWEN)
+  const noPhases = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: goodConsolidation({ taskReasoningEffort: 'low' }) })
+  assert.equal(noPhases.code, 'START_EVIDENCE_MISSING', 'review：缺开工证据先于禁派闸')
+  const thinPhases = await runtime.delegateTool(leaderAgent, {
+    action: 'review',
+    consolidation: goodConsolidation({ taskReasoningEffort: 'low' }),
+    startPhases: goodPhases({ problemAnalysis: [chars(MIN_PLANNING_PROBLEM_CHARS - 1)] }),
+  })
+  assert.equal(thinPhases.code, 'START_EVIDENCE_INCOMPLETE', 'review：薄开工证据先于禁派闸')
 })
 
 /* ---------- C 双入口同判据＋声明记忆＋防注入 ---------- */
 
 test('C1 runtime：非 qwen medium review 钳制留痕＋declared 记忆 → dispatch 读回不误杀（§8.2 cap6 截断为既有行为保留）', async () => {
   const { runtime, leaderAgent, record, spawned } = makeRuntime(OTHER, { provider: 'openai' })
-  const review = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: goodConsolidation({ taskReasoningEffort: 'medium', assignments: eight() }) })
+  const review = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: goodConsolidation({ taskReasoningEffort: 'medium', assignments: eight() }), startPhases: goodPhases() })
   assert.equal(review.ok, true, JSON.stringify(review))
   assert.equal(review.taskEffort, 'low', '非 qwen medium→low 钳制')
   assert.equal(review.taskEffortClamped?.requested, 'medium')
@@ -274,6 +290,7 @@ test('C2 防注入：review 输入携带 taskReasoningEffortDeclared 被剥离 �
   const injected = await runtime.delegateTool(leaderAgent, {
     action: 'review',
     consolidation: goodConsolidation({ taskReasoningEffort: 'low', taskReasoningEffortDeclared: 'max' }),
+    startPhases: goodPhases(),
   })
   assert.equal(injected.code, LOW_FORBIDDEN, 'runtime 剥离注入字段，禁派闸不可被绕过（§5.8.4）')
   const platform = planDelegations({ consolidation: goodConsolidation({ taskReasoningEffort: 'low', taskReasoningEffortDeclared: 'max', assignments: eight() }), model: QWEN })
@@ -282,9 +299,9 @@ test('C2 防注入：review 输入携带 taskReasoningEffortDeclared 被剥离 �
 
 /* ---------- D direct 动作 ---------- */
 
-test('D1 direct：合格 deepThink＋缺省/显式 low ⇒ 登记成功，effortOverride=low 落位＋空分工表＋审计＋hint', async () => {
+test('D1 direct：合格 startPhases＋缺省/显式 low ⇒ 登记成功，effortOverride=low 落位＋空分工表＋审计＋hint', async () => {
   const { runtime, leaderAgent, record } = makeRuntime(QWEN)
-  const r = await runtime.delegateTool(leaderAgent, { action: 'direct', deepThink: goodThink() })
+  const r = await runtime.delegateTool(leaderAgent, { action: 'direct', startPhases: goodPhases() })
   assert.equal(r.ok, true, JSON.stringify(r))
   assert.equal(r.action, 'direct')
   assert.equal(r.effortOverride, 'low')
@@ -293,21 +310,21 @@ test('D1 direct：合格 deepThink＋缺省/显式 low ⇒ 登记成功，effort
   assert.equal(row.effortOverride, 'low', 'effortOverride 落位 ⇒ phase-0 结算闸凭此接续')
   assert.deepEqual(row.consolidation.assignments, [], '空分工表＝直执标记')
   assert.equal(row.consolidation.taskReasoningEffort, 'low')
-  assert.deepEqual(row.consolidation.problemAnalysis, [chars(40)])
+  assert.deepEqual(row.startPhases.planning.problemAnalysis, MAIN_START_PHASES_FIXTURE.planning.problemAnalysis, '开工证据落档行级 startPhases')
   assert.deepEqual(lastAudit(record), ['direct', true, null])
-  const explicit = await runtime.delegateTool(leaderAgent, { action: 'direct', deepThink: goodThink(), reasoningEffort: 'low' })
+  const explicit = await runtime.delegateTool(leaderAgent, { action: 'direct', startPhases: goodPhases(), reasoningEffort: 'low' })
   assert.equal(explicit.ok, true, '显式 low 同样接受')
 })
 
 test('D2 direct 防旁路：复杂档 medium/high/xhigh/max 与非法值一律 DELEGATE_DIRECT_EFFORT_INVALID，不落盘', async () => {
   for (const effort of ['medium', 'high', 'xhigh', 'max', 'turbo']) {
     const { runtime, leaderAgent, record } = makeRuntime(QWEN)
-    const r = await runtime.delegateTool(leaderAgent, { action: 'direct', deepThink: goodThink(), reasoningEffort: effort })
+    const r = await runtime.delegateTool(leaderAgent, { action: 'direct', startPhases: goodPhases(), reasoningEffort: effort })
     assert.equal(r.ok, false, effort)
     assert.equal(r.code, 'DELEGATE_DIRECT_EFFORT_INVALID', effort)
     assert.match(r.error!, /review\+dispatch/, '文案指路复杂流程')
     assert.equal(record.statuses[0].effortOverride ?? null, null, '拒绝不得写入 effortOverride')
-    assert.equal(record.statuses[0].consolidation ?? null, null, '拒绝不得写入梳理产物')
+    assert.equal(record.statuses[0].consolidation ?? null, null, '拒绝不得写入分工表')
     assert.deepEqual(lastAudit(record), ['direct', false, 'DELEGATE_DIRECT_EFFORT_INVALID'])
   }
 })
@@ -315,61 +332,64 @@ test('D2 direct 防旁路：复杂档 medium/high/xhigh/max 与非法值一律 D
 test('D3 direct 防旁路：携带 consolidation（含空对象/分工表）⇒ DELEGATE_DIRECT_ASSIGNMENTS_FORBIDDEN', async () => {
   for (const consolidation of [{}, goodConsolidation()]) {
     const { runtime, leaderAgent, record } = makeRuntime(QWEN)
-    const r = await runtime.delegateTool(leaderAgent, { action: 'direct', deepThink: goodThink(), consolidation })
+    const r = await runtime.delegateTool(leaderAgent, { action: 'direct', startPhases: goodPhases(), consolidation })
     assert.equal(r.code, 'DELEGATE_DIRECT_ASSIGNMENTS_FORBIDDEN')
     assert.deepEqual(lastAudit(record), ['direct', false, 'DELEGATE_DIRECT_ASSIGNMENTS_FORBIDDEN'])
   }
 })
 
-test('D4 direct 思考门禁：缺产物 THINK_MISSING／薄产物 THINK_INCOMPLETE（40/40/20 同一判据）／恰好边界放行', async () => {
+test('D4 direct 开工证据门禁：缺证据 START_MISSING／薄证据 START_INCOMPLETE（40/40/20 同一判据）／恰好边界放行', async () => {
   assert.deepEqual([MIN_PLANNING_PROBLEM_CHARS, MIN_PLANNING_APPROACH_CHARS, MIN_PLANNING_BASIS_CHARS], [40, 40, 20])
   const { runtime, leaderAgent } = makeRuntime(QWEN)
   const missing = await runtime.delegateTool(leaderAgent, { action: 'direct' })
-  assert.equal(missing.code, 'DELEGATE_DIRECT_THINK_MISSING')
+  assert.equal(missing.code, 'DELEGATE_DIRECT_START_MISSING')
   const thinCases = [
-    { problemAnalysis: [chars(39)] },
-    { approach: [chars(39)] },
-    { approachBasis: [chars(19)] },
+    { problemAnalysis: [chars(MIN_PLANNING_PROBLEM_CHARS - 1)] },
+    { approach: [chars(MIN_PLANNING_APPROACH_CHARS - 1)] },
+    { approachBasis: [chars(MIN_PLANNING_BASIS_CHARS - 1)] },
+    { resources: [chars(19)] },
   ]
   for (const overrides of thinCases) {
-    const r = await runtime.delegateTool(leaderAgent, { action: 'direct', deepThink: goodThink(overrides) })
-    assert.equal(r.code, 'DELEGATE_DIRECT_THINK_INCOMPLETE', JSON.stringify(overrides))
-    assert.match(r.error!, /problemAnalysis 合计 ≥40 字/, '拒因透传原文＋补 direct 同一判据说明')
+    const r = await runtime.delegateTool(leaderAgent, { action: 'direct', startPhases: goodPhases(overrides) })
+    assert.equal(r.code, 'DELEGATE_DIRECT_START_INCOMPLETE', JSON.stringify(overrides))
+    // 拒因透传 validateStartPhaseEvidence 原文＋补 direct 同一判据说明。
+    assert.match(r.error!, /startPhases\.(planning|preparation)\./, JSON.stringify(overrides))
+    assert.match(r.error!, /合计 ≥40 字/)
     assert.match(r.error!, /approachBasis 合计 ≥20 字/)
   }
-  const boundary = await runtime.delegateTool(leaderAgent, { action: 'direct', deepThink: goodThink() })
-  assert.equal(boundary.ok, true, '恰好 40/40/20 字边界放行')
+  const boundary = await runtime.delegateTool(leaderAgent, { action: 'direct', startPhases: goodPhases() })
+  assert.equal(boundary.ok, true, '合格共享夹具（全部下限达标）放行')
 })
 
 test('D5 direct 防旁路：已有非空分工表 ⇒ CONFLICT；下级 running ⇒ ALREADY_RUNNING（顺序：running 先）', async () => {
   const conflict = makeRuntime(QWEN)
   conflict.record.statuses[0].consolidation = goodConsolidation({ taskReasoningEffort: 'medium', assignments: eight() })
-  const r1 = await conflict.runtime.delegateTool(conflict.leaderAgent, { action: 'direct', deepThink: goodThink() })
+  const r1 = await conflict.runtime.delegateTool(conflict.leaderAgent, { action: 'direct', startPhases: goodPhases() })
   assert.equal(r1.code, 'DELEGATE_DIRECT_CONFLICT')
   const running = makeRuntime(QWEN)
   running.record.statuses[0].delegates = [{ member: 'Expert-A', status: 'running' }]
   running.record.statuses[0].consolidation = goodConsolidation({ taskReasoningEffort: 'medium', assignments: eight() })
-  const r2 = await running.runtime.delegateTool(running.leaderAgent, { action: 'direct', deepThink: goodThink() })
+  const r2 = await running.runtime.delegateTool(running.leaderAgent, { action: 'direct', startPhases: goodPhases() })
   assert.equal(r2.code, 'DELEGATE_ALREADY_RUNNING', '校验 1（running）先于校验 2（CONFLICT）')
 })
 
 test('D6 路由隔离：叶子调 direct ⇒ NOT_LEADER_SESSION（无父会话）／NO_PLAN（父＝部门会话无计划）', async () => {
   const { runtime } = makeRuntime(QWEN)
-  const noParent = await runtime.delegateTool({ session: { id: 'leaf-x', header: {} } }, { action: 'direct', deepThink: goodThink() })
+  const noParent = await runtime.delegateTool({ session: { id: 'leaf-x', header: {} } }, { action: 'direct', startPhases: goodPhases() })
   assert.equal(noParent.code, 'NOT_LEADER_SESSION')
   const leaf = { session: { id: 'member-1', header: { parentSession: 'child-leader' } }, options: { provider: 'qw', model: QWEN } }
-  const noPlan = await runtime.delegateTool(leaf, { action: 'direct', deepThink: goodThink() })
+  const noPlan = await runtime.delegateTool(leaf, { action: 'direct', startPhases: goodPhases() })
   assert.equal(noPlan.code, 'NO_PLAN')
 })
 
 test('D7 direct 后：dispatch/review(low) 被禁派闸硬拒（D2）；重新 review 显式 medium+ 转复杂流程合法（§5.8.8 语义边界）', async () => {
   const { runtime, leaderAgent, spawned } = makeRuntime(QWEN)
-  assert.equal((await runtime.delegateTool(leaderAgent, { action: 'direct', deepThink: goodThink() })).ok, true)
+  assert.equal((await runtime.delegateTool(leaderAgent, { action: 'direct', startPhases: goodPhases() })).ok, true)
   const dispatch = await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
   assert.equal(dispatch.code, LOW_FORBIDDEN, 'direct 登记后读回 low ⇒ dispatch 硬拒')
-  const reLow = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: goodConsolidation({ taskReasoningEffort: 'low' }) })
+  const reLow = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: goodConsolidation({ taskReasoningEffort: 'low' }), startPhases: goodPhases() })
   assert.equal(reLow.code, LOW_FORBIDDEN)
-  const reComplex = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: goodConsolidation({ taskReasoningEffort: 'medium', assignments: eight() }) })
+  const reComplex = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: goodConsolidation({ taskReasoningEffort: 'medium', assignments: eight() }), startPhases: goodPhases() })
   assert.equal(reComplex.ok, true, '新显式声明不是例外通道：声明档为判定权威，≥8 人闸照常')
   assert.equal((await runtime.delegateTool(leaderAgent, { action: 'dispatch' })).ok, true)
   assert.equal(spawned.length, 8)
@@ -378,7 +398,7 @@ test('D7 direct 后：dispatch/review(low) 被禁派闸硬拒（D2）；重新 r
 test('D8 durable 回放：direct 登记与 declared 记忆经 buildPlanMessage+reconstructFromSession 不丢', async () => {
   const direct = makeRuntime(QWEN)
   direct.rootSession.append('user/message', buildPlanMessage(direct.record.plan))
-  assert.equal((await direct.runtime.delegateTool(direct.leaderAgent, { action: 'direct', deepThink: goodThink() })).ok, true)
+  assert.equal((await direct.runtime.delegateTool(direct.leaderAgent, { action: 'direct', startPhases: goodPhases() })).ok, true)
   flushPendingWorkplanUpdates(direct.rootSession)
   const rebuilt: any = reconstructFromSession(direct.rootSession)
   const row = rebuilt.statuses.find((item: any) => item.subtaskId === 'T1')
@@ -386,9 +406,11 @@ test('D8 durable 回放：direct 登记与 declared 记忆经 buildPlanMessage+r
   assert.equal(row.consolidation.taskReasoningEffort, 'low')
   assert.deepEqual(row.consolidation.assignments, [])
   assert.ok(row.gateAudit.some((e: any) => e.action === 'direct' && e.ok === true))
+  // [3.0.8 疑似缺口] 行级 startPhases 不在 durable workplan-update 回放白名单
+  // （见本文件 X1 备案用例）：此处只断言契约保证落盘的字段。
   const complex = makeRuntime(OTHER, { provider: 'openai' })
   complex.rootSession.append('user/message', buildPlanMessage(complex.record.plan))
-  assert.equal((await complex.runtime.delegateTool(complex.leaderAgent, { action: 'review', consolidation: goodConsolidation({ taskReasoningEffort: 'medium', assignments: eight() }) })).ok, true)
+  assert.equal((await complex.runtime.delegateTool(complex.leaderAgent, { action: 'review', consolidation: goodConsolidation({ taskReasoningEffort: 'medium', assignments: eight() }), startPhases: goodPhases() })).ok, true)
   flushPendingWorkplanUpdates(complex.rootSession)
   const rebuilt2: any = reconstructFromSession(complex.rootSession)
   const row2 = rebuilt2.statuses.find((item: any) => item.subtaskId === 'T1')
@@ -398,12 +420,12 @@ test('D8 durable 回放：direct 登记与 declared 记忆经 buildPlanMessage+r
 
 test('D9 status hint：low 直执派生分支命中；复杂钳制到 low 的行（分工表非空）不命中', async () => {
   const { runtime, leaderAgent } = makeRuntime(QWEN)
-  await runtime.delegateTool(leaderAgent, { action: 'direct', deepThink: goodThink() })
+  await runtime.delegateTool(leaderAgent, { action: 'direct', startPhases: goodPhases() })
   const status = await runtime.delegateTool(leaderAgent, { action: 'status' })
   assert.match(status.hint, /禁止第三层下派/)
   assert.match(status.hint, /direct/)
   const complex = makeRuntime(OTHER, { provider: 'openai' })
-  await complex.runtime.delegateTool(complex.leaderAgent, { action: 'review', consolidation: goodConsolidation({ taskReasoningEffort: 'medium', assignments: eight() }) })
+  await complex.runtime.delegateTool(complex.leaderAgent, { action: 'review', consolidation: goodConsolidation({ taskReasoningEffort: 'medium', assignments: eight() }), startPhases: goodPhases() })
   const status2 = await complex.runtime.delegateTool(complex.leaderAgent, { action: 'status' })
   assert.equal(status2.effortOverride, 'low')
   assert.ok(!status2.hint.includes('负责人亲自执行'), '钳制到 low 的复杂行不得误导为直执')
@@ -412,12 +434,12 @@ test('D9 status hint：low 直执派生分支命中；复杂钳制到 low 的行
 
 test('D10 direct 幂等＋中断镜像 stall-fix：仅首次登记（此前无 effortOverride）中断，重复 direct 只更新产物', async () => {
   const { runtime, leaderAgent, record, interrupts } = makeRuntime(QWEN)
-  assert.equal((await runtime.delegateTool(leaderAgent, { action: 'direct', deepThink: goodThink() })).ok, true)
+  assert.equal((await runtime.delegateTool(leaderAgent, { action: 'direct', startPhases: goodPhases() })).ok, true)
   assert.equal(interrupts.length, 1, 'phase-0→登记转变才中断')
-  const again = await runtime.delegateTool(leaderAgent, { action: 'direct', deepThink: goodThink({ approach: [chars(41)] }) })
+  const again = await runtime.delegateTool(leaderAgent, { action: 'direct', startPhases: goodPhases({ approach: [chars(MIN_PLANNING_APPROACH_CHARS + 1)] }) })
   assert.equal(again.ok, true)
   assert.equal(record.statuses[0].effortOverride, 'low')
-  assert.deepEqual(record.statuses[0].consolidation.approach, [chars(41)], '产物更新')
+  assert.deepEqual(record.statuses[0].startPhases.planning.approach, [chars(MIN_PLANNING_APPROACH_CHARS + 1)], '产物更新（行级 startPhases）')
   assert.equal(interrupts.length, 1, 'phase-1 重新 direct 绝不中断正在执行的回合')
 })
 
@@ -493,7 +515,7 @@ test('F4 回归：resolveTaskEffort 单一判据不变＋W1 负责人告知块�
 
 /* ---------- G direct 全链 e2e（规格 §9 direct 专项补回） ---------- */
 
-test('G1 e2e：合格 deepThink＋direct low 登记 ⇒ phase-0 结算闸放行、以 low 档接续 phase-1、attempt 预算不耗、status=done', async () => {
+test('G1 e2e：合格 startPhases＋direct low 登记 ⇒ phase-0 结算闸放行、以 low 档接续 phase-1、attempt 预算不耗、status=done', async () => {
   // 夹具仿 workplan-250-self-effort.test.ts 负责人 phase-0→review→接续 e2e 惯例：
   // dispatchPlan 真实链路，phase-0 期间经叶子工具调用触发 direct 登记（本用例局部夹具，不动其他用例）。
   const plan = makePlan()
@@ -535,7 +557,7 @@ test('G1 e2e：合格 deepThink＋direct low 登记 ⇒ phase-0 结算闸放行�
       setTimeout(async () => {
         directDone = await runtime.delegateTool(
           { session: { id: act.childId, header: { parentSession: 'session-root', cwd: '/tmp/t3-low-gate-cwd' } }, options: { provider: 'qw', model: QWEN } },
-          { action: 'direct', deepThink: goodThink(), reasoningEffort: 'low' },
+          { action: 'direct', startPhases: goodPhases(), reasoningEffort: 'low' },
         )
         spawned[0].resolveResult({ stopReason: 'completed', output: [{ type: 'text', text: 'phase-0 评估完成：任务为 low 轻度，负责人亲自执行' }] })
       }, 0)
@@ -572,4 +594,20 @@ test('G1 e2e：合格 deepThink＋direct low 登记 ⇒ phase-0 结算闸放行�
   // 注：record.errors 可能含 noticeChannel SESSION_UNAVAILABLE 提示（夹具 sessions.get
   // 只识别 root/leader，与 self-effort e2e 同惯例）——属通知通道夹具边界，非尝试失败，
   // 不在本矩阵项断言范围；attempt 不耗由「恰 2 次激活＋done＋行级无 error」证明。
+})
+
+/* ---------- X durable 回放（3.0.8 缺口已修复） ---------- */
+
+test('X1：行级 startPhases 经 durable workplan-update 回放不丢（G1 双侧接线）', async () => {
+  // [3.0.8] 修复：persist 白名单 + buildUpdateMessage 白名单 + 回放 patch 三处
+  // 均已接 startPhases（与 consolidation 同一回放口径），重建后行级开工证据仍在——
+  // 结算一致性比对（adjudicateResult carryover）与重试执行蓝图重启后不丢。
+  const { runtime, leaderAgent, record, rootSession } = makeRuntime(QWEN)
+  rootSession.append('user/message', buildPlanMessage(record.plan))
+  assert.equal((await runtime.delegateTool(leaderAgent, { action: 'direct', startPhases: goodPhases() })).ok, true)
+  assert.ok(record.statuses[0].startPhases, '登记后行级 startPhases 在内存中生效')
+  flushPendingWorkplanUpdates(rootSession)
+  const rebuilt: any = reconstructFromSession(rootSession)
+  const row = rebuilt.statuses.find((item: any) => item.subtaskId === 'T1')
+  assert.deepEqual(row.startPhases, record.statuses[0].startPhases, '重建后行级 startPhases 回放不丢')
 })

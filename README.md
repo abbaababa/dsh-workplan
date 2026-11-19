@@ -3,7 +3,7 @@
 > **两个卖点，一句话：ISO/IEC 15408:2026 全套安全证据，5 条命令自己验；安装一条命令、零第三方运行时依赖。**
 
 [![verify](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml/badge.svg)](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml)
-[![version](https://img.shields.io/badge/version-3.0.6-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v3.0.6)
+[![version](https://img.shields.io/badge/version-3.0.9-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v3.0.9)
 
 给 **DeepSeek Harness（DSH）** 加一段「先拆计划 → 真派部门子 Agent 去做 → 左侧栏实时看进度」的能力。不装 App、不改 DSH 源码、不换页面。
 
@@ -62,14 +62,14 @@ grep -RInE "child_process|execSync|eval\(|writeFileSync" src || echo "0 命中�
 
 | 要求 | 说明 |
 |---|---|
-| DeepSeek Harness | **≥ 0.2.2-rc.3**（官方 Web 版，`dsh web` / `--profile web` 跑的这套；`engines.dsh` 会拦截过低版本） |
+| DeepSeek Harness | 官方 Web 版（`dsh web` / `--profile web` 跑的这套；自 3.0.9 起对 DSH 版本不作要求，均可安装使用） |
 | Node.js | **22 或更高**（`node -v` 自查） |
 | 网络 | 安装时需要能访问 npm registry |
 
 ## 一键安装
 
 ```bash
-dsh plugin --profile web add dsh-workplan@3.0.6
+dsh plugin --profile web add dsh-workplan@3.0.9
 ```
 
 装完**重启一次 DSH Web**（或重新载入当前页面）让插件生效。
@@ -113,28 +113,30 @@ dsh plugin --profile web add "$(pwd)"
 | `dsh_workplan_instruct` | 主 Agent 回答请示并下达指示；失败则挂起，子任务下次激活时注入。60 秒无回执只提示，不按时间判失败或中止。 |
 | `dsh_workplan_handoff` | 处置跨部门需求：`list` / `assign` / `resolve` / `close`。未处置会拦住交付；对「待指示」的行 `resolve` 会直接把答复投递给子会话。 |
 | `dsh_workplan_followup` | 给已中止或暂停、但产物已落盘的直接子会话补一条收尾说明。 |
-| `dsh_workplan_verify` | 子 Agent 在**阶段三（验证阶段）**提交三阶段证据做核验；阶段一、二调用会返回 `PHASE_GATE`。核验通过≠完成，最终仍由完成判定复核。 |
+| `dsh_workplan_verify` | 子 Agent 在**第四步（验证阶段）**提交五步证据做核验；前三步证据不齐调用会返回 `PHASE_GATE`。核验通过≠完成，最终仍由完成判定复核。 |
 | `dsh_workplan_lessons` | 只读查看**永久教训记忆**：`list` / `search` / `stats`。仅限根会话调用（子 Agent 不能跨项目读取）；它只读文件，不改计划状态；用来核对「到底记住了什么、哪些错误在重复发生」。 |
 
 在 **plan 模式**下只会给你看计划，`dispatch` 会被明确拦下并说明原因，不会偷偷开跑。
 
-## 三阶段工作法与自我学习（2.0.2 的核心）
+## 五步工作法与自我学习（3.0.8 的单框架）
 
-### 三阶段：规划 → 执行 → 验证
+### 五步：任务梳理 → 资源/工具/方案研究 → 准备就绪 → 执行与验证 → 收尾复盘
 
-每个部门 Agent 收到工作后，顺序不可颠倒：
+3.0.8 起，原「两轮深度思考」开工门禁并入五步工作法（两轮内容本就是第 1、2 步的子集，不再双份提交）：每个部门 Agent 收到工作后，顺序不可颠倒，开工前必须完成前三步并登记开工证据 `startPhases`：
 
-| 阶段 | 必须完成的事 | 完成证据 |
+| 步骤 | 必须完成的事 | 证据 |
 |---|---|---|
-| 一 规划 | 先梳理问题（现状/约束/未知/主要矛盾），再形成完整可执行思路（做什么、产出什么、如何证明） | `phases.planning` |
-| 二 执行 | 严格按阶段一的思路执行；需要改道必须记录原因 | `phases.execution.steps/deviations` |
-| 三 验证 | 逐条验证验收标准与用户原要求，并做**自我学习复盘** | `phases.verification` + `retrospective` |
+| 一 任务梳理 | 全面、深入梳理自己的任务（目标与验收/现状/事实/约束/未知/主要矛盾/边界） | `startPhases.planning.problemAnalysis` + 结算 `phases.planning` |
+| 二 资源/工具/方案 | 基于第一步全部结果研究需要哪些资源、哪些工具、具体实施方案（方法、流程、步骤，含依据） | `startPhases.planning.resources/tools/approach/approachBasis` |
+| 三 准备就绪 | 把资源与工具真正备齐并给出可复核的就绪证据 | `startPhases.preparation.prepared/evidence` |
+| 四 执行与验证 | 严格按第二步的方法、流程、步骤执行并逐条验证；需要改道必须记录原因 | `phases.execution.steps/deviations` + `phases.verification` |
+| 五 收尾复盘 | 逐条验证验收标准与用户原要求，并做**自我学习复盘** | `phases.verification` + `retrospective` |
 
-**关于「第一、二阶段禁用插件」的更正（2.0.2）**：这条只适用于 2026-11-05 本次优化会话，不是对所有后续会话的永久规则（2.0.1 曾把它写成产品级规则，2.0.2 已更正）。三阶段约束的是部门子 Agent 的交付证据顺序；主 Agent 在任何阶段都可以正常使用计划、派发、查询与改判工具。验证工具在缺规划或执行证据时返回 `PHASE_GATE` 并列出待补项——这是防止跳过前两阶段直接「验证通过」的门禁，不是禁用插件。遇阻上报 `dsh_workplan_escalate` 始终可用。
+**关于「前三步禁用插件」的更正（2.0.2）**：这条只适用于 2026-11-05 本次优化会话，不是对所有后续会话的永久规则（2.0.1 曾把它写成产品级规则，2.0.2 已更正）。五步工作法约束的是部门子 Agent 的交付证据顺序；主 Agent 在任何阶段都可以正常使用计划、派发、查询与改判工具。验证工具在缺前三步证据时返回 `PHASE_GATE` 并列出待补项——这是防止跳过前三步直接「验证通过」的门禁，不是禁用插件。遇阻上报 `dsh_workplan_escalate` 始终可用。
 
 ### 自我学习与自我迭代：把弯路变成永久记忆
 
-每次完成工作，阶段三必须提交四项复盘（缺一项就判未完成）：
+每次完成工作，第五步收尾必须提交四项复盘（缺一项就判未完成）：
 
 1. **problems**：本次全过程遇到的所有问题（现象 + 根因）；
 2. **detours**：走过的弯路、返工与无效尝试（确实没有就写空数组，不编造）；
@@ -257,7 +259,7 @@ npm audit --omit=dev
 
 DSH 本身自带「子智能体」能力（内置 subagent 工具）。本插件**不替换、也不关闭**它，两者同时存在，请知道这三件事：
 
-1. **插件的部门负责人/专家**由插件统一派发和管理，走 `dsh_workplan_delegate` 等 11 个工具的全部闸门（事前预估、分工表、两轮深度思考、结算核验、汇报核验）。
+1. **插件的部门负责人/专家**由插件统一派发和管理，走 `dsh_workplan_delegate` 等 11 个工具的全部闸门（事前预估、分工表、五步开工证据、结算核验、汇报核验）。
 2. **内置 subagent 工具在这些子会话里仍然可见**。如果模型绕过插件、直接调用内置 `subagent` / `subagent_fork`，那个人会话**不经过插件的任何闸门**（无台账、无核验、无执行管理），产物也不会自动进计划看板。发现看板外多出来路不明的子会话时，对它说「以后派活一律走 dsh_workplan」即可。
 3. **设置页两个子代理选项对本插件的影响不同**（已核实宿主源码，两条通道互不相干）：
    - 「子代理最大深度」（`subagent.maxDepth`）**只管内置 subagent/subagent_fork 工具**——本插件的三层体系（你 → 部门负责人 → 专家）按派发契约固定申请第 2 层深度，宿主对插件契约单独放行，**该滑块在任何位置都不会影响、也不会拦阻**负责人派发给专家。首次检测到该设置 <2 时插件会一次性说明这一点（无需任何操作；想完全一致可把滑块调到 2，重启后恢复默认）；
