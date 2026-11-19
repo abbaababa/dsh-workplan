@@ -148,7 +148,7 @@ import {
   buildPhaseZeroDelegateePrompt,
   resolveTaskEffort,
 } from './llm-rules.js'
-import { checkStartEvidenceCarryover, phaseGateFromErrors, phaseSummaryLine, sanitizeStartPhaseEvidence, START_EVIDENCE_MIN_CHARS_BRIEF, validateFiveStepEvidence, validateStartPhaseEvidence } from './five-step.js'
+import { checkStartEvidenceCarryover, phaseGateFromErrors, phaseSummaryLine, renderStartPhaseEvidence, sanitizeStartPhaseEvidence, START_EVIDENCE_MIN_CHARS_BRIEF, validateFiveStepEvidence, validateStartPhaseEvidence } from './five-step.js'
 import {
   lessonStats,
   rankLessons,
@@ -2595,7 +2595,9 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
                  * 的推理等级 + 部门负责人「先全面梳理、再用 dsh_workplan_delegate
                  * 分配给顶尖专家与组员」的强制流程告知。
                  */
-                phaseZeroContinuation: phaseZeroCompleted ? buildPhaseZeroContinuationHint(String(effortRow?.effortOverride ?? ''), phaseZeroOutput, effortRow?.effortOverride === 'low' && (effortRow?.consolidation?.assignments ?? []).length === 0) : '',
+                // [3.1.1] 第 4 参回注登记原文：direct/review 在负责人会话登记、执行在
+                // 新会话承接时，接续提示必须带登记证据原文，否则收尾必然被变薄退回。
+                phaseZeroContinuation: phaseZeroCompleted ? buildPhaseZeroContinuationHint(String(effortRow?.effortOverride ?? ''), phaseZeroOutput, effortRow?.effortOverride === 'low' && (effortRow?.consolidation?.assignments ?? []).length === 0, effortRow?.startPhases) : '',
                 llmRulesBrief: buildLlmRulesBrief({
                   model: modelSelection?.model ?? null,
                   effort: staticRuleChildEffort || null,
@@ -3010,6 +3012,11 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
           attempt,
           code: error?.code ?? 'UNKNOWN',
           message: describeError(error),
+          // [3.1.1] 带上登记原文回喂：EVIDENCE_INCOMPLETE 的重试根因常是「登记在
+          // 别的会话、交卷人没见过原文」，只回数字会把补报退化成凑字数；附原文后
+          // buildChildPrompt 会渲染登记证据块，交卷人照抄即可。settleRow 声明在
+          // try 块内、catch 不可见，这里从台账按 id 重查（record 在两级作用域均在）。
+          registeredStartPhases: record.statuses.find((item: any) => item?.subtaskId === subtask.id)?.startPhases,
         }
         const retry = !isAbort && shouldRetryAttempt(error, attempt, remaining, idleTimeoutMs)
         if (retry) {
@@ -9352,7 +9359,10 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       const registeredEstimate = stashedEstimate?.delivery === 'sent' ? stashedEstimate : null
       const leafPhaseZero = !priorSelf || !stashedStartPhases || !registeredEstimate
       const selfContinuation = priorSelf && stashedStartPhases && registeredEstimate
-        ? `【自配档接续·开工证据读档】你的自配推理等级 \`${priorSelf}\` 与五步第 1/2/3 步开工证据均已登记生效（成员自配为权威）。继续勿重做：直接执行正式任务，不要重新评估复杂度、不要重复提交开工证据。正式执行必须严格按你第二步理清的方法、流程、步骤进行（你的第一步产物：${stashedStartPhases.planning.problemAnalysis.join('；').slice(0, 200)}…；你的第二步产物：${stashedStartPhases.planning.approach.join('；').slice(0, 300)}…），全程少走弯路：先查历史教训、先验证再动手、不重复试错。你的开工预估已登记并送达部门负责人（约 ${registeredEstimate.declaredMinutes} 分钟，整数分钟），无需重复上报。`
+        ? `【自配档接续·开工证据读档】你的自配推理等级 \`${priorSelf}\` 与五步第 1/2/3 步开工证据均已登记生效（成员自配为权威）。继续勿重做：直接执行正式任务，不要重新评估复杂度、不要重复提交开工证据。正式执行必须严格按你第二步理清的方法、流程、步骤进行，全程少走弯路：先查历史教训、先验证再动手、不重复试错。你的开工预估已登记并送达部门负责人（约 ${registeredEstimate.declaredMinutes} 分钟，整数分钟），无需重复上报。
+
+【开工登记证据·原文（[3.1.1] 收尾结果块的 phases.planning / phases.preparation 必须原样收录下列全部登记条目——逐字复制、不得重写或摘要——再追加执行期新补充）】
+${renderStartPhaseEvidence(stashedStartPhases)}`
         : (priorSelf
           ? `【自配档接续】你的自配推理等级 \`${priorSelf}\` 已登记生效（成员自配为权威）。继续勿重做：直接执行正式任务，不要重新评估复杂度。`
           : '')

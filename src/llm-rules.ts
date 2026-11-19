@@ -356,7 +356,7 @@ export function planDelegations(input: {
     return {
       ...empty,
       code: 'DELEGATE_LOW_TASK_FORBIDDEN',
-      error: '本任务为 low 档（或未配置，视同 low）：按用户裁决 D1–D5 禁止第三层下派，review/dispatch 一律硬拒，无任何例外通道。请部门负责人亲自执行：完成五步第 1/2/3 步（任务梳理 + 资源/工具/方案研究 + 准备）后经 dsh_workplan_delegate(action="direct") 登记 startPhases={ planning{ problemAnalysis[], approach[], approachBasis[], resources[], tools[] }, preparation{ prepared[], evidence[] } }（' + START_EVIDENCE_MIN_CHARS_BRIEF + '；可选 reasoningEffort="low"；不接受分工表），平台将以 low 档接续本会话亲自执行。已完成的历史派发不回溯。',
+      error: '本任务为 low 档（或未配置，视同 low）：按用户裁决 D1–D5 禁止第三层下派，review/dispatch 一律硬拒，无任何例外通道。请部门负责人亲自执行：完成五步第 1/2/3 步（任务梳理 + 资源/工具/方案研究 + 准备）后经 dsh_workplan_delegate(action="direct") 登记 startPhases={ planning{ problemAnalysis[], approach[], approachBasis[], resources[], tools[] }, preparation{ prepared[], evidence[] } }（' + START_EVIDENCE_MIN_CHARS_BRIEF + '；可选 reasoningEffort="low"；不接受分工表），平台将以 low 档接续本会话亲自执行。已完成的历史派发不回溯。[3.1.1] 收尾纪律：登记条目须逐字原样收录进收尾结果块的 phases.planning / phases.preparation（再追加执行期补充，不得重写或摘要）——平台接续提示与回喂消息会附登记原文，照抄即可；结算闸会把登记原文与你交卷内容归并落账（登记永不丢失）。',
     }
   }
   const memberCap = complexTask ? MAX_COMPLEX_DELEGATE_MEMBERS : MAX_DELEGATE_MEMBERS

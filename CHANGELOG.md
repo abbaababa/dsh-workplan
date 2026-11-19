@@ -1,3 +1,10 @@
+## 3.1.1 — 2026-11-19（跨会话登记缺陷治本：结算自动归并 + 登记原文回注）
+
+- **事故（2026-11-19 晚，计划 wp-b26c6d56 T2/T3，EVIDENCE_INCOMPLETE 连环退回）**：部门负责人在自己的会话经 `action="direct"` 代登记开工证据（T2 problemAnalysis 8 条/1242 字），平台另开**全新执行子会话**承接——接续提示只转述「已登记」，登记**逐字原文从未进入交卷人上下文**；执行者凭任务书重写更短摘要（6 条/471 字）→ 结算闸开工-结算一致性比对判「变薄」→ 退回；重试只回数字不回原文，补报退化成凑字数游戏（重试会话原文自述 "I don't have the exact startPhases text"），重试仍在大概率再被退回。根因：登记人（负责人会话）≠ 交卷人（执行会话），比对的数据源错了对象。
+- **结算自动归并（five-step.ts `mergeStartEvidenceIntoSettlement`）**：结算一致性比对前，先把行级登记 startPhases 与交卷 phases 取**并集**落账（交卷条目在前、登记条目按原序补入、trim 后逐字去重、每清单封顶 20 条）——登记内容是任务的 durable 事实，不因交卷人未复述而减少；「宽容新增」语义不变，「禁止变薄」由平台侧保证，比对保留作安全网（仅封顶截断装不下登记条目时才真退回）。
+- **登记原文回注三路**：① phase-1 接续提示（`buildPhaseZeroContinuationHint` 新增第 4 参，runtime.ts 调用点传 `effortRow.startPhases`）；② EVIDENCE_INCOMPLETE 回喂消息（runtime.ts lastFailure 新增 `registeredStartPhases` 字段，`buildChildPrompt` 渲染「逐字抄入」登记原文块）；③ 负责人自配档接续提示（runtime.ts 由截断 200/300 字摘要升级为全文渲染）。direct 路径禁派文案（llm-rules.ts）同步追加收尾复制纪律。五条提示词链路全部明示「原样收录登记条目再追加，照抄不要重写」。
+- **回归**：新增 `tests/workplan-start-evidence-merge.test.ts` 10 例（M1–M3 归并单测、R1 原文渲染、A1 薄交卷+登记判 done 且落账含登记条目、A2 缺块零回归、A3 封顶安全网仍 blocked、P1/P2 提示词回注、E1 direct 跨会话首跑即 done）；全量 1354 例零回归；版本断言随定版升级 3.1.1。
+
 ## 3.1.0 — 2026-11-19
 
 - 专家上限 12→25 整套同步（sources 30、存档消毒、提示词、测试）；dispatch 按钳制前声明判复杂（静默截断治本）；超上限拒收替代静默截断（HEADCOUNT_MAX）；重派跳过已完成成员；排队可见化（通知+queuedMs+等待上限可配）；上限/规划并发环境变量化；降级消息可行动指引；测试全局台账隔离

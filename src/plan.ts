@@ -22,7 +22,7 @@ import { MAX_TASK_ANCHOR_CHARS } from './understanding.js'
 // 杜绝「写 25 读 12」的存读不对称（3.0.6 死锁同类事故的预防）。
 import { MAX_COMPLEX_DELEGATE_MEMBERS, MIN_COMPLEX_DELEGATE_MEMBERS } from './caps.js'
 import { isMappingDigest, verifyMappingDigest } from './supersede-digest.js'
-import { checkStartEvidenceCarryover, fiveStepPromptLines, MAX_PHASE_ITEM_CHARS, MAX_PHASE_LIST_ITEMS, MAX_PHASE_TOTAL_CHARS, phaseSummaryLine, sanitizeStartPhaseEvidence, START_EVIDENCE_MIN_CHARS_BRIEF, validateFiveStepEvidence, validateStartPhaseEvidence } from './five-step.js'
+import { checkStartEvidenceCarryover, fiveStepPromptLines, MAX_PHASE_ITEM_CHARS, MAX_PHASE_LIST_ITEMS, MAX_PHASE_TOTAL_CHARS, mergeStartEvidenceIntoSettlement, phaseSummaryLine, renderStartPhaseEvidence, sanitizeStartPhaseEvidence, START_EVIDENCE_MIN_CHARS_BRIEF, validateFiveStepEvidence, validateStartPhaseEvidence } from './five-step.js'
 // [修复] 七项字数下限简报（five-step.ts 单一事实源）转发给 host.ts 等消费方。
 export { START_EVIDENCE_MIN_CHARS_BRIEF } from './five-step.js'
 import {
@@ -2681,13 +2681,28 @@ export function buildPhaseZeroLeaderPrompt(input: { subtaskId?: string; title?: 
 }
 
 /** [2.5.0][自配档] phase-0→phase-1 接续块（负责人）：携带 phase-0 产物+继续勿重做。 */
-export function buildPhaseZeroContinuationHint(effort: string, phaseZeroOutput: string, lowDirect = false) {
+export function buildPhaseZeroContinuationHint(effort: string, phaseZeroOutput: string, lowDirect = false, registeredStartPhases: any = null) {
   // [2.5.5][T3] W11：low 直执行（effortOverride='low' 且分工表为空）时指路 direct 亲自执行；
   // 缺省 false，既有调用零影响（调用点派生量由 runtime 传入）。
   const nextStep = lowDirect
     ? 'low 任务亲自执行：禁止 review/dispatch（low 禁派闸）；第 1/2/3 步开工证据未登记先经 action="direct" 补齐，然后直接执行任务'
     : '直接进入正式分配流程（review 已登记则 dispatch，未登记先补齐 review）'
-  return `【phase-0→phase-1 接续——继续勿重做】你已在 phase-0 完成复杂度评估并配置整体推理等级 \`${effort}\`（effortOverride 已登记，重试/续跑全程生效）。平台已按你的自配档接续本会话；phase-0 输出：${truncate(String(phaseZeroOutput ?? ''), 600) || '（无）'}。${nextStep}，不要重新评估复杂度，不要重做 phase-0 已完成的工作。`
+  /*
+   * [3.1.1] 登记原文回注（治本 2026-11-19）：direct/review 的登记发生在部门负责人
+   * 自己的 phase-0 会话，而 phase-1 常由平台另开的全新执行会话承接——旧接续块只
+   * 转述「已登记」与 phase-0 口语摘要，登记逐字原文从未进入执行者视野，收尾重写
+   * 必然变薄、被结算闸开工-结算一致性比对退回。这里把消毒后的登记证据原文随
+   * 接续提示一并下发，并要求收尾结果块原样收录（复制而非重写）。
+   */
+  const registered = sanitizeStartPhaseEvidence(registeredStartPhases)
+  const registeredBlock = registered
+    ? [
+        '',
+        '【开工登记证据·原文（已 durable 登记；收尾结果块的 phases.planning / phases.preparation 必须原样收录下列全部条目——逐字复制、不得重写或摘要——再追加执行期新补充）】',
+        renderStartPhaseEvidence(registered),
+      ].join('\n')
+    : ''
+  return `【phase-0→phase-1 接续——继续勿重做】你已在 phase-0 完成复杂度评估并配置整体推理等级 \`${effort}\`（effortOverride 已登记，重试/续跑全程生效）。平台已按你的自配档接续本会话；phase-0 输出：${truncate(String(phaseZeroOutput ?? ''), 600) || '（无）'}。${nextStep}，不要重新评估复杂度，不要重做 phase-0 已完成的工作。${registeredBlock}`
 }
 
 export function buildBudgetWarning(plan: any, totalBudgetMinutes = 0, maxResumes = MAX_PLAN_RESUMES) {
@@ -4259,9 +4274,17 @@ export function adjudicateResult({ output, strict = true, expectedAcceptance = [
   /*
    * [3.0.8] 开工-结算一致性比对：第 4/5 步证据齐全后，再核对第 1/2/3 步没有
    * 在收尾时被稀释。历史回放无登记值（undefined）跳过，不误伤旧日志。
+   *
+   * [3.1.1] 结算自动归并（治本 2026-11-19 跨会话登记缺陷）：direct/review 路径
+   * 下登记人是部门负责人在自己的会话代笔，交卷人是平台另开的全新执行会话——
+   * 登记原文从未进入交卷人上下文，交卷重写必然变薄（T2：8 条/1242 字 → 6 条/471
+   * 字），一致性比对每次都误伤。现在先把登记证据并入交卷 phases（并集落账，登记
+   * 内容永不丢失），再比对：宽容新增语义不变，禁止变薄由平台侧保证；比对仍保留
+   * 作安全网（仅当 MAX_PHASE_LIST_ITEMS 封顶截断装不下登记条目时才退回）。
    */
-  if (phaseCheck?.ok && startPhases) {
-    const carryover = checkStartEvidenceCarryover(startPhases, payload.phases)
+  if (phaseCheck?.ok && phaseCheck.phases && startPhases) {
+    mergeStartEvidenceIntoSettlement(phaseCheck.phases, startPhases)
+    const carryover = checkStartEvidenceCarryover(startPhases, phaseCheck.phases)
     if (carryover.length > 0) {
       return {
         ...advisoryTime,
@@ -4270,7 +4293,7 @@ export function adjudicateResult({ output, strict = true, expectedAcceptance = [
         acceptance,
         artifacts,
         needs,
-        error: `开工-结算证据不一致（收尾证据不得稀释开工时登记的第 1/2/3 步证据）：${carryover.slice(0, 4).join('；')}`,
+        error: `开工-结算证据不一致（收尾证据不得稀释开工时登记的第 1/2/3 步证据）：${carryover.slice(0, 4).join('；')}——平台已把登记原文并入比对并随本消息附在下方，请把下列登记条目原样抄入收尾结果块的 phases.planning / phases.preparation（再追加你的执行期补充；每个清单最多 ${MAX_PHASE_LIST_ITEMS} 条，重复表述请合并）`,
         phases: null,
         /* [修复] 结果块已解析、缺口可经回喂补报：允许有界重试回喂。 */
         rereport: true,
@@ -6732,6 +6755,22 @@ export function buildChildPrompt({
         `- 失败类型：${previousFailure.code ?? 'UNKNOWN'}${previousFailure.attempt ? `（第 ${previousFailure.attempt} 次尝试）` : ''}`,
         `- 失败说明：${truncate(String(previousFailure.message ?? '（无说明）'), 600)}`,
         '请针对上面这个原因调整做法，不要重复相同的失败路径；如果仍然无法完成，第一行输出 `BLOCKED: 原因` 并说明缺少什么。',
+        /*
+         * [3.1.1] 登记原文随回喂下发（治本 2026-11-19）：结算闸退回（EVIDENCE_INCOMPLETE）
+         * 的重试常见根因是「登记证据在别的会话里、交卷人没见过原文，只能重写变薄」。
+         * 只回传数字（8 条/1242 字）会把补报退化成凑字数游戏（重试会话原文自述
+         * "I don't have the exact startPhases text"）；附登记原文后，交卷人照抄即可。
+         */
+        ...(() => {
+          const registered = sanitizeStartPhaseEvidence(previousFailure.registeredStartPhases)
+          return registered
+            ? [
+                '',
+                '【开工登记证据·原文（你上次收尾结果块没有原样收录下列登记条目而被退回；本次收尾必须把它们逐字抄入 phases.planning / phases.preparation，再追加执行期新补充，不得重写或摘要）】',
+                renderStartPhaseEvidence(registered),
+              ]
+            : []
+        })(),
       ].join('\n')
     : ''
   /*
