@@ -33,6 +33,11 @@ const HYGIENE_WHITELIST: Record<string, number> = {
   // plan.ts [2.5.5] head 落地补发保险丝：卫生类（只补发可见通知、不驱动终态；
   // 2s×300 有界自停；缺失仅延迟通知可见性，不影响任何收束）
   flushPoll: 1,
+  // plan.ts [3.1.5] 工具执行中暂存通知的补发保险丝（midExchangeFlushPoll）：卫生类
+  // （只补发可见通知、不驱动任何任务终态；100ms×6000 有界自停，超时强制补发后自停；
+  // 缺失仅延迟通知可见性；根因 session-aa38d8c0：通知落在 tool/call 与 tool/result
+  // 之间导致下一轮 API 请求 400 INVALID_REQUEST）
+  midExchangeFlushPoll: 1,
   // host.ts [3.0.6] 留痕清理定时器：卫生类（不触发只少清理一次旧 journal 文件，
   // 不驱动任何任务终态；24h 周期，宿主关闭时随 ctx.effect 清理）
   journalRetentionTimer: 1,
@@ -67,7 +72,7 @@ test('[2.2.9][P-3] handle-policy：src/ 全部 unref 点位 === 卫生类白名�
     Object.fromEntries([...found.entries()].map(([f, n]) => [f, n.sort()])),
     {
       'host.ts': ['firstPruneTimer', 'journalRetentionTimer'],
-      'plan.ts': ['flushPoll'],
+      'plan.ts': ['flushPoll', 'midExchangeFlushPoll'],
       'runtime.ts': ['notice', 'notice', 'noticeTimer', 'poll', 'poll'],
     },
     'unref 点位与 handle-policy 契约不符：收束类计时器（必须触发才能到达终态）禁止 unref；'

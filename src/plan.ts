@@ -680,10 +680,38 @@ export function isStatusQuestion(value: any) {
 const CONFIRMATION_NEGATIONS = /(?:不同意|不认可|不批准|不确认|不可以|不行|不能|不要|不用|不必|无需|先别|别急|暂不|先不|还没|拒绝)/
 
 /** 认可信号词（命中其一才进入消耗判定；单字词靠"全消耗"约束防误伤）。 */
-const CONFIRMATION_CUE = /(?:同意|认可|批准|确认|确定|可以|没问题|没错|照办|照做|按你|按您|按此|按该|就按|就这么|就这样|采用|执行|开始|动手|去做|去办|好|行|嗯|是|对|干|办|okay|ok|go|yes|yeah|yep|sure|approved|approve|confirmed|confirm|agreed|agree|execute|proceed|lgtm|do\s*it|sounds?\s*good)/gi
+const CONFIRMATION_CUE = /(?:同意|认可|批准|确认|确定|可以|没问题|没错|照办|照做|按你|按您|按此|按该|就按|就这么|就这样|采用|执行|开始|动手|去做|去办|做|好|行|嗯|是|对|干|办|okay|ok|go|yes|yeah|yep|sure|approved|approve|confirmed|confirm|agreed|agree|execute|proceed|lgtm|do\s*it|sounds?\s*good)/gi
 
 /** 确认语境里的填充词（"按你的建议执行"中的 的/建议 等，可安全剥掉）。 */
-const CONFIRMATION_FILLER = /(?:我们|你们|我|你|您|这个|这么|这样|这|那|该|此|照|的|了|呢|啊|吧|呀|哦|噢|嗯|哈|嘛|喽|咯|喔|嘿|呵|滴|哒|地|得|说|讲|建议|方案|计划|想法|意见|就|都|也|还|最|先|定|一下|个|把|被|让|给|要|想|会|能|请|来|ahead|it|this|that|the|yours|your|ur|please)/gi
+const CONFIRMATION_FILLER = /(?:全部|全都|统统|一律|一并|一切|完全|百分之百|全|听|我们|你们|我|你|您|这个|这么|这样|这|那|该|此|照|的|了|呢|啊|吧|呀|哦|噢|嗯|哈|嘛|喽|咯|喔|嘿|呵|滴|哒|地|得|说|讲|建议|方案|计划|想法|意见|就|都|也|还|最|先|定|一下|个|把|被|让|给|要|想|会|能|请|来|ahead|it|this|that|the|yours|your|ur|please)/gi
+
+/*
+ * [3.1.4] 认可语模板（治本）：把「同意」按**句式**识别，而不是按词表穷举。
+ *
+ * 事故（2026-11-20 本会话 session-a9232d63，计划 wp-cff638b6）：用户对计划回复
+ * 「全部按你建议执行」——语义上是最明确的同意，却判为 false：残留「全部」二字
+ * 无法被 3.0.7 的填充词表吃掉，`rest.length === 0` 不成立。后果是确认路由与
+ * 认可闸门放行全线空转，插件对用户彻底沉默（计划 0/13 一直挂着）。
+ *
+ * 实证（对既有 build 直接调用）：27 条日常同意句 **25 条漏判**，包括「全部同意」
+ * 「完全同意」「全都同意」「完全没问题」「我完全同意」等。根因不是缺某个词，
+ * 而是**方法**：用封闭词表去穷举开放的中文同意句式，必然持续漏判，且每漏一个
+ * 同义词就复发一次「插件没反应」。
+ *
+ * 模板法把判定从「每个字都在词表里」换成「整句符合认可的语法骨架」：锚定 ^…$
+ * 全匹配才通过，句中任何实质内容（"但范围改成X"/"先只做第一部分"）都无法匹配。
+ * 否定与长度仍由前置判定把关；词表穷举通道保留为附加通道，双通道取并集。
+ */
+const CONFIRMATION_TEMPLATES: readonly RegExp[] = Object.freeze([
+  // 纯同意：[(我|我们)] [(全部|全都|完全|...)] (同意|认可|批准|确认|赞成|没问题|可以|行|好|是|对) [语气词]
+  /^(?:我|我们|咱们)?(?:全部|全都|全|统统|一律|一并|一切|完全|百分之百|都|也|就)*(?:同意|认可|批准|确认|确定|赞成|没问题|没问题吧|可以|行|好|是|对|中)(?:了|的|吧|呀|啊|呢|嘛|哦|哈|啦)*$/,
+  // 按建议执行：[(我)] [(全部|完全|就|先|...)] (按|照|依|遵) [(你|您|此|这|该|上面|上述)] [(的)] [(建议|方案|计划|...)] [(来|去)] [(执行|办|做|干|走|实施|落实|开始)] [语气词]
+  /^(?:(?:我|我们|咱们)?(?:同意|认可|批准|确认|确定|赞成|没问题|可以|行|好|是|对)(?:了|的|吧|呀|啊|呢|嘛|哈)*)?(?:全部|全都|全|统统|一律|一并|一切|完全|都|也|就|先)*(?:按照|遵照|依照|按|照|依|遵)(?:照)?(?:你|您|此|这|这个|该|上面|上述|刚才|前面|前述)?(?:(?:说|讲)(?:的)?|的)?(?:建议|方案|计划|意见|想法|安排|说法|意思|指示|要求)?(?:来|去)?(?:执行|办|做|干|走|实施|落实|开始|办吧)?(?:了|的|吧|呀|啊|呢|嘛|就行|就好|即可)*$/,
+  // 就这么办 / 就这样执行
+  /^(?:就)?(?:这么|这样|那么|此|如此)(?:办|定|干|做|执行|决定|来|定了|办吧)(?:了|的|吧|呀|啊|呢|嘛)*$/,
+  // 听你的 / 全听您的
+  /^(?:我|我们|咱们)?(?:全部|全都|全|完全|都|就)?(?:听|依|随)(?:你|您)(?:的)?(?:吧|了|的|呀|啊|呢|嘛|就行|就好)*$/,
+])
 
 export function isUserConfirmation(value: any) {
   if (typeof value !== 'string') return false
@@ -691,6 +719,11 @@ export function isUserConfirmation(value: any) {
   if (original.length === 0 || original.length > 24) return false
   if (CONFIRMATION_NEGATIONS.test(original)) return false
   const compact = original.toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '')
+  // [3.1.4] 第一通道：句式模板（锚定整句，命中即确认）。
+  for (const template of CONFIRMATION_TEMPLATES) {
+    if (template.test(compact)) return true
+  }
+  // [3.1.4] 第二通道：信号词 + 词表穷举（对模板覆盖不到的短句保底）。
   if (!new RegExp(CONFIRMATION_CUE.source, 'i').test(compact)) return false
   // 迭代剥到不动点：信号词与填充词交替出现（"按你的建议执行" = 按你→的→建议→执行）。
   let rest = compact
@@ -1964,6 +1997,89 @@ function schedulePreHeadFlush(session: any) {
   preHeadFlushTimers.set(session, flushPoll)
 }
 
+/*
+ * [3.1.5][治本] 工具执行中暂存闸：surface 尾部处于「assistant 已发起 tool-call、
+ * tool/result 尚未落地」的窗口时，任何即时写入的通知都会落在 tool/call 与
+ * tool/result 之间。1:1 投影成 API 请求后违反 OpenAI 兼容协议——tool 消息必须
+ * 紧跟发起它的 assistant tool_calls，否则服务端 400："messages with role 'tool'
+ * must be a response to a preceeding message with 'tool_calls'"。实证：
+ * session-aa38d8c0（dsh_workplan_replan 执行中注入重规划通知，下一轮请求 400
+ * INVALID_REQUEST，整轮中断）。
+ *
+ * 检测只读会话日志：从尾部回溯，先遇到 tool/result 判定「不在窗口内」；先遇到
+ * 带 tool-call 的 assistant/message 判定「在窗口内」；其余事件类型不改变判定。
+ * eventAt/seq 不可用的单元桩保持旧行为（立即写入），零回归。
+ */
+function surfaceAwaitingToolResult(session: any): boolean {
+  if (typeof session?.eventAt !== 'function' || !Number.isFinite(Number(session.seq))) return false
+  const total = Math.floor(Number(session.seq))
+  const floor = Math.max(0, total - 5000)
+  for (let seq = total - 1; seq >= floor; seq -= 1) {
+    const event = session.eventAt(seq)
+    if (!event) continue
+    if (event.type === 'tool/result') return false
+    if (event.type === 'assistant/message') {
+      const content = event.data?.message?.content
+      return Array.isArray(content) && content.some((block: any) => block && block.type === 'tool-call')
+    }
+  }
+  return false
+}
+
+const midExchangeNoticeQueue = new WeakMap<object, any[]>()
+const midExchangeFlushTimers = new WeakMap<object, any>()
+
+/** 工具结果已落地时，按序补发暂存通知（形状校验/裁剪已在入队前完成）。 */
+function flushMidExchangeNotices(session: any, force = false) {
+  const queue = midExchangeNoticeQueue.get(session)
+  if (!queue || queue.length === 0) return
+  if (!force && surfaceAwaitingToolResult(session)) return
+  midExchangeNoticeQueue.delete(session)
+  for (const message of queue) {
+    const appended = session.append('user/message', toJsonSafe(message), { surfaceOp: 'append' })
+    /* [T3][回读校验] 补发直写同样写后读回比对关键字段，不一致即抛。 */
+    verifySessionAppendReadback(session, message, 'flushMidExchangeNotices')
+    if (String(message?.source?.kind ?? '').startsWith('workplan')) {
+      appendNoticeLedger(session.id, { ...message, seq: appended?.seq })
+    }
+  }
+}
+
+/*
+ * [3.1.5] 补发保险丝：首次暂存时启动有界轮询（100ms × 6000 = 10 分钟上限，unref
+ * 不驻留进程）：tool/result 一落地立即按序补发并自停；超限强制补发（宿主核心投影层
+ * 另有工具排序修复兜底，即使再次落在窗口内也不会再产生非法请求），仍失败则丢弃并
+ * 告警，绝不残留无限定时器（与 2.2.8/2.2.9 计时器收束纪律一致）。
+ */
+function scheduleMidExchangeFlush(session: any) {
+  if (midExchangeFlushTimers.has(session)) return
+  let ticks = 0
+  const midExchangeFlushPoll = setInterval(() => {
+    ticks += 1
+    try {
+      if (!surfaceAwaitingToolResult(session)) {
+        flushMidExchangeNotices(session)
+      } else if (ticks >= 6000) {
+        flushMidExchangeNotices(session, true)
+      }
+    } catch (error) {
+      if (ticks >= 6000) {
+        clearInterval(midExchangeFlushPoll)
+        midExchangeFlushTimers.delete(session)
+        midExchangeNoticeQueue.delete(session)
+        console.error(`[dsh-workplan] flushMidExchangeNotices 放弃补发（${ticks} ticks）:`, error)
+      }
+      return
+    }
+    if (!midExchangeNoticeQueue.has(session) || ticks >= 6000) {
+      clearInterval(midExchangeFlushPoll)
+      midExchangeFlushTimers.delete(session)
+    }
+  }, 100)
+  midExchangeFlushPoll.unref()
+  midExchangeFlushTimers.set(session, midExchangeFlushPoll)
+}
+
 /**
  * [2.2.1] The single approved writer for `user/message` events in this plugin.
  *
@@ -2419,6 +2535,19 @@ export function appendUserMessage(session: any, payload: any, source?: any, opts
     schedulePreHeadFlush(session)
     return undefined
   }
+  /*
+   * [3.1.5][治本] 工具执行中暂存闸（见 surfaceAwaitingToolResult 注释）：通知绝不
+   * 写在 tool/call 与 tool/result 之间；先入队，等工具结果落地后由
+   * scheduleMidExchangeFlush 按序补发。宿主核心投影层的工具排序修复是兜底双保险。
+   */
+  if (surfaceAwaitingToolResult(session)) {
+    const queue = midExchangeNoticeQueue.get(session) ?? []
+    queue.push(message)
+    midExchangeNoticeQueue.set(session, queue)
+    scheduleMidExchangeFlush(session)
+    return undefined
+  }
+  flushMidExchangeNotices(session)
   flushPreHeadNotices(session)
   /* [T2][治本] 写入前净化为纯 JSON：NaN/undefined/Date/Map/Set/循环引用等
    * 一律转为可序列化值，杜绝宿主 snapshotJsonValue 校验抛错导致的重试刷屏。 */

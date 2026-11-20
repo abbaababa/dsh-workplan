@@ -94,6 +94,16 @@ export const inject = ['tools', 'systemPrompt', 'llm', 'subagents', 'sessions']
 
 export const PROMPT_ORDER = 40
 
+/*
+ * [3.1.4] 版本号唯一来源：提示词里对外声明的版本与 meta.version 必须同源。
+ *
+ * 事故（2026-11-20 排查 wp-cff638b6）：PROMPT_SECTION 里硬编码的是「3.1.0 版本…
+ * 本插件当前版本为 3.1.0」，而 meta.version 早已是 3.1.2。主 Agent 读提示词
+ * 自报版本时被误导，用户也拿不到真实版本（用户要求 13/G 要如实报告版本）。
+ * 硬编码字符串与 meta 双写是根因，改为同一常量派生。
+ */
+export const PLUGIN_VERSION = '3.1.4'
+
 const PROMPT_SECTION = [
   '本会话已启用自动任务分解。系统会在每个新用户任务的第一个模型步骤前生成计划，并先把计划显示在对话里；看到【任务分解】计划消息后，若插件未自动派发或需要续跑/重试，再调用 dsh_workplan_dispatch（默认 wait 等结果；预计较久时用 mode:"async" 先开跑）。若只收到「任务分解已在后台生成中」而尚未看到【任务分解】，不要手动派发，先告知用户正在分配并等待计划落地。',
   /*
@@ -105,7 +115,7 @@ const PROMPT_SECTION = [
   '3.0.0 任务书质量要求（用户要求 3/6）：插件派给部门负责人的每个子任务都携带 qualityRequirements（结果质量要求），部门负责人派给专家的每条任务也必须携带 qualityRequirements。负责人→专家缺它平台直接拒绝派发（DELEGATE_QUALITY_REQUIREMENTS_MISSING）；主 Agent→部门负责人缺它则该子任务在派发时被直接拒发（DISPATCH_QUALITY_REQUIREMENTS_MISSING，不启动部门 Agent），须 replan 补齐后重派。你审阅计划时先看每个子任务是否写了清楚的质量要求。',
   '3.0.0 极简任务（用户要求 5，用户裁决 A＝硬门槛）：部门负责人派出的每条任务必须简单到像 1+1=2——一个动作、一个主产物、一项可独立验收，单句、≤300 字符、不含「并且/同时/另外/还要/以及/分别/顺便」等并列词；不满足即被拒绝并给出拆分提示（DELEGATE_TASK_NOT_ATOMIC）。',
   '3.0.0 角色与汇报（用户要求 7/8/9/10/11/12）：部门组员角色已取消，只保留部门负责人与全球顶尖专家（role 只允许 expert）；专家完成后必须以 JSON 汇报（证据块里的 report：keyResults/keyInfo/importantInfo/leadRequirements，精简、禁止重复，F10）；部门负责人必须全面汇总本部门全部专家汇报后，以 JSON 交回主 Agent（departmentSummary：keyResults/keyInfo/importantInfo/sources，精简、禁止累赘重复，F11）；等所有部门的汇总都交回后，由你再全面、深入整理汇总成最终成果交付给用户（用户要求 12）。',
-  '3.1.0 版本（用户要求 13）：本插件当前版本为 3.1.0。涉及版本号的对外表述一律写 3.1.0。',
+  `${PLUGIN_VERSION} 版本（用户要求 13）：本插件当前版本为 ${PLUGIN_VERSION}。涉及版本号的对外表述一律写 ${PLUGIN_VERSION}。`,
   /*
    * [3.0.8] 主 Agent 五步开工证据协议（取代 2.5.1 两轮深度思考，用户已批准）：
    * 部门三层执行者已有开工/结算双门禁，主 Agent 自己也必须做到同一协议——
@@ -2128,7 +2138,7 @@ export function apply(ctx: any, config: WorkplanConfig = {}) {
 
 export const meta = {
   name,
-  version: '3.1.2',
+  version: '3.1.4',
   promptOrder: PROMPT_ORDER,
   routes: ['/dsh-workplan/plans', '/dsh-workplan/vendor/chart.umd.js'],
 }

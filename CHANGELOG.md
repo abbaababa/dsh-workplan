@@ -1,3 +1,19 @@
+## 3.1.4 — 2026-11-20（「用户已同意、插件却毫无反应」二次治本：确认识别改句式模板 + 闸门静默兜底提示 + 版本自报 ＋ 工具执行中插通知致 400 INVALID_REQUEST 治本：mid-exchange 通知暂存补发）
+
+- **事故（2026-11-20，会话 session-aa38d8c0-e197-4e5e-bf1c-55c96fdab089 实测存档）**：主 Agent 调用 `dsh_workplan_replan` 期间，插件把【重规划】通知直接写入会话，落在 assistant 工具调用与 tool/result 之间。DSH 核心按落盘顺序 1:1 投影消息、pi-ai 原样转发，Kimi/OpenAI 兼容 API 拒绝该序列：`messages with role 'tool' must be a response to a preceeding message with 'tool_calls'`（400 INVALID_REQUEST），整轮崩溃。
+- **根因（双重）**：①插件 `appendUserMessage` 不区分时机，工具执行中插话破坏 wire 序列（assistant tool_calls → user → tool 违例）；②DSH 核心 `deriveMessages()` 无排序兜底，非法序列直达 API。
+- **修复（src/plan.ts，标记 [3.1.4]）**：①新增 `surfaceAwaitingToolResult` 时机检测 + mid-exchange 通知内存暂存队列——工具结果落地后自动补发（100ms×6000 有界 unref 保险丝 `midExchangeFlushPoll`，超时强制补发后自停；已在 handle-policy 白名单按卫生类登记并附分类理由）；②空闲/已结算会话保持同步写入，零回归。
+- **核心侧配套**：`@deepseek-ai/dsh-session` 派生历史新增 `repairDerivedHistory` 排序兜底（已向 deepseek-ai/deepseek-harness 提 PR），任何来源的错序都到不了 API——双层治本。
+- **回归**：新增功能测试（工具执行中不立即写 / 结果落地后补发且位置在 tool/result 之后 / 空闲与已结算会话同步写，共 5 例）；复现脚本以真实存档转录验证修复后序列合法；全量 1365 通过 / 0 失败。
+
+- **事故（2026-11-20 本会话实测，计划 wp-cff638b6）**：主 Agent 依据总任务「先出计划、经用户认可后再开始执行」生成 6 阶段 13 子任务计划并按住闸门。用户回复「全部按你建议执行」——插件无任何通知、计划停 0/13 挂死；用户只能反过来问「为什么没开始分配」。
+- **源码级根因（第一根因，方法错）**：`isUserConfirmation` 走「信号词 + 填充词表穷举、剥到空串」判定，残留的「全部」二字吃不掉即判 false。实测 27 条日常同意句 **25 条漏判**（「全部同意」「全都同意」「完全同意」「完全没问题」「我完全同意」等）。用封闭词表穷举开放句式必然持续复发。
+- **第二根因（静默）**：`onPreStep` 遇到「认可闸门按住」的计划直接 `return downstream`，既不派发也不提示——用户永远不知道闸门卡在哪，即使分类器再漏判也不该一声不响。
+- **第三根因（自报版本错误）**：`src/host.ts` 提示词硬编码「本插件当前版本为 3.1.0」，与 `meta.version` 脱节，误导主 Agent 与用户。
+- **修复（src/plan.ts / src/runtime.ts / src/host.ts，标记 [3.1.4]）**：① 新增 `CONFIRMATION_TEMPLATES` 四条锚定整句模板（纯同意 / 按建议执行 / 就这么办 / 听你的），与词表通道取并集，句中任何实质内容（「可以，但范围改成X」）仍无法匹配；② 闸门按住时按消息原文去重发一条可见提示（计划 ID、完成度、回复「认可」或调用 `dsh_workplan_release` 的放行方式），不刷屏、不自动派发；③ 版本号单源 `PLUGIN_VERSION = '3.1.4'`，提示词由常量渲染，新增测试锁定 `meta.version === PLUGIN_VERSION`。
+- **行为对照**：闸门按住时回「全部按你建议执行」→ 自动解闸并下达派发指令；回「这个方案我还有别的想法」→ 保持按住并给出可见提示（同句重复只提示一次）。
+- **回归**：新增 `tests/workplan-confirmation-natural-phrases-3-1-4.test.ts`（30 条正例、原 3.0.7 正例不退化、20 条反例仍排除、闸门解闸/提示/去重、版本单源）；全量 1366 例。
+
 ## 3.1.2 — 2026-11-19（「用户认可后插件不再运行」死锁治本：确认识别单条口径 + 收件箱盖章 + 取代豁免）
 
 - **事故（2026-11-19 晚，本会话实测）**：用户对任务回复「认可」，插件毫无反应、任务分解反复重启且永不落地（notices/journal 双实证：四次后台分解无一存活、无任何确认接收通知）。前一会话（wp-b26c6d56 同型任务）同因流产。
