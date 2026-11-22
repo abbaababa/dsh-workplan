@@ -44,6 +44,11 @@ const HYGIENE_WHITELIST: Record<string, number> = {
   // host.ts [3.0.6][复审修复] 首次留痕清理延迟器：卫生类（激活同步路径不得当场
   // 扫盘；10s 后触发一次，不驱动任何任务终态；宿主关闭时随 ctx.effect 清理）
   firstPruneTimer: 1,
+  // runtime.ts [3.1.8][P1 D5] 第三层静默死亡巡检：卫生类（不触发只延迟「负责人
+  // 会话结束后成员仍在 running」的收敛与终止通知；status 读与根会话 turn-stopping
+  // 已提供同源收敛路径，巡检不是到达终态的唯一保证；120s 周期，仅在真有 running
+  // 成员时启动，dispose 清理）。
+  delegateSweepTimer: 1,
 }
 
 /** 历史事故点位黑名单：显式命名，回归时给出最直白的报错（与白名单检查互为双保险）。 */
@@ -66,14 +71,15 @@ test('[2.2.9][P-3] handle-policy：src/ 全部 unref 点位 === 卫生类白名�
     if (names.length > 0) found.set(f, names)
   }
 
-  // 1) 精确集合契约：runtime.ts 五处（根 ack 三处＋[T5-channel] 叶子 ack 两处）+ plan.ts [2.5.5] flushPoll（head 落地
+  // 1) 精确集合契约：runtime.ts 六处（根 ack 三处＋[T5-channel] 叶子 ack 两处
+  //    ＋[3.1.8] 巡检 delegateSweepTimer）+ plan.ts [2.5.5] flushPoll（head 落地
   //    补发保险丝，卫生类：只补发可见通知、有界自停、不驱动终态）允许 unref。
   assert.deepEqual(
     Object.fromEntries([...found.entries()].map(([f, n]) => [f, n.sort()])),
     {
       'host.ts': ['firstPruneTimer', 'journalRetentionTimer'],
       'plan.ts': ['flushPoll', 'midExchangeFlushPoll'],
-      'runtime.ts': ['notice', 'notice', 'noticeTimer', 'poll', 'poll'],
+      'runtime.ts': ['delegateSweepTimer', 'notice', 'notice', 'noticeTimer', 'poll', 'poll'],
     },
     'unref 点位与 handle-policy 契约不符：收束类计时器（必须触发才能到达终态）禁止 unref；'
     + '新增卫生类计时器必须显式加入 tests/handle-policy.test.ts 白名单并附分类理由。'

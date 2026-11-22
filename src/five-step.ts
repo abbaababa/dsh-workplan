@@ -671,3 +671,40 @@ export function renderStartPhaseEvidence(registered: StartPhaseEvidence): string
   push('第三步·就绪证据 evidence', registered.preparation.evidence)
   return lines.join('\n')
 }
+
+/**
+ * [3.1.7] 接续用的「执行蓝图」：只保留真正指导执行的两段（approach / approachBasis）。
+ *
+ * 其余登记清单（任务梳理、资源、工具、已备、就绪证据）是**审计链**，不该在每次
+ * 接续时把全文再贴一遍——完整原文随接续一起落盘，需要逐字核对时读文件。
+ * 这样既不会丢任何证据（文件里是原文），又只在提示词里为「必须照做」的部分付费。
+ */
+export function renderStartEvidenceBlueprint(registered: StartPhaseEvidence): string {
+  if (!registered || !registered.planning) return ''
+  const lines: string[] = []
+  const push = (label: string, items: string[]) => {
+    if (!Array.isArray(items) || items.length === 0) return
+    lines.push(`${label}：`)
+    items.forEach((item, index) => {
+      lines.push(`  ${index + 1}. ${String(item).slice(0, MAX_PHASE_ITEM_CHARS)}`)
+    })
+  }
+  push('第二步·方法流程步骤 approach（执行蓝图，严格照做）', registered.planning.approach)
+  push('第二步·依据 approachBasis', registered.planning.approachBasis)
+  return lines.join('\n')
+}
+
+/** [3.1.7] 其余登记清单的规模索引（只报条数与字数，不重复正文）。 */
+export function startEvidenceIndexLines(registered: StartPhaseEvidence): string[] {
+  if (!registered) return []
+  const rows: Array<[string, string[]]> = [
+    ['第一步·任务梳理 problemAnalysis', (registered.planning as any)?.problemAnalysis ?? []],
+    ['第二步·资源研究 resources', (registered.planning as any)?.resources ?? []],
+    ['第二步·工具研究 tools', (registered.planning as any)?.tools ?? []],
+    ['第三步·已备清单 prepared', (registered.preparation as any)?.prepared ?? []],
+    ['第三步·就绪证据 evidence', (registered.preparation as any)?.evidence ?? []],
+  ]
+  return rows
+    .filter(([, items]) => Array.isArray(items) && items.length > 0)
+    .map(([label, items]) => `${label}：${items.length} 条 / ${items.reduce((sum, item) => sum + String(item).length, 0)} 字`)
+}

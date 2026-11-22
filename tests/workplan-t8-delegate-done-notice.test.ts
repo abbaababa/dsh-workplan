@@ -14,7 +14,7 @@
  *  T8-2 幂等：已 sent 的成员在后续结算中不重报（sendMessage 恰每成员一次）。
  *  T8-3 投递失败 ⇒ report.state='failed' + DELIVERY_FAILED 留痕 + errors 审计；
  *       下一次结算自动补发（只有 sent 拦重报，T5 教训）。
- *  T8-4 done-only：failed 叶子不产生完成通知。
+ *  T8-4 done-only：failed 叶子不产生完成通知；[缺陷 22] 但必须产生终止通知。
  *  T8-5 待指示优先：escalation 挂起的叶子结算不得覆盖成 done，也不通知。
  *  T8-6 selfEffort 接续结算同款路由到负责人会话（第二处接线）。
  *  T8-7 [T8][D2 同步] delegates 消毒上限 12（8 人结算不截断）+ report 子对象
@@ -213,15 +213,27 @@ test('T8-3：投递失败 ⇒ failed 留痕 + DELIVERY_FAILED 审计；下一次
   assert.match(f.sent[1].text, /Member-B/)
 })
 
-test('T8-4：done-only——failed 叶子不产生完成通知', async () => {
+test('T8-4：done-only——failed 叶子不产生完成通知，但必须产生终止通知', async () => {
   const f = makeRuntime({}, '4')
   await dispatchTwo(f)
   f.spawned[0].resolveResult({ stopReason: 'error', diagnostic: '模拟执行失败', output: [] })
   await flush()
-  assert.equal(rowOf(f.record).delegates[0].status, 'failed')
-  assert.equal(f.sent.length, 0, 'failed 叶子不得投递完成汇报')
+  const leaf = rowOf(f.record).delegates[0]
+  assert.equal(leaf.status, 'failed')
+  // 完成口径不变：failed 绝不产生 kind='completion' 的完成汇报。
   const journal = readDeptMessages('wp-t8-notice-4', { kind: 'completion' })
   assert.equal((journal.ok ? journal.messages : []).length, 0)
+  // [缺陷 22] 终止口径：负责人必须收到一条「已终止、不是完成」的通知，且带幂等标记。
+  assert.equal(f.sent.length, 1, 'failed 叶子必须投递 1 条终止通知（不是完成汇报）')
+  assert.equal(f.sent[0].targetId, 'child-leader')
+  assert.match(f.sent[0].text, /stopReason=error/)
+  assert.match(f.sent[0].text, /不代表任务完成/)
+  assert.equal(leaf.termination?.state, 'sent')
+  assert.equal(leaf.termination?.kind, 'interrupted')
+  // 幂等：同一成员再次结算（重投结果）不得重复推送终止通知。
+  f.spawned[1].resolveResult(doneOutcome('Expert-B 完成。'))
+  await flush()
+  assert.equal(f.sent.filter((m: any) => /Expert-A/.test(m.text) && /不代表任务完成/.test(m.text)).length, 1)
 })
 
 test('T8-5：待指示优先——escalation 挂起的叶子结算不得覆盖成 done，也不通知', async () => {

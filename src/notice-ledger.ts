@@ -118,6 +118,14 @@ export type NoticeLedgerRecord = {
   text: string
   /** 对应的 user/message 事件 seq（写入时未知则为 -1）。 */
   surfaceSeq: number
+  /**
+   * [3.1.7][P1 U-43] 台账写前日志（additive 可选键）：缓冲中的 workplan-update
+   * 在进内存缓冲的**同一时刻**就把 durable 载荷同步落到插件自有 JSONL，崩溃/
+   * 重启窗口内不再只活在内存里。回放侧按 planId+subtaskId+revision 单调消费，
+   * 与 user/message 通道互为兜底（同一条更新两边都有时只前进一次）。
+   * 旧台账行没有该键，读端零迁移。
+   */
+  durable?: Record<string, unknown>
 }
 
 /** 台账文件位置：默认用户主目录，跨项目保留；测试可用环境变量覆盖。 */
@@ -145,6 +153,8 @@ function coerceRecord(raw: unknown): NoticeLedgerRecord | null {
     summary: typeof raw.summary === 'string' ? raw.summary : '',
     text: typeof raw.text === 'string' ? raw.text : '',
     surfaceSeq: Number.isSafeInteger(Number(raw.surfaceSeq)) ? Number(raw.surfaceSeq) : -1,
+    // [3.1.7][P1 U-43] additive 可选键：旧行没有 durable，读端零迁移。
+    ...(isRecord(raw.durable) ? { durable: raw.durable } : {}),
   }
 }
 
@@ -214,6 +224,68 @@ export function appendNoticeLedger(
     summary: typeof source.summary === 'string' ? source.summary : '',
     text: textOfMessage(message),
     surfaceSeq: typeof message?.seq === 'number' ? message.seq : -1,
+    // [3.1.7][P1 U-43] 写前日志：durable 载荷随行落盘（缓冲中的台账更新由此
+    // 获得崩溃窗口内的持久副本；回放侧单调消费，绝不重复前进）。
+    ...(isRecord(source.durable) ? { durable: source.durable } : {}),
+  }
+  return flushNoticeLedger(file, [JSON.stringify(record)])
+}
+
+/**
+ * [3.1.7][P1 U-43] 台账写前日志专用入口：把一条**尚未落 user/message** 的
+ * workplan-update durable 载荷同步写进插件自有 JSONL。与 appendNoticeLedger
+ * 共用同一文件/权限/防链接/行数治理/失败补落纪律；失败只返回 false（调用方
+ * 的内存缓冲仍在，user/message 通道随后兜底），绝不抛错拖垮派发。
+ */
+export function appendWorkplanUpdateWAL(
+  sessionId: string,
+  durable: Record<string, unknown>,
+  file: string = resolveNoticeLedgerFile(),
+  now: number = Date.now(),
+): string | null {
+  if (!isRecord(durable) || durable.kind !== 'workplan-update') return null
+  const walId = `wal-${now}-${Math.random().toString(36).slice(2, 10)}`
+  const record: NoticeLedgerRecord = {
+    version: NOTICE_LEDGER_VERSION,
+    at: now,
+    sessionId: String(sessionId ?? ''),
+    planId: typeof durable.planId === 'string' ? durable.planId : '',
+    kind: 'workplan-update',
+    form: 'wal',
+    summary: '',
+    text: '',
+    surfaceSeq: -1,
+    durable: { ...durable, walId },
+  }
+  return flushNoticeLedger(file, [JSON.stringify(record)]) ? walId : null
+}
+
+/**
+ * [3.1.7][P1 U-43] WAL 确认标记：合并归档真正落 user/message 后，把本批每条
+ * 更新的 walId 写成一条 form='wal-ack' 行。回放侧只消费**没有对应 ack** 的
+ * wal 行——即「缓冲了但没落盘就崩溃」的更新。ack 与 wal 同文件同纪律；
+ * 失败只返回 false（最坏情况是回放多补一次同 revision 的改判，单调闸仍守门）。
+ */
+export function appendWorkplanUpdateWALAck(
+  sessionId: string,
+  planId: string,
+  walIds: string[],
+  file: string = resolveNoticeLedgerFile(),
+  now: number = Date.now(),
+): boolean {
+  const ids = (Array.isArray(walIds) ? walIds : []).filter((id) => typeof id === 'string' && id !== '')
+  if (ids.length === 0) return true
+  const record: NoticeLedgerRecord = {
+    version: NOTICE_LEDGER_VERSION,
+    at: now,
+    sessionId: String(sessionId ?? ''),
+    planId: String(planId ?? ''),
+    kind: 'workplan-update',
+    form: 'wal-ack',
+    summary: '',
+    text: '',
+    surfaceSeq: -1,
+    durable: { kind: 'workplan-update-wal-ack', planId: String(planId ?? ''), walIds: ids, at: now },
   }
   return flushNoticeLedger(file, [JSON.stringify(record)])
 }

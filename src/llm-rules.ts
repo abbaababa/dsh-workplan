@@ -179,11 +179,21 @@ export function buildLlmRulesBrief(info: LlmRulesBriefInfo = {}): string {
     lines.push(`- 部门负责人已为本任务配置整体推理等级 \`${info.taskEffort}\`（effortOverride，负责人自配档）：本任务每次派发/重试/续跑全程沿用该等级，不得中途丢弃或覆盖；下级自己的等级以 self_effort 自配为权威（分工表档仅建议）。`)
   }
   if (info.tier === 'delegate') {
-    lines.push(`- 你是部门第三层执行者（本部门相关领域全球顶尖专家${info.memberName ? `：${info.memberName}` : ''}）。执行自己的任务必须遵守五步工作法的前三步（3.0.8 单一框架）：第一步全面、全盘、深入梳理、研究、思考自己的任务；第二步基于第一步完成好的所有结果，研究需要哪些资源、哪些工具、具体实施方案（方法、流程、步骤，含依据）；第三步把资源与工具真正备齐并给出就绪证据；然后进入第四步具体执行，全程少走弯路（先查历史教训、先验证再动手、不重复试错）。前三步证据经 phase-0（low 档启动）由 dsh_workplan_delegate(action="self_effort") 一并提交 startPhases={ planning{ problemAnalysis[], approach[], approachBasis[], resources[], tools[] }, preparation{ prepared[], evidence[] } }，未登记合格证据平台不会接续你进入正式执行。分工表给你的档位仅为建议：你必须在 phase-0 经 self_effort 按自己任务复杂度提交自配档（reasoningEffort+complexityRationale），平台登记后立即以自配档接续你执行正式任务；越界档会被钳制并留痕。开工前必须先预估本人任务耗时（整数分钟）并经 self_effort 的 timeNotice 上报部门负责人，未上报不接续（T6/D9 硬门禁）。必须确保自身任务完成品质非常高的前提下，完美、超高效率地执行。`)
+    /*
+     * [3.1.7][P3 U-24/U-26] 专家规则简报不再重发五步全文与预估门禁全文。
+     *
+     * 旧实现这条长行把「五步前三步全文 + startPhases 结构 + 自配档 + 预估
+     * 门禁」整段写一遍，而 buildDelegateePrompt 的「执行要求」与末尾
+     * fiveStepPromptLines() 已经逐字包含同一份内容（T4 A01/A03：每次派发
+     * 多注入 485–755 字符）。现在简报只留身份 + 指针（五步协议见任务书下方、
+     * 预估义务见执行要求），关键串「执行自己的任务必须遵守五步工作法的前三步」
+     * 与 startPhases 保活（守门测试钉住），正文只在任务书里出现一次。
+     */
+    lines.push(`- 你是部门第三层执行者（本部门相关领域全球顶尖专家${info.memberName ? `：${info.memberName}` : ''}）。执行自己的任务必须遵守五步工作法的前三步（3.0.8 单一框架，完整协议见本任务书下方「五步工作法」与「执行要求」）：先梳理任务、再研究资源/工具/方案、再备齐并给出就绪证据，然后才执行，全程少走弯路。前三步证据经 phase-0（low 档启动）由 dsh_workplan_delegate(action="self_effort") 一并提交 startPhases，未登记合格证据平台不会接续你进入正式执行。分工表给你的档位仅为建议：你必须在 phase-0 经 self_effort 按自己任务复杂度提交自配档（reasoningEffort+complexityRationale），平台登记后立即以自配档接续你执行正式任务；越界档会被钳制并留痕。开工前必须先预估本人任务耗时并经 self_effort 的 timeNotice 上报部门负责人（详见执行要求，未上报不接续）。必须确保自身任务完成品质非常高的前提下，完美、超高效率地执行。`)
   } else {
     // [2.5.4][T4][3.1.0] 人数口径同步（D1/D2）：low/未配置禁派；复杂（medium/high/xhigh/max）
     // ≥8 且 ≤25（上限随 caps.ts，环境变量可覆盖，提示词与门禁同源不漂移）。
-    lines.push(`- 部门负责人（本任务书的直接接收者）强制流程（用户要求 1/2/3，3.0.8 五步工作法单框架）：你拥有本部门内的再分配权限——执行自己的任务必须先完成五步前三步（第一步任务梳理；第二步基于第一步全部结果研究资源、工具与具体实施方案；第三步把资源与工具真正备齐并给出就绪证据），正式执行与再分配全程少走弯路（先查历史教训、先验证再动手、不重复试错），经 dsh_workplan_delegate(action="review") 一并提交分工表（assignments + taskReasoningEffort）与第 1/2/3 步证据（startPhases={ planning{ problemAnalysis[], approach[], approachBasis[], resources[], tools[] }, preparation{ prepared[], evidence[] } }），并在 consolidation.taskReasoningEffort 里按你接到任务的复杂度配置你自己的整体推理等级（先配置后开工：phase-0 以 low 启动，登记后平台立即以自配档接续本会话进入 phase-1，重试/续跑全程生效）；第 1/2/3 步证据与分工表未提交前，dsh_workplan_delegate(action="dispatch") 会被平台拒绝（硬门禁）。梳理完成后必须把任务拆得更简单——每位下级只承担单一目标、单一主产物、可独立验收的一项工作——再合理分配给本部门多名相关领域全球顶尖专家（部门组员角色已按用户要求 9 取消，分工表只允许 role="expert"，至少 1 名；low/未配置任务禁止下派——负责人亲自执行，第 1/2/3 步证据经 dsh_workplan_delegate(action="direct") 登记（${START_EVIDENCE_MIN_CHARS_BRIEF}；可选 reasoningEffort="low"）；复杂任务（medium/high/xhigh/max）合计不少于 ${MIN_COMPLEX_DELEGATE_MEMBERS} 人且最多 ${MAX_COMPLEX_DELEGATE_MEMBERS} 人，少于 ${MIN_COMPLEX_DELEGATE_MEMBERS} 人硬性阻断，超过上限平台拒收（可精简名单或拆两轮派发，绝不静默丢人无痕））；每位下级必须在 phase-0 经 dsh_workplan_delegate(action="self_effort") 按自己分到的单项任务复杂度自配推理等级（轻度=low；qwen 中等=medium、非 qwen 中等=high；qwen 非常复杂=xhigh、非 qwen 非常复杂=max），专家自配为权威（分工表 per-expert 档仅建议），平台登记后以自配档接续下级会话，全程应用；平台会按上述等级集合自动钳制越界档并留痕，等级在其任务全生命周期生效且不可被覆盖。第三层为叶子层：任何第四层派发一律被拒绝。`)
+    lines.push(`- 部门负责人（本任务书的直接接收者）强制流程（用户要求 1/2/3，3.0.8 五步工作法单框架）：你拥有本部门内的再分配权限——执行自己的任务必须先完成五步前三步（第一步任务梳理；第二步基于第一步全部结果研究资源、工具与具体实施方案；第三步把资源与工具真正备齐并给出就绪证据），正式执行与再分配全程少走弯路（先查历史教训、先验证再动手、不重复试错），经 dsh_workplan_delegate(action="review") 一并提交分工表（assignments + taskReasoningEffort）与第 1/2/3 步证据（startPhases={ planning{ problemAnalysis[], approach[], approachBasis[], resources[], tools[] }, preparation{ prepared[], evidence[] } }），并在 consolidation.taskReasoningEffort 里按你接到任务的复杂度配置你自己的整体推理等级（先配置后开工：phase-0 以 low 启动，登记后平台立即以自配档接续（宿主另起执行会话并携带 phase-0 产物，不是当前评估会话）进入 phase-1，重试/续跑全程生效）；第 1/2/3 步证据与分工表未提交前，dsh_workplan_delegate(action="dispatch") 会被平台拒绝（硬门禁）。梳理完成后必须把任务拆得更简单——每位下级只承担单一目标、单一主产物、可独立验收的一项工作——再合理分配给本部门多名相关领域全球顶尖专家（部门组员角色已按用户要求 9 取消，分工表只允许 role="expert"，至少 1 名；low/未配置任务禁止下派——负责人亲自执行，第 1/2/3 步证据经 dsh_workplan_delegate(action="direct") 登记（${START_EVIDENCE_MIN_CHARS_BRIEF}；可选 reasoningEffort="low"）；复杂任务（medium/high/xhigh/max）合计不少于 ${MIN_COMPLEX_DELEGATE_MEMBERS} 人且最多 ${MAX_COMPLEX_DELEGATE_MEMBERS} 人，少于 ${MIN_COMPLEX_DELEGATE_MEMBERS} 人硬性阻断，超过上限平台拒收（可精简名单或拆两轮派发，绝不静默丢人无痕））；每位下级必须在 phase-0 经 dsh_workplan_delegate(action="self_effort") 按自己分到的单项任务复杂度自配推理等级（轻度=low；qwen 中等=medium、非 qwen 中等=high；qwen 非常复杂=xhigh、非 qwen 非常复杂=max），专家自配为权威（分工表 per-expert 档仅建议），平台登记后以自配档接续下级会话，全程应用；平台会按上述等级集合自动钳制越界档并留痕，等级在其任务全生命周期生效且不可被覆盖。第三层为叶子层：任何第四层派发一律被拒绝。`)
     /*
      * [3.0.0] 用户 2026-11-14 第 3、5、6、7、8、10、11 条要求：负责人侧四条硬规则。
      * 与代码门禁同源（planDelegations 的 checkAtomicAssignment、comm-format 的
@@ -192,7 +202,16 @@ export function buildLlmRulesBrief(info: LlmRulesBriefInfo = {}): string {
     lines.push('- 极简任务硬门槛（用户要求 5，用户裁决 A＝硬门槛）：你派出的每一条任务必须简单到像 1+1=2——一个动作、一个主产物、一项可独立验收；出现「并且/并/同时/另外/还要/以及/分别/顺便/然后/接着/再」或分号并列、或一个任务里写了多句（含英文句点分隔的多句）、或超过 300 字符，平台直接拒绝派发（DELEGATE_TASK_NOT_ATOMIC）并给出拆分提示，实例：不要派「分析并修复并写测试」，要拆成「读 X 定位原因」「按原因改 Y」「写 Z 用例」三条。')
     lines.push('- 质量要求硬门槛（用户要求 6）：每一条分派都必须带 qualityRequirements（至少 1 条、每条 ≤400 字符、最多 8 条），写清「成果必须达到什么要求、什么算合格、怎么算不合格」；缺它平台拒绝派发（DELEGATE_QUALITY_REQUIREMENTS_MISSING）。任务书会把这块原文交给专家。')
     lines.push('- 专家汇报必须精简且是 JSON（用户要求 7）：专家完成后在证据块里给出 report（keyResults/keyInfo/importantInfo/leadRequirements 四个字符串数组，每数组 ≤6 条、每条 ≤200 字符，禁止重复）；你收到后逐条核对，缺项或重复会被格式门禁退回（F10）。')
-    lines.push('- 你的汇总必须精简且是 JSON（用户要求 8/10/11）：汇总本部门全部专家汇报后，在证据块里给出 departmentSummary（keyResults/keyInfo/importantInfo/sources 四个字符串数组，sources 必须覆盖全部已派发专家，禁止累赘重复）；不合格会被退回（F11）。汇总完成后直接交回主 Agent，不需要另建文件。')
+    /*
+     * [3.1.7][P3 U-32] 汇总字段清单不再在简报里重发一遍。
+     *
+     * 旧实现这条把 departmentSummary 的四个字段名与限额整段列出，而任务书
+     * 末尾 renderCommFormatSpec('leader') 内含的 F11 契约（comm-format.ts）
+     * 已经逐字给出同一份字段清单与限额（T4 A08：两份同源清单）。现在简报
+     * 只留义务声明 + 指针（字段与限额见下方沟通交流格式规范 F11），关键语义
+     * 「sources 必须覆盖全部已派发专家」「不合格会被退回（F11）」保活。
+     */
+    lines.push('- 你的汇总必须精简且是 JSON（用户要求 8/10/11）：汇总本部门全部专家汇报后，在证据块里给出 departmentSummary（字段清单与限额见本任务书下方《沟通交流格式规范》F11，sources 必须覆盖全部已派发专家，禁止累赘重复）；不合格会被退回（F11）。汇总完成后直接交回主 Agent，不需要另建文件。')
     lines.push('- 执行时间与验收：你和每位全球顶尖专家均没有总时长、单次时长、空闲或回执硬截止。开工预估及其汇总只用于协调与告知，未报齐时如实显示部分和，但不构成分钟判据；不得以耗时、预估超额或未经时间批准为由拒绝 done，extendMs 已停用。完成只由真实结果、产物、结构化证据和质量验收决定；用户显式取消与真实错误仍然有效。')
     lines.push('- 专家遇阻处置（3.0.5 硬规则，机制已强制）：任何专家调用 dsh_workplan_escalate 后，禁止用 review/dispatch/direct 把该问题改派、重派或降级给其他专家；你必须先用 action="status" 全面梳理该成员的问题与本部门全部 delegates 执行状态，再研究形成解决方案，最后用 dsh_workplan_instruct 答复原 member；平台在该成员待指示期间会硬拒一切改派动作，投递成功后强制原专家继续执行。')
   }
@@ -356,7 +375,7 @@ export function planDelegations(input: {
     return {
       ...empty,
       code: 'DELEGATE_LOW_TASK_FORBIDDEN',
-      error: '本任务为 low 档（或未配置，视同 low）：按用户裁决 D1–D5 禁止第三层下派，review/dispatch 一律硬拒，无任何例外通道。请部门负责人亲自执行：完成五步第 1/2/3 步（任务梳理 + 资源/工具/方案研究 + 准备）后经 dsh_workplan_delegate(action="direct") 登记 startPhases={ planning{ problemAnalysis[], approach[], approachBasis[], resources[], tools[] }, preparation{ prepared[], evidence[] } }（' + START_EVIDENCE_MIN_CHARS_BRIEF + '；可选 reasoningEffort="low"；不接受分工表），平台将以 low 档接续本会话亲自执行。已完成的历史派发不回溯。[3.1.1] 收尾纪律：登记条目须逐字原样收录进收尾结果块的 phases.planning / phases.preparation（再追加执行期补充，不得重写或摘要）——平台接续提示与回喂消息会附登记原文，照抄即可；结算闸会把登记原文与你交卷内容归并落账（登记永不丢失）。',
+      error: '本任务为 low 档（或未配置，视同 low）：按用户裁决 D1–D5 禁止第三层下派，review/dispatch 一律硬拒，无任何例外通道。请部门负责人亲自执行：完成五步第 1/2/3 步（任务梳理 + 资源/工具/方案研究 + 准备）后经 dsh_workplan_delegate(action="direct") 登记 startPhases={ planning{ problemAnalysis[], approach[], approachBasis[], resources[], tools[] }, preparation{ prepared[], evidence[] } }（' + START_EVIDENCE_MIN_CHARS_BRIEF + '；可选 reasoningEffort="low"；不接受分工表），平台将以 low 档接续（宿主另起执行会话并携带登记产物）由你亲自执行。已完成的历史派发不回溯。[3.1.1] 收尾纪律：登记条目须逐字原样收录进收尾结果块的 phases.planning / phases.preparation（再追加执行期补充，不得重写或摘要）——平台接续提示与回喂消息会附登记原文，照抄即可；结算闸会把登记原文与你交卷内容归并落账（登记永不丢失）。',
     }
   }
   const memberCap = complexTask ? MAX_COMPLEX_DELEGATE_MEMBERS : MAX_DELEGATE_MEMBERS
@@ -589,7 +608,18 @@ export function buildDelegateePrompt(input: {
     input.rulesBrief,
     '',
     '执行要求（用户强制要求 5 原文口径）：',
-    '- 执行自己的任务必须先完成下方「五步工作法」的前三步（3.0.8 单一框架）：第一步全面、全盘、深入梳理、研究、思考自己的任务；第二步基于第一步完成好的所有结果研究需要哪些资源、哪些工具、具体实施方案（方法、流程、步骤，含依据 approachBasis）；第三步把资源与工具真正备齐并给出就绪证据。前三步证据经 phase-0 的 self_effort 一并提交 startPhases，未登记合格证据平台不会接续你进入正式执行；第四步执行必须严格基于第二步理清的方法、流程、步骤，全程少走弯路（先查历史教训、先验证再动手、不重复试错）。',
+    /*
+     * [3.1.7][P3 U-27] 首条不再逐字重发五步前三步全文。
+     *
+     * 旧实现这条把「第一步…第二步…第三步…」整段写一遍，而本任务书末尾的
+     * fiveStepPromptLines() 已经逐字包含同一份协议（T4 A04：开头段与执行
+     * 要求首条重复 58+ 字符）。现在首条只留义务声明 + 指针 + 第四步纪律
+     * （少走弯路），关键串「先全面、全盘、深入梳理、研究、思考自己的任务」
+     * 「基于第一步完成好的所有结果研究需要哪些资源、哪些工具、具体实施方案」
+     * 「方法、流程、步骤」「approachBasis」「startPhases」全部保活——它们
+     * 在下方五步协议里逐字存在，守门测试（workplan-251-deep-think）不变。
+     */
+    '- 执行自己的任务：五步工作法的前三步已在 phase-0 经 self_effort 提交 startPhases 并登记（本任务书即 phase-1 接续），已登记内容不要重做、不要重复登记，直接从第四步执行；只有登记范围之外、执行确实需要的细节缺口，才先补齐（只补缺口，不推倒重来）。开工前仍须先全面、全盘、深入梳理、研究、思考自己的任务，并基于第一步完成好的所有结果研究需要哪些资源、哪些工具、具体实施方案（方法、流程、步骤，含 approachBasis 依据）——这一步只做核对与增量补充，不重复登记；第四步执行必须严格基于第二步理清的方法、流程、步骤，全程少走弯路（先查历史教训、先验证再动手、不重复试错）。',
     '- 你的推理等级以自配为权威（分工表档仅建议）：phase-0（low 档启动）唯一职责是经 dsh_workplan_delegate(action="self_effort") 提交自配档；phase-1 以登记生效的自配档全程应用（规划、执行、验证、复盘全生命周期），不得自行换档。',
     '- 开工前必须先预估本人任务耗时（整数分钟）并经 self_effort 的 timeNotice={ declaredMinutes: 正整数分钟, reason? } 上报部门负责人，未上报不接续（T6/D9 硬门禁：ESTIMATE_MISSING/ESTIMATE_INVALID）；该上报只是协调信息，必须如实预估。你和部门负责人执行任务均没有总时长、单次时长、空闲或回执硬截止；预估或实际耗时不会触发延期、超时接手，也不影响 done 验收。',
     '- 必须在确保自身任务完成品质非常高的前提下，完美、超高效率地执行；严禁低效执行与浪费 token。',
@@ -617,8 +647,8 @@ export function buildPhaseZeroDelegateePrompt(input: { departmentLabel?: string;
     ...(qualityBlock ? [qualityBlock] : []),
     `工作目录：${input.cwd || '（未知）'}`,
     ...(input.extraContext ? ['', input.extraContext] : []),
-    '本阶段唯一职责（先配置+先研究准备，后开工）：评估你分到的单项任务的复杂度，并完成五步工作法前三步（任务梳理、资源/工具/方案研究、准备就绪），然后调用 dsh_workplan_delegate(action="self_effort") 一次性提交：reasoningEffort（你的自配推理等级：轻度=low；qwen 中等=medium、非 qwen 中等=high；qwen 非常复杂=xhigh、非 qwen 非常复杂=max）+ complexityRationale（复杂度依据，必填）+ startPhases={ planning{ problemAnalysis[], approach[], approachBasis[], resources[], tools[] }, preparation{ prepared[], evidence[] } }（第 1/2/3 步证据，必填）+ timeNotice={ declaredMinutes: 正整数分钟, reason? }（开工前预估，必填）。未提交/不合格预估会被硬拒（ESTIMATE_MISSING/ESTIMATE_INVALID）：没有告知部门负责人预估时间，先拦截，再告知此人，你必须自己预估时间，汇报给对应负责人后，才可以重试或继续执行。',
+    '本阶段唯一职责（先配置+先研究准备，后开工）：评估你分到的单项任务的复杂度，并完成五步工作法前三步（任务梳理、资源/工具/方案研究、准备就绪），然后调用 dsh_workplan_delegate(action="self_effort") 一次性提交：member（你的成员名＝上面括号里的名字，必填，平台据此在台账认亲）+ reasoningEffort（你的自配推理等级：轻度=low；qwen 中等=medium、非 qwen 中等=high；qwen 非常复杂=xhigh、非 qwen 非常复杂=max）+ complexityRationale（复杂度依据，必填）+ startPhases={ planning{ problemAnalysis[], approach[], approachBasis[], resources[], tools[] }, preparation{ prepared[], evidence[] } }（第 1/2/3 步证据，必填）+ timeNotice={ declaredMinutes: 正整数分钟, reason? }（开工前预估，必填）。未提交/不合格预估会被硬拒（ESTIMATE_MISSING/ESTIMATE_INVALID）：没有告知部门负责人预估时间，先拦截，再告知此人，你必须自己预估时间，汇报给对应负责人后，才可以重试或继续执行。',
     'startPhases 五步前三步口径（与主 Agent/负责人同一判据）：第一步 problemAnalysis=先全面、全盘、深入梳理、研究、思考自己分到的任务（目标与验收/现状/事实/约束/未知/主要矛盾/边界，合计≥40字）；第二步 resources=需要哪些资源（数据/文件/权限/人/知识/时间，合计≥20字）+ tools=需要哪些工具、每个用来做什么（合计≥10字）+ approach=基于第一步完成好的所有结果理清的具体一步步执行、确保完美完成的方法、流程和步骤（合计≥40字，含如何少走弯路：先查历史教训、先验证再动手、不重复试错）+ approachBasis=第二步如何基于第一步全部结果的依据对应（合计≥20字）；第三步 preparation.prepared=已备齐的资源/工具清单（合计≥20字）+ preparation.evidence=逐项就绪证据（命令输出/文件路径/配置项/版本号/引用，合计≥20字）。',
-    '不要执行任务本身，不得派生任何第四层 Agent/子会话。缺交或不合格 startPhases 会被硬拒（START_EVIDENCE_MISSING / START_EVIDENCE_INCOMPLETE），不登记、不接续。三项齐全提交后结束本回合；平台会立即以你的自配档接续本会话进入 phase-1（正式任务），正式执行必须严格按你第二步理清的方法、流程、步骤进行。越界档由平台按模型家族合法集合钳制并留痕。',
+    '不要执行任务本身，不得派生任何第四层 Agent/子会话。缺交或不合格 startPhases 会被硬拒（START_EVIDENCE_MISSING / START_EVIDENCE_INCOMPLETE），不登记、不接续。三项齐全提交后结束本回合；平台会立即以你的自配档接续（宿主另起执行会话并携带本阶段产物，不是当前评估会话）进入 phase-1（正式任务），正式执行必须严格按你第二步理清的方法、流程、步骤进行。越界档由平台按模型家族合法集合钳制并留痕。',
   ].join('\n')
 }

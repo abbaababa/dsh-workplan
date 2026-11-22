@@ -105,6 +105,8 @@ window.__ModuleLoader__.load({
           "rejected": "派发被拒",
           "blocked": "受阻"
         },
+        "delegateCompletionSummary": "下级完成情况：{done}/{total} 已完成",
+        "delegateAwaitingSummary": "下级专家已全部完成，正在等本行负责人核验并汇总；本行显示“未完成”只表示汇总未收尾，不表示专家没做完。",
         "dept": {
           "engineering": "工程研发",
           "research": "研究分析",
@@ -341,6 +343,8 @@ window.__ModuleLoader__.load({
           "rejected": "rejected",
           "blocked": "blocked"
         },
+        "delegateCompletionSummary": "Delegate completion: {done}/{total} done",
+        "delegateAwaitingSummary": "All delegated experts are done; this row is waiting for the team lead to verify and summarize. “Not finished” here means the summary is not closed, not that the experts failed.",
         "dept": {
           "engineering": "Engineering",
           "research": "Research",
@@ -1995,6 +1999,23 @@ window.__ModuleLoader__.load({
               )),
             ),
           )
+          : null,
+        /*
+         * [3.1.5] 看板不能只逐条显示专家完成；当所有下级都 done 而部门行仍在
+         * 汇总时，必须显式说明「专家已完成、等待负责人汇总」，否则同一面板会被
+         * 读成「已完成」和「未完成」两种结论。
+         */
+        item?.delegateCompletion && status !== 'done'
+          ? h('p', { className: 'dsh-wp-muted' },
+            /*
+             * [T4][F2] 「只表示汇总未收尾」只对仍在推进的行成立。blocked/failed
+             * 行即使专家全 done，也不是「等汇总」而是「本行受阻」——只显示真实
+             * 完成数，避免不实解释（服务端 awaitingLeaderSummary 已同口径收紧，
+             * 这里再做一次呈现守卫，历史载荷也不会重现旧文案）。
+             */
+            item.delegateCompletion.awaitingLeaderSummary && (status === 'in_progress' || status === 'pending')
+              ? t('delegateAwaitingSummary')
+              : fill(t('delegateCompletionSummary'), { done: item.delegateCompletion.done, total: item.delegateCompletion.total }))
           : null,
         status !== 'blocked' && item?.summary ? h('p', { className: 'dsh-wp-muted' }, `${t('summary')}：${plainError(item.summary)}`) : null,
         /*

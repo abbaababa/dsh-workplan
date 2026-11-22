@@ -1,0 +1,711 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 1b786f4..cf94f84 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -1,3 +1,12 @@
++## 3.1.5 — 2026-11-20（第三层完成度同源投影：专家已完成与部门行未汇总不再互相矛盾）
++
++- **事故口径**：T4 已派 agent-2/agent-3（行业景气专家、资金面专家），看板逐条显示两名专家完成；但 T4 行/状态查询仍显示未完成，用户看到“已完成”和“没完成”两种结论。
++- **源码级根因**：不是第二份状态，也不是缓存。看板读取 `delegates[].status`，计划行进度与 `dsh_workplan_status` 以行级 `status` 为权威；旧版没有一个同源聚合字段说明“下级全部 done、但部门负责人尚未汇总收尾”，于是两个不同层级的事实被读成同一层级的矛盾。
++- **源码级根因 2（目标会话实测）**：行业景气/资金面两个叶子会话已经 `turn/end`，甚至已输出普通文字结论；但收尾缺少合格 `WORKPLAN_EVIDENCE` 结果块，严格结算不能记 done。若异步结算回调再被吞，`delegates[].status` 会永久停在 `running`，与会话侧“已结束/已完成”的观感冲突。
++- **修复（src/plan.ts / src/runtime.ts / src/client.ts，标记 [3.1.5]）**：新增 `deriveDelegateCompletion` 读时纯函数并挂入 `normaliseStatusEntry` 与 `modelStatusLines`，输出 `delegateCompletion={total,done,failed,running,rejected,blocked,timeout,escalated,allDone,awaitingLeaderSummary}`；客户端在行未完成但下级全 done 时明确显示“下级专家已全部完成，正在等本行负责人核验并汇总”。不自动把 T4 改 done，部门汇总 F11 与证据门禁仍由负责人收尾。
++- **修复 2（src/runtime.ts `reconcileEndedDelegateSessions`，标记 [3.1.5]）**：负责人 `delegate action="status"` 时按叶子会话日志重放最后助手正文：合格 F10 汇报补结算 done；普通正文/缺结果块按实收敛 failed；phase-0 工具调用结束、待指示、无会话/回合仍开均不误杀。
++- **回归**：新增 `tests/delegate-completion-projection.test.ts` 4 例与 `tests/delegate-ended-session-reconcile.test.ts` 4 例（全 done/in_progress、部分失败、无分工与 replanned 旧行、快照与模型可读面同源、结束无块收敛 failed、phase-0 不误判、待指示不覆盖、unknown/open 不变）；版本声明统一 3.1.5。
++
+ ## 3.1.4 — 2026-11-20（「用户已同意、插件却毫无反应」二次治本：确认识别改句式模板 + 闸门静默兜底提示 + 版本自报 ＋ 工具执行中插通知致 400 INVALID_REQUEST 治本：mid-exchange 通知暂存补发）
+ 
+ - **事故（2026-11-20，会话 session-aa38d8c0-e197-4e5e-bf1c-55c96fdab089 实测存档）**：主 Agent 调用 `dsh_workplan_replan` 期间，插件把【重规划】通知直接写入会话，落在 assistant 工具调用与 tool/result 之间。DSH 核心按落盘顺序 1:1 投影消息、pi-ai 原样转发，Kimi/OpenAI 兼容 API 拒绝该序列：`messages with role 'tool' must be a response to a preceeding message with 'tool_calls'`（400 INVALID_REQUEST），整轮崩溃。
+diff --git a/README.en.md b/README.en.md
+index 48efad7..8099c62 100644
+--- a/README.en.md
++++ b/README.en.md
+@@ -3,7 +3,7 @@
+ > **Two selling points, one line: a full ISO/IEC 15408:2026 evidence pack you can verify with 5 commands, and a one-command install with zero runtime dependencies.**
+ 
+ [![verify](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml/badge.svg)](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml)
+-[![version](https://img.shields.io/badge/version-3.1.4-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v3.1.4)
++[![version](https://img.shields.io/badge/version-3.1.5-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v3.1.5)
+ 
+ Adds "plan first → dispatch real department subagents → watch progress in the sidebar" to **DeepSeek Harness (DSH)**. No app, no DSH source patch, no page replacement.
+ 
+@@ -80,7 +80,7 @@ The full contract — roles, data shapes, state machine, recovery, and the three
+ ## Install
+ 
+ ```bash
+-dsh plugin --profile web add dsh-workplan@3.1.4
++dsh plugin --profile web add dsh-workplan@3.1.5
+ ```
+ 
+ Restart the DSH Web process (or reload the page) so the bundle is picked up.
+diff --git a/README.md b/README.md
+index 597c054..03405dc 100644
+--- a/README.md
++++ b/README.md
+@@ -3,7 +3,7 @@
+ > **两个卖点，一句话：ISO/IEC 15408:2026 全套安全证据，5 条命令自己验；安装一条命令、零第三方运行时依赖。**
+ 
+ [![verify](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml/badge.svg)](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml)
+-[![version](https://img.shields.io/badge/version-3.1.4-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v3.1.4)
++[![version](https://img.shields.io/badge/version-3.1.5-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v3.1.5)
+ 
+ 给 **DeepSeek Harness（DSH）** 加一段「先拆计划 → 真派部门子 Agent 去做 → 左侧栏实时看进度」的能力。不装 App、不改 DSH 源码、不换页面。
+ 
+@@ -69,7 +69,7 @@ grep -RInE "child_process|execSync|eval\(|writeFileSync" src || echo "0 命中
+ ## 一键安装
+ 
+ ```bash
+-dsh plugin --profile web add dsh-workplan@3.1.4
++dsh plugin --profile web add dsh-workplan@3.1.5
+ ```
+ 
+ 装完**重启一次 DSH Web**（或重新载入当前页面）让插件生效。
+diff --git a/README.zh.md b/README.zh.md
+index b6f79c8..0991f2a 100644
+--- a/README.zh.md
++++ b/README.zh.md
+@@ -3,7 +3,7 @@
+ > **两个卖点，一句话：ISO/IEC 15408:2026 全套安全证据，5 条命令自己验；安装一条命令、零第三方运行时依赖。**
+ 
+ [![verify](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml/badge.svg)](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml)
+-[![version](https://img.shields.io/badge/version-3.1.0-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v3.1.0)
++[![version](https://img.shields.io/badge/version-3.1.5-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v3.1.5)
+ 
+ 给 **DeepSeek Harness（DSH）** 加一段「先拆计划 → 真派部门子 Agent 去做 → 左侧栏实时看进度」的能力。不装 App、不改 DSH 源码、不换页面。
+ 
+@@ -69,7 +69,7 @@ grep -RInE "child_process|execSync|eval\(|writeFileSync" src || echo "0 命中
+ ## 一键安装
+ 
+ ```bash
+-dsh plugin --profile web add dsh-workplan@3.1.0
++dsh plugin --profile web add dsh-workplan@3.1.5
+ ```
+ 
+ 装完**重启一次 DSH Web**（或重新载入当前页面）让插件生效。
+diff --git a/client.js b/client.js
+index f611cd0..9c71cb1 100644
+--- a/client.js
++++ b/client.js
+@@ -103,6 +103,8 @@ window.__ModuleLoader__.load({
+                     "rejected": "派发被拒",
+                     "blocked": "受阻"
+                 },
++                "delegateCompletionSummary": "下级完成情况：{done}/{total} 已完成",
++                "delegateAwaitingSummary": "下级专家已全部完成，正在等本行负责人核验并汇总；本行显示“未完成”只表示汇总未收尾，不表示专家没做完。",
+                 "dept": {
+                     "engineering": "工程研发",
+                     "research": "研究分析",
+@@ -339,6 +341,8 @@ window.__ModuleLoader__.load({
+                     "rejected": "rejected",
+                     "blocked": "blocked"
+                 },
++                "delegateCompletionSummary": "Delegate completion: {done}/{total} done",
++                "delegateAwaitingSummary": "All delegated experts are done; this row is waiting for the team lead to verify and summarize. “Not finished” here means the summary is not closed, not that the experts failed.",
+                 "dept": {
+                     "engineering": "Engineering",
+                     "research": "Research",
+@@ -1905,6 +1909,16 @@ window.__ModuleLoader__.load({
+                     + (member?.closure === 'acknowledged' ? `｜${t('closureAcknowledged')}` : '')
+                     + (member?.instructionOverdue ? `｜${t('closureNoAck')}` : '')
+                     + (member?.summary ? `：${String(member.summary)}` : '')))))
++                : null, 
++            /*
++             * [3.1.5] 看板不能只逐条显示专家完成；当所有下级都 done 而部门行仍在
++             * 汇总时，必须显式说明「专家已完成、等待负责人汇总」，否则同一面板会被
++             * 读成「已完成」和「未完成」两种结论。
++             */
++            item?.delegateCompletion && status !== 'done'
++                ? h('p', { className: 'dsh-wp-muted' }, item.delegateCompletion.awaitingLeaderSummary
++                    ? t('delegateAwaitingSummary')
++                    : fill(t('delegateCompletionSummary'), { done: item.delegateCompletion.done, total: item.delegateCompletion.total }))
+                 : null, status !== 'blocked' && item?.summary ? h('p', { className: 'dsh-wp-muted' }, `${t('summary')}：${plainError(item.summary)}`) : null, 
+             /*
+              * [1.10.0] R-02：「卡住原因」只属于没做完的行。
+diff --git a/lib/client.js b/lib/client.js
+index f611cd0..9c71cb1 100644
+--- a/lib/client.js
++++ b/lib/client.js
+@@ -103,6 +103,8 @@ window.__ModuleLoader__.load({
+                     "rejected": "派发被拒",
+                     "blocked": "受阻"
+                 },
++                "delegateCompletionSummary": "下级完成情况：{done}/{total} 已完成",
++                "delegateAwaitingSummary": "下级专家已全部完成，正在等本行负责人核验并汇总；本行显示“未完成”只表示汇总未收尾，不表示专家没做完。",
+                 "dept": {
+                     "engineering": "工程研发",
+                     "research": "研究分析",
+@@ -339,6 +341,8 @@ window.__ModuleLoader__.load({
+                     "rejected": "rejected",
+                     "blocked": "blocked"
+                 },
++                "delegateCompletionSummary": "Delegate completion: {done}/{total} done",
++                "delegateAwaitingSummary": "All delegated experts are done; this row is waiting for the team lead to verify and summarize. “Not finished” here means the summary is not closed, not that the experts failed.",
+                 "dept": {
+                     "engineering": "Engineering",
+                     "research": "Research",
+@@ -1905,6 +1909,16 @@ window.__ModuleLoader__.load({
+                     + (member?.closure === 'acknowledged' ? `｜${t('closureAcknowledged')}` : '')
+                     + (member?.instructionOverdue ? `｜${t('closureNoAck')}` : '')
+                     + (member?.summary ? `：${String(member.summary)}` : '')))))
++                : null, 
++            /*
++             * [3.1.5] 看板不能只逐条显示专家完成；当所有下级都 done 而部门行仍在
++             * 汇总时，必须显式说明「专家已完成、等待负责人汇总」，否则同一面板会被
++             * 读成「已完成」和「未完成」两种结论。
++             */
++            item?.delegateCompletion && status !== 'done'
++                ? h('p', { className: 'dsh-wp-muted' }, item.delegateCompletion.awaitingLeaderSummary
++                    ? t('delegateAwaitingSummary')
++                    : fill(t('delegateCompletionSummary'), { done: item.delegateCompletion.done, total: item.delegateCompletion.total }))
+                 : null, status !== 'blocked' && item?.summary ? h('p', { className: 'dsh-wp-muted' }, `${t('summary')}：${plainError(item.summary)}`) : null, 
+             /*
+              * [1.10.0] R-02：「卡住原因」只属于没做完的行。
+diff --git a/lib/host.js b/lib/host.js
+index 76d2556..1cbbb84 100644
+--- a/lib/host.js
++++ b/lib/host.js
+@@ -85,14 +85,14 @@ export const name = 'dsh-workplan';
+ export const inject = ['tools', 'systemPrompt', 'llm', 'subagents', 'sessions'];
+ export const PROMPT_ORDER = 40;
+ /*
+- * [3.1.4] 版本号唯一来源：提示词里对外声明的版本与 meta.version 必须同源。
++ * [3.1.5] 版本号唯一来源：提示词里对外声明的版本与 meta.version 必须同源。
+  *
+  * 事故（2026-11-20 排查 wp-cff638b6）：PROMPT_SECTION 里硬编码的是「3.1.0 版本…
+  * 本插件当前版本为 3.1.0」，而 meta.version 早已是 3.1.2。主 Agent 读提示词
+  * 自报版本时被误导，用户也拿不到真实版本（用户要求 13/G 要如实报告版本）。
+  * 硬编码字符串与 meta 双写是根因，改为同一常量派生。
+  */
+-export const PLUGIN_VERSION = '3.1.4';
++export const PLUGIN_VERSION = '3.1.5';
+ const PROMPT_SECTION = [
+     '本会话已启用自动任务分解。系统会在每个新用户任务的第一个模型步骤前生成计划，并先把计划显示在对话里；看到【任务分解】计划消息后，若插件未自动派发或需要续跑/重试，再调用 dsh_workplan_dispatch（默认 wait 等结果；预计较久时用 mode:"async" 先开跑）。若只收到「任务分解已在后台生成中」而尚未看到【任务分解】，不要手动派发，先告知用户正在分配并等待计划落地。',
+     /*
+@@ -1981,7 +1981,7 @@ export function apply(ctx, config = {}) {
+ }
+ export const meta = {
+     name,
+-    version: '3.1.4',
++    version: '3.1.5',
+     promptOrder: PROMPT_ORDER,
+     routes: ['/dsh-workplan/plans', '/dsh-workplan/vendor/chart.umd.js'],
+ };
+diff --git a/lib/plan.js b/lib/plan.js
+index bf35011..c4e9209 100644
+--- a/lib/plan.js
++++ b/lib/plan.js
+@@ -5777,6 +5777,59 @@ export function deriveLeaderEstimate(row) {
+         return null;
+     return { totalMinutes, reported, expected: roster.length, missing, failed };
+ }
++/**
++ * [3.1.5] 第三层完成度的单一读时投影。
++ *
++ * 看板逐条渲染 delegates，而状态工具/交付门禁以计划行 status 为权威；若没有一个
++ * 同源聚合字段，「agent-2/agent-3 已完成」与「T4 未完成」会被读成同一层级的互相
++ * 矛盾。这里只回答一个事实：下级完成到了哪一步；不把行自动改 done（部门汇总
++ * F11 仍需负责人提交）。
++ */
++export function deriveDelegateCompletion(source) {
++    if (source?.closure === 'replanned')
++        return null;
++    const delegates = Array.isArray(source?.delegates) ? source.delegates : [];
++    if (delegates.length === 0)
++        return null;
++    let done = 0;
++    let failed = 0;
++    let running = 0;
++    let rejected = 0;
++    let blocked = 0;
++    let timeout = 0;
++    let escalated = 0;
++    for (const item of delegates) {
++        if (item?.escalation || item?.closure === 'escalated')
++            escalated += 1;
++        const status = String(item?.status ?? 'running');
++        if (status === 'done')
++            done += 1;
++        else if (status === 'failed')
++            failed += 1;
++        else if (status === 'rejected')
++            rejected += 1;
++        else if (status === 'blocked')
++            blocked += 1;
++        else if (status === 'timeout')
++            timeout += 1;
++        else
++            running += 1;
++    }
++    const total = delegates.length;
++    const allDone = total > 0 && done === total;
++    return {
++        total,
++        done,
++        failed,
++        running,
++        rejected,
++        blocked,
++        timeout,
++        escalated,
++        allDone,
++        awaitingLeaderSummary: allDone && source?.status !== 'done',
++    };
++}
+ /**
+  * Structurally normalise one entry without touching the clock.
+  *
+@@ -5823,6 +5876,7 @@ export function normaliseStatusEntry(entry) {
+      * null（空 roster/replanned 旧行/越界 fail-closed）⇒ 省略字段，客户端整行隐藏（J8）。
+      */
+     const leaderEstimate = deriveLeaderEstimate(source);
++    const delegateCompletion = deriveDelegateCompletion(source);
+     /*
+      * [SCv2-T4][Q6-A/C29] 单次尝试墙钟读时派生：只认 startedAt/finishedAt 时间戳，
+      * 缺失（含预算重置清空）⇒ null「未验证」，绝不按 0 分钟展示。pending 行无计时。
+@@ -5855,6 +5909,8 @@ export function normaliseStatusEntry(entry) {
+         ...(lastError ? { lastError } : {}),
+         // [T7][J1 冻结结构] 仅非 null 时下发；缺失＝无下属分工/已排除，客户端整行隐藏。
+         ...(leaderEstimate ? { leaderEstimate } : {}),
++        // [3.1.5] 第三层完成度与看板逐条 delegates 同源聚合，状态工具不再只读行 status。
++        ...(delegateCompletion ? { delegateCompletion } : {}),
+         /*
+          * [SCv2-T4] 判据层字段挂载：源字段存在才覆盖（消毒后值），不存在则保持
+          * 缺省——旧计划/未生效计划载荷逐字不变（Q5-A）。attemptWallClockMs 与
+diff --git a/lib/runtime.js b/lib/runtime.js
+index 6e22bba..aad7121 100644
+--- a/lib/runtime.js
++++ b/lib/runtime.js
+@@ -3436,6 +3436,8 @@ export function modelStatusLines(statuses) {
+                 .filter((entry) => entry && typeof entry === 'object')
+                 .map((entry) => ({ ...entry })),
+             delegateEstimates: item.delegateEstimates ?? null,
++            // [3.1.5] 第三层完成度投影：与看板载荷同源，避免「专家已完成/行未完成」互相矛盾。
++            delegateCompletion: item.delegateCompletion ?? null,
+             // [T7][J1 冻结结构] {totalMinutes, reported, expected, missing[], failed[]} | null。
+             leaderEstimate,
+             ...(leaderEstimateAnomaly ? { leaderEstimateAnomaly } : {}),
+@@ -4042,6 +4044,71 @@ export function sessionTurnState(session) {
+     }
+     return { state: 'unknown', reason: null, reasonDetail: null, at: null };
+ }
++/*
++ * [3.1.5] 第三层「会话已结束但台账仍 running」的读时收敛。
++ *
++ * 事故（session-82fe93a1…T4）：行业景气/资金面两个叶子会话已经正常 turn/end，
++ * 但因为收尾消息没有合格 WORKPLAN_EVIDENCE 结果块，结算回调不能把它们记 done；
++ * 回调若再被异步链路上的异常吞掉，行 delegates[] 就会永久停在 running。负责人
++ * action="status" 时按会话日志重放最后一条助手正文：合格汇报按 F10 补结算 done，
++ * 不合格汇报按实改 failed；没有助手正文（phase-0 等接续）保持 running，绝不误杀。
++ */
++function latestAssistantText(session) {
++    if (!session || typeof session.eventAt !== 'function')
++        return '';
++    const total = Number(session.seq);
++    if (!Number.isFinite(total) || total <= 0)
++        return '';
++    const floor = Math.max(0, Math.floor(total) - 100);
++    for (let seq = Math.floor(total) - 1; seq >= floor; seq -= 1) {
++        let event;
++        try {
++            event = session.eventAt(seq);
++        }
++        catch {
++            return '';
++        }
++        if (!event)
++            continue;
++        if (event.type !== 'assistant/message')
++            continue;
++        const text = messageText(event.data?.message ?? event.data).trim();
++        if (text)
++            return text;
++    }
++    return '';
++}
++export function reconcileEndedDelegateSessions(delegates, getSession) {
++    const list = Array.isArray(delegates) ? delegates : [];
++    let changed = false;
++    const next = list.map((item) => {
++        if (!item || item.status !== 'running' || item.escalation || item.closure === 'escalated')
++            return item;
++        const childId = typeof item.childId === 'string' ? item.childId : '';
++        if (!childId)
++            return item;
++        const session = getSession?.(childId);
++        if (!session)
++            return item;
++        const turn = sessionTurnState(session);
++        if (turn.state !== 'ended')
++            return item;
++        const text = latestAssistantText(session);
++        if (!text)
++            return item;
++        const f10 = adjudicateExpertReport({ output: [{ type: 'text', text }] });
++        changed = true;
++        return {
++            ...item,
++            status: f10.ok ? 'done' : 'failed',
++            closure: null,
++            summary: truncate(text, 300),
++            error: f10.ok ? null : truncate(f10.rejection, 300),
++            finishedAt: Number.isFinite(turn.at) ? turn.at : Date.now(),
++        };
++    });
++    return { delegates: changed ? next : list, changed };
++}
+ /*
+  * [1.8.4] 回合已经结束 ⇒ 没有任何子任务还可能在跑。
+  *
+@@ -8920,22 +8987,24 @@ export function createWorkplanRuntime(ctx, options = {}) {
+             };
+         }
+         if (action === 'status') {
+-            const delegates = Array.isArray(row.delegates) ? row.delegates : [];
++            const reconciliation = reconcileEndedDelegateSessions(row.delegates, (childId) => ctx.sessions?.get?.(childId));
++            const statusRow = reconciliation.changed ? persist({ delegates: reconciliation.delegates }) : row;
++            const delegates = Array.isArray(statusRow?.delegates) ? statusRow.delegates : [];
+             return {
+                 ok: true,
+                 planId: record.plan.planId,
+                 subtaskId,
+                 action,
+-                consolidation: row.consolidation ?? null,
+-                effortOverride: row.effortOverride ?? null,
++                consolidation: statusRow?.consolidation ?? null,
++                effortOverride: statusRow?.effortOverride ?? null,
+                 // [2.5.4][T3R1] 门禁审计对负责人可见（A3：拒绝/放行记录可复核）。
+-                gateAudit: Array.isArray(row.gateAudit) ? row.gateAudit : [],
++                gateAudit: Array.isArray(statusRow?.gateAudit) ? statusRow.gateAudit : [],
+                 delegates,
+                 // [3.0.5] 待指示成员清单：负责人履行「先梳理全部任务状态」义务的读取面。
+                 openEscalations: openEscalations.map((item) => String(item?.member ?? '?')),
+                 // [T7][lead-decisions J2] 负责人时长聚合：与看板/模型面同一读时派生纯函数
+                 // （J1 冻结结构；null＝无下属分工/replanned 旧行/越界 fail-closed，J8/R8）。
+-                leaderEstimate: deriveLeaderEstimate(row),
++                leaderEstimate: deriveLeaderEstimate(statusRow),
+                 // [2.5.5][T3] low 直执分支（派生判据，不新增持久化标记）：effortOverride='low'
+                 // 且分工表为空/缺失 ⇒ low 直执；复杂任务被钳制到 low 的行（assignments 非空）
+                 // 不命中，避免误导（规格 §5.6）。
+diff --git a/package-lock.json b/package-lock.json
+index bb24c81..8cd6b2c 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -1,12 +1,12 @@
+ {
+   "name": "dsh-workplan",
+-  "version": "3.1.4",
++  "version": "3.1.5",
+   "lockfileVersion": 3,
+   "requires": true,
+   "packages": {
+     "": {
+       "name": "dsh-workplan",
+-      "version": "3.1.4",
++      "version": "3.1.5",
+       "license": "MIT",
+       "devDependencies": {
+         "@types/node": "^22.20.5",
+diff --git a/package.json b/package.json
+index baf5152..73f529c 100644
+--- a/package.json
++++ b/package.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "dsh-workplan",
+-  "version": "3.1.4",
++  "version": "3.1.5",
+   "description": "Automatic task decomposition, real department subagents, and a responsive workplan dashboard for DeepSeek Harness.",
+   "type": "module",
+   "license": "MIT",
+diff --git a/src/client.ts b/src/client.ts
+index 6ef1127..c2ba6c2 100644
+--- a/src/client.ts
++++ b/src/client.ts
+@@ -105,6 +105,8 @@ window.__ModuleLoader__.load({
+           "rejected": "派发被拒",
+           "blocked": "受阻"
+         },
++        "delegateCompletionSummary": "下级完成情况：{done}/{total} 已完成",
++        "delegateAwaitingSummary": "下级专家已全部完成，正在等本行负责人核验并汇总；本行显示“未完成”只表示汇总未收尾，不表示专家没做完。",
+         "dept": {
+           "engineering": "工程研发",
+           "research": "研究分析",
+@@ -341,6 +343,8 @@ window.__ModuleLoader__.load({
+           "rejected": "rejected",
+           "blocked": "blocked"
+         },
++        "delegateCompletionSummary": "Delegate completion: {done}/{total} done",
++        "delegateAwaitingSummary": "All delegated experts are done; this row is waiting for the team lead to verify and summarize. “Not finished” here means the summary is not closed, not that the experts failed.",
+         "dept": {
+           "engineering": "Engineering",
+           "research": "Research",
+@@ -1996,6 +2000,17 @@ window.__ModuleLoader__.load({
+             ),
+           )
+           : null,
++        /*
++         * [3.1.5] 看板不能只逐条显示专家完成；当所有下级都 done 而部门行仍在
++         * 汇总时，必须显式说明「专家已完成、等待负责人汇总」，否则同一面板会被
++         * 读成「已完成」和「未完成」两种结论。
++         */
++        item?.delegateCompletion && status !== 'done'
++          ? h('p', { className: 'dsh-wp-muted' },
++            item.delegateCompletion.awaitingLeaderSummary
++              ? t('delegateAwaitingSummary')
++              : fill(t('delegateCompletionSummary'), { done: item.delegateCompletion.done, total: item.delegateCompletion.total }))
++          : null,
+         status !== 'blocked' && item?.summary ? h('p', { className: 'dsh-wp-muted' }, `${t('summary')}：${plainError(item.summary)}`) : null,
+         /*
+          * [1.10.0] R-02：「卡住原因」只属于没做完的行。
+diff --git a/src/host.ts b/src/host.ts
+index 53115de..5aa7c30 100644
+--- a/src/host.ts
++++ b/src/host.ts
+@@ -95,14 +95,14 @@ export const inject = ['tools', 'systemPrompt', 'llm', 'subagents', 'sessions']
+ export const PROMPT_ORDER = 40
+ 
+ /*
+- * [3.1.4] 版本号唯一来源：提示词里对外声明的版本与 meta.version 必须同源。
++ * [3.1.5] 版本号唯一来源：提示词里对外声明的版本与 meta.version 必须同源。
+  *
+  * 事故（2026-11-20 排查 wp-cff638b6）：PROMPT_SECTION 里硬编码的是「3.1.0 版本…
+  * 本插件当前版本为 3.1.0」，而 meta.version 早已是 3.1.2。主 Agent 读提示词
+  * 自报版本时被误导，用户也拿不到真实版本（用户要求 13/G 要如实报告版本）。
+  * 硬编码字符串与 meta 双写是根因，改为同一常量派生。
+  */
+-export const PLUGIN_VERSION = '3.1.4'
++export const PLUGIN_VERSION = '3.1.5'
+ 
+ const PROMPT_SECTION = [
+   '本会话已启用自动任务分解。系统会在每个新用户任务的第一个模型步骤前生成计划，并先把计划显示在对话里；看到【任务分解】计划消息后，若插件未自动派发或需要续跑/重试，再调用 dsh_workplan_dispatch（默认 wait 等结果；预计较久时用 mode:"async" 先开跑）。若只收到「任务分解已在后台生成中」而尚未看到【任务分解】，不要手动派发，先告知用户正在分配并等待计划落地。',
+@@ -2138,7 +2138,7 @@ export function apply(ctx: any, config: WorkplanConfig = {}) {
+ 
+ export const meta = {
+   name,
+-  version: '3.1.4',
++  version: '3.1.5',
+   promptOrder: PROMPT_ORDER,
+   routes: ['/dsh-workplan/plans', '/dsh-workplan/vendor/chart.umd.js'],
+ }
+diff --git a/src/plan.ts b/src/plan.ts
+index 7f8fbf5..8e6c1e8 100644
+--- a/src/plan.ts
++++ b/src/plan.ts
+@@ -5900,6 +5900,51 @@ export function deriveLeaderEstimate(row: any): LeaderEstimateSummary | null {
+   return { totalMinutes, reported, expected: roster.length, missing, failed }
+ }
+ 
++/**
++ * [3.1.5] 第三层完成度的单一读时投影。
++ *
++ * 看板逐条渲染 delegates，而状态工具/交付门禁以计划行 status 为权威；若没有一个
++ * 同源聚合字段，「agent-2/agent-3 已完成」与「T4 未完成」会被读成同一层级的互相
++ * 矛盾。这里只回答一个事实：下级完成到了哪一步；不把行自动改 done（部门汇总
++ * F11 仍需负责人提交）。
++ */
++export function deriveDelegateCompletion(source: any) {
++  if (source?.closure === 'replanned') return null
++  const delegates = Array.isArray(source?.delegates) ? source.delegates : []
++  if (delegates.length === 0) return null
++  let done = 0
++  let failed = 0
++  let running = 0
++  let rejected = 0
++  let blocked = 0
++  let timeout = 0
++  let escalated = 0
++  for (const item of delegates) {
++    if (item?.escalation || item?.closure === 'escalated') escalated += 1
++    const status = String(item?.status ?? 'running')
++    if (status === 'done') done += 1
++    else if (status === 'failed') failed += 1
++    else if (status === 'rejected') rejected += 1
++    else if (status === 'blocked') blocked += 1
++    else if (status === 'timeout') timeout += 1
++    else running += 1
++  }
++  const total = delegates.length
++  const allDone = total > 0 && done === total
++  return {
++    total,
++    done,
++    failed,
++    running,
++    rejected,
++    blocked,
++    timeout,
++    escalated,
++    allDone,
++    awaitingLeaderSummary: allDone && source?.status !== 'done',
++  }
++}
++
+ /**
+  * Structurally normalise one entry without touching the clock.
+  *
+@@ -5946,6 +5991,7 @@ export function normaliseStatusEntry(entry: any): StatusEntry {
+    * null（空 roster/replanned 旧行/越界 fail-closed）⇒ 省略字段，客户端整行隐藏（J8）。
+    */
+   const leaderEstimate = deriveLeaderEstimate(source)
++  const delegateCompletion = deriveDelegateCompletion(source)
+   /*
+    * [SCv2-T4][Q6-A/C29] 单次尝试墙钟读时派生：只认 startedAt/finishedAt 时间戳，
+    * 缺失（含预算重置清空）⇒ null「未验证」，绝不按 0 分钟展示。pending 行无计时。
+@@ -5978,6 +6024,8 @@ export function normaliseStatusEntry(entry: any): StatusEntry {
+     ...(lastError ? { lastError } : {}),
+     // [T7][J1 冻结结构] 仅非 null 时下发；缺失＝无下属分工/已排除，客户端整行隐藏。
+     ...(leaderEstimate ? { leaderEstimate } : {}),
++    // [3.1.5] 第三层完成度与看板逐条 delegates 同源聚合，状态工具不再只读行 status。
++    ...(delegateCompletion ? { delegateCompletion } : {}),
+     /*
+      * [SCv2-T4] 判据层字段挂载：源字段存在才覆盖（消毒后值），不存在则保持
+      * 缺省——旧计划/未生效计划载荷逐字不变（Q5-A）。attemptWallClockMs 与
+diff --git a/src/runtime.ts b/src/runtime.ts
+index 4beb484..8b78c1d 100644
+--- a/src/runtime.ts
++++ b/src/runtime.ts
+@@ -3568,6 +3568,8 @@ export function modelStatusLines(statuses: any) {
+       .filter((entry: any) => entry && typeof entry === 'object')
+       .map((entry: any) => ({ ...entry })),
+     delegateEstimates: item.delegateEstimates ?? null,
++    // [3.1.5] 第三层完成度投影：与看板载荷同源，避免「专家已完成/行未完成」互相矛盾。
++    delegateCompletion: item.delegateCompletion ?? null,
+     // [T7][J1 冻结结构] {totalMinutes, reported, expected, missing[], failed[]} | null。
+     leaderEstimate,
+     ...(leaderEstimateAnomaly ? { leaderEstimateAnomaly } : {}),
+@@ -4150,6 +4152,62 @@ export function sessionTurnState(session: any) {
+   return { state: 'unknown', reason: null, reasonDetail: null, at: null }
+ }
+ 
++/*
++ * [3.1.5] 第三层「会话已结束但台账仍 running」的读时收敛。
++ *
++ * 事故（session-82fe93a1…T4）：行业景气/资金面两个叶子会话已经正常 turn/end，
++ * 但因为收尾消息没有合格 WORKPLAN_EVIDENCE 结果块，结算回调不能把它们记 done；
++ * 回调若再被异步链路上的异常吞掉，行 delegates[] 就会永久停在 running。负责人
++ * action="status" 时按会话日志重放最后一条助手正文：合格汇报按 F10 补结算 done，
++ * 不合格汇报按实改 failed；没有助手正文（phase-0 等接续）保持 running，绝不误杀。
++ */
++function latestAssistantText(session: any) {
++  if (!session || typeof session.eventAt !== 'function') return ''
++  const total = Number(session.seq)
++  if (!Number.isFinite(total) || total <= 0) return ''
++  const floor = Math.max(0, Math.floor(total) - 100)
++  for (let seq = Math.floor(total) - 1; seq >= floor; seq -= 1) {
++    let event
++    try {
++      event = session.eventAt(seq)
++    } catch {
++      return ''
++    }
++    if (!event) continue
++    if (event.type !== 'assistant/message') continue
++    const text = messageText(event.data?.message ?? event.data).trim()
++    if (text) return text
++  }
++  return ''
++}
++
++export function reconcileEndedDelegateSessions(delegates: any, getSession: (childId: string) => any) {
++  const list = Array.isArray(delegates) ? delegates : []
++  let changed = false
++  const next = list.map((item: any) => {
++    if (!item || item.status !== 'running' || item.escalation || item.closure === 'escalated') return item
++    const childId = typeof item.childId === 'string' ? item.childId : ''
++    if (!childId) return item
++    const session = getSession?.(childId)
++    if (!session) return item
++    const turn = sessionTurnState(session)
++    if (turn.state !== 'ended') return item
++    const text = latestAssistantText(session)
++    if (!text) return item
++    const f10 = adjudicateExpertReport({ output: [{ type: 'text', text }] })
++    changed = true
++    return {
++      ...item,
++      status: f10.ok ? 'done' : 'failed',
++      closure: null,
++      summary: truncate(text, 300),
++      error: f10.ok ? null : truncate(f10.rejection, 300),
++      finishedAt: Number.isFinite(turn.at) ? turn.at : Date.now(),
++    }
++  })
++  return { delegates: changed ? next : list, changed }
++}
++
+ /*
+  * [1.8.4] 回合已经结束 ⇒ 没有任何子任务还可能在跑。
+  *
+@@ -9054,22 +9112,24 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions
+     }
+ 
+     if (action === 'status') {
+-      const delegates = Array.isArray(row.delegates) ? row.delegates : []
++      const reconciliation = reconcileEndedDelegateSessions(row.delegates, (childId: string) => (ctx as any).sessions?.get?.(childId))
++      const statusRow = reconciliation.changed ? persist({ delegates: reconciliation.delegates }) : row
++      const delegates = Array.isArray(statusRow?.delegates) ? statusRow.delegates : []
+       return {
+         ok: true,
+         planId: record.plan.planId,
+         subtaskId,
+         action,
+-        consolidation: row.consolidation ?? null,
+-        effortOverride: row.effortOverride ?? null,
++        consolidation: statusRow?.consolidation ?? null,
++        effortOverride: statusRow?.effortOverride ?? null,
+         // [2.5.4][T3R1] 门禁审计对负责人可见（A3：拒绝/放行记录可复核）。
+-        gateAudit: Array.isArray(row.gateAudit) ? row.gateAudit : [],
++        gateAudit: Array.isArray(statusRow?.gateAudit) ? statusRow.gateAudit : [],
+         delegates,
+         // [3.0.5] 待指示成员清单：负责人履行「先梳理全部任务状态」义务的读取面。
+         openEscalations: openEscalations.map((item: any) => String(item?.member ?? '?')),
+         // [T7][lead-decisions J2] 负责人时长聚合：与看板/模型面同一读时派生纯函数
+         // （J1 冻结结构；null＝无下属分工/replanned 旧行/越界 fail-closed，J8/R8）。
+-        leaderEstimate: deriveLeaderEstimate(row),
++        leaderEstimate: deriveLeaderEstimate(statusRow),
+         // [2.5.5][T3] low 直执分支（派生判据，不新增持久化标记）：effortOverride='low'
+         // 且分工表为空/缺失 ⇒ low 直执；复杂任务被钳制到 low 的行（assignments 非空）
+         // 不命中，避免误导（规格 §5.6）。
+diff --git a/tests/fixtures/tool-surface.json b/tests/fixtures/tool-surface.json
+index 0160f93..fe02374 100644
+--- a/tests/fixtures/tool-surface.json
++++ b/tests/fixtures/tool-surface.json
+@@ -1,6 +1,6 @@
+ {
+   "$comment": "T4 (CC G-08/G-24): golden inventory of the plugin's external interface surface (model tools, HTTP routes, lifecycle events). The regression test tests/tool-surface-inventory.test.ts extracts the same facts from src/host.ts and must match this file. Any intentional interface change requires updating this file AND refreshing docs/cc (ADV_FSP functional spec + AVA attack surface) in the same change.",
+-  "version": "3.1.4",
++  "version": "3.1.5",
+   "tools": [
+     "dsh_workplan_cancel",
+     "dsh_workplan_delegate",
+diff --git a/tests/workplan-250-head-delegation.test.ts b/tests/workplan-250-head-delegation.test.ts
+index 8db76ee..41382ac 100644
+--- a/tests/workplan-250-head-delegation.test.ts
++++ b/tests/workplan-250-head-delegation.test.ts
+@@ -216,11 +216,11 @@ test('要求2 端到端：review 配置整体等级 → 状态行 effortOverride
+   assert.equal(status.effortOverride, 'medium')
+ })
+ 
+-// [3.1.4] 版本声明统一 3.1.4（断言随定版升级；package.json、src/host.ts meta 与
++// [3.1.5] 版本声明统一 3.1.5（断言随定版升级；package.json、src/host.ts meta 与
+ // tests/fixtures/tool-surface.json 四处由 publish-release.sh 同步）。
+-test('要求5：版本声明统一 3.1.4（2.5.0 断言随定版升级）', () => {
++test('要求5：版本声明统一 3.1.5（2.5.0 断言随定版升级）', () => {
+   const pkg = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8'))
+-  assert.equal(pkg.version, '3.1.4')
++  assert.equal(pkg.version, '3.1.5')
+   const fixture = JSON.parse(readFileSync(join(process.cwd(), 'tests/fixtures/tool-surface.json'), 'utf8'))
+   assert.equal(fixture.version, pkg.version, 'tool-surface 清单版本必须与包版本统一')
+ })
+diff --git a/tests/workplan-v3-contract.test.ts b/tests/workplan-v3-contract.test.ts
+index 2649e69..17a9406 100644
+--- a/tests/workplan-v3-contract.test.ts
++++ b/tests/workplan-v3-contract.test.ts
+@@ -381,6 +381,6 @@ test('派发：质量要求随分工表落到成员记录上', () => {
+ 
+ /* ============================ 要求 13：版本号 ============================ */
+ 
+-test('要求 13：插件 meta 版本为 3.1.4', () => {
+-  assert.equal(meta.version, '3.1.4')
++test('要求 13：插件 meta 版本为 3.1.5', () => {
++  assert.equal(meta.version, '3.1.5')
+ })
