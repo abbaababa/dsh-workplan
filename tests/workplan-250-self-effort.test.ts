@@ -30,7 +30,7 @@ function makePlan() {
   }
 }
 
-function makeRuntime(opts: { failPhase1?: boolean } = {}) {
+function makeRuntime(opts: { failPhase1?: boolean; capacity?: number } = {}) {
   const plan = makePlan()
   const events: any[] = []
   const rootSession: any = {
@@ -42,6 +42,13 @@ function makeRuntime(opts: { failPhase1?: boolean } = {}) {
   const leaderSession: any = { id: 'child-leader', header: { createdAt: 1000, parentSession: 'session-root', cwd: '/tmp/self-cwd' }, append() {}, events: [] }
   const spawned: any[] = []
   const spawnAttempts = { count: 0 }
+  /*
+   * [3.1.8] 并发池夹具：模拟宿主 ActivationPool——空位不足即抛
+   * ACTIVATION_LIMIT_REACHED；容量在用例里显式调整，等价于「phase-0 回合结束、
+   * 宿主释放并发位」。默认无限，既有用例零影响。
+   */
+  const spawnState = { active: 0, capacity: opts.capacity ?? Number.POSITIVE_INFINITY }
+  const setCapacity = (value: number) => { spawnState.capacity = value }
   const interrupts: any[] = []
   const leaderAgent: any = { session: leaderSession, options: { provider: 'qw', model: QWEN } }
   const ctx: any = {
@@ -49,13 +56,17 @@ function makeRuntime(opts: { failPhase1?: boolean } = {}) {
     subagents: {
       startActivation: async (request: any) => {
         spawnAttempts.count += 1
+        if (spawnState.active >= spawnState.capacity) {
+          throw Object.assign(new Error(`subagent limit reached (active child limit: ${spawnState.capacity})`), { code: 'ACTIVATION_LIMIT_REACHED' })
+        }
         // [2.5.5][T3] 夹具适配：复杂声明 8 人分工表 ⇒ phase-0 成功 8 次后才进入接续尝试（原 2 人）。
         if (opts.failPhase1 && spawnAttempts.count > 8) throw new Error('spawn rejected')
+        spawnState.active += 1
         const childId = `member-${spawned.length + 1}`
         let resolveResult: any
         const result = new Promise((resolve) => { resolveResult = resolve })
         spawned.push({ childId, request, resolveResult })
-        return { childId, result, dispose: async () => {} }
+        return { childId, result, dispose: async () => { spawnState.active = Math.max(0, spawnState.active - 1) } }
       },
       interruptByParent: (childId: string, parentId: string, mode: string) => { interrupts.push({ childId, parentId, mode }); return { ok: true } },
       // [T6] 预估送达通道 stub：self_effort 登记后经 sendMessage 投给负责人（缺此函数会 ESTIMATE_DELIVERY_FAILED）。
@@ -70,7 +81,7 @@ function makeRuntime(opts: { failPhase1?: boolean } = {}) {
   statuses[0].childId = 'child-leader'
   const record = { plan, statuses, updatedAt: 0, errors: [], notices: [] }
   runtime.state.records.set('session-root', record)
-  return { runtime, record, rootSession, spawned, spawnAttempts, interrupts, leaderAgent, ctx }
+  return { runtime, record, rootSession, spawned, spawnAttempts, spawnState, setCapacity, interrupts, leaderAgent, ctx }
 }
 
 const consolidation = (overrides: any = {}) => ({
@@ -310,4 +321,92 @@ test('自配档：旧计划回放零迁移——未配置视同 low 禁派；带
   session.append('user/message', buildUpdateMessage({ planId: plan.planId, subtaskId: 'T1', status: 'in_progress', revision: 2 }))
   const rebuilt: any = reconstructFromSession(session)
   assert.equal(rebuilt.statuses[0].effortOverride, undefined, '旧日志无新字段 ⇒ 零迁移不报错')
+})
+
+/*
+ * [3.1.8][P0 D6] 治本回归：宿主并发位满时，self_effort 绝不在工具调用里等新激活。
+ *
+ * 现场（wp-d3448f95 / T3，2026-11-22）：7 名专家 + 1 名负责人 = 默认 8 个并发位
+ * 全部占满；叶子 phase-0 调用 self_effort 后，旧实现先中断自己的回合再同步 await
+ * 新激活。新激活要空位，空位要等回合结束，回合又等工具返回 ⇒ 自锁，最长约 20
+ * 分钟无响应。治本后：容量满 ⇒ 立即返回 continuation='scheduled'，回合结束后由
+ * 后台任务自动接续 phase-1，台账 childId/结算全部照旧。
+ */
+test('[3.1.8] 并发位已满时 self_effort 立即返回 scheduled，回合结束后后台自动接续 phase-1', async () => {
+  const { runtime, record, spawned, setCapacity, leaderAgent } = makeRuntime({ capacity: 8 })
+  await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation({ taskReasoningEffort: 'xhigh', assignments: assignments8() }), startPhases: MAIN_START_PHASES_FIXTURE })
+  const dispatched = await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
+  assert.equal(dispatched.ok, true, JSON.stringify(dispatched))
+  assert.equal(spawned.length, 8, '8 名专家 phase-0 已占满默认并发位')
+
+  const beganAt = Date.now()
+  const r = await runtime.delegateTool(leafAgent('member-1'), {
+    action: 'self_effort',
+    reasoningEffort: 'xhigh',
+    complexityRationale: '跨模块根因排查，验证难度高',
+    startPhases: MAIN_START_PHASES_FIXTURE,
+    timeNotice: { declaredMinutes: 20, reason: '跨模块根因排查，验证难度高' },
+  })
+  assert.equal(r.ok, true, JSON.stringify(r))
+  assert.equal(r.continuation, 'scheduled', '容量满时必须立即返回，不阻塞工具调用')
+  assert.ok(Date.now() - beganAt < 1000, '工具调用不得排队等待（旧实现最长约 20 分钟）')
+
+  let row = record.statuses[0]
+  assert.equal(row.delegates[0].childId, 'member-1', 'phase-0 会话 id 仍在台账')
+  assert.equal(row.delegates[0].continuationPending, true, '交接过渡标记必须落档')
+  assert.equal(row.delegates[0].status, 'running')
+
+  // 等价于：phase-0 回合结束，宿主释放一个并发位。
+  setCapacity(9)
+  await new Promise((resolve) => setTimeout(resolve, 400))
+  assert.equal(spawned.length, 9, '后台必须自动接续 phase-1（不需要模型重试）')
+  assert.equal(effortOf(spawned[8]), 'xhigh', 'phase-1 以自配档激活')
+  row = record.statuses[0]
+  assert.equal(row.delegates[0].childId, 'member-9', '台账 childId 更新为 phase-1 会话')
+  assert.equal(row.delegates[0].continuationPending, false, '接续完成后必须清除过渡标记')
+
+  spawned[8].resolveResult(memberDoneOutcome('专家结论：完成'))
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.equal(record.statuses[0].delegates[0].status, 'done', '接续后的结算链路不回归')
+})
+
+/*
+ * [3.1.8][P0 D7] 回归：并发位不足时 dispatch 不得把负责人工具调用拖到宿主上限。
+ * 本轮排队预算用完 ⇒ 立即返回 queued 清单；等下级结算后补派，只启动未启动成员，
+ * 已在跑的成员按 childId 跳过，绝不重复拉起（重复拉起 = 重复烧 token）。
+ */
+test('[3.1.8] 派发排队预算用完立即返回 queued；补派只启动未启动成员', async () => {
+  const previous = process.env.DSH_WORKPLAN_DISPATCH_QUEUE_MAX_WAIT_MS
+  process.env.DSH_WORKPLAN_DISPATCH_QUEUE_MAX_WAIT_MS = '30'
+  try {
+    // 8 人复杂分工表（复杂档下限 8），并发位只给 6 个：第 7 人开始排队。
+    const { runtime, record, spawned, setCapacity, leaderAgent } = makeRuntime({ capacity: 6 })
+    const reviewed = await runtime.delegateTool(leaderAgent, { action: 'review', consolidation: consolidation({ taskReasoningEffort: 'xhigh', assignments: assignments8() }), startPhases: MAIN_START_PHASES_FIXTURE })
+    assert.equal(reviewed.ok, true, JSON.stringify(reviewed))
+    const beganAt = Date.now()
+    const first = await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
+    assert.equal(first.ok, true, JSON.stringify(first))
+    assert.ok(Date.now() - beganAt < 3000, '预算用完必须立即返回（旧实现按成员各等 10 分钟）')
+    assert.deepEqual(first.queued, ['Member-G', 'Member-H'], '未启动成员必须进入队列并显式返回')
+    assert.equal(spawned.length, 6, '只有拿到并发位的成员被激活')
+    let row = record.statuses[0]
+    assert.equal(row.delegates.length, 8, '全部分工表成员都要先登记（旧实现只登记到第 8 个）')
+    assert.equal(row.delegates[6].childId, null)
+    assert.equal(row.delegates[6].status, 'running')
+
+    // 等价于：已有下级结算释放并发位。
+    setCapacity(12)
+    const second = await runtime.delegateTool(leaderAgent, { action: 'dispatch' })
+    assert.equal(second.ok, true, JSON.stringify(second))
+    assert.equal(second.queued, undefined, '补派成功后不应再有排队成员')
+    assert.equal(spawned.length, 8, '补派只启动未启动成员，已在跑成员不重复拉起')
+    const labels = spawned.map((item: any) => String(item.request.label))
+    assert.equal(new Set(labels).size, labels.length, '同一成员绝不能被重复拉起（重复 = 重复烧 token）')
+    assert.match(labels[6], /Member-G/, '补派激活的是排队的那个成员')
+    row = record.statuses[0]
+    assert.equal(row.delegates[6].childId, 'member-7')
+  } finally {
+    if (previous === undefined) delete process.env.DSH_WORKPLAN_DISPATCH_QUEUE_MAX_WAIT_MS
+    else process.env.DSH_WORKPLAN_DISPATCH_QUEUE_MAX_WAIT_MS = previous
+  }
 })

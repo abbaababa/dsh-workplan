@@ -210,7 +210,7 @@ test('A1：薄交卷 + 登记 ⇒ 判 done 且落账 phases 含登记条目（�
     '交卷自有条目同样保留（宽容新增语义不变）')
 })
 
-test('A2：零回归——五步证据本身不完整（缺 preparation），有登记也判 blocked', () => {
+test('[3.2.0] A2：交卷只缺 preparation 时，平台用登记证据补齐并判 done（免重抄）', () => {
   const phases: any = thinSettlementFixture()
   delete phases.preparation
   const out = adjudicateResult({
@@ -218,8 +218,25 @@ test('A2：零回归——五步证据本身不完整（缺 preparation），有
     expectedAcceptance: ['通道可用'],
     startPhases: registeredFixture(),
   })
-  assert.equal(out.status, 'blocked')
-  assert.match(String(out.error), /五步证据不完整/)
+  assert.equal(out.status, 'done', `登记证据应自动补齐 preparation：${out.error ?? ''}`)
+  const merged = (out as any)?.phases
+  assert.ok(Array.isArray(merged?.preparation?.prepared) && merged.preparation.prepared.length > 0,
+    '落账 phases 必须含登记的已备清单')
+  assert.ok(Array.isArray(merged?.planning?.problemAnalysis) && merged.planning.problemAnalysis.length > 0,
+    '落账 phases 必须含登记的 planning')
+})
+
+test('[3.2.0] A2b：交卷只写 execution/verification，平台自动并入登记的第 1/2/3 步', () => {
+  const phases: any = thinSettlementFixture()
+  delete phases.planning
+  delete phases.preparation
+  const out = adjudicateResult({
+    output: outputWithPhases(phases),
+    expectedAcceptance: ['通道可用'],
+    startPhases: registeredFixture(),
+  })
+  assert.equal(out.status, 'done', `最省输出的交卷形态应通过：${out.error ?? ''}`)
+  assert.ok((out as any)?.phases?.planning?.approach?.length > 0, 'approach 蓝图必须随登记并入')
 })
 
 test('A3：安全网——封顶截断使登记条目装不下 ⇒ 仍判 blocked', () => {
@@ -255,7 +272,7 @@ test('P1：phase-1 接续提示回注登记原文（buildPhaseZeroContinuationHi
   const registered = registeredFixture()
   const hint = buildPhaseZeroContinuationHint('high', 'phase-0 输出摘要', false, registered)
   assert.ok(hint.includes(LONG_REGISTERED_ITEM), '接续提示必须逐字含登记原文')
-  assert.match(hint, /必须原样收录/, '接续提示必须明示复制纪律')
+  assert.match(hint, /平台会自动并入|不必重抄/, '接续提示必须说明免重抄、平台自动并入')
   // 无登记（旧调用点）零回归
   const legacy = buildPhaseZeroContinuationHint('high', 'phase-0 输出摘要')
   assert.match(legacy, /phase-0→phase-1 接续/)
@@ -294,7 +311,7 @@ test('P2：回喂消息回注登记原文（buildChildPrompt previousFailure.reg
     },
   })
   assert.ok(String(prompt).includes(LONG_REGISTERED_ITEM), '回喂任务书必须逐字含登记原文')
-  assert.match(String(prompt), /逐字抄入/, '回喂必须明示照抄而非重写')
+  assert.match(String(prompt), /不必重抄|平台自动并入/, '回喂必须说明免重抄、平台自动并入')
   // 无登记字段（旧回放/旧调用）零回归
   const legacy = buildChildPrompt({
     plan: { planId: 'wp-t11-merge', title: 't', stages: [] },
