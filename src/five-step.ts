@@ -515,7 +515,7 @@ export function fiveStepPromptLines(): string[] {
     '  基于第二步的全部结果，把需要的资源、工具、实施方案真正准备到位，而不是「打算用」：逐项写清准备了什么、在哪里、是否可用，写入 phases.preparation.prepared；每一项就绪状态都必须给出可复核的证据（命令输出/文件路径/配置项/版本号/引用），写入 phases.preparation.evidence。缺资源、缺工具、缺证据时，先补齐或如实上报受阻，不得带着缺口进入第四步。',
     '【第四步 · 执行与验证】',
     '  基于第三步备齐的成果和既定实施方案，开始具体执行，严格按 phases.planning.approach 落地；出现新事实需要偏离时，必须记录偏离原因、证据与调整后的做法，不得静默改道，执行步骤写入 phases.execution.steps。',
-    '  执行完成后逐条验证验收标准与用户原要求：每条都要有可复核的证据（命令输出/文件/引用）；验证未通过不得报 done；确实无法确认的验收项，在结果块顶层 acceptance[] 对应条目的 result 写 "unverified"（evidence 写已核到的事实），不要写 pass——phases.verification.checks 里只写已验证条目（criterion/method/evidence 齐全），且 allPassed 必须为 true；结果写入 phases.verification。',
+    '  执行完成后逐条验证验收标准与用户原要求：每条都要有可复核的证据（命令输出/文件/引用）；验证未通过不得报 done；确实无法确认的验收项，在结果块顶层 acceptance[] 对应条目的 result 写 "unverified"（evidence 写已核到的事实），不要写 pass——phases.verification.checks 里只写已验证条目（criterion/method/evidence 齐全），且 allPassed 必须为 true；checks/allPassed 可省略，平台会按顶层 acceptance 自动生成；结果写入 phases.verification。',
     '【第四步收尾 · 自我学习复盘（强制）】',
     '  报 done 之前必须把 phases.verification.retrospective 写全，四项缺一不可：',
     '  1) problems：本次全过程遇到的所有问题（现象 + 根因），至少 1 条；',
@@ -537,7 +537,7 @@ export function fiveStepPromptLines(): string[] {
      * 20 个字符」的高频根因）。此处渲染的每个数字都与本文件校验器常量一致。
      */
     `硬下限（校验器逐字执行，缺一即退回）：${START_EVIDENCE_MIN_CHARS_BRIEF}。`,
-    `硬上限（校验器逐字执行，超出即退回）：每个清单（数组）最多 ${MAX_PHASE_LIST_ITEMS} 条、每条最多 ${MAX_PHASE_ITEM_CHARS} 字；phases 四组（planning+preparation+execution+verification）全部条目合计最多 ${MAX_PHASE_TOTAL_CHARS} 字；phases.verification.checks 至少 1 条、且条数不得少于验收标准条数、必须逐条覆盖验收标准。`,
+    `硬上限（校验器逐字执行，超出即退回）：每个清单（数组）最多 ${MAX_PHASE_LIST_ITEMS} 条、每条最多 ${MAX_PHASE_ITEM_CHARS} 字；phases 四组（planning+preparation+execution+verification）全部条目合计最多 ${MAX_PHASE_TOTAL_CHARS} 字；phases.verification.checks 至少 1 条、且条数不得少于验收标准条数、必须逐条覆盖验收标准（可省略：平台会用顶层 acceptance 自动生成并逐条覆盖；显式写了则以你写的为准）。`,
     `复盘硬下限（校验器逐字执行）：retrospective.problems 至少 1 条、合计 ≥${MIN_RETRO_PROBLEM_CHARS} 字；resolutions 至少 1 条、合计 ≥${MIN_RETRO_RESOLUTION_CHARS} 字；prevention 至少 1 条、合计 ≥${MIN_RETRO_PREVENTION_CHARS} 字；detours 确实没有可写空数组 []。`,
   ]
 }
@@ -563,7 +563,7 @@ export function fiveStepContinuationPromptLines(): string[] {
     '【第五步 · JSON mode 结构化交付】专家写 report 对象（keyResults / keyInfo / importantInfo / leadRequirements 四个字符串数组）；负责人写 departmentSummary 对象（keyResults / keyInfo / importantInfo / sources，sources 必须覆盖全部已派发专家）。成果块必须放在 <!-- WORKPLAN_EVIDENCE:START --> 与 <!-- WORKPLAN_EVIDENCE:END --> 之间，且是合法 JSON，不得用散文代替。',
     '开工闸与结算闸：前三步登记证据已经生效；收尾结果块允许省略 phases.planning / phases.preparation（平台自动并入登记原文，并集落账、不会变薄），只需写 phases.execution、phases.verification 与顶层 acceptance/artifacts/report 或 departmentSummary；若要补充执行期新事实，可在这两组里追加，平台会保留。缺 execution/verification、验证未全部通过、缺 report / departmentSummary 都会判未完成。第四步可用 dsh_workplan_verify 做最终核验；遇阻用 dsh_workplan_escalate 上报，它是安全通道，不属于五步产物。开工证据未交/不合格会被硬拒（START_EVIDENCE_MISSING / START_EVIDENCE_INCOMPLETE）。',
     `硬下限（校验器逐字执行，缺一即退回）：${START_EVIDENCE_MIN_CHARS_BRIEF}。`,
-    `硬上限（校验器逐字执行，超出即退回）：每个清单（数组）最多 ${MAX_PHASE_LIST_ITEMS} 条、每条最多 ${MAX_PHASE_ITEM_CHARS} 字；phases 四组（planning+preparation+execution+verification）全部条目合计最多 ${MAX_PHASE_TOTAL_CHARS} 字；phases.verification.checks 至少 1 条、且条数不得少于验收标准条数、必须逐条覆盖验收标准。`,
+    `硬上限（校验器逐字执行，超出即退回）：每个清单（数组）最多 ${MAX_PHASE_LIST_ITEMS} 条、每条最多 ${MAX_PHASE_ITEM_CHARS} 字；phases 四组（planning+preparation+execution+verification）全部条目合计最多 ${MAX_PHASE_TOTAL_CHARS} 字；phases.verification.checks 至少 1 条、且条数不得少于验收标准条数、必须逐条覆盖验收标准（可省略：平台会用顶层 acceptance 自动生成并逐条覆盖；显式写了则以你写的为准）。`,
     `复盘硬下限（校验器逐字执行）：retrospective.problems 至少 1 条、合计 ≥${MIN_RETRO_PROBLEM_CHARS} 字；resolutions 至少 1 条、合计 ≥${MIN_RETRO_RESOLUTION_CHARS} 字；prevention 至少 1 条、合计 ≥${MIN_RETRO_PREVENTION_CHARS} 字；detours 确实没有可写空数组 []。`,
   ]
 }

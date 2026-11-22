@@ -193,15 +193,15 @@ export function buildLlmRulesBrief(info: LlmRulesBriefInfo = {}): string {
   } else {
     // [2.5.4][T4][3.1.0] 人数口径同步（D1/D2）：low/未配置禁派；复杂（medium/high/xhigh/max）
     // ≥8 且 ≤25（上限随 caps.ts，环境变量可覆盖，提示词与门禁同源不漂移）。
-    lines.push(`- 部门负责人（本任务书的直接接收者）强制流程（用户要求 1/2/3，3.0.8 五步工作法单框架）：你拥有本部门内的再分配权限——执行自己的任务必须先完成五步前三步（第一步任务梳理；第二步基于第一步全部结果研究资源、工具与具体实施方案；第三步把资源与工具真正备齐并给出就绪证据），正式执行与再分配全程少走弯路（先查历史教训、先验证再动手、不重复试错），经 dsh_workplan_delegate(action="review") 一并提交分工表（assignments + taskReasoningEffort）与第 1/2/3 步证据（startPhases={ planning{ problemAnalysis[], approach[], approachBasis[], resources[], tools[] }, preparation{ prepared[], evidence[] } }），并在 consolidation.taskReasoningEffort 里按你接到任务的复杂度配置你自己的整体推理等级（先配置后开工：phase-0 以 low 启动，登记后平台立即以自配档接续（宿主另起执行会话并携带 phase-0 产物，不是当前评估会话）进入 phase-1，重试/续跑全程生效）；第 1/2/3 步证据与分工表未提交前，dsh_workplan_delegate(action="dispatch") 会被平台拒绝（硬门禁）。梳理完成后必须把任务拆得更简单——每位下级只承担单一目标、单一主产物、可独立验收的一项工作——再合理分配给本部门多名相关领域全球顶尖专家（部门组员角色已按用户要求 9 取消，分工表只允许 role="expert"，至少 1 名；low/未配置任务禁止下派——负责人亲自执行，第 1/2/3 步证据经 dsh_workplan_delegate(action="direct") 登记（${START_EVIDENCE_MIN_CHARS_BRIEF}；可选 reasoningEffort="low"）；复杂任务（medium/high/xhigh/max）合计不少于 ${MIN_COMPLEX_DELEGATE_MEMBERS} 人且最多 ${MAX_COMPLEX_DELEGATE_MEMBERS} 人，少于 ${MIN_COMPLEX_DELEGATE_MEMBERS} 人硬性阻断，超过上限平台拒收（可精简名单或拆两轮派发，绝不静默丢人无痕））；每位下级必须在 phase-0 经 dsh_workplan_delegate(action="self_effort") 按自己分到的单项任务复杂度自配推理等级（轻度=low；qwen 中等=medium、非 qwen 中等=high；qwen 非常复杂=xhigh、非 qwen 非常复杂=max），专家自配为权威（分工表 per-expert 档仅建议），平台登记后以自配档接续下级会话，全程应用；平台会按上述等级集合自动钳制越界档并留痕，等级在其任务全生命周期生效且不可被覆盖。第三层为叶子层：任何第四层派发一律被拒绝。`)
+    lines.push(`- 部门负责人强制流程（用户要求 1/2/3，3.0.8 五步单框架）：执行自己的任务必须先完成五步前三步（任务梳理；基于第一步全部结果研究资源/工具/实施方案；备齐并给出就绪证据），经 dsh_workplan_delegate(action="review") 一并提交分工表（assignments + consolidation.taskReasoningEffort）与 startPhases={ planning{ problemAnalysis[], approach[], approachBasis[], resources[], tools[] }, preparation{ prepared[], evidence[] } }；先配置后开工：phase-0 以 low 启动，登记后平台立即以你的自配档接续 phase-1（宿主另起执行会话，携带 phase-0 产物），重试/续跑全程生效；未提交证据与分工表前 dispatch 硬拒。把任务拆简单：每位下级只承担单一目标、单一主产物、可独立验收的一项工作，再分配给本部门多名相关领域全球顶尖专家（role="expert"，至少 1 名；low/未配置任务禁止下派——负责人亲自执行，第 1/2/3 步证据经 dsh_workplan_delegate(action="direct") 登记（${START_EVIDENCE_MIN_CHARS_BRIEF}；可选 reasoningEffort="low"）；复杂任务（medium/high/xhigh/max）合计不少于 ${MIN_COMPLEX_DELEGATE_MEMBERS} 人且最多 ${MAX_COMPLEX_DELEGATE_MEMBERS} 人，少于 ${MIN_COMPLEX_DELEGATE_MEMBERS} 人硬性阻断，超过上限平台拒收（可精简名单或拆两轮派发，绝不静默丢人无痕））；每位下级在 phase-0 经 dsh_workplan_delegate(action="self_effort") 按自己分到的单项任务复杂度自配等级（轻度=low；qwen 中等=medium、非 qwen 中等=high；qwen 非常复杂=xhigh、非 qwen 非常复杂=max），专家自配为权威（分工表 per-expert 档仅建议），越界档平台自动钳制留痕；正式执行与再分配全程少走弯路（先查历史教训、先验证再动手、不重复试错）。第三层为叶子层：任何第四层派发一律被拒绝；action="status" 可查看登记与下级进度。`)
     /*
      * [3.0.0] 用户 2026-11-14 第 3、5、6、7、8、10、11 条要求：负责人侧四条硬规则。
      * 与代码门禁同源（planDelegations 的 checkAtomicAssignment、comm-format 的
      * F10/F11），提示词只是把代码已经在执行的规则提前说清楚。
      */
-    lines.push('- 极简任务硬门槛（用户要求 5，用户裁决 A＝硬门槛）：你派出的每一条任务必须简单到像 1+1=2——一个动作、一个主产物、一项可独立验收；出现「并且/并/同时/另外/还要/以及/分别/顺便/然后/接着/再」或分号并列、或一个任务里写了多句（含英文句点分隔的多句）、或超过 300 字符，平台直接拒绝派发（DELEGATE_TASK_NOT_ATOMIC）并给出拆分提示，实例：不要派「分析并修复并写测试」，要拆成「读 X 定位原因」「按原因改 Y」「写 Z 用例」三条。')
-    lines.push('- 质量要求硬门槛（用户要求 6）：每一条分派都必须带 qualityRequirements（至少 1 条、每条 ≤400 字符、最多 8 条），写清「成果必须达到什么要求、什么算合格、怎么算不合格」；缺它平台拒绝派发（DELEGATE_QUALITY_REQUIREMENTS_MISSING）。任务书会把这块原文交给专家。')
-    lines.push('- 专家汇报必须精简且是 JSON（用户要求 7）：专家完成后在证据块里给出 report（keyResults/keyInfo/importantInfo/leadRequirements 四个字符串数组，每数组 ≤6 条、每条 ≤200 字符，禁止重复）；你收到后逐条核对，缺项或重复会被格式门禁退回（F10）。')
+    lines.push('- 极简任务硬门槛（用户要求 5）：每条任务必须一个动作、一个主产物、一项可独立验收，≤300 字符，不含并列词/多句；不符即拒发（DELEGATE_TASK_NOT_ATOMIC）。例：不要「分析并修复并写测试」，拆成「读 X 定位原因」「按原因改 Y」「写 Z 用例」。')
+    lines.push('- 质量要求硬门槛（用户要求 6）：每条任务必须带 qualityRequirements（1-8 条、每条≤400 字符），写清什么算合格/不合格；缺失即拒发（DELEGATE_QUALITY_REQUIREMENTS_MISSING）。')
+    lines.push('- 专家汇报必须精简 JSON（用户要求 7）：report 四数组（keyResults/keyInfo/importantInfo/leadRequirements，各≤6 条、每条≤200 字符），缺项/重复被 F10 退回。')
     /*
      * [3.1.7][P3 U-32] 汇总字段清单不再在简报里重发一遍。
      *
@@ -211,9 +211,9 @@ export function buildLlmRulesBrief(info: LlmRulesBriefInfo = {}): string {
      * 只留义务声明 + 指针（字段与限额见下方沟通交流格式规范 F11），关键语义
      * 「sources 必须覆盖全部已派发专家」「不合格会被退回（F11）」保活。
      */
-    lines.push('- 你的汇总必须精简且是 JSON（用户要求 8/10/11）：汇总本部门全部专家汇报后，在证据块里给出 departmentSummary（字段清单与限额见本任务书下方《沟通交流格式规范》F11，sources 必须覆盖全部已派发专家，禁止累赘重复）；不合格会被退回（F11）。汇总完成后直接交回主 Agent，不需要另建文件。')
-    lines.push('- 执行时间与验收：你和每位全球顶尖专家均没有总时长、单次时长、空闲或回执硬截止。开工预估及其汇总只用于协调与告知，未报齐时如实显示部分和，但不构成分钟判据；不得以耗时、预估超额或未经时间批准为由拒绝 done，extendMs 已停用。完成只由真实结果、产物、结构化证据和质量验收决定；用户显式取消与真实错误仍然有效。')
-    lines.push('- 专家遇阻处置（3.0.5 硬规则，机制已强制）：任何专家调用 dsh_workplan_escalate 后，禁止用 review/dispatch/direct 把该问题改派、重派或降级给其他专家；你必须先用 action="status" 全面梳理该成员的问题与本部门全部 delegates 执行状态，再研究形成解决方案，最后用 dsh_workplan_instruct 答复原 member；平台在该成员待指示期间会硬拒一切改派动作，投递成功后强制原专家继续执行。')
+    lines.push('- 汇总必须精简 JSON（用户要求 8/10/11）：departmentSummary 字段与限额见下方《沟通交流格式规范》F11，sources 必须覆盖全部已派发专家；不合格退回 F11。')
+    lines.push('- 执行时间与验收：负责人与专家均无总时长/单次/空闲/回执硬截止；预估只用于协调，不构成分钟判据；extendMs 已停用。done 只由真实结果、产物、结构化证据与质量验收决定；用户取消与真实错误仍有效。')
+    lines.push('- 专家遇阻（3.0.5 硬规则）：专家调用 dsh_workplan_escalate 后，禁止 review/dispatch/direct 改派该问题；先 status 梳理，再 instruct 答复原 member，平台硬拒改派并强制原专家继续。')
   }
   return lines.join('\n')
 }

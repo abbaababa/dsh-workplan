@@ -227,7 +227,7 @@ export const PROMPT_ORDER = 40
  * 自报版本时被误导，用户也拿不到真实版本（用户要求 13/G 要如实报告版本）。
  * 硬编码字符串与 meta 双写是根因，改为同一常量派生。
  */
-export const PLUGIN_VERSION = '3.2.1'
+export const PLUGIN_VERSION = '3.2.2'
 
 const PROMPT_SECTION = [
   '本会话已启用自动任务分解。系统会在每个新用户任务的第一个模型步骤前生成计划，并先把计划显示在对话里；看到【任务分解】计划消息后，若插件未自动派发或需要续跑/重试，再调用 dsh_workplan_dispatch（默认 wait 等结果；预计较久时用 mode:"async" 先开跑）。若只收到「任务分解已在后台生成中」而尚未看到【任务分解】，不要手动派发，先告知用户正在分配并等待计划落地。',
@@ -421,13 +421,9 @@ function createUpdateTool(runtime: any) {
   return {
     name: 'dsh_workplan_update',
     description:
-      '更新当前任务分解计划中一个子任务的状态与证据。仅用于本会话已生成的主计划；子 Agent 不可调用。'
-      + '当主 Agent 核对子任务结果、发现完成不实或需要修正时使用。'
-      + '把子任务标成 done 时，必须同时给出真实的 verification 与 acceptance（每项 result="pass"），'
-      + '否则计划不会变成可交付状态（deliveryReady=false，present 会被拒绝）。'
-      + '部门负责人和全球顶尖专家执行没有时限，extendMs 已停用并返回 TIME_LIMITS_DISABLED；不要申请延期。'
-      + 'timeNotice 仅记录预估（仅供参考、非承诺），可用于告知预估变化，不影响执行或验收。'
-      + '这些字段会写入会话日志，刷新/重启后仍然生效。',
+      '更新当前计划一个子任务的状态与证据（仅主 Agent）。标 done 必须给真实 verification 与 acceptance'
+      + '（每项 result="pass"），否则 deliveryReady=false、present 被拒。extendMs 已停用（TIME_LIMITS_DISABLED）；'
+      + 'timeNotice 仅记录预估，不影响执行或验收。',
     parameters: {
       type: 'object',
       properties: {
@@ -442,7 +438,7 @@ function createUpdateTool(runtime: any) {
         status: {
           type: 'string',
           enum: ['pending', 'in_progress', 'done', 'blocked'],
-          description: '新的状态（普通改判必填；仅记录开工预估时可省略并改传 timeNotice）。extendMs 仅为旧调用兼容，会返回 TIME_LIMITS_DISABLED。',
+          description: '新状态（普通改判必填；仅记录 timeNotice 时可省略）。extendMs 仅兼容，返回 TIME_LIMITS_DISABLED。',
         },
         progress: {
           type: 'integer',
@@ -451,14 +447,12 @@ function createUpdateTool(runtime: any) {
         evidence: {
           type: 'array',
           items: { type: 'string' },
-          description: '支持该状态的证据（文件、命令输出、验收结果）。只用于说明，不参与可交付判定。',
+          description: '支持该状态的证据（文件/命令输出/验收结果），不参与可交付判定。',
         },
         verification: {
           type: 'string',
           enum: ['structured', 'legacy', 'unverified', 'failed'],
-          description: '证据等级：structured=逐条自检通过；unverified=自述未逐条确认；'
-            + 'legacy=旧格式回传（没有结构化证据）；failed=自检失败。'
-            + '可交付要求 structured。',
+          description: 'structured=逐条自检通过；unverified=未逐条确认；legacy=旧格式；failed=自检失败。可交付要求 structured。',
         },
         acceptance: {
           type: 'array',
@@ -466,9 +460,9 @@ function createUpdateTool(runtime: any) {
           items: {
             type: 'object',
             properties: {
-              criterion: { type: 'string', description: '验收标准。' },
-              result: { type: 'string', enum: ['pass', 'fail', 'unverified'], description: '该项结果。' },
-              evidence: { type: 'string', description: '支持该结果的证据（文件、命令输出、测试结果）。' },
+              criterion: { type: 'string', description: '验收项（A1/A2…）。' },
+              result: { type: 'string', enum: ['pass', 'fail', 'unverified'], description: '结果。' },
+              evidence: { type: 'string', description: '证据（文件/命令输出/测试结果）。' },
             },
             required: ['criterion', 'result'],
             additionalProperties: false,
@@ -491,19 +485,19 @@ function createUpdateTool(runtime: any) {
         missingArtifacts: {
           type: 'array',
           items: { type: 'string' },
-          description: '已知缺失的产物路径；非空时计划不可交付。',
+          description: '已知缺失产物；非空时不可交付。',
         },
         expectedRevision: {
           type: 'integer',
-          description: '你读取到的 revision。传入后若该子任务已被更新，会返回 STALE_WRITE 而不是覆盖新证据。',
+          description: '读取到的 revision；不一致返回 STALE_WRITE。',
         },
         force: {
           type: 'boolean',
-          description: '计划执行中强行改判（默认拒绝并返回 TASK_RUNNING）。会记录为人工改判。',
+          description: '执行中强行改判（默认 TASK_RUNNING）。',
         },
         note: {
           type: 'string',
-          description: '补充说明；会显示在任务卡片中。',
+          description: '补充说明。',
         },
         /*
          * [1.12.0][D-28] 结果消息指引的 `update + instruction` 必须真的能通过
@@ -513,8 +507,7 @@ function createUpdateTool(runtime: any) {
          */
         instruction: {
           type: 'string',
-          description: '待指示项（closure=escalated）的答复文本：与 status="in_progress" 一起使用，'
-            + '会投递给子会话并把该行恢复为执行中。等价于 dsh_workplan_instruct。',
+          description: '待指示项答复；与 status="in_progress" 同用，等价 instruct。',
         },
         /*
          * [2.2.0][T5/O-4c] 延期事务（方案 §2.2 / §5.4；D-28 教训：runtime 会读取的
@@ -525,7 +518,7 @@ function createUpdateTool(runtime: any) {
          */
         extendMs: {
           type: 'integer',
-          description: '旧版延期字段，仅为兼容保留。部门负责人和全球顶尖专家已无执行截止，传入正整数只返回 TIME_LIMITS_DISABLED，不改状态、不重设任何计时器，也不需要用户批准。请改用 timeNotice 更新纯信息预估。',
+          description: '旧版字段，仅兼容；返回 TIME_LIMITS_DISABLED，请改用 timeNotice。',
         },
         /*
          * [SCv2-T4][Q1-B/C06/C08] 用户例外批准留痕（criterionApproval → 行上
@@ -536,13 +529,13 @@ function createUpdateTool(runtime: any) {
          */
         criterionApproval: {
           type: 'object',
-          description: '旧版时间判据批准字段，仅为兼容历史调用与记录保留；当前没有时间判据、延期或超时例外审批，此字段不影响 done。完成仍必须通过真实证据、产物与质量验收。',
+          description: '旧版批准字段，仅兼容；当前无时间判据，不影响 done。',
           properties: {
-            approvedBy: { type: 'string', enum: ['user'], description: '批准主体：必须是 user（用户明确批准）；主 Agent 自行批准无效。' },
-            at: { type: 'number', description: '用户实际批准的时间（epoch 毫秒；展示按 Asia/Shanghai）。不得晚于当前时刻。' },
-            reason: { type: 'string', description: '用户批准原文/来源（逐字摘录，必填；「全部按推荐」不构成对个别超时的批准）。' },
-            source: { type: 'string', description: '批准来源（可选：用户消息引用/会话 ID 等）。' },
-            scope: { type: 'string', enum: ['task', 'plan'], description: '适用范围：task=仅本任务；plan=本计划。' },
+            approvedBy: { type: 'string', enum: ['user'], description: '必须是 user。' },
+            at: { type: 'number', description: '批准时间（epoch ms）。' },
+            reason: { type: 'string', description: '批准原文/来源。' },
+            source: { type: 'string', description: '来源（可选）。' },
+            scope: { type: 'string', enum: ['task', 'plan'], description: 'task=仅本任务；plan=本计划。' },
           },
           required: ['approvedBy', 'at', 'reason', 'scope'],
           additionalProperties: false,
@@ -553,10 +546,10 @@ function createUpdateTool(runtime: any) {
          */
         timeNotice: {
           type: 'object',
-          description: '专家开工预估：{ declaredMinutes, reason }，只记入信息流水并通知主 Agent 转告用户，仅供参考、非承诺；不生成截止、不触发延期或接管，也不改状态与完成判定。',
+          description: '开工预估 { declaredMinutes, reason }；仅记录并通知，不生成截止。',
           properties: {
-            declaredMinutes: { type: 'number', description: '预计完成本子任务的分钟数（仅供参考、非承诺）。' },
-            reason: { type: 'string', description: '预告理由（可选）。' },
+            declaredMinutes: { type: 'number', description: '预计分钟数（仅供参考）。' },
+            reason: { type: 'string', description: '理由（可选）。' },
           },
           required: ['declaredMinutes'],
           additionalProperties: false,
@@ -1004,55 +997,45 @@ function createDelegateTool(runtime: any) {
   return {
     name: 'dsh_workplan_delegate',
     description:
-      '部门负责人专用的第三层派发（用户要求 1/2/3，3.0.8 五步工作法单框架）：你拥有本部门内再分配权限。执行自己的任务必须先完成五步前三步：'
-      + '第一步全面、全盘、深入梳理、研究、思考自己的任务；第二步基于第一步完成好的所有结果研究需要哪些资源、哪些工具、具体实施方案（方法、流程、步骤，含依据）；'
-      + '第三步把资源与工具真正备齐并给出就绪证据。'
-      + '先 action="review" 提交第 1/2/3 步开工证据（startPhases）'
-      // [2.5.4][T4] D1/D2 人数口径同步（与 llm-rules.ts 负责人任务书同源逐字一致；3.1.0 上限 25）
-      + `（planning{ problemAnalysis, resources, tools, approach, approachBasis } + preparation{ prepared, evidence }，开工证据字数下限：${START_EVIDENCE_MIN_CHARS_BRIEF} + 分工表：每位下级的 member/role/task/reasoningEffort，至少 1 名 expert 顶尖专家（部门组员角色已按用户要求 9 取消）；low/未配置任务禁止下派——负责人亲自执行，开工证据经 dsh_workplan_delegate(action="direct") 登记（${START_EVIDENCE_MIN_CHARS_BRIEF}；可选 reasoningEffort="low"）；复杂任务（medium/high/xhigh/max）合计不少于 ${MIN_COMPLEX_DELEGATE_MEMBERS} 人且最多 ${MAX_COMPLEX_DELEGATE_MEMBERS} 人，少于 ${MIN_COMPLEX_DELEGATE_MEMBERS} 人硬性阻断；`
-      + '并可用 consolidation.taskReasoningEffort 为整个任务配置整体推理等级，配置后本任务重试/续跑全程沿用；下级档位以成员 self_effort 自配为权威（分工表档仅建议）），'
-      + '再 action="dispatch" 把任务派给本部门相关领域全球顶尖专家（部门组员角色已取消，只保留 expert；固定一层下级、叶子层，第四层一律被拒）。'
-      + '分配必须更简单：每位专家只承担一个动作、一个主产物、一项可独立验收的工作（简单到像 1+1=2：单句、≤300 字符、不含并列词，且每条必须带至少 1 条 qualityRequirements 质量要求；不满足即拒绝派发）。'
-      + 'review 未提交前 dispatch 被硬门禁拒绝。每位下级的推理等级必须按其任务复杂度配置'
-      + '（轻度=low；qwen 中等=medium、非 qwen 中等=high；qwen 非常复杂=xhigh、非 qwen 非常复杂=max），'
-      + '平台按当前模型家族合法集合自动钳制越界档并留痕，等级在其任务全生命周期生效。'
-      + 'action="status" 查看登记与下级进度。第三层专家叶子用 action="self_effort" 自配推理等级并提交五步第 1/2/3 步开工证据'
-      + '（先配置+先研究准备后开工：phase-0 以 low 启动，唯一职责=评估自身任务复杂度并提交 reasoningEffort+complexityRationale+startPhases{planning,preparation}+开工前预估 timeNotice{declaredMinutes:正整数分钟,reason?}；'
-      + '缺交/不合格开工证据硬拒 START_EVIDENCE_MISSING/START_EVIDENCE_INCOMPLETE、不接续；齐全登记后平台立即以自配档接续同一任务进入 phase-1，正式执行必须按第二步方法流程步骤进行、全程少走弯路；成员自配为权威、分工表档仅建议）。'
-      + '3.0.5 硬规则：任一第三层成员处于待指示（escalated）时，review/dispatch/direct 一律拒绝改派、重派或降级；负责人必须梳理该成员问题与本部门全部任务状态，研究方案后用 dsh_workplan_instruct 答复原成员，原成员继续执行。',
+      '部门负责人/第三层专家专用派发工具。负责人：action="review" 提交 startPhases（五步前三步证据）'
+      + '与 consolidation.assignments 分工表（可带 taskReasoningEffort），action="dispatch" 派给 expert，'
+      + 'action="direct" 登记 low 任务亲自执行，action="status" 查看。专家叶子：action="self_effort" 提交'
+      + ' reasoningEffort+complexityRationale+startPhases+timeNotice，平台以自配档接续 phase-1。'
+      + '分配必须极简（一个动作/主产物/可独立验收、≤300 字符、带 qualityRequirements）；low/未配置禁派；'
+      + `复杂任务人数 ${MIN_COMPLEX_DELEGATE_MEMBERS}-${MAX_COMPLEX_DELEGATE_MEMBERS} 人；待指示成员禁止改派，先用 instruct 答复。`,
     parameters: {
       type: 'object',
       properties: {
         action: {
           type: 'string',
           enum: ['review', 'dispatch', 'direct', 'status', 'self_effort'],
-          description: 'review=提交开工证据与分工表（负责人）：startPhases 五步第 1/2/3 步证据 + 每位下级的 member/role/task/reasoningEffort；dispatch=正式派发给专家（负责人）；direct=low 任务负责人亲自执行登记（仅收 startPhases 开工证据，' + START_EVIDENCE_MIN_CHARS_BRIEF + '＋可选 reasoningEffort=\'low\'；拒 consolidation/分工表与复杂档，防旁路）；status=查看登记与进度；self_effort=第三层专家叶子自配推理等级+提交开工证据 startPhases+开工前预估 timeNotice（先配置+先研究准备后开工，缺一硬拒不接续）。',
+          description: 'review=提交 startPhases+分工表；dispatch=派给专家；direct=low 任务负责人亲自执行登记（仅 startPhases，可带 reasoningEffort=\'low\'）；status=查看；self_effort=专家自配等级+startPhases+开工前预估 timeNotice。',
         },
         reasoningEffort: {
           type: 'string',
           enum: ['low', 'medium', 'high', 'xhigh', 'max'],
-          description: 'action="self_effort" 必带（schema 层不强制，缺交将被运行时拒绝 SELF_EFFORT_MISSING）：叶子按自己分到的单项任务复杂度自配的推理等级（轻度=low；qwen 中等=medium、非 qwen 中等=high；qwen 非常复杂=xhigh、非 qwen 非常复杂=max）。成员自配为权威，越界档被平台钳制并留痕；登记后平台立即以自配档接续 phase-1。action="direct" 可选：仅接受 \'low\'（缺失默认 low）；复杂档请走 review。',
+          description: 'self_effort 必带；direct 可选且只接受 low。轻度=low；qwen 中等=medium、非 qwen=high；qwen 非常复杂=xhigh、非 qwen=max。成员自配为权威，越界钳制留痕。',
         },
         complexityRationale: {
           type: 'string',
-          description: 'action="self_effort" 必带（schema 层不强制，缺交将被运行时拒绝 SELF_EFFORT_RATIONALE_MISSING）：复杂度依据（为什么你的单项任务是该档：事实/依赖/验证难度）。',
+          description: 'self_effort 必带：为什么该任务是此档（事实/依赖/验证难度）。',
         },
         member: {
           type: 'string',
-          description: 'action="self_effort" 可选但强烈建议：你的成员名＝任务书首行括号里的名字（如 Expert-A）。台账尚未登记你的 childId（派发竞态）时，平台按成员名在同一负责人的部门行里认亲并当场绑定 childId；不带它则可能命中 SELF_EFFORT_NOT_LEAF。',
+          description: '建议填写：任务书首行括号里的成员名；childId 未登记时平台按此认亲。',
         },
         startPhases: {
           type: 'object',
-          description: 'action="self_effort" / "review" / "direct" 必填（3.0.8 开工证据硬门禁）：五步工作法前三步证据——第一步全面、全盘、深入梳理、研究、思考自己的任务；第二步基于第一步完成好的所有结果再全面、全盘、深入地开展梳理、研究和思考，研究需要哪些资源、哪些工具、具体实施方案（方法、流程、步骤，含依据）；第三步把资源与工具真正备齐并给出就绪证据。缺交/不合格硬拒（START_EVIDENCE_MISSING / START_EVIDENCE_INCOMPLETE），不登记、不接续正式执行；登记后持久化，重派/续跑读档放行。',
+          description: 'review/direct/self_effort 必填：五步前三步证据（梳理→资源/工具/方案→准备就绪）；缺/不合格硬拒 START_EVIDENCE_MISSING / START_EVIDENCE_INCOMPLETE。',
           properties: {
             planning: {
               type: 'object',
               properties: {
-                problemAnalysis: { type: 'array', items: { type: 'string' }, description: '第一步 · 任务梳理：全面、全盘、深入梳理、研究、思考自己的任务（目标与验收/现状/事实/约束/未知/主要矛盾/边界），至少 1 条、合计 ≥40 字。' },
-                resources: { type: 'array', items: { type: 'string' }, description: '第二步 · 资源研究：基于第一步全部结果，研究需要哪些资源（数据/文件/权限/人/知识/时间），至少 1 项、合计 ≥20 字。' },
-                tools: { type: 'array', items: { type: 'string' }, description: '第二步 · 工具研究：需要哪些工具、每个工具用来做什么，至少 1 项、合计 ≥10 字。' },
-                approach: { type: 'array', items: { type: 'string' }, description: '第二步 · 方法流程步骤：理清如何一步步以最高效率、少走弯路、完美完成任务的方法、流程和步骤，至少 1 条、合计 ≥40 字。' },
-                approachBasis: { type: 'array', items: { type: 'string' }, description: '第二步依据：如何基于第一步完成好的所有结果（逐条对应），至少 1 条、合计 ≥20 字。' },
+                problemAnalysis: { type: 'array', items: { type: 'string' }, description: '第一步任务梳理（≥1 条，合计≥40 字）' },
+                resources: { type: 'array', items: { type: 'string' }, description: '第二步资源（≥1，≥20 字）' },
+                tools: { type: 'array', items: { type: 'string' }, description: '第二步工具（≥1，≥10 字）' },
+                approach: { type: 'array', items: { type: 'string' }, description: '第二步方法步骤（≥1，≥40 字）' },
+                approachBasis: { type: 'array', items: { type: 'string' }, description: '第二步依据（≥1，≥20 字）' },
               },
               required: ['problemAnalysis', 'approach', 'approachBasis', 'resources', 'tools'],
               additionalProperties: false,
@@ -1060,8 +1043,8 @@ function createDelegateTool(runtime: any) {
             preparation: {
               type: 'object',
               properties: {
-                prepared: { type: 'array', items: { type: 'string' }, description: '第三步 · 已备齐的资源与工具清单（每项写清：准备了什么、在哪里、是否可用），至少 1 项、合计 ≥20 字。' },
-                evidence: { type: 'array', items: { type: 'string' }, description: '第三步 · 就绪证据：命令输出/文件路径/配置项/版本号/引用，至少 1 条、合计 ≥20 字。' },
+                prepared: { type: 'array', items: { type: 'string' }, description: '第三步已备（≥1，≥20 字）' },
+                evidence: { type: 'array', items: { type: 'string' }, description: '第三步就绪证据（≥1，≥20 字）' },
               },
               required: ['prepared', 'evidence'],
               additionalProperties: false,
@@ -1082,32 +1065,32 @@ function createDelegateTool(runtime: any) {
         },
         consolidation: {
           type: 'object',
-          description: 'action="review" 必带（schema 层不强制，缺交将被运行时拒绝 DELEGATE_CONSOLIDATION_MISSING / DELEGATE_CONSOLIDATION_INCOMPLETE）：第三层分工表（3.0.8 起不再内嵌开工证据——开工证据一律经 startPhases 提交登记）。负责人自己的第 1/2/3 步开工证据未登记前 dispatch 被硬门禁拒绝。action="direct" 禁止携带（direct 不接受分工表）。',
+          description: 'review 必带：分工表；缺/不全硬拒 DELEGATE_CONSOLIDATION_MISSING / DELEGATE_CONSOLIDATION_INCOMPLETE。',
           properties: {
             taskReasoningEffort: {
               type: 'string',
               enum: ['low', 'medium', 'high', 'xhigh', 'max'],
-              description: '可选：负责人为整个任务配置的整体推理等级（按本任务复杂度：轻度=low；qwen 中等=medium、非 qwen 中等=high；qwen 非常复杂=xhigh、非 qwen 非常复杂=max）。负责人自配整体档：配置后本任务每次派发/重试/续跑全程沿用；下级以 self_effort 自配为权威；越界档被平台钳制并留痕。',
+              description: '可选：负责人整体档；配置后重试/续跑全程沿用；下级 self_effort 自配为权威。',
             },
             assignments: {
               type: 'array',
               // [3.0.0] 用户 2026-11-14 第 5/6/9 条：组员角色取消、任务极简、质量要求必填；3.1.0 上限随 caps.ts。
-              description: `分工表：至少 1 名 expert（本部门相关领域全球顶尖专家；部门组员角色已按用户要求 9 取消，role 只允许 expert）；low/未配置任务禁止下派——负责人亲自执行，开工证据经 dsh_workplan_delegate(action="direct") 登记（${START_EVIDENCE_MIN_CHARS_BRIEF}；可选 reasoningEffort="low"）；复杂任务（medium/high/xhigh/max）合计不少于 ${MIN_COMPLEX_DELEGATE_MEMBERS} 人且最多 ${MAX_COMPLEX_DELEGATE_MEMBERS} 人，少于 ${MIN_COMPLEX_DELEGATE_MEMBERS} 人硬性阻断，超过上限平台拒收（可精简名单或拆两轮派发，绝不静默丢人无痕）。每一条任务必须简单到像 1+1=2：一个动作、一个主产物、一项可独立验收（≤300 字符、单句、不含并列词），且必须带 qualityRequirements（至少 1 条可检查的质量要求）；不满足即拒绝派发。`,
+              description: `至少 1 名 expert；low/未配置禁派（direct 登记，${START_EVIDENCE_MIN_CHARS_BRIEF}；可选 reasoningEffort="low"）；复杂任务 ${MIN_COMPLEX_DELEGATE_MEMBERS}-${MAX_COMPLEX_DELEGATE_MEMBERS} 人，少于 ${MIN_COMPLEX_DELEGATE_MEMBERS} 硬拒；每条一个动作/主产物/可独立验收（≤300 字符、单句、无并列词）且带 qualityRequirements。`,
               items: {
                 type: 'object',
                 properties: {
                   member: { type: 'string', description: '专家的姓名或代号。' },
-                  role: { type: 'string', enum: ['expert'], description: '只能是 expert=本部门相关领域全球顶尖专家（部门组员角色已取消；历史数据里的 member 读取时归一为 expert）。' },
-                  task: { type: 'string', description: '分配给该专家的任务：一个动作、一个主产物，完整自包含，单句且 ≤300 字符；出现并列词或分句会被拒绝（DELEGATE_TASK_NOT_ATOMIC）。' },
+                  role: { type: 'string', enum: ['expert'], description: '只能是 expert（本部门相关领域全球顶尖专家）。' },
+                  task: { type: 'string', description: '一个动作、一个主产物、单句≤300 字符；并列/多句拒发 DELEGATE_TASK_NOT_ATOMIC。' },
                   qualityRequirements: {
                     type: 'array',
                     items: { type: 'string' },
-                    description: '必填（用户要求 6）：这条任务成果必须达到的要求和质量，至少 1 条、最多 8 条、每条 ≤400 字符，写清什么算合格、什么算不合格；缺失即拒绝派发（DELEGATE_QUALITY_REQUIREMENTS_MISSING）。',
+                    description: '必填：1-8 条、每条≤400 字符，写清合格/不合格；缺失拒发 DELEGATE_QUALITY_REQUIREMENTS_MISSING。',
                   },
                   reasoningEffort: {
                     type: 'string',
                     enum: ['low', 'medium', 'high', 'xhigh', 'max'],
-                    description: '按该任务复杂度配置：轻度=low；比较复杂的任务 qwen 系=medium、非 qwen 系=high；非常复杂的任务 qwen 系=xhigh、非 qwen 系=max。建议档（成员自配为权威）：叶子 phase-0 一律 low 启动并经 self_effort 自配；越界档会被平台钳制并留痕。',
+                    description: '按任务复杂度：轻度=low；qwen 中等=medium、非 qwen=high；qwen 非常复杂=xhigh、非 qwen=max；成员自配为权威。',
                   },
                 },
                 required: ['member', 'role', 'task', 'qualityRequirements'],
@@ -1214,13 +1197,13 @@ export function createVerifyTool(runtime: any) {
               type: 'object',
               description: '第一步 + 第二步：全面、全盘、深入梳理、研究、思考自己的任务（问题梳理），再基于第一步全部结果研究资源、工具与实施方案（方法、流程、步骤，含依据）。',
               properties: {
-                problemAnalysis: { type: 'array', items: { type: 'string' }, description: '第一步 · 任务梳理：全面、全盘、深入梳理、研究、思考自己的任务（目标与验收/现状/事实/约束/未知/主要矛盾/边界）' },
+                problemAnalysis: { type: 'array', items: { type: 'string' }, description: '第一步任务梳理（≥1 条，合计≥40 字）' },
                 constraints: { type: 'array', items: { type: 'string' }, description: '约束条件' },
                 unknowns: { type: 'array', items: { type: 'string' }, description: '未知或待确认项' },
-                approach: { type: 'array', items: { type: 'string' }, description: '第二步 · 方法流程步骤：基于第一步全部结果理清的具体一步步执行、完美完成任务的方法、流程和步骤（每一步做什么、产出什么、如何证明）' },
-                approachBasis: { type: 'array', items: { type: 'string' }, description: '第二步依据（必填）：第二步的资源、工具、方案如何基于第一步完成好的所有结果——第一步的哪些事实/约束/矛盾决定了第二步的哪些资源/工具/步骤' },
-                resources: { type: 'array', items: { type: 'string' }, description: '第二步 · 资源研究：完成本任务需要哪些资源（数据/文件/权限/人/知识/时间），逐项写清用途与获取方式' },
-                tools: { type: 'array', items: { type: 'string' }, description: '第二步 · 工具研究：需要哪些工具、每个工具用来做什么、为什么选它' },
+                approach: { type: 'array', items: { type: 'string' }, description: '第二步方法步骤（≥1，≥40 字）' },
+                approachBasis: { type: 'array', items: { type: 'string' }, description: '第二步依据（≥1，≥20 字）' },
+                resources: { type: 'array', items: { type: 'string' }, description: '第二步资源（≥1，≥20 字）' },
+                tools: { type: 'array', items: { type: 'string' }, description: '第二步工具（≥1，≥10 字）' },
               },
               required: ['problemAnalysis', 'approach', 'approachBasis', 'resources', 'tools'],
             },
@@ -1228,8 +1211,8 @@ export function createVerifyTool(runtime: any) {
               type: 'object',
               description: '第三步 · 准备：把第二步研究出的资源、工具、实施方案真正备齐，并给出可复核的就绪证据。',
               properties: {
-                prepared: { type: 'array', items: { type: 'string' }, description: '已准备好的资源/工具清单：准备了什么、在哪里、是否可用' },
-                evidence: { type: 'array', items: { type: 'string' }, description: '就绪证据：命令输出/文件路径/配置项/版本号/引用，与 prepared 一一对应' },
+                prepared: { type: 'array', items: { type: 'string' }, description: '第三步已备（≥1，≥20 字）' },
+                evidence: { type: 'array', items: { type: 'string' }, description: '第三步就绪证据（≥1，≥20 字）' },
               },
               required: ['prepared', 'evidence'],
             },
@@ -1562,19 +1545,19 @@ function createReleaseTool(runtime: any) {
             planning: {
               type: 'object',
               properties: {
-                problemAnalysis: { type: 'array', items: { type: 'string' } },
-                resources: { type: 'array', items: { type: 'string' } },
-                tools: { type: 'array', items: { type: 'string' } },
-                approach: { type: 'array', items: { type: 'string' } },
-                approachBasis: { type: 'array', items: { type: 'string' } },
+                problemAnalysis: { type: 'array', items: { type: 'string' }, description: '第一步任务梳理（≥1 条，合计≥40 字）' },
+                resources: { type: 'array', items: { type: 'string' }, description: '第二步资源（≥1，≥20 字）' },
+                tools: { type: 'array', items: { type: 'string' }, description: '第二步工具（≥1，≥10 字）' },
+                approach: { type: 'array', items: { type: 'string' }, description: '第二步方法步骤（≥1，≥40 字）' },
+                approachBasis: { type: 'array', items: { type: 'string' }, description: '第二步依据（≥1，≥20 字）' },
               },
               required: ['problemAnalysis', 'approach', 'approachBasis', 'resources', 'tools'],
             },
             preparation: {
               type: 'object',
               properties: {
-                prepared: { type: 'array', items: { type: 'string' } },
-                evidence: { type: 'array', items: { type: 'string' } },
+                prepared: { type: 'array', items: { type: 'string' }, description: '第三步已备（≥1，≥20 字）' },
+                evidence: { type: 'array', items: { type: 'string' }, description: '第三步就绪证据（≥1，≥20 字）' },
               },
               required: ['prepared', 'evidence'],
             },
@@ -1851,11 +1834,11 @@ function createDispatchTool(runtime: any) {
             planning: {
               type: 'object',
               properties: {
-                problemAnalysis: { type: 'array', items: { type: 'string' }, description: '第一步 · 任务梳理：全面、全盘、深入梳理、研究、思考自己的任务（目标与验收/现状/事实/约束/未知/主要矛盾/边界逐条写清），至少 1 条、合计 ≥40 字。' },
-                resources: { type: 'array', items: { type: 'string' }, description: '第二步 · 资源研究：基于第一步全部结果，研究需要哪些资源（数据/文件/权限/人/知识/时间），至少 1 项、合计 ≥20 字。' },
-                tools: { type: 'array', items: { type: 'string' }, description: '第二步 · 工具研究：需要哪些工具、每个工具用来做什么，至少 1 项、合计 ≥10 字。' },
-                approach: { type: 'array', items: { type: 'string' }, description: '第二步 · 方法流程步骤：理清的具体一步步执行、完美完成任务的方法、流程和步骤（派发顺序/督战/验收/交付如何做、如何证明），至少 1 条、合计 ≥40 字。' },
-                approachBasis: { type: 'array', items: { type: 'string' }, description: '第二步依据（必填）：第二步如何基于第一步完成好的所有结果——第一步的哪些事实/约束/矛盾决定了第二步的哪些资源/工具/步骤，至少 1 条、合计 ≥20 字。' },
+                problemAnalysis: { type: 'array', items: { type: 'string' }, description: '第一步任务梳理（≥1 条，合计≥40 字）' },
+                resources: { type: 'array', items: { type: 'string' }, description: '第二步资源（≥1，≥20 字）' },
+                tools: { type: 'array', items: { type: 'string' }, description: '第二步工具（≥1，≥10 字）' },
+                approach: { type: 'array', items: { type: 'string' }, description: '第二步方法步骤（≥1，≥40 字）' },
+                approachBasis: { type: 'array', items: { type: 'string' }, description: '第二步依据（≥1，≥20 字）' },
               },
               required: ['problemAnalysis', 'approach', 'approachBasis', 'resources', 'tools'],
               additionalProperties: false,
@@ -1863,8 +1846,8 @@ function createDispatchTool(runtime: any) {
             preparation: {
               type: 'object',
               properties: {
-                prepared: { type: 'array', items: { type: 'string' }, description: '第三步 · 已备齐的资源与工具清单（每项写清：准备了什么、在哪里、是否可用），至少 1 项、合计 ≥20 字。' },
-                evidence: { type: 'array', items: { type: 'string' }, description: '第三步 · 就绪证据：命令输出/文件路径/配置项/版本号/引用，至少 1 条、合计 ≥20 字。' },
+                prepared: { type: 'array', items: { type: 'string' }, description: '第三步已备（≥1，≥20 字）' },
+                evidence: { type: 'array', items: { type: 'string' }, description: '第三步就绪证据（≥1，≥20 字）' },
               },
               required: ['prepared', 'evidence'],
               additionalProperties: false,
@@ -2281,7 +2264,7 @@ export function apply(ctx: any, config: WorkplanConfig = {}) {
 
 export const meta = {
   name,
-  version: '3.2.1',
+  version: '3.2.2',
   promptOrder: PROMPT_ORDER,
   routes: ['/dsh-workplan/plans', '/dsh-workplan/vendor/chart.umd.js'],
 }

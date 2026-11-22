@@ -87,6 +87,7 @@ import {
   messageText,
   readySubtasks,
   MAX_PLAN_RESUMES,
+  MAX_ORIGINAL_REQUEST_CHARS,
   PRESENT_DENY_CODES,
   canResumePlan,
   resetBlockedStatuses,
@@ -97,6 +98,7 @@ import {
   reconcilePhase,
   REASONING_EFFORTS,
   truncate,
+  truncateTail,
   validatePlan,
   applyResultStatuses,
   adjudicateResult,
@@ -834,7 +836,10 @@ function recentConversation(session: any, maxChars = MAX_CONVERSATION_CHARS) {
     parts.unshift(line)
     total += line.length + 2
   }
-  return truncate(parts.join('\n\n'), maxChars)
+  /* Keep the newest turns: the scan collects a recent window backwards, so
+   * head truncation would drop the newest lines when the window is one line
+   * over budget. Tail truncation matches the function name and the intent. */
+  return truncateTail(parts.join('\n\n'), maxChars)
 }
 
 export function isPlanModeActive(ctx: any, session: any) {
@@ -1045,6 +1050,28 @@ function sleepAbortable(signal: any, ms: number) {
  * 只认「末尾已闭合」：被拦腰截断的 JSON 即使补上括号也可能丢掉尾部阶段，
  * 静默交出残缺计划比降级更危险。
  */
+/**
+ * [省钱] The planner no longer echoes the user's original text back as
+ * taskUnderstanding.originalRequest. The same verbatim text is already owned by
+ * the host (taskText) and will be stored in taskAnchor; fill it here before the
+ * context audit so old and new wire formats behave identically. Authored values
+ * (older planners, replays, hand-built plans) are never overwritten.
+ */
+function fillOriginalRequestFromTask(plan: any, taskText: any) {
+  try {
+    if (!plan || typeof plan !== 'object') return
+    const understanding = plan.taskUnderstanding
+    if (!understanding || typeof understanding !== 'object') return
+    const current = typeof understanding.originalRequest === 'string' ? understanding.originalRequest.trim() : ''
+    if (current) return
+    const text = typeof taskText === 'string' ? taskText.trim() : ''
+    if (!text) return
+    understanding.originalRequest = text.slice(0, MAX_ORIGINAL_REQUEST_CHARS)
+  } catch {
+    /* Prompt-side economy must never make a valid plan fail validation. */
+  }
+}
+
 function salvagePartialPlan(text: any, guardOptions: any) {
   if (typeof text !== 'string') return null
   const trimmed = text.trimEnd()
@@ -1053,6 +1080,7 @@ function salvagePartialPlan(text: any, guardOptions: any) {
     const raw = extractJson(trimmed)
     const validated = validatePlan(raw)
     if (!validated.ok) return null
+    fillOriginalRequestFromTask(validated.plan, guardOptions?.taskText)
     const guard = validatePlanContext(validated.plan, guardOptions)
     if (!guard.ok) return null
     const plan: any = validated.plan
@@ -1289,6 +1317,13 @@ export async function runPlanner(ctx: any, options: any) {
       // 经重试回路回喂自纠（用户要求 1/2；模型名缺失⇒null⇒不施加）。
       const validated = validatePlan(raw, { allowedEfforts: allowedEffortsForModel(modelSelection.model) })
       if (validated.ok) {
+        /*
+         * [省钱] originalRequest is derived from the user's own message (the
+         * same text taskAnchor will seal). This removes up to 8,000 characters
+         * of planner output per plan while keeping the context audit's verbatim
+         * check meaningful; authored values from older plans are preserved.
+         */
+        fillOriginalRequestFromTask(validated.plan, taskText)
         /*
          * [1.12.0] Structure alone is not understanding. Run the three-stage
          * audit against the user's own words before the plan can be returned;
@@ -2872,6 +2907,7 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
                   })),
                 cwd: options.cwd,
                 conversationContext,
+                compactBackground: true,
                 statuses: record.statuses,
                 /*
                  * [2.2.0][T3/O-2a] 子→主预告通道的目标（真实父会话 id）。
