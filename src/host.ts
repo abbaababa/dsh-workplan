@@ -248,7 +248,7 @@ export const PROMPT_ORDER = 40
  * 自报版本时被误导，用户也拿不到真实版本（用户要求 13/G 要如实报告版本）。
  * 硬编码字符串与 meta 双写是根因，改为同一常量派生。
  */
-export const PLUGIN_VERSION = '3.2.5'
+export const PLUGIN_VERSION = '3.2.6'
 
 const PROMPT_SECTION = [
   '本会话已启用自动任务分解。每个新任务的第一个模型步骤前生成计划并显示在对话；看到【任务分解】后，未自动派发或需续跑/重试时再调用 dsh_workplan_dispatch（默认 wait；较久用 mode:"async"）。只收到「任务分解已在后台生成中」时不要手动派发，先告知用户正在分配并等待。',
@@ -996,14 +996,14 @@ function createDelegateTool(runtime: any) {
                   },
                   /*
                    * [3.2.4][O1] 负责人预登记（仅当环境变量 DSH_WORKPLAN_LEADER_PRE_REGISTER=1
-                   * 时生效，默认关）：分工表条目可随附该成员的开工证据与开工前预估，
+                   * 时生效，3.2.6 起默认开）：分工表条目可随附该成员的开工证据与开工前预估，
                    * 平台在派发前替成员登记（delivery 视为已送达——信息由负责人本人
                    * 撰写），成员免跑 phase-0、直接以分工表档接续 phase-1。缺省或
                    * 非法 ⇒ 该成员照旧走 phase-0（fail-open）。
                    */
                   startPhases: {
                     type: 'object',
-                    description: '（可选，仅 DSH_WORKPLAN_LEADER_PRE_REGISTER=1 生效）该成员的五步第 1/2/3 步开工证据：{planning:{problemAnalysis[],approach[],approachBasis[],resources[],tools[]},preparation:{prepared[],evidence[]}}；字数下限与 review 相同。',
+                    description: '（可选，3.2.6 起默认开预登记；DSH_WORKPLAN_LEADER_PRE_REGISTER=0 可关）该成员的五步第 1/2/3 步开工证据：{planning:{problemAnalysis[],approach[],approachBasis[],resources[],tools[]},preparation:{prepared[],evidence[]}}；字数下限与 review 相同。',
                     properties: {
                       planning: { type: 'object' },
                       preparation: { type: 'object' },
@@ -1012,7 +1012,7 @@ function createDelegateTool(runtime: any) {
                   },
                   timeNotice: {
                     type: 'object',
-                    description: '（可选，仅 DSH_WORKPLAN_LEADER_PRE_REGISTER=1 生效）该成员的开工前预估：{declaredMinutes: 正整数分钟(1-10080), reason?}。',
+                    description: '（可选，3.2.6 起默认开预登记；DSH_WORKPLAN_LEADER_PRE_REGISTER=0 可关）该成员的开工前预估：{declaredMinutes: 正整数分钟(1-10080), reason?}。',
                     properties: {
                       declaredMinutes: { type: 'integer', minimum: 1, maximum: 10080 },
                       reason: { type: 'string' },
@@ -2151,7 +2151,7 @@ export function apply(ctx: any, config: WorkplanConfig = {}) {
 
 export const meta = {
   name,
-  version: '3.2.5',
+  version: '3.2.6',
   promptOrder: PROMPT_ORDER,
   routes: ['/dsh-workplan/plans', '/dsh-workplan/vendor/chart.umd.js'],
 }

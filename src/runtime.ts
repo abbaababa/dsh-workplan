@@ -180,6 +180,7 @@ import { computeMappingDigest, verifyMappingDigest } from './supersede-digest.js
 import { supersedePlanRecord } from './supersede.js'
 // [3.1.0] 人数上限单一真源（caps.ts）：报错文案与门禁同源。
 import { MAX_COMPLEX_DELEGATE_MEMBERS, MAX_TOTAL_EXPERTS_PER_PLAN } from './caps.js'
+import { leaderPreRegisterEnabled as capsLeaderPreRegisterEnabled } from './caps.js'
 // [3.1.0] 排队等待上限环境变量化（默认 10 分钟不变）＋规划器并发预算环境变量化。
 import { envPositiveInt } from './caps.js'
 import { createProgressWatchdog, describeError } from './watchdog.js'
@@ -429,19 +430,20 @@ function dispatchQueueMaxWaitMs(): number {
 }
 
 /*
- * [3.2.4][O1] 负责人预登记开关（默认关）。
+ * [3.2.4][O1] 负责人预登记开关（3.2.6 起默认开，DSH_WORKPLAN_LEADER_PRE_REGISTER=0 关）。
  *
  * 设 `DSH_WORKPLAN_LEADER_PRE_REGISTER=1`（或 true/on）后，部门负责人在分工表
  * 条目里可随附该成员的 startPhases（五步第 1/2/3 步证据）与 timeNotice（开工前
  * 预估）：派发时平台替成员登记这两项（信息由负责人本人撰写，delivery 视为已
  * 送达），成员免跑 phase-0 评估回合、直接以分工表档接续 phase-1——每个专家
  * 省整整一次 LLM 回合（约占专家总输出的一半）。证据/预估经消毒判据校验，
- * 缺失或非法 ⇒ 该成员照旧走 phase-0（fail-open，不新增拒因）。默认关：
- * 预登记把「成员自配档」改为「负责人代配档」，是行为变更，交给用户显式选择。
+ * 缺失或非法 ⇒ 该成员照旧走 phase-0（fail-open，不新增拒因）。**3.2.6 起默认开**：
+ * 旧默认关，导致每个专家都被迫先开一个只写开工证据、不产交付物的评估会话；
+ * 关掉它的方式是 DSH_WORKPLAN_LEADER_PRE_REGISTER=0/false/off。判定统一由
+ * caps.leaderPreRegisterEnabled() 提供，本函数只做转调，避免两处判定分叉。
  */
 export function leaderPreRegisterEnabled(): boolean {
-  const raw = String(process.env.DSH_WORKPLAN_LEADER_PRE_REGISTER ?? '').trim().toLowerCase()
-  return raw === '1' || raw === 'true' || raw === 'on'
+  return capsLeaderPreRegisterEnabled()
 }
 
 export function isActivationLimitError(error: any): boolean {
@@ -5317,12 +5319,42 @@ export function reconcileEndedDelegateSessions(
  * 仍保持与正常结算可区分；不自动重派。childId 为空（排队中尚未激活）、
  * escalation、getSession/getSettled 抛错（未知）一律不动。
  */
+/*
+ * [3.2.6][治本·假死误杀] 停滞判定阈值与判据。
+ *
+ * 事故（2026-11-24 18:23–19:22，session-da5b9915）：T3 的 7 名专家在开工
+ * 226 秒时被判 failed(stalled)，而它们的会话此后仍在持续写日志——即当时**还活着**。
+ * 紧接着负责人按「不自动重派」另开了 9 个新专家会话，多跑 393 步、约 40MB。
+ *
+ * 根因：旧判据把「`ctx.sessions.get(childId)` 取不到」当成「会话已死」，
+ * 但会话对象不在内存注册表里 ≠ 会话死了（换出、注册时序、父会话释放都会造成
+ * 取不到）。这违反本函数自己文档里写下的原则「宁可不动，绝不误杀」。
+ *
+ * 治本两条，缺一不可：
+ *  1. 增加**正向存活证据**：`ctx.agents.get(childId)` 拿得到活体 Agent 对象 ⇒ 活着，
+ *     一律不动（这是宿主自己的活体注册表，比 sessions 更贴近「是否真的在跑」）。
+ *  2. 只判「新开工」：阈值 120s → 600s。误杀发生在 226s，新阈值把它挡在门外；
+ *     真死的会话最多晚 10 分钟被标出，代价只是通知延后，不会有人为它多烧钱。
+ *
+ * 两条都不满足才判停滞；仍保持「不自动重派」语义不变。
+ */
+export const DELEGATE_STALL_MS = Math.max(
+  60_000,
+  envPositiveInt('DSH_WORKPLAN_DELEGATE_STALL_SECONDS', 600) * 1000,
+)
+
+/** 停滞判定的统一文案（唯一真源：runtime 内部与通知文案共用）。 */
+export function delegateStalledReason(stallMs = DELEGATE_STALL_MS): string {
+  return `子会话在 ${Math.round(stallMs / 1000)}s 内既无活体会话、也无结束快照，判定停滞（不自动重派）`
+}
+
 export function markStalledDelegates(
   delegates: any,
   getSession: (childId: string) => any,
   getSettled: (childId: string) => any,
   now = Date.now(),
-  stallMs = 120_000,
+  stallMs = DELEGATE_STALL_MS,
+  getAgent?: (childId: string) => any,
 ) {
   const list = Array.isArray(delegates) ? delegates : []
   const stalled: any[] = []
@@ -5336,6 +5368,15 @@ export function markStalledDelegates(
     let live: any = null
     try { live = getSession?.(childId) } catch { return item }
     if (live) return item
+    /*
+     * [3.2.6] 活体 Agent 优先于「会话取不到」：agents 注册表里还有这个 childId
+     * 就说明它正在跑（或即将跑），绝不当成死亡证据。
+     */
+    if (typeof getAgent === 'function') {
+      let agent: any = null
+      try { agent = getAgent(childId) } catch { return item }
+      if (agent) return item
+    }
     let settled: any = null
     try { settled = getSettled?.(childId) } catch { return item }
     if (settled) return item
@@ -5345,7 +5386,7 @@ export function markStalledDelegates(
     const marked = {
       ...item,
       status: 'failed',
-      error: '子会话已消失超过 120s 且无结束快照，判定停滞（不自动重派）',
+      error: delegateStalledReason(stallMs),
       finishedAt: now,
       reconciledAt: now,
       reconciledFrom: 'live-session',
@@ -9183,6 +9224,10 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         result.delegates,
         (childId: string) => (ctx as any).sessions?.get?.(childId),
         (childId: string) => settled.get(childId),
+        Date.now(),
+        DELEGATE_STALL_MS,
+        // [3.2.6] 正向存活证据：宿主活体 Agent 注册表里还有它就绝不判死。
+        (childId: string) => (ctx as any).agents?.get?.(childId),
       )
       if (!result.changed && !stalledResult.changed) continue
       const finalDelegates = stalledResult.delegates
@@ -9234,7 +9279,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
                 childId: String(item.childId),
                 kind,
                 reason: String(item.error ?? (kind === 'stalled'
-                  ? '子会话已消失超过 120s 且无结束快照，判定停滞（不自动重派）'
+                  ? delegateStalledReason()
                   : '读时对账确认：会话已结束，但结果块未通过核验')),
               })),
             )
@@ -11971,7 +12016,7 @@ ${startEvidenceRef
     // 读取（consolidation 不再携带两轮思考产物）。
     const consolidationApproach = Array.isArray((row as any)?.startPhases?.planning?.approach) ? (row as any).startPhases.planning.approach : []
     /*
-     * [3.2.4][O1] 负责人预登记（DSH_WORKPLAN_LEADER_PRE_REGISTER=1 时生效，默认关）：
+     * [3.2.4][O1] 负责人预登记（3.2.6 起默认开，DSH_WORKPLAN_LEADER_PRE_REGISTER=0 关闭）：
      * 分工表条目可携带 startPhases + timeNotice，平台在派发前替成员登记开工证据
      * 与预估（delivery:'sent'——信息由负责人本人撰写，无需再经 self_effort 转述），
      * 成员直接以分工表档接续 phase-1，省掉每个专家整整一次 phase-0 评估回合

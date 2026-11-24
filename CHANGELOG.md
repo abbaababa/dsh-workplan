@@ -1,3 +1,36 @@
+## 3.2.6 — 2026-11-24（费用治本：人数下限、假死误杀、专家开工评估回合）
+
+> **背景（实测，非估算）**：会话 `session-da5b9915-9fcb-4d90-8948-72f7c2c04316`（计划 `wp-2b766146-c360-4644-b677-38c652fa13e2`）在 59 分钟内开了 **32 个会话**（1 主 + 31 子）、**846 次模型调用**、978 次工具调用，累计重发上下文约 **218 MB**（按 2.6 字节/token 折算约 8,000 万输入 token），最终因 `402 Insufficient Balance` 中断，交付物未生成。3.2.3–3.2.5 的省 token 全部是提示词字面量削减（根工具面 −476 字符、phase-1 简报 −115 字符、重复自查句 −48 字符），相对该账单差三个数量级。本版改为动**结构性根因**，不再抠字。
+
+### 一、复杂任务人数下限 8 → 3（费用第一主因）
+
+- `src/caps.ts`：`MIN_COMPLEX_DELEGATE_MEMBERS` 默认 **8 → 3**（`DSH_WORKPLAN_MIN_COMPLEX_DELEGATE_MEMBERS` 可覆盖）。每个成员都是一次独立计费会话；实测该计划仅 T3 一个子任务就开了 **18 个会话**（2 负责人 + 16 专家）、**541 步 = 全计划 64%**。人手应按活儿定，不该按"下限"定。
+- `MAX_TOTAL_EXPERTS_PER_PLAN` 默认 **40 → 30**：压到 12 会把「5 阶段 × 3 人 = 15」这种正常计划整单拒绝，属 3.0.6 部门汇总死锁同类错误。
+- `MAX_COMPLEX_DELEGATE_MEMBERS` **维持 25**：下限才是费用主因；降上限只会把合法的 7–25 人分工表从"允许"变成"禁止"。
+- 闸门代码与错误码（`DELEGATE_HEADCOUNT_MIN`）不变，只改默认值与文案。
+
+### 二、假死误杀治本（重复劳动的来源）
+
+- 实测：T3 第一波 7 名专家（64 步）在派发 **226 秒**后被判「子会话已消失超过 120s 且无结束快照」，7 个会话随即被 `turn/end reason {kind:"aborted", reason:{kind:"parent"}}` 掐断——而它们在被判死后**仍继续写会话记录最长 40 秒**（即当时还活着）；随后平台又开 9 个专家会话重跑 **393 步**。
+- `DELEGATE_STALL_MS` 默认 **120s → 600s**（`DSH_WORKPLAN_DELEGATE_STALL_SECONDS` 可覆盖，下限 60s）。
+- `markStalledDelegates` 增加**正向存活证据**：`getAgent(childId)` 取到活体执行体即绝不判死；取不到（抛错/未知）一律不动，不把"查不到"当"已死亡"。
+- 停滞后错误文案抽成 `delegateStalledReason()` 统一渲染，报出实际阈值。
+
+### 三、负责人预登记默认开（每个专家省一整次会话）
+
+- `leaderPreRegisterEnabled()` 默认 **false → true**（`DSH_WORKPLAN_LEADER_PRE_REGISTER=0/false/off` 关闭）；判定实现迁到 `src/caps.ts` 单一来源，`src/runtime.ts` 只做转调，避免两处判定分叉。
+- 负责人在该开关打开时，任务书追加一句预登记说明（`src/llm-rules.ts`）：成员条目随附 `startPhases` + `timeNotice`，成员免跑 phase-0 评估回合、直接进执行段。
+- 语义仍 **fail-open**：负责人没填、填错或字数不足 ⇒ 该成员照旧走 phase-0，不新增拒因；平台侧消毒与字数闸零改动。
+- 依据：实测 7 对「评估会话 + 执行会话」中，评估段 **111/382 步（29%）**，而评估会话由模型自己产出的可交付文件为 **0 个**，唯一产物是平台生成的开工证据（7 份合计 47,767 字节，平均 6.8KB）；执行会话看不到评估会话的探索过程，只能重做（T1 同一批行情 URL 被两段各抓一遍）。
+
+### 四、验证与版本
+
+- `npm run build` 通过；`npm test`：**1513 例，pass=1513 / fail=0 / cancelled=0 / todo=1，exit=0**。
+- 同步更新的守门测试：`tests/token-economy-324.test.ts`（人数下限、预登记默认开）、`tests/workplan-254-min-headcount.test.ts`、`tests/workplan-254-t3-deep-gate.test.ts`、`tests/workplan-low-delegation-gate.test.ts`、`tests/workplan-318-t2-defects.test.ts`（600s 阈值与 `630_000` 偏移）。
+- 版本统一 **3.2.6**：`package.json` / `package-lock.json`（两处）/ `PLUGIN_VERSION` / `meta.version` / 三份 README / `tests/fixtures/tool-surface.json`。
+- 运行中的 DSH 不会自动加载新代码：请**手动重启 DSH**（或在插件管理里禁用再启用）。重启后在新会话调用 `dsh_workplan_status` 应显示 `v3.2.6`。
+- 回退开关（环境变量）：`DSH_WORKPLAN_MIN_COMPLEX_DELEGATE_MEMBERS=8`、`DSH_WORKPLAN_DELEGATE_STALL_SECONDS=120`、`DSH_WORKPLAN_LEADER_PRE_REGISTER=0`。
+
 ## 3.2.5 — 2026-11-24（注意力红线对齐：唯一信息零丢失，只删重复/死代码/不可见面）
 
 > **发布范围说明（事实，不修饰）**：3.2.3、3.2.4 从未单独提交或发布过——远端 tag 止于 `v3.2.2`，npm `latest` 为 `3.2.2`，仓库内也没有这两个版本的提交。它们的全部改动只以未提交工作区的形式存在，并与 3.2.5 的改动混在同一批文件里；在不编造历史的前提下无法重建。按用户 2026-11-24 的裁决（A 方案），本版一次性发布 3.2.3 + 3.2.4 + 3.2.5 的全部内容，版本号统一 **3.2.5**；下文 3.2.3/3.2.4 章节保留为开发记录。

@@ -46,7 +46,7 @@ import {
 } from './v3-contract.js'
 // [3.1.0] 数量上限单一真源（复杂任务专家人数 12→25）：与 v3-contract 的 sources
 // 上限、plan.ts 的存档消毒同一常量，杜绝「改一处漏一处」的写读不对称。
-import { MAX_COMPLEX_DELEGATE_MEMBERS, MIN_COMPLEX_DELEGATE_MEMBERS } from './caps.js'
+import { MAX_COMPLEX_DELEGATE_MEMBERS, MIN_COMPLEX_DELEGATE_MEMBERS, leaderPreRegisterEnabled } from './caps.js'
 
 export {
   allowedEffortsForModel,
@@ -210,7 +210,7 @@ export function buildLlmRulesBrief(info: LlmRulesBriefInfo = {}): string {
       ? '- 部门负责人强制流程（phase-1 接续）：五步前三步已在 phase-0 完成并登记（见接续块与登记原文），不要重做、不要重复登记；用 dsh_workplan_delegate(action="review") 提交分工表（assignments+consolidation.taskReasoningEffort）后即可 dispatch 派活；未交分工表前 dispatch 硬拒。'
       : '- 部门负责人强制流程：执行自己的任务必须先完成五步前三步，经 dsh_workplan_delegate(action="review") 提交分工表（assignments+consolidation.taskReasoningEffort）与 startPhases={ planning{ problemAnalysis[], approach[], approachBasis[], resources[], tools[] }, preparation{ prepared[], evidence[] } }；phase-0 low 启动，登记后按你的自配档接续 phase-1；未交前 dispatch 硬拒。'
     lines.push(deptFlowHead
-      + `任务拆极简后派给本部门多名相关领域全球顶尖专家（role="expert"，≥1 名，单一目标、单一主产物、可独立验收）；low/未配置任务禁止下派——负责人亲自执行，第 1/2/3 步证据经 dsh_workplan_delegate(action="direct") 登记（${START_EVIDENCE_MIN_CHARS_BRIEF}；可选 reasoningEffort="low"）；复杂任务（medium/high/xhigh/max）合计不少于 ${MIN_COMPLEX_DELEGATE_MEMBERS} 人且最多 ${MAX_COMPLEX_DELEGATE_MEMBERS} 人，少于 ${MIN_COMPLEX_DELEGATE_MEMBERS} 人硬性阻断，超过上限平台拒收（可精简名单或拆两轮派发，绝不静默丢人无痕）。专家经 self_effort 按单项复杂度自配（轻度=low；qwen 中等=medium、非 qwen=high；复杂=xhigh/max），专家自配为权威；本部门再分配权限仅限本部门，越界钳制留痕；全程少走弯路；第三层为叶子层，第四层拒绝；action="status" 查看进度。`)
+      + `任务拆极简后派给本部门多名相关领域全球顶尖专家（role="expert"，≥1 名，单一目标、单一主产物、可独立验收）；low/未配置任务禁止下派——负责人亲自执行，第 1/2/3 步证据经 dsh_workplan_delegate(action="direct") 登记（${START_EVIDENCE_MIN_CHARS_BRIEF}；可选 reasoningEffort="low"）；复杂任务（medium/high/xhigh/max）合计不少于 ${MIN_COMPLEX_DELEGATE_MEMBERS} 人且最多 ${MAX_COMPLEX_DELEGATE_MEMBERS} 人，少于 ${MIN_COMPLEX_DELEGATE_MEMBERS} 人硬性阻断，超过上限平台拒收（可精简名单或拆两轮派发，绝不静默丢人无痕）。专家经 self_effort 按单项复杂度自配（轻度=low；qwen 中等=medium、非 qwen=high；复杂=xhigh/max），专家自配为权威；本部门再分配权限仅限本部门，越界钳制留痕；全程少走弯路；第三层为叶子层，第四层拒绝；action="status" 查看进度。${leaderPreRegisterEnabled() ? '【3.2.6 起默认开 · 预登记】请在 assignments 的每个成员条目里随附该成员的 startPhases（五步第 1/2/3 步证据：problemAnalysis / approach / approachBasis / resources / tools / preparation.prepared / preparation.evidence，字数下限同 direct）与 timeNotice（开工前预估时长）：平台替你登记后，该成员免跑开工评估回合（phase-0），直接进执行段，每个专家省掉一整次会话；拿不准的条目就别填，该成员照旧自己评估（fail-open，不新增拒因）。' : ''}`)
     /*
      * [3.0.0] 用户 2026-11-14 第 3、5、6、7、8、10、11 条要求：负责人侧四条硬规则。
      * 与代码门禁同源（planDelegations 的 checkAtomicAssignment、comm-format 的
@@ -292,7 +292,7 @@ export interface DelegationAssignment {
   correctionReason?: string
   /**
    * [3.2.4][O1] 负责人预登记的该成员五步第 1/2/3 步开工证据（仅当环境变量
-   * DSH_WORKPLAN_LEADER_PRE_REGISTER=1 时被派发侧消费，默认关；消毒在派发侧
+   * DSH_WORKPLAN_LEADER_PRE_REGISTER 非 0 时被派发侧消费，3.2.6 起默认开；消毒在派发侧
    * sanitizeStartPhaseEvidence，非法照旧走 phase-0）。
    */
   startPhases?: unknown
@@ -581,7 +581,8 @@ export function planDelegations(input: {
    * [3.2.3] 例外：顺序推理链任务豁免——链式任务只能 1 人连续执行，≥8 人
    * 下限是为「可并行拆分」设计的，对链式任务只会制造无解死锁。
    * [3.2.4][O8] 例外 2：单阶段计划（stages.length === 1）豁免同一死锁；
-   * 下限本身可用 DSH_WORKPLAN_MIN_COMPLEX_DELEGATE_MEMBERS 调整（默认 8）。
+   * 下限本身可用 DSH_WORKPLAN_MIN_COMPLEX_DELEGATE_MEMBERS 调整（3.2.6 起默认 3，
+   * 旧值 8 会把每个复杂任务都强制拆成 8 个独立子代理会话）。
    */
   if (complexTask && !sequentialChain && !input.singleStagePlan && members.length < MIN_COMPLEX_DELEGATE_MEMBERS) {
     return {
@@ -591,7 +592,7 @@ export function planDelegations(input: {
       clamped: [],
       taskEffort: null,
       taskEffortClamped: null,
-      error: `复杂任务（声明档 ${String(declaredEffort)}）按用户决策 D1/D2 须合计 ≥${MIN_COMPLEX_DELEGATE_MEMBERS} 人（组员角色已取消，全部为专家），当前 ${members.length} 人；请把任务拆得更简单（单一目标/单一主产物/可独立验收，简单到 1+1=2）并扩充分工表后重新 review/dispatch。下限可用环境变量 DSH_WORKPLAN_MIN_COMPLEX_DELEGATE_MEMBERS 调整（默认 8）；单阶段计划（只有 1 个 stage）自动豁免本下限。`,
+      error: `复杂任务（声明档 ${String(declaredEffort)}）按用户决策 D1/D2 须合计 ≥${MIN_COMPLEX_DELEGATE_MEMBERS} 人（组员角色已取消，全部为专家），当前 ${members.length} 人；请把任务拆得更简单（单一目标/单一主产物/可独立验收，简单到 1+1=2）并扩充分工表后重新 review/dispatch。下限可用环境变量 DSH_WORKPLAN_MIN_COMPLEX_DELEGATE_MEMBERS 调整（3.2.6 起默认 3）；单阶段计划（只有 1 个 stage）自动豁免本下限。`,
     }
   }
   /*

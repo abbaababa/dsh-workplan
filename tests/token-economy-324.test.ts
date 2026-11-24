@@ -21,26 +21,26 @@ function assignmentsOf(count: number) {
   }))
 }
 
-test('[O8] 单阶段计划豁免复杂任务 ≥8 人下限；多阶段计划不豁免', () => {
-  const input = { consolidation: { assignments: assignmentsOf(3), taskReasoningEffort: 'high' }, model: 'gpt-4o' }
+test('[O8] 单阶段计划豁免复杂任务人数下限；多阶段计划不豁免（3.2.6 下限 3）', () => {
+  const input = { consolidation: { assignments: assignmentsOf(2), taskReasoningEffort: 'high' }, model: 'gpt-4o' }
   const multi = planDelegations(input)
   assert.equal(multi.ok, false)
   assert.equal(multi.code, 'DELEGATE_HEADCOUNT_MIN')
   const single = planDelegations({ ...input, singleStagePlan: true })
-  assert.equal(single.ok, true, `单阶段豁免应放行 3 人分工表：${single.error ?? ''}`)
-  assert.equal(single.members.length, 3)
+  assert.equal(single.ok, true, `单阶段豁免应放行 2 人分工表：${single.error ?? ''}`)
+  assert.equal(single.members.length, 2)
 })
 
-test('[O6/O8] caps 常量：MIN 可用环境变量覆盖（默认 8），MAX_TOTAL_EXPERTS_PER_PLAN 存在', async () => {
+test('[O6/O8] caps 常量：MIN 可用环境变量覆盖（3.2.6 默认 3），MAX_TOTAL_EXPERTS_PER_PLAN 存在', async () => {
   const base = await import('../src/caps.js')
-  assert.equal(base.MIN_COMPLEX_DELEGATE_MEMBERS, 8)
+  assert.equal(base.MIN_COMPLEX_DELEGATE_MEMBERS, 3)
   assert.ok(base.MAX_TOTAL_EXPERTS_PER_PLAN >= 1)
-  process.env.DSH_WORKPLAN_MIN_COMPLEX_DELEGATE_MEMBERS = '3'
+  process.env.DSH_WORKPLAN_MIN_COMPLEX_DELEGATE_MEMBERS = '5'
   try {
     const overriddenSpec = '../src/caps.js?o8-override=1'
     const overridden: typeof base = await import(overriddenSpec)
-    assert.equal(overridden.MIN_COMPLEX_DELEGATE_MEMBERS, 3)
-    assert.ok(overridden.MAX_COMPLEX_DELEGATE_MEMBERS >= 3)
+    assert.equal(overridden.MIN_COMPLEX_DELEGATE_MEMBERS, 5)
+    assert.ok(overridden.MAX_COMPLEX_DELEGATE_MEMBERS >= 5)
   } finally {
     delete process.env.DSH_WORKPLAN_MIN_COMPLEX_DELEGATE_MEMBERS
   }
@@ -50,8 +50,8 @@ test('[O6/O8] caps 常量：MIN 可用环境变量覆盖（默认 8），MAX_TOT
   const fallbackSpec = '../src/caps.js?o8-fallback=1'
   const fallback: typeof base = await import(fallbackSpec)
   delete process.env.DSH_WORKPLAN_MIN_COMPLEX_DELEGATE_MEMBERS
-  assert.equal(bad.MIN_COMPLEX_DELEGATE_MEMBERS, 8, '缺省回落 8')
-  assert.equal(fallback.MIN_COMPLEX_DELEGATE_MEMBERS, 8, '非法值回落 8')
+  assert.equal(bad.MIN_COMPLEX_DELEGATE_MEMBERS, 3, '缺省回落 3')
+  assert.equal(fallback.MIN_COMPLEX_DELEGATE_MEMBERS, 3, '非法值回落 3')
 })
 
 test('[3.2.4] 规划器拆分：system 块含全部静态内容，user 块只含动态三段，拼接视图与旧口径一致', async () => {
@@ -189,17 +189,21 @@ test('[3.2.4] resolveSupportedEfforts：模型无 reasoning 元数据 ⇒ 空清
   assert.deepEqual(list, [])
 })
 
-test('[3.2.4] leaderPreRegisterEnabled：默认关；1/true/on 开', async () => {
-  const freshSpec = '../src/runtime.js?prereg-324=1'
+test('[3.2.6] leaderPreRegisterEnabled：默认开；0/false/off 关', async () => {
+  const freshSpec = '../src/runtime.js?prereg-326=1'
   const fresh: typeof import('../src/runtime.js') = await import(freshSpec)
-  assert.equal(fresh.leaderPreRegisterEnabled(), false)
-  for (const value of ['1', 'true', 'on']) {
+  delete process.env.DSH_WORKPLAN_LEADER_PRE_REGISTER
+  assert.equal(fresh.leaderPreRegisterEnabled(), true, '3.2.6 起默认开：专家免跑 phase-0 评估回合')
+  for (const value of ['0', 'false', 'off']) {
     process.env.DSH_WORKPLAN_LEADER_PRE_REGISTER = value
-    assert.equal(fresh.leaderPreRegisterEnabled(), true, `值 ${value} 必须开启`)
+    assert.equal(fresh.leaderPreRegisterEnabled(), false, `值 ${value} 必须关闭`)
     delete process.env.DSH_WORKPLAN_LEADER_PRE_REGISTER
   }
-  process.env.DSH_WORKPLAN_LEADER_PRE_REGISTER = '0'
-  assert.equal(fresh.leaderPreRegisterEnabled(), false)
+  for (const value of ['1', 'true', 'on', '']) {
+    process.env.DSH_WORKPLAN_LEADER_PRE_REGISTER = value
+    assert.equal(fresh.leaderPreRegisterEnabled(), true, `值 ${value || '(空)'} 必须开启`)
+    delete process.env.DSH_WORKPLAN_LEADER_PRE_REGISTER
+  }
   delete process.env.DSH_WORKPLAN_LEADER_PRE_REGISTER
 })
 

@@ -388,8 +388,8 @@ test('G8：空数组仍按原拒因拒绝（开工证据空检查先于分工表
   const noAssignments = planDelegations({ consolidation: goodConsolidation({ taskReasoningEffort: 'medium', assignments: [] }), model: QWEN })
   assert.equal(noAssignments.code, 'DELEGATE_CONSOLIDATION_INCOMPLETE')
   assert.match(noAssignments.error!, /assignments/)
-  // [3.0.8] consolidation 不再有字数梳理字段：不带这些字段不再拒（复杂 7 人 ⇒ 人数闸照常）。
-  const bare = planDelegations({ consolidation: goodConsolidation({ taskReasoningEffort: 'medium', assignments: eightAssignments().slice(0, 7) }), model: QWEN })
+  // [3.0.8] consolidation 不再有字数梳理字段：不带这些字段不再拒（复杂 2 人 ⇒ 人数闸照常）。
+  const bare = planDelegations({ consolidation: goodConsolidation({ taskReasoningEffort: 'medium', assignments: eightAssignments().slice(0, 2) }), model: QWEN })
   assert.equal(bare.code, 'DELEGATE_HEADCOUNT_MIN')
 })
 

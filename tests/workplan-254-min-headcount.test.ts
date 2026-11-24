@@ -70,28 +70,28 @@ function planWith(tier: string | undefined, count: number, model: string | null,
   return planDelegations({ consolidation: consolidation(overrides), model })
 }
 
-test('A1：model=null，四个复杂档各 7 人 → DELEGATE_HEADCOUNT_MIN（D1 全档触发）', () => {
+test('A1：model=null，四个复杂档各 2 人 → DELEGATE_HEADCOUNT_MIN（D1 全档触发；3.2.6 下限 3）', () => {
   for (const tier of COMPLEX_TIERS) {
-    const plan = planWith(tier, 7, null)
-    console.log(`[254-min-headcount] A1 ${tier} 7人 → ok=${plan.ok} code=${plan.code}`)
+    const plan = planWith(tier, 2, null)
+    console.log(`[254-min-headcount] A1 ${tier} 2人 → ok=${plan.ok} code=${plan.code}`)
     assert.equal(plan.ok, false)
     assert.equal(plan.code, 'DELEGATE_HEADCOUNT_MIN')
-    assert.ok(plan.error!.includes('7'), 'error 须含当前人数 7')
-    assert.ok(plan.error!.includes('8'), 'error 须含下限 8')
+    assert.ok(plan.error!.includes('2'), 'error 须含当前人数 2')
+    assert.ok(plan.error!.includes(String(MIN_COMPLEX_DELEGATE_MEMBERS)), 'error 须含下限 3')
     assert.ok(plan.error!.includes(tier), 'error 须含声明档')
     assert.ok(plan.error!.includes('D1/D2'), 'error 须注明用户决策 D1/D2')
   }
 })
 
-test('A2：复杂 8 人 → ok 且 members=8；9 人 → ok 且 members=9', () => {
-  const eight = planWith('xhigh', 8, null)
+test('A2：复杂 3 人（恰为下限）→ ok 且 members=3；8 人 → ok 且 members=8', () => {
+  const three = planWith('xhigh', 3, null)
+  console.log(`[254-min-headcount] A2 3人 → ok=${three.ok} members=${three.members.length}`)
+  assert.equal(three.ok, true)
+  assert.equal(three.members.length, 3)
+  const eight = planWith('max', 8, null)
   console.log(`[254-min-headcount] A2 8人 → ok=${eight.ok} members=${eight.members.length}`)
   assert.equal(eight.ok, true)
   assert.equal(eight.members.length, 8)
-  const nine = planWith('max', 9, null)
-  console.log(`[254-min-headcount] A2 9人 → ok=${nine.ok} members=${nine.members.length}`)
-  assert.equal(nine.ok, true)
-  assert.equal(nine.members.length, 9)
 })
 
 // [2.5.5][T3] D1–D3 夹具适配（原则②）：本子案意图本就是 low/未配置下派行为——
@@ -112,9 +112,9 @@ test('A3：low 2 人 / low 7 人 / 未配置 2 人均 ⇒ DELEGATE_LOW_TASK_FORB
   assert.equal(none.code, 'DELEGATE_LOW_TASK_FORBIDDEN')
 })
 
-test('A4：复杂枚举恰为 {medium,high,xhigh,max}——四档 7 人均拦、low 7 人禁派拦', () => {
+test('A4：复杂枚举恰为 {medium,high,xhigh,max}——四档 2 人均拦、low 7 人禁派拦', () => {
   for (const tier of COMPLEX_TIERS) {
-    assert.equal(planWith(tier, 7, null).code, 'DELEGATE_HEADCOUNT_MIN')
+    assert.equal(planWith(tier, 2, null).code, 'DELEGATE_HEADCOUNT_MIN')
   }
   // [2.5.5][T3] D1–D3 适配（原则②）：low 7 人旧「不拦截断 6」改为禁派硬拒。
   const low7 = planWith('low', 7, null)
@@ -127,29 +127,29 @@ test('A4：复杂枚举恰为 {medium,high,xhigh,max}——四档 7 人均拦、
   assert.equal(invalid.code, 'DELEGATE_TASK_EFFORT_INVALID')
 })
 
-test('边界：taskEffortFallback=max 且 consolidation 无该字段 → 7 人拦（effortOverride 回落链）', () => {
+test('边界：taskEffortFallback=max 且 consolidation 无该字段 → 2 人拦（effortOverride 回落链）', () => {
   const plan = planDelegations({
-    consolidation: consolidation({ assignments: assignmentsOf(7) }),
+    consolidation: consolidation({ assignments: assignmentsOf(2) }),
     model: null,
     taskEffortFallback: 'max',
   })
-  console.log(`[254-min-headcount] 边界 fallback=max 7人 → code=${plan.code}`)
+  console.log(`[254-min-headcount] 边界 fallback=max 2人 → code=${plan.code}`)
   assert.equal(plan.ok, false)
   assert.equal(plan.code, 'DELEGATE_HEADCOUNT_MIN')
 })
 
-test('边界：非 qwen 模型 + 声明 medium → 仍复杂 7 人拦（D1 不豁免；review 入口语义）', () => {
+test('边界：非 qwen 模型 + 声明 medium → 仍复杂 2 人拦（D1 不豁免；review 入口语义）', () => {
   // dispatch 复读边界：宿主写回钳制后值，非 qwen+medium 复读会看到 low，但分工表
-  // 已是 review 放行的 ≥8 人名单，强制语义不破；本用例直接验证 review 入口按原始声明判复杂。
-  const plan = planWith('medium', 7, NON_QWEN)
-  console.log(`[254-min-headcount] 边界 ${NON_QWEN}+medium 7人 → code=${plan.code}`)
+  // 已是 review 放行的人数名单，强制语义不破；本用例直接验证 review 入口按原始声明判复杂。
+  const plan = planWith('medium', 2, NON_QWEN)
+  console.log(`[254-min-headcount] 边界 ${NON_QWEN}+medium 2人 → code=${plan.code}`)
   assert.equal(plan.ok, false)
   assert.equal(plan.code, 'DELEGATE_HEADCOUNT_MIN')
 })
 
-test('边界：qwen 模型 + 声明 high → 复杂 7 人拦（实际档位被钳但判定用声明档）', () => {
-  const plan = planWith('high', 7, QWEN)
-  console.log(`[254-min-headcount] 边界 ${QWEN}+high 7人 → code=${plan.code}`)
+test('边界：qwen 模型 + 声明 high → 复杂 2 人拦（实际档位被钳但判定用声明档）', () => {
+  const plan = planWith('high', 2, QWEN)
+  console.log(`[254-min-headcount] 边界 ${QWEN}+high 2人 → code=${plan.code}`)
   assert.equal(plan.ok, false)
   assert.equal(plan.code, 'DELEGATE_HEADCOUNT_MIN')
 })
@@ -214,12 +214,12 @@ test('拒因顺序回归：人数闸前的既有闸仍先拒（3.0.8 新顺序�
   })
   console.log(`[254-min-headcount] 顺序 分工不完整 → code=${brokenAssignment.code}（先于人数闸）`)
   assert.equal(brokenAssignment.code, 'DELEGATE_ASSIGNMENT_INVALID')
-  // 不带梳理字段不再拒（字数闸已废除）：复杂 7 人 ⇒ 落到人数闸。
+  // 不带梳理字段不再拒（字数闸已废除）：复杂 2 人（低于 3.2.6 下限 3）⇒ 落到人数闸。
   const bare = planDelegations({
-    consolidation: { taskReasoningEffort: 'max', assignments: assignmentsOf(7) },
+    consolidation: { taskReasoningEffort: 'max', assignments: assignmentsOf(2) },
     model: null,
   })
-  console.log(`[254-min-headcount] 顺序 无梳理字段 7人 → code=${bare.code}（字数闸已废除，落到人数闸）`)
+  console.log(`[254-min-headcount] 顺序 无梳理字段 2人 → code=${bare.code}（字数闸已废除，落到人数闸）`)
   assert.equal(bare.code, 'DELEGATE_HEADCOUNT_MIN')
 })
 

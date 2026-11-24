@@ -146,15 +146,15 @@ test('D4：head 结算后 forget，旧会话仍存活也不再永久挡住重派
   assert.equal(recallLiveHeadActivation(ctx, 'wp-318', 'T1'), null, 'head 结算后必须撤销登记，允许合法重派')
 })
 
-test('D5：负责人已释放且无快照，超 120s 的 running 才标 failed(stalled)', () => {
+test('D5：负责人已释放且无快照，超 600s 的 running 才标 failed(stalled)（3.2.6 阈值 120s→600s）', () => {
   const now = 10_000_000
   const delegates = [
-    { member: 'dead', childId: 'c-dead', status: 'running', startedAt: now - 130_000 },
-    { member: 'live', childId: 'c-live', status: 'running', startedAt: now - 130_000 },
+    { member: 'dead', childId: 'c-dead', status: 'running', startedAt: now - 630_000 },
+    { member: 'live', childId: 'c-live', status: 'running', startedAt: now - 630_000 },
     { member: 'fresh', childId: 'c-fresh', status: 'running', startedAt: now - 10_000 },
-    { member: 'queued', childId: null, status: 'running', startedAt: now - 130_000 },
-    { member: 'esc', childId: 'c-esc', status: 'running', startedAt: now - 130_000, escalation: { question: '选 A 还是 B？' } },
-    { member: 'settled', childId: 'c-settled', status: 'running', startedAt: now - 130_000 },
+    { member: 'queued', childId: null, status: 'running', startedAt: now - 630_000 },
+    { member: 'esc', childId: 'c-esc', status: 'running', startedAt: now - 630_000, escalation: { question: '选 A 还是 B？' } },
+    { member: 'settled', childId: 'c-settled', status: 'running', startedAt: now - 630_000 },
   ]
   const result = markStalledDelegates(
     delegates,
@@ -166,7 +166,7 @@ test('D5：负责人已释放且无快照，超 120s 的 running 才标 failed(s
   assert.equal(result.stalled.length, 1)
   assert.equal(result.stalled[0].member, 'dead')
   assert.equal(result.stalled[0].status, 'failed')
-  assert.match(result.stalled[0].error, /120s|停滞/)
+  assert.match(result.stalled[0].error, /600s|停滞/)
   assert.equal(result.delegates.find((item: any) => item.member === 'live').status, 'running', '活体会话不得误杀')
   assert.equal(result.delegates.find((item: any) => item.member === 'fresh').status, 'running', '新开工不得误杀')
   assert.equal(result.delegates.find((item: any) => item.member === 'queued').status, 'running', 'childId 未登记（排队/激活中）不得误杀')
