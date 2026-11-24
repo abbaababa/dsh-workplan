@@ -267,6 +267,7 @@ test('e2e A2：重试后仍非法才 blocked，记录附在盘产物清单与 ds
   assert.match(String(row.error), /dsh_workplan_update/, '必须给主 Agent 指明复核改判通道')
   assert.match(String(row.error), /产物已在盘上/)
   assert.match(String(row.error), /reports\/t7-核对报告\.md/, 'attempt 摘要/声明产物中确核在盘的清单必须随 blocked 行逐字留档')
+})
 
 /* ------------------------------------------- [3.2.3 W2] 结算备份先于重派 */
 
@@ -307,5 +308,4 @@ test('W2-b：陈旧备份 → 拒绝采纳，仍按既有有界回喂重派', as
   const final: any = await runtime.dispatchTool({ session, options: { cwd } }, { startPhases: MAIN_START_PHASES_FIXTURE }, new AbortController().signal)
   assert.equal(prompts.length, 2, '陈旧备份必须被拒，仍走有界回喂')
   assert.equal(rowOf(final).status, 'done', '第二次合法回报照常结算')
-})
 })
