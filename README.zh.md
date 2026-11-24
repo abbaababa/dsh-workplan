@@ -3,7 +3,7 @@
 > **两个卖点，一句话：ISO/IEC 15408:2026 全套安全证据，5 条命令自己验；安装一条命令、零第三方运行时依赖。**
 
 [![verify](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml/badge.svg)](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml)
-[![version](https://img.shields.io/badge/version-3.2.2-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v3.2.2)
+[![version](https://img.shields.io/badge/version-3.2.5-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v3.2.5)
 
 给 **DeepSeek Harness（DSH）** 加一段「先拆计划 → 真派部门子 Agent 去做 → 左侧栏实时看进度」的能力。不装 App、不改 DSH 源码、不换页面。
 
@@ -69,7 +69,7 @@ grep -RInE "child_process|execSync|eval\(|writeFileSync" src || echo "0 命中�
 ## 一键安装
 
 ```bash
-dsh plugin --profile web add dsh-workplan@3.2.2
+dsh plugin --profile web add dsh-workplan@3.2.5
 ```
 
 装完**重启一次 DSH Web**（或重新载入当前页面）让插件生效。
@@ -138,7 +138,8 @@ dsh plugin --profile web add "$(pwd)"
 | 规划器无进展上限 | 5 分钟（**自上一个输出块起算**，一直在输出就一直顺延） | `DSH_WORKPLAN_PLANNER_TIMEOUT_MS` |
 | 规划器静默判定 | 90 秒（输出开始后连一个字都不再来才算卡死） | `DSH_WORKPLAN_PLANNER_IDLE_TIMEOUT_MS` |
 | 规划器绝对上限 | 15 分钟（= 无进展上限 × 3，有无产出都到此为止） | 随 `…_PLANNER_TIMEOUT_MS` 等比变化 |
-| 自动续跑次数 | 2 次 | `DSH_WORKPLAN_MAX_RESUMES` |
+| 自动续跑次数 | 2 次（处理可续跑的非时间暂停） | `DSH_WORKPLAN_AUTO_RESUME_MAX`（配置 `autoResumeMaxAttempts`） |
+| 手动续跑额度 | 默认 4 次（`dsh_workplan_dispatch` 从受阻处续跑；只统计 blocked） | `DSH_WORKPLAN_MAX_RESUMES`（配置 `maxResumes`，上限 5） |
 | 并发子 Agent | **每轮最多 5 个负责人**；整棵树受宿主 `maxActiveSubagents` 约束（默认 8） | — |
 
 这些规划器时限只保护“生成计划”这一步，不会作用到负责人或专家执行。执行阶段只由真实完成、真实错误、证据/质量门禁或用户取消改变；重试可由真实失败触发，不会因计时器到点触发。

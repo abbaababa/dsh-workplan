@@ -81,7 +81,8 @@ const OK_SUBTASK = {
 
 const BAD_SUBTASK = {
   id: 'T2', title: '缺质量要求任务', department: 'engineering', dependsOn: [],
-  objective: '做另一件事', method: ['步骤一'], inputs: [], outputs: ['产物'],
+  // [3.2.3] 产物与 OK_SUBTASK 不重叠：本文件只考察质量闸，不触发共享文件串行闸。
+  objective: '做另一件事', method: ['步骤一'], inputs: [], outputs: ['另一产物'],
   acceptance: ['可验收'], risk: '无',
 }
 

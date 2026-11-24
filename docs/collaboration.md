@@ -6,6 +6,19 @@
 >
 <!-- [D-45] 本文版本与实现口径已对齐 2.0.2；核对项：权限 7 处、present 仅根会话、下游可读 artifacts、三阶段证据门禁、复盘永久记忆。 -->
 
+> ## 3.2.3 现状更正（以源码为准，本节优先于下文 2.0.2 叙述）
+>
+> 下文 §1–§11 是 2.0.2 的历史契约，很多条目已过时。3.2.3 的实际机制：
+>
+> - **三层执行树**：主 Agent（depth 0）→ 部门负责人（depth 1）→ 相关领域全球顶尖专家（depth 2，叶子）。`maxDepth: 2`，第四层派生被宿主硬拒；每轮最多 5 个负责人并行，整棵会话树还受宿主默认 8 个并发位限制。
+> - **部门负责人真实存在**：`dsh_workplan_delegate` 由负责人调用；负责人之间不直连，专家任务书里没有任何兄弟信息。
+> - **消息通道**：子 Agent **没有直接互发消息的工具**，但平台会经根 Agent 中转兄弟完成通知（每条 ≤320 字、每个负责人每计划最多一条）；`delegate(action="status")` 会返回最多 12 条兄弟索引。
+> - **共享约束**：所有子 Agent 共用同一个工作目录和同一份计划台账；`dependsOn` 门禁、产物/验证门禁、待指示期间禁止改派仍然生效。3.2.3 起，声明了重叠 `inputs`/`outputs` 绝对路径的子任务在调度边互斥串行；无重叠任务仍按原并发执行。
+> - **顺序链约束**：若子任务本身是「先…再 / 逐步 / 基于上一步结论」这类必须连续推理的链，平台在 `planDelegations` 硬拒把它拆给多名独立专家（`DELEGATE_SEQUENTIAL_CHAIN_SPLIT`）；只接受负责人亲自执行或 1 名专家一次做完。负责人亲自执行链式任务时不得用 low 档：必须先自评复杂度，再经 `action="direct"` 提交自评复杂档 `reasoningEffort`（qwen: medium/xhigh；非 qwen: high/max），缺失或 low 会被 `DELEGATE_DIRECT_CHAIN_EFFORT_REQUIRED` / `DELEGATE_DIRECT_CHAIN_EFFORT_INVALID` 硬拒，平台按自评档接续执行。
+> - **省钱机制**：计划 JSON 只放 durable、子会话系统提示遮蔽、`compactBackground`、verify 的 checks 自动生成、以及 3.2.3 的「未派发计划锚点未变则复用、不重跑规划器」（开关 `DSH_WORKPLAN_REUSE_UNSENT_PLAN=0` 可关闭）。
+>
+> 下层文字保留作历史档案；与上述条目冲突时，一律以本节与 `src/` 源码为准。
+
 > 约定：本文只用「文件 + 符号名」定位代码（例如 `src/plan.ts#buildChildPrompt`），**不写行号**，避免代码改动后文档漂移。核对命令见 §11。
 
 ---
@@ -377,7 +390,7 @@ pending ──dispatch──▶ executing ──全部 done──▶ done
 | 确定性裁决 | `done` + 任一条 `acceptance.result=fail` ⇒ `blocked/failed`；部分 `unverified` ⇒ `done/unverified` 并在结果消息计数；`strict:false` 可回滚到旧判定 | 已实现 |
 | 运行中写保护 | `update` 带 `expectedRevision`；对运行中条目默认 `TASK_RUNNING` 拒绝，`force:true` 才覆盖 | 已实现 |
 | 改判持久化 | 新增 `workplan-update` 消息；回放按 seq 应用，低 revision 不回退 | 已实现 |
-| 产物门禁 | 结算时检查 `artifacts[kind=file]` 是否存在；缺失写入 `missingArtifacts`，下游不就绪 | 已实现 |
+| 产物门禁 | 结算时检查 `artifacts[kind=file]` 是否存在（双基座：`<cwd>` 兼容旧回报，`<cwd>/reports/` 为现行契约，命中即算在盘）；缺失写入 `missingArtifacts`，下游不就绪 | 已实现 |
 | 取消落盘 | 未派发计划被取代时写 `workplan-cancel` | 已实现 |
 | 背景刷新 | 每次派发前重新采样最近对话；单一截断点 | 已实现 |
 | 兄弟可见 + `needs` 转达 | `buildTeamBrief` 注入兄弟任务只读一览；`needs` 汇总为「跨部门待转达」 | 已实现 |
@@ -439,7 +452,7 @@ npm run verify
 | 证据块决定完成/受阻，非空文本不再直接算完成 | `src/plan.ts#adjudicateResult`、`#parseEvidenceBlock` |
 | 完成必须带规划→执行→验证三段证据，缺段降级 | `src/plan.ts#adjudicateResult`、`src/three-phase.ts#validatePhaseEvidence` |
 | 阶段三才可核验，阶段一/二返回 PHASE_GATE | `src/runtime.ts#verifySubtask`、`src/host.ts#createVerifyTool` |
-| 依赖同时看状态与产物 | `src/plan.ts#readySubtasks` 的 `dependencyOk`、`src/runtime.ts#checkArtifacts` |
+| 依赖同时看状态与产物 | `src/plan.ts#readySubtasks` 的 `dependencyOk`、`src/runtime.ts#checkArtifacts`（`artifactPathCandidates` 双基座解析） |
 | 派发支持 wait/async 且可汇合 | `src/runtime.ts#dispatchTool` 的 `mode` 与 `dispatchPromise` 分支 |
 | 运行中 update 默认被拒 | `src/runtime.ts#updateStatus` 的 `TASK_RUNNING` 分支 |
 | 改判落盘并可回放 | `src/runtime.ts#updateStatus` 写 `buildUpdateMessage`；`#reconstructFromSession` 调 `parseUpdateMessage` |

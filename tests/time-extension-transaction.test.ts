@@ -131,15 +131,19 @@ async function rowOf(runtime: any, session: any, subtaskId = 'T1') {
   return (snapshot?.statuses ?? []).find((item: any) => item.subtaskId === subtaskId)
 }
 
-test('O-4c：dsh_workplan_update schema 显式声明 extendMs 与 timeNotice（D-28，additionalProperties:false）', () => {
+test('O-4c（3.2.4 口径）：update schema 只声明仍在使用的 timeNotice，不再宣告已停用的 extendMs/criterionApproval', () => {
   const tool: any = createUpdateTool({})
   const props = tool?.parameters?.properties ?? {}
-  assert.ok(
-    props.extendMs,
-    '待实现（O-4c/2.6 表 #11）：createUpdateTool schema 必须显式声明 extendMs（runtime 读了字段但 schema 没声明，严格宿主直接拒收——D-28 教训）',
-  )
-  assert.equal(props.extendMs.type, 'integer', 'extendMs 为整数毫秒')
-  assert.ok(props.timeNotice, '待实现（O-4c）：schema 需声明 timeNotice（{declaredMinutes, reason}）')
+  /*
+   * [3.2.4][省钱 R5] 延期事务与判据 v2 批准闸在生产路径恒不可达
+   * （criterionV2Active() 恒 false；extendMs 一律 TIME_LIMITS_DISABLED），
+   * 所以两个字段从 schema 移除：既省每次请求的说明字数，也不再把模型引向
+   * 一次注定被拒的调用。runtime 仍保留旧字段兼容读取（本文件下方的直接
+   * updateStatus 用例继续验证 TIME_LIMITS_DISABLED）。
+   */
+  assert.equal(props.extendMs, undefined, 'extendMs 已停用，不得再向模型宣告')
+  assert.equal(props.criterionApproval, undefined, 'criterionApproval 随判据 v2 停用，不得再向模型宣告')
+  assert.ok(props.timeNotice, 'schema 仍需声明 timeNotice（{declaredMinutes, reason}，仍在使用的开工预估）')
   assert.equal(props.timeNotice.type, 'object', 'timeNotice 为对象')
   assert.equal(tool?.parameters?.additionalProperties, false, '保持 additionalProperties:false（宿主 schema 子集）')
 })

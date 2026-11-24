@@ -1,3 +1,126 @@
+## 3.2.5 — 2026-11-24（注意力红线对齐：唯一信息零丢失，只删重复/死代码/不可见面）
+
+> **发布范围说明（事实，不修饰）**：3.2.3、3.2.4 从未单独提交或发布过——远端 tag 止于 `v3.2.2`，npm `latest` 为 `3.2.2`，仓库内也没有这两个版本的提交。它们的全部改动只以未提交工作区的形式存在，并与 3.2.5 的改动混在同一批文件里；在不编造历史的前提下无法重建。按用户 2026-11-24 的裁决（A 方案），本版一次性发布 3.2.3 + 3.2.4 + 3.2.5 的全部内容，版本号统一 **3.2.5**；下文 3.2.3/3.2.4 章节保留为开发记录。
+
+### 一、红线（用户 2026-11-24 定死，写入守门测试）
+
+- 所有子任务执行自己的任务全过程**禁止注意力丢失**：凡属「唯一信息」的内容一律不删。最近对话背景、pending 兄弟目标曾按省 token 删除，已全部回滚。
+- 只允许三类删除：①同一 prompt 内逐字重复；②永不执行的死代码；③模型根本看不到的界面/磁盘内容。相位性文案（phase-0 残留）与矛盾句不属唯一信息，删除后由接续块保留事实。
+- 新增 `tests/attention-red-line.test.ts`（4 例）钉住四条不变式：背景仍注入、pending 目标仍可见、完整自查句只留一份且提交位置有短提醒、phase-1 不带 phase-0 过时流程而 phase-0 仍完整。任何后续省 token 改动违反其一即测试失败。
+
+### 二、省 token 与一致性收口（P0 批；语义门禁不变）
+
+**用户 2026-11-24 红线：所有子任务执行自己的任务全过程禁止注意力丢失。** 凡属「唯一信息」的删减一律回滚（最近对话背景、pending 兄弟目标）；只保留三类删除：①同一 prompt 内逐字重复；②永不执行的死代码；③模型根本看不到的界面/磁盘内容。相位性文案（phase-0 残留）与矛盾句不属唯一信息，删除后由接续块保留事实。
+
+- `dsh_workplan_update` 的 schema 移除 `extendMs` 与 `criterionApproval`：生产路径里 `criterionV2Active()` 恒为 false，延期事务与判据 v2 批准闸都不可达，`extendMs` 一律返回 `TIME_LIMITS_DISABLED`。根工具面因此 **10,098→9,622 字符（−476/次请求）**，也不再诱导模型调用一次注定被拒的工具；runtime 保留旧字段兼容读取（旧日志/旧客户端与既有测试不受影响）。
+- phase-1 规则简报不再重述 phase-0 的「必须先完成前三步 / phase-0 low 启动」：旧文案与接续块「前三步已完成，不要重做」正面冲突，还让每次 phase-1 激活重付一遍（−115 字符/本）；`buildLlmRulesBrief` 新增 `phase1` 开关，派发侧传 `phaseZeroCompleted`。
+- 负责人任务书删掉重复的 66 字《提交前自查》副本（同一句逐字出现两遍不增加约束），并在结果模板后补一句 **19 字**短提醒「提交前再对照上方 F1–F11 自查一遍」——重复副本删除不丢信息，但「提交前」这个位置有近期效应，用三成成本把该位置的注意力补回来（净 −48 字符/本）。
+- 【已按红线回滚】自包含任务的 1,200 字「最近对话背景」曾整块省略（−1,191 字符/本），但「自包含」只是词面推断：任务里没写「它」，用户却可能在上文刚改过要求。唯一信息删除即注意力丢失，现恢复为「自包含也保留最近 1,200 字，探测到指代才放 7,000 字」。
+- 【已按红线回滚】pending 兄弟的 60 字目标曾省掉（约 −64 字符/个），但目标属唯一信息：它决定执行者要不要等这个兄弟、会不会和它重复采集同一批输入。现恢复为与其他状态同一行格式；`tests/sibling-visibility.test.ts` 的产物可见性契约不受影响。
+- 规划器修复重试的底稿加上限：`lastText` 超过 24,000 字时不再原样重发整份底稿，改为「完整规则 + 错误清单」重新生成（校验上限 6 万字，最坏每次重试省最多 6 万输入字符）；底稿正常大小时仍走短修复，避免模型凭空补出不存在的子任务。
+- `scripts/measure-injection.mjs` 重写为按真实角色集合测量：导出 `createFollowupTool` / `createHoldTool` / `createReleaseTool`，用生产同一个 `workplanToolAdmitted()` 求可见面（**根 11 / 负责人 4 / 专家 3，共 14**），不再把根会话看不到的 delegate/verify/escalate 算进基线，也不再漏掉 hold/release/followup；同时把计划夹具换成 15 子任务、真实规则简报、1,200 字背景与兄弟状态。旧口径 15,080（11 份、含根不可见 3 份）由此作废。
+- 文档更正（README.md / README.zh.md / README.en.md）：14 个工具与角色可见性、`hold`/`release`/`followup` 补齐、自动续跑（`DSH_WORKPLAN_AUTO_RESUME_MAX`）与手动续跑（`DSH_WORKPLAN_MAX_RESUMES`）拆成两行、回合收尾等待默认无限（可显式配毫秒）、教训注入 6 条 / 2200 字、隐私段补上项目目录 `reports/` 的两类写入并更正 grep 自检。
+- 本批红线回滚后的实测（新测量脚本、确定性 15 子任务夹具）：负责人任务书 **12,797 字符**、phase-1 接续 **11,524 字符**、根工具面 **9,622 字符**（直接测量）。
+  同夹具旧口径为推算值（新值 + 逐项已单独验证的删减量，−19 字新提醒已扣除）：负责人 12,845（+67 重复自查，−48，−0.4%）、phase-1 11,687（再 +115 phase-0 残留文案，−163，−1.4%）、根工具面 10,098（+476 已删 schema，−4.7%）。子 Agent 工具面（负责人 7,389 / 专家 6,886）本批未动。
+  说明：早前草稿里的「13,088 / 11,930」把 pending 目标按 7 行估算（实际夹具约 3 行），属推算误差，已按实测差值更正；这项回滚后本批在子任务书上的净收益很小（仅重复自查），这是红线的必然代价。
+- 测试：`tests/time-extension-transaction.test.ts` 的 schema 用例改为断言两个已停用字段不再宣告、`timeNotice` 仍保留；全套 **1510 例，pass=1509 / fail=0 / cancelled=0 / todo=1，exit=0**。
+
+
+### 三、验证
+
+- `npm run build`（含 tsc）通过；`npm test`：**1510 例，pass=1509 / fail=0 / cancelled=0 / todo=1，exit=0**（含新增红线守门 4 例）。
+- 终态实测（`node scripts/measure-injection.mjs`，字符数非账单 token）：根工具面 **9,622**（11 个工具，删除 2 个已停用参数后 −476）、负责人任务书 **12,797**、phase-1 接续 **11,524**、专家任务书 **4,813**、PROMPT_SECTION **3,663**、规划器提示词 **5,757**、加权样例 **107,092**。
+- 版本统一 **3.2.5**：`package.json` / `package-lock.json`（两处）/ `PLUGIN_VERSION` / `meta.version` / 三份 README 徽章与安装命令 / `tests/fixtures/tool-surface.json`。
+- 运行中的 DSH 由用户手动重启后生效；发布制品以 GitHub Release 与 npm registry 登记为准。
+
+## 3.2.4 — 2026-11-23（档位安全治本 + 输入/输出 token 续省；用户裁决「全部按建议执行」当日第二批）
+
+基线 3.2.3。本版两条主线：①推理档位链路治本——把「档位真发到模型、且真的被接受」从"按模型名猜"升级为"按宿主声明清单钳制"，专家路径补齐最后两道闸；②在 3.2.3 基础上继续压缩输入/输出计费面，所有改动经同一套回归测试复核（新增 9 例守门）。
+
+### 一、推理档位安全（治本，不再有"发了但被拒"）
+
+- 专家接续（phase-1，W3）与专家派发（phase-0/自配接续，W4）补宿主能力钳制：旧实现只按模型名做静态家族修正，档位不在模型声明清单时宿主在首次请求前即抛 `UNSUPPORTED_REASONING_EFFORT`（终态，重试不自愈），专家正式执行整段失败；现在与规划器/部门负责人同闸——发送前用 `llm.resolveModelInfo` 读目标模型**实际声明**的档位清单（`resolveSupportedEfforts`），清单内等效钳制；模型无 reasoning 元数据（空清单）⇒ 不发送档位字段。修复默认模型 `tx/minimax-m3`（无推理元数据）上专家必然失败的问题。台账/提示词保留「成员自配档」原值，实际发送用钳制值，不一致时 console.warn 留痕并在接续提示词如实告知。
+- `supportedEffortsCache` 加 30 分钟 TTL 与 128 条容量上限：旧实现按 `${provider}/${model}` 永久缓存，模型改档后进程不重启就永远拿旧清单；现在过期重查、超限淘汰最旧，查询失败依旧不缓存不阻断。
+- 规划器未知模型兜底：模型名不在静态白名单且旋钮未设时，兜底从裸发 `max` 改为「不发送档位字段」——`max` 兜底只在能力查询同时失败时才裸发，而 qwen4-max 等模型不支持 max，一次规划即被终态拒绝。`DSH_WORKPLAN_PLANNER_REASONING_EFFORT` 显式旋钮不受影响；`DEFAULT_PLANNER_REASONING_EFFORT='max'` 常量保留导出但不再用作运行时兜底。
+- `leafPhaseZero` 三合一判定补可见性与复用：成员已登记自配档但因证据/预估缺失重走 phase-0 时，console.warn 留痕，并把已登记档位作为提示词复用建议（若复杂度判断不变可直接再次提交同一档，不改判）。
+
+### 二、输入侧续省
+
+- 规划器请求拆两角色：静态方法论/约束/部门表/输出精简/JSON 结构进 `role:'system'`（同会话内每次重试与多次规划字节级相同，上游前缀缓存稳定命中，每次重试省 ~4.3K 字符输入）；工作目录/最近对话/任务原文进 `role:'user'`。定向修复请求保持单条 user 消息；总字符数与旧单消息口径一致（`buildPlannerPrompt` 拼接视图供测试/遥测）。
+- 负责人任务书《沟通交流格式规范》提前到规则简报之后（原在最尾部）：规范文本固定，与动态块（背景/依赖/兄弟进展/失败反馈）分离，请求前段跨重试字节级稳定；文本一字未改（与核验门禁同一事实源）。
+- 复杂度依据支持极简枚举：`complexityReason` 三选一（facts=任务事实多且杂 / dependencies=跨模块跨系统依赖 / verification-difficulty=验证难度高）与 prose `complexityRationale` 二选一即可；台账统一落 `complexityRationale`（prose 优先、无 prose 落枚举原文），消毒器零改动；两者都缺才硬拒。每次 self_effort 的固定输出从一段话压到一个词。
+
+### 三、输出侧续省
+
+- F11 部门汇总 sources 只需写专家名（原「专家名：一句关键成果」）：成果一句话由平台在完成通知里从各成员结算行 summary 自动补全（成员名匹配、已带冒号说明的条目原样保留；台账 departmentSummary 原样存档，只改交回主 Agent 的通知）。按 25 人分工表计，每次结算省 ~1,000 字符模型输出。
+- 最终成果答复长度约束（提示词侧）：正文 ≤800 字（结论、产物路径、遗留项），细节放产物文件与结果块，不复述证据 JSON——旧实现最终汇总完全不受约束。
+
+### 四、全计划预算闸（O6/O8，默认行为不变）
+
+- 新增全计划专家总数上限 `MAX_TOTAL_EXPERTS_PER_PLAN`（默认 40，环境变量 `DSH_WORKPLAN_MAX_TOTAL_EXPERTS_PER_PLAN` 可调）：旧实现 15 子任务 × 25 专家 = 375 名专家 ⇒ 约 781 个 LLM 回合，没有任何全局闸。派发前统计全计划已登记 delegates 合计 + 本轮真正要新启动的成员，超限整单拒绝（`DELEGATE_PLAN_EXPERTS_EXCEEDED`，给出「精简分工表 / 拆成多轮计划」两条出路）。
+- 复杂任务 ≥8 人下限开放环境变量 `DSH_WORKPLAN_MIN_COMPLEX_DELEGATE_MEMBERS`（默认仍 8，行为不变；非法/缺省回落 8）；单阶段计划（stages.length === 1）自动豁免该下限——「可并行拆分」的 8 人下限对单阶段任务只会制造无解死锁。
+
+### 五、可选负责人预登记（O1，默认关闭）
+
+- 环境变量 `DSH_WORKPLAN_LEADER_PRE_REGISTER=1`（或 true/on）启用：分工表条目可随附该成员的 `startPhases`（五步第 1/2/3 步证据）与 `timeNotice`（开工前预估），派发时平台替成员登记（信息由负责人本人撰写，delivery 视为已送达），成员免跑 phase-0 评估回合、直接以分工表档接续 phase-1——每个专家省整整一次 LLM 回合（约占专家总输出的一半）。证据经 `sanitizeStartPhaseEvidence` 消毒、预估按 self_effort 同判据校验；任一缺失/非法 ⇒ 该成员照旧走 phase-0（fail-open，不新增拒因）。登记写进行级三通道（delegateSelfEfforts/delegateStartPhases/delegateEstimates），重启/回放不丢；consolidation.assignments 消毒白名单与 delegate 工具 schema 同步扩字段。默认关闭是有意取舍：预登记把「成员自配档」改为「负责人代配档」，是行为变更，交给用户显式选择。
+
+### 六、明确不做（评估后保留/放弃，附原因）
+
+- 团队简报省略 pending 兄弟：tests/token-economy-320.test.ts 钉住「并行兄弟必须仍可见」契约（执行者需要知道并行部门还没开工，避免空等或重复采集），撤销该裁剪。
+- 工具 output.schema「清理」：核实后确认并非死代码——宿主 dsh-tools 用它做工具结果校验（INVALID_TOOL_OUTPUT）与渲染投影，保留。
+- 子任务书全面静态前置重排：仅完成沟通规范前置；全面重排的缓存收益不确定而回归面大（73 处测试引用、两处「上方/下方」自引用），不做。
+- STOP_STEER_LIMIT 调整：原建议「第二次 steer 只发工具调用」需宿主能力支持，简单降档会改变交付语义，不做。
+
+### 七、验证
+
+- `npm run check`（tsc --noEmit）通过。
+- `npm test`：**1491 例，pass=1490 / fail=0 / cancelled=0 / todo=1，exit=0**；新增 9 例守门（tests/token-economy-324.test.ts）：单阶段豁免 ≥8 人下限、MIN 环境变量覆盖与非法回落、规划器 system+user 拆分（内容/角色/拼接视图）、规划器两角色请求实发断言、能力缓存同键命中与容量淘汰、空清单返回、预登记开关解析、F11 专家名契约、预登记载荷透传。
+- `node scripts/measure-injection.mjs` 终态实测（字符数非账单 token）：PROMPT_SECTION 3,663（+84：新增最终答复长度约束一行）；11 个工具 schema 合计 14,797（delegate 3,980，+O1/枚举字段后仍 ≤4,500 预算）；规划器提示词 4,551（不变，但静态部分已移入 system 角色）；负责人任务书 7,081（沟通规范换位）；专家任务书 3,276（不变）；五步全文/接续 2,587/1,323（不变）；加权样例 74,796。
+- 版本统一 **3.2.4**：`package.json` / `package-lock.json`（两处）/ `PLUGIN_VERSION` / `meta.version` / 三份 README 徽章与安装命令 / `tests/fixtures/tool-surface.json` / 版本断言测试。
+- 运行中的 DSH 由用户手动重启后生效。
+
+
+## 3.2.3 — 2026-11-23（省 token：输入侧提示词压缩 + 输出侧模板瘦身；门禁语义不变）
+
+基线 3.2.2。本版只压缩「重复、客套、可省略」的提示词与输出模板，不改任何校验字段、枚举、阈值、错误码与派发/验收/交付语义；改动经同一套回归测试、守护断言与边界探针复核。
+
+### 一、输入侧（7 个 src 文件，+195/−512 行）
+
+- 系统提示段（PROMPT_SECTION）：5,314 → 3,579 字符。
+- 14 个工具 schema 行为长文：22,621 → 16,124 字符（必填/枚举/阈值/错误码全部保留）。
+- 规划器说明：6,548 → 4,622；负责人任务书（含 §5.5 汇报句）：11,119 → 8,676；专家任务书：5,006 → 3,678。
+- phase-0 两份任务书：2,301 → 1,799；五步法全文版/接续版：3,659/1,876 → 2,601/1,325；沟通格式 F1–F11：1,993/1,815/551/726 → 1,304/1,223/359/445。
+- 本版终态注入面实测（`node scripts/measure-injection.mjs`，字符数非账单 token）：PROMPT_SECTION 3,579；11 个工具 schema 合计 13,855（delegate 3,038 / verify 2,454 / replan 2,044 / update 1,999）；规划器提示词 4,551；负责人任务书 6,961；专家任务书 3,276（3.2.3 新增共享文件纪律 128 字符）；五步全文/接续 2,587/1,323；一个 5 负责人 + 5 专家的加权样例 73,170。**此前草稿中的 44,060 → 31,352、`reports/t5-probes/measure-injection.cjs`、317/251 断言与 20/20 探针在本仓库无脚本/报告可复现，已删除，不作为实测证据。**
+
+### 二、输出侧（3 个 src 文件 + 1 个回归用例，+67/−26 行）
+
+- 结果块模板：接续 452 → 293 字符，非接续 903 → 458 字符；交卷说明 1,164 → 622 字符。
+- 删除模板中无消费方的可选字段示范与 done 空占位；`criterion` 改为编号示范，逐条证据仍以顶层 `acceptance` 为准。
+- 修正真实冲突：`dsh_workplan_verify` 自检路径也按计划验收条目自动生成 checks，与结算闸使用同一套补齐逻辑；模型已写的 checks/allPassed 一律不覆盖。
+- 统一三处「checks 可省略」文案（`src/five-step.ts` 两处、`src/plan.ts` 一处），消除「提示词说可省、verify 却打回」的矛盾。
+- 汇报正文上限 600 → 200 字（3 句）。
+
+### 三、失败路径治本（本轮新增，全部保持原有门禁）
+
+- W1 规划器校验失败：第二次起不再整份重发规则/部门表/对话背景，改「待修问题 + 上一轮原文 + 只修点名字段」的定向修复提示词；三道闸、3 次上限、CLARIFY/CONTEXT 一次终态、DEVIATION 严格性与最终硬失败原样保留；传输/超时/中止类失败回退完整提示词。
+- W2 子会话结算失败：unparsable / 结果块缺失 / 结算闸退回三类共用盘上结算备份先查（新鲜度 `mtimeMs >= startedAt` + planId/subtaskId 归属 + strict 重裁决 + 拒绝坏备份），命中即原地结算、不再白起一个新子会话；未命中仍按原 EVIDENCE_* 有界回喂。`verification:'failed'` 不触发重报。
+- W3 已规划未派发：同任务（buildTaskAnchor 的 sha256 + sourceMessageIds 比对）且阶段 pending / 无 hold / 无 SALVAGED / 无 pending changeRequest 时复用原计划，只发一条轻量通报并派发；`DSH_WORKPLAN_REUSE_UNSENT_PLAN=0` 可关闭，plan-first（autoDispatch:false）只提示不代派发；任一闸不满足保留旧「取消并重规划」语义。
+- W5 自动续跑放大器：dispatchPlan 在重置状态前记录 `subtaskId:status:revision` 指纹；一轮结束若指纹未变则 `NO_PROGRESS` 停止续跑，避免「什么都没写还反复开会话」；旧记录无指纹 fail-open，上限 2/4 不变。
+- W6 开工证据重复注入：重试回喂与叶子自接续优先只注入文件引用 + 蓝图/索引摘要（`renderStartEvidenceBrief`），写盘失败自动回退逐字全文；证据内容一字不丢。
+- 极简单动作快路径（用户已授权、默认关闭）：配置 `deterministicFastPath: true` 或 `DSH_WORKPLAN_DETERMINISTIC_FAST_PATH=1` 才启用；仅当「无活跃计划/非 planMode/非认可闸门/8–400 字/单动作动词/单文件路径/无指代矛盾/单部门/非分析请求」全部满足时，代码直接生成单子任务计划，完全跳过规划器 LLM；仍走同一 `validatePlan` + `validatePlanContext` 三闸，任何疑点 fail-closed 回落常规规划。默认关闭是有意取舍：它省掉规划器的分解与矛盾分析能力，只适合用户明确授权的简单任务。
+- 守门短语恢复：恢复「执行自己的任务必须先完成上方『五步工作法』的前三步」「前三步证据经 review 的 startPhases 一并提交并登记，未登记合格证据前禁止进入执行与再分配」「基于第一步完成好的所有结果研究需要哪些资源、哪些工具、具体实施方案」三条用户强制原文口径（旧回归测试逐字断言）。
+- 顺序推理链根治（本轮新增）：新增纯函数 `detectSequentialChainTask`（先…再 / 依次 / 逐步 / 第 N 步 / 串行 / 链式 / 基于上一步 / 最后一步，机械可复算、不做语义猜测）。`planDelegations` 在 review/dispatch 同一入口新增硬闸：链式父任务不得拆给多名独立专家（`DELEGATE_SEQUENTIAL_CHAIN_SPLIT`），只接受 1 名专家从头到尾一次做完（豁免复杂任务 ≥8 人下限——该下限为可并行拆分设计，否则「≥8 人被链闸拒、1 人被 MIN 闸拒」会构成无解死锁）；low/未配置档仍可负责人 `action="direct"` 亲自执行。闸位在人数上下限之前，避免误导性拒因；负责人/专家任务书同步告知，跨子任务只传已落盘产物引用，不用推理摘要替代结论。
+- 链式直执档位（本轮新增）：顺序推理链任务改由负责人亲自执行时不得以 low 档开跑——负责人必须先自己评估复杂度，再经 `action="direct"` 提交自评复杂档 `reasoningEffort`（qwen 模型: medium/xhigh；非 qwen: high/max，以 `allowedEffortsForModel` 家族合法集合为准）。缺失 → `DELEGATE_DIRECT_CHAIN_EFFORT_REQUIRED`；显式 low / 非法值 / 非本家族合法档 → `DELEGATE_DIRECT_CHAIN_EFFORT_INVALID`；命中后 `effortOverride` 按自评档 durable 落位，平台以该档接续 phase-1 亲自全链执行，空分工表直执标记与「不再下派拆分（链闸仍拦截多人拆分）」不变。非链式任务的原 low 直执语义一字不变；delegate 工具描述、负责人/部门简报行同步更新。
+- 共享可变状态根治（本轮新增）：`dispatchPlan` 在 `runSubtask` 外层按规范化后的绝对路径（`inputs` + `outputs`，`resolveArtifactPath` 同源）加互斥锁：重叠产物的子任务严格串行，无重叠键直接放行、原并发与 `MAX_CONCURRENT=5` 不变；`dependsOn`、单写者防重头、质量闸与全部原有拒因一字不动。专家任务书新增「只写本任务 outputs 声明的产物与自己那份 reports/wp-member-*.json，不并发写共享文件」的硬纪律。
+
+### 四、验证
+
+- `npm run check`（tsc --noEmit）通过。
+- `npm test`：**1482 例，pass=1481 / fail=0 / cancelled=0 / todo=1，exit=0**；新增 23 例守门：长锚点去重、不复述/不重复口径、verify schema（tests/token-economy-321.test.ts）、未派发计划复用 5 例（tests/workplan-324-reuse-unsent-plan.test.ts）、W2 新鲜/陈旧备份 2 例（tests/workplan-unparsable-retry.test.ts）、快路径资格 + W1 定向修复 + W5 指纹 + W6 摘要 4 例（tests/token-economy-323.test.ts）、顺序链不拆（含链式豁免 ≥8 人下限与豁免不扩大两例）+ 共享状态互斥 7 例（tests/workplan-323-chain-and-shared-state.test.ts）、链式直执档位 5 例（tests/workplan-low-delegation-gate.test.ts D2b-1…D2b-5：缺档拒 / low 拒 / 四家族组合放行与 effortOverride 落位 / 越界档拒 / 非链式语义不变）。修正旧质量闸测试夹具的两条子任务同产物冲突（改为不同产物，保持该测试只考察质量闸）。
+- `node scripts/measure-injection.mjs` 可复现实测；输出到 stdout，字符数非 token。
+- 版本统一 **3.2.3**：`package.json` / `package-lock.json`（两处）/ `PLUGIN_VERSION` / `meta.version` / 三份 README（README.md、README.en.md、README.zh.md）徽章与安装命令 / `tests/fixtures/tool-surface.json` / 两处硬编码版本断言。
+- 运行中的 DSH 由用户手动重启后生效（用户已确认 2026-11-23 重启完成）。
+
 ## 3.2.2 — 2026-11-22（省钱：不再让模型重抄/重复带同一段文字；一致性治本）
 
 本版把“模型反复抄写、反复收到的同一段文字”改成平台一次性生成或按需携带；不删除功能、不改派发/验收/交付语义。基线为 3.2.1，本会话修改后统一版本 3.2.2。
@@ -3569,3 +3692,61 @@ dsh plugin --profile web add /path/to/the/older/copy
 ## 1.0.0
 
 - Initial TypeScript implementation: pre-step task decomposition, real department subagents, durable plan/result messages, `dsh_workplan_update` / `dsh_workplan_dispatch` / `dsh_workplan_cancel`, and the responsive `任务进度` dashboard.
+
+### 八、3.2.4 追加修复（2026-11-23 19:25，重启后验证中发现）
+
+- **replan 新增/替换行补 `qualityRequirements` 透传（治本死局）**：`src/replan.ts` 的 `newSubtask` 构造器与 `REPLACEMENT_FIELDS` 都不含质量要求字段，而 `src/plan.ts:1457-1458` 规定「激活时刻之后的新计划必填质量要求，缺失即拒发 `DISPATCH_QUALITY_REQUIREMENTS_MISSING`」。两条规则叠加成死局：**任何经 replan 建出来的新行都必然被派发门禁拒发，再 replan 一次也补不上——因为构造器根本不读这个字段**。现场由 `wp-32bee059` 的 T6 实测复现。修复：`add` 与 `replace` 两条路径都收 `qualityRequirements`，统一经 `normalizeQualityRequirements`（去空、去重、≤8 条、每条 ≤400 字）消毒；`replanner` 入口 `replanFieldError` 增加同口径校验；`src/host.ts` 的 replan 工具 schema 在 `newSubtask` 与 `replacement` 两处暴露该字段。缺失时不静默造一条假要求，仍由既有门禁照旧拒发——「没写」不伪装成「写了」。
+- 关联诊断报告：`reports/wp-diagnosis-token-and-expert-stop-20261123.md`（token 构成实测、专家中断根因定位为 verify 参数 JSON 缺根对象右花括号、T4/T5 专家产物清单、6 条优化建议）。
+
+### 九、3.2.4 第二轮追加修复（2026-11-23 19:40，按诊断报告建议逐条落地）
+
+诊断报告 `reports/wp-diagnosis-token-and-expert-stop-20261123.md` 的 6 条建议中，第六条（replan 补 qualityRequirements）已在第八节修复，本节落地其余可执行项：
+
+- **H1 异常终止时把「已落盘产物」写进台账 `error`**（建议 3）：新增纯函数 `failedErrorWithHarvestNote(text, cwd, member)`（`src/runtime.ts`，紧邻 `probeDelegateLandedArtifacts`），在两处成员结算点（self_effort 接续结算、部门派发成员结算）替换原来的裸错误文案。缺陷现场：专家会话以 error/中断结束，台账只写「子会话结束状态 error」，主 Agent 与负责人看不到产物其实已写好，只能整层重跑——同一份工作付两次钱。终止通知本来就带 `landedRefs`，但负责人会话已释放时无人接收；台账才是唯一可靠留痕通道。不新增字段、不改白名单、不动 durable 兼容性（仍 ≤300 字）。
+- **H2 产物根目录单一化**（建议 4）：部门任务书（`src/plan.ts` 的 `buildChildPrompt`）、专家任务书与 phase-0 任务书（`src/llm-rules.ts`）统一写入硬约定「产物根目录（唯一，强制）：<工作目录>/reports/；不要写进任何子仓库（例如 plugins/…）」。缺陷现场：同一子任务的 8 名专家把产物分散写到 `reports/` 与 `plugins/dsh-workplan/reports/` 两处，机制都能找到，但人核验要在两个目录之间来回翻，且说不清哪份是正式产物。根因不是路径解析，是任务书从未规定唯一产物根。
+- **H3 分批派出软约束**（建议 5）：部门负责人强制流程新增一条「专家多于 5 名时每批 ≤5 名」。宿主子代理并发位是整个会话树共享的，一次推满会让队尾成员在本轮 120 秒排队预算内起不来，导致本轮整轮判为 `CHILD_NOT_COMPLETED`、已完成成员无人结算（T4/T5 两次现场）。
+- **H4 工具参数 JSON 纪律与兜底**（建议 2）：专家执行要求新增一条——`dsh_workplan_verify` 参数只写必要字段（每条 ≤200 字、每数组 ≤20 条），不拼接长字符串、不手写超四层嵌套；若被宿主以「参数 JSON 非法」拒绝，**不要原样重试**，直接在正文给出结果块交卷（结算读的是正文证据块，verify 只是自检通道）。宿主侧解析器不能由插件改，这是插件侧唯一能真正止损的路径。缺陷现场：会话 `93fc515d` 的 verify 参数在第 3293 字符结束，根对象少一个右花括号，整轮以 error 收尾。
+- 建议 1（把 token 预算换成步数预算）**本轮未做**：属于新的调度机制，需要与宿主 tokenMeter/中断语义重新对齐，风险高于本轮收益；现状已在诊断报告中给出实测口径（步数 124 vs 13 ⇒ 合计 token 差 25 倍），可作为下一轮独立设计。
+- 尺寸影响（`scripts/measure-injection.mjs`）：`leaderTaskBook` 7,081 → 7,218，`expertTaskBook` 3,276 → 3,585，`delegate` 工具 3,980（仍 ≤4,500 上限），`replan` 工具 2,044 → 2,327（新增 qualityRequirements 参数）。
+
+### 十、步数预算（3.2.4 追加实现，2026-11-23 20:10；用户指定继续推进此前推迟的建议 1）
+
+- **定位**：诊断报告第二节实测，合计 token 与步数近似线性（124 步 ⇒ 1,326 万；13 步 ⇒ 54 万；95% 是同一段对话被反复重读）。控钱的第一杠杆是步数。但直接加「步数上限」会与已冻结的「专家执行没有总时长、单次时长、空闲或回执硬截止」契约冲突。
+- **实现（`src/step-budget.ts`，新模块）**：结算时（settle-time）口径，**绝不中断回合、绝不把成功改判失败**——
+  - 默认开启：软 60 步 / 硬 75 步（`DSH_WORKPLAN_STEP_BUDGET` 正整数 n ⇒ 软 n/硬 ceil(n×1.25)；`0|false|off` ⇒ 完全关闭；非法值 ⇒ 默认）；
+  - 结果为 done 且步数 ≥ 软上限 ⇒ 仅 console.warn 留痕，不改状态；
+  - 结果为 done 且触线 ⇒ durable 台账消息附「步数台账：…共 N 步（软 M/硬 K）——已结算成功，仅留痕供下一轮参考」；
+  - 结果不是 done ⇒ 失败 error 追加「步数预算：本会话 N 步（软 M/硬 K，超硬上限时标注），已落盘结算备份…」，让重派决策有据可依（与 3.2.4 的产物收编说明同段）；
+  - 会话取不到 ⇒ 计 0 ⇒ 无操作（fail-open）。
+- **接线点**：两处第三层成员结算（`src/runtime.ts` self_effort 接续结算 + 部门派发成员结算）；专家任务书新增一条透明告知——措辞按实现事实写：**执行中没有任何到点催促、不中断、不因步数判失败**，只说明「每多一步整段对话重读一遍」的成本事实，并明确**禁止为省步数削减证据、跳过验证或提前交卷**（门禁不因步数放宽，交薄只会被退回重做，反而更贵）。
+- **诚实边界**：这不是运行中击杀——插件无法安全中止宿主子会话（拿不到它的 abort 信号），v1 的硬上限只在结算时留痕，不做中途截停。运行期的实际成本控制仍靠「每批 ≤5 名」与任务书指引。
+- **测试**：新增 `tests/step-budget.test.ts` 8 例（解析表、判定边界、计数器 afterSeq/countCap/fail-open、失败上下文拼接、环境变量名防漂移），全绿。
+
+### 十一、构建指纹覆盖全部已加载模块（治本，2026-11-23 20:32）
+
+- **缺陷**：`src/host.ts` 的 `LOADED_BUILD` 只哈希手写的四个文件（`host.js / runtime.js / plan.js / watchdog.js`）。这正是它自己 docblock 里 `[1.8.15]` 记下的那类假阴性——「模块被加载、被修改，指纹却不变」。3.2.4 新增 `step-budget.js` 之后同一个洞又开了一次：`status` 报出的 `build` 值无法证明「跑的是哪几份 step-budget 字节」。
+- **修复**：改为**按目录枚举**所有 `.js` 模块（排序后逐个入哈希），磁盘上多一个、少一个、改一个，指纹必然变化，不再依赖有人记得维护清单。排除 `client.js`：它是浏览器端 bundle，宿主进程从不加载，且生产布局里位于包根目录（不随 `lib/` 落盘）——算进来会让 `dist/` 与 `lib/` 枚举出不同集合，指纹反而取决于「从哪里加载」。枚举失败（沙箱限制、非常规打包布局）才回退到关键入口清单，仍然 fail-open，绝不因算指纹阻断激活。
+- **覆盖范围**：`lib/` 下 22 个模块全部入哈希（含 `step-budget.js`）；当前磁盘复算值 `b086d3b822d4bbdf`。
+- **回归**：`tests/step-budget.test.ts` 新增第 9 例「build 指纹覆盖全部已加载模块（含 step-budget.js）」——断言 `src/host.ts` 含 `readdirSync(dir)` 与 `name !== 'client.js'`，并断言 `lib/` 枚举集合包含 `step-budget.js`、`host.js`、`runtime.js`；将来再新增模块被漏掉时这条会失败。
+
+### 十二、静态优先重排：让同部门专家的提示词共享前缀（纯省钱，质量零改动，2026-11-23 21:30）
+
+- **缺陷（实测）**：每名专家的任务书**第一行就写着成员名**、第二三行写着各自任务，8 名专家的提示词从第 1 个字就分叉。实测旧布局的共享前缀只有 **24 字符**——等于每人每次都要把同一份五步协议、执行要求、汇报规范按全价重新买一遍。而 95% 的会话 token 花在「同一段内容被重复读」上，缓存命中是唯一不牺牲质量的省钱手段。
+- **修复**：`buildDelegateePrompt` 与 `buildPhaseZeroDelegateePrompt` 改为**静态优先**——静态头部（部门名）→ 五步协议 → 执行要求 → 汇报规范 → 【你的分工】（成员名/负责人任务/你的任务/工作目录/产物根/质量要求/重试简报/规则摘要）。**内容一字未删，只换位置**。
+- **实测收益**（8 名同部门专家）：
+  - 专家任务书 4,870 字符，两两最小共享前缀 **3,678 字符 ≈ 2,164 token（75.5%）**，此前 ≈24 字符；
+  - phase-0 任务书 1,366 字符，共享前缀 **1,137 字符 ≈ 669 token（83.2%）**。
+  - 含义：缓存可命中的部分从「0」变成「四分之三以上」，且同一批专家的前缀完全一致——供应商侧前缀缓存（OpenAI 自动前缀缓存 / Anthropic cache_control）才有机会命中。命中与否仍取决于供应商，但**共享前缀是必要条件**，现在具备了。
+- **质量零改动**：字句未变、门禁未变、五步协议仍先于执行要求（`tests/taskbook-static-first.test.ts` 4 例守门：共享前缀 ≥3000 字符、差异必须落在动态段内、五步先于执行要求、关键义务串零丢失）。
+- **顺带**：`phases.verification.checks` 的提示从「只写已验证条目」改为「非必填——平台会用顶层 acceptance 逐条生成」，鼓励模型省略这段注定被平台重建的重复输出（**不改变**校验口径，`tests/token-economy-321.test.ts:220` 的「checks 可省略只应出现一次」守门仍通过）。
+- **验证**：`npm run check` 无错；全量 **1503 通过 / 0 失败 / 0 取消**（+4 = 新增守门例）；`expertTaskBook` 3,889 字符、`leaderTaskBook` 7,293、`delegate` 工具 3,980（仍 ≤4,500）。
+
+
+### 十三、3.2.4 第三轮追加修复（2026-11-23 21:50，产物路径双基座核对；现场 wp-bb6cee17）
+
+- **缺陷（现场）**：T1/T2 已按任务书写完产物，结算却报「声明产物缺失/不存在」，依赖门把 11 个下游全部挡成 `blocked`，`dispatch` 零派发即返回「本轮预算用尽」，整份计划看起来卡死。结算 JSON 里 ref 写作 `T1/…`、`t2-closed-20261123/…`，真实文件在 `reports/T1/…`、`reports/t2-closed-20261123/…`。
+- **根因**：任务书（`src/plan.ts` 的 `buildChildPrompt`、`src/llm-rules.ts`）强制「产物根目录唯一：`<cwd>/reports/`，回报路径相对这个根目录写」；而 `src/runtime.ts` 的 `checkArtifacts` / `probeInterruptedArtifacts` / `fingerprintArtifacts` 只按 `<cwd>` 一个基座解析。基座不一致 ⇒ 真实产物被判缺失 ⇒ 依赖门（`runtime.ts:4334/4345`）级联挡死下游。不是子 Agent 写错，也不是依赖门策略错。
+- **修复（只改解析，不改任何门禁语义）**：新增 `artifactPathCandidates(ref, cwd)`——绝对路径原样；相对路径先按工作目录（兼容旧回报），再按 `<cwd>/reports/`（现行契约），带 `reports/` 前缀的回报先剥前缀避免拼出 `reports/reports/…`，候选去重。`checkArtifacts`、`probeInterruptedArtifacts`、`fingerprintArtifacts` 统一走候选表，命中即算在盘；`resolveArtifactPath` 保留单基座语义，仅供 `sharedStateKeysForSubtask` 使用（计划声明的 outputs/inputs 是工作目录路径，不是子 Agent 回报，锁键口径不变，避免无谓串行）。
+- **质量与成本**：提示词零字符改动（不增加任何输入 token）；只在首个基座未命中时多一次文件系统探测，token 计费面无变化；不新增字段、不改白名单、旧消息回放与 `strict:false`/`artifactGate:false` 回滚通道均不受影响。
+- **回归**：新增 `tests/workplan-324-artifact-root.test.ts` 6 例（产物根相对路径、工作目录优先、`reports/` 前缀去重、绝对路径单次、正文产物识别、指纹双基座）；`tests/workplan-dependency-artifacts.test.ts` 的探测序列同步为双基座。全量 `npm test`：**1509 通过 / 0 失败 / 0 取消**。`lib/` 已重建（`npm run build`），宿主进程需重载插件后生效。
+- **现场回填**：已用 `dsh_workplan_update` 把 T1/T2 的 `artifacts` 改登记为真实 `reports/…` 路径并置 `exists:true`、`missingArtifacts:[]`，计划已恢复；待运行中计划收尾后再移除临时符号链接（`T1`、`t2-closed-20261123`）。

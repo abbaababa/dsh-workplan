@@ -78,7 +78,7 @@ function eight(extra: any[] = []) {
   ]
 }
 
-function makePlan(rowEffort?: string) {
+function makePlan(rowEffort?: string, chain = false) {
   return {
     planId: 'wp-t3-low-gate',
     sessionId: 'session-root',
@@ -92,6 +92,10 @@ function makePlan(rowEffort?: string) {
       subtasks: [{
         id: 'T1', title: '部门任务', department: 'engineering', dependsOn: [],
         ...(rowEffort !== undefined ? { reasoningEffort: rowEffort } : {}),
+        ...(chain ? {
+          objective: '先完成第一步梳理，再基于上一步结论逐步实现',
+          method: '顺序执行全部步骤，最后一步汇总产物并交付',
+        } : {}),
       }],
     }],
   }
@@ -109,8 +113,8 @@ function makeSession(id: string) {
   }
 }
 
-function makeRuntime(model: string, opts: { rowEffort?: string; provider?: string } = {}) {
-  const plan = makePlan(opts.rowEffort)
+function makeRuntime(model: string, opts: { rowEffort?: string; provider?: string; chain?: boolean } = {}) {
+  const plan = makePlan(opts.rowEffort, opts.chain)
   const rootSession = makeSession('session-root')
   const spawned: any[] = []
   const interrupts: any[] = []
@@ -332,6 +336,68 @@ test('D2 direct 防旁路：复杂档 medium/high/xhigh/max 与非法值一律 D
     assert.deepEqual(lastAudit(record), ['direct', false, 'DELEGATE_DIRECT_EFFORT_INVALID'])
   }
 })
+
+/* ---------- D2b 顺序推理链直执档（3.2.3：链式 direct 不得 low，必须自评复杂档） ---------- */
+
+test('D2b-1 链式 direct 缺 reasoningEffort ⇒ DELEGATE_DIRECT_CHAIN_EFFORT_REQUIRED，不落盘', async () => {
+  const { runtime, leaderAgent, record } = makeRuntime(QWEN, { chain: true })
+  const r = await runtime.delegateTool(leaderAgent, { action: 'direct', startPhases: goodPhases() })
+  assert.equal(r.ok, false)
+  assert.equal(r.code, 'DELEGATE_DIRECT_CHAIN_EFFORT_REQUIRED')
+  assert.match(r.error!, /自己评估/)
+  assert.match(r.error!, /medium\/xhigh/)
+  assert.match(r.error!, /high\/max/)
+  assert.equal(record.statuses[0].effortOverride ?? null, null, '拒绝不得写入 effortOverride')
+  assert.equal(record.statuses[0].consolidation ?? null, null, '拒绝不得写入分工表')
+  assert.deepEqual(lastAudit(record), ['direct', false, 'DELEGATE_DIRECT_CHAIN_EFFORT_REQUIRED'])
+})
+
+test('D2b-2 链式 direct 显式 low ⇒ DELEGATE_DIRECT_CHAIN_EFFORT_INVALID（低档推不动推理链）', async () => {
+  const { runtime, leaderAgent, record } = makeRuntime(QWEN, { chain: true })
+  const r = await runtime.delegateTool(leaderAgent, { action: 'direct', startPhases: goodPhases(), reasoningEffort: 'low' })
+  assert.equal(r.ok, false)
+  assert.equal(r.code, 'DELEGATE_DIRECT_CHAIN_EFFORT_INVALID')
+  assert.match(r.error!, /禁止 low 档亲自执行/)
+  assert.equal(record.statuses[0].effortOverride ?? null, null)
+  assert.deepEqual(lastAudit(record), ['direct', false, 'DELEGATE_DIRECT_CHAIN_EFFORT_INVALID'])
+})
+
+test('D2b-3 链式 direct 自评复杂档放行：非 qwen high/max、qwen medium/xhigh；effortOverride 随档落位', async () => {
+  for (const [model, effort] of [[OTHER, 'high'], [OTHER, 'max'], [QWEN, 'medium'], [QWEN, 'xhigh']] as const) {
+    const { runtime, leaderAgent, record } = makeRuntime(model, { chain: true })
+    const r = await runtime.delegateTool(leaderAgent, { action: 'direct', startPhases: goodPhases(), reasoningEffort: effort })
+    assert.equal(r.ok, true, `${model} ${effort}: ${JSON.stringify(r)}`)
+    assert.equal(r.action, 'direct')
+    assert.equal(r.effortOverride, effort)
+    assert.match(r.hint!, new RegExp(`${effort} 档`), 'hint 声明实际接续档')
+    assert.equal(record.statuses[0].effortOverride, effort, '自评复杂档 durable 落位 ⇒ phase-1 按该档接续')
+    assert.equal(record.statuses[0].consolidation.taskReasoningEffort, effort)
+    assert.deepEqual(record.statuses[0].consolidation.assignments, [], '仍是空分工表＝直执标记，不下派')
+    assert.deepEqual(lastAudit(record), ['direct', true, null])
+  }
+})
+
+test('D2b-4 链式 direct 档位越界：qwen 的 max／非 qwen 的 medium／非法值 ⇒ DELEGATE_DIRECT_CHAIN_EFFORT_INVALID', async () => {
+  for (const [model, effort] of [[QWEN, 'max'], [OTHER, 'medium'], [OTHER, 'xhigh'], [QWEN, 'turbo']] as const) {
+    const { runtime, leaderAgent, record } = makeRuntime(model, { chain: true })
+    const r = await runtime.delegateTool(leaderAgent, { action: 'direct', startPhases: goodPhases(), reasoningEffort: effort })
+    assert.equal(r.ok, false, `${model} ${effort}`)
+    assert.equal(r.code, 'DELEGATE_DIRECT_CHAIN_EFFORT_INVALID', `${model} ${effort}`)
+    assert.match(r.error!, /本模型家族的复杂档/, '文案给出本家族合法复杂档')
+    assert.equal(record.statuses[0].effortOverride ?? null, null)
+    assert.deepEqual(lastAudit(record), ['direct', false, 'DELEGATE_DIRECT_CHAIN_EFFORT_INVALID'])
+  }
+})
+
+test('D2b-5 非链式任务不受影响：复杂档直执仍 DELEGATE_DIRECT_EFFORT_INVALID（D2 语义一字不变）', async () => {
+  const { runtime, leaderAgent } = makeRuntime(QWEN)
+  const r = await runtime.delegateTool(leaderAgent, { action: 'direct', startPhases: goodPhases(), reasoningEffort: 'max' })
+  assert.equal(r.ok, false)
+  assert.equal(r.code, 'DELEGATE_DIRECT_EFFORT_INVALID')
+  assert.match(r.error!, /顺序推理链任务可经 direct 自评复杂档/, '文案指明链式例外')
+})
+
+/* ---------- D3 direct 防旁路：携带 consolidation（含空对象/分工表）⇒ DELEGATE_DIRECT_ASSIGNMENTS_FORBIDDEN ---------- */
 
 test('D3 direct 防旁路：携带 consolidation（含空对象/分工表）⇒ DELEGATE_DIRECT_ASSIGNMENTS_FORBIDDEN', async () => {
   for (const consolidation of [{}, goodConsolidation()]) {

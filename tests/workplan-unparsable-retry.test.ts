@@ -13,7 +13,7 @@
 import test from 'node:test'
 import { seedLeaderSelfEffort } from './helpers/self-effort-contract.js'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -267,4 +267,45 @@ test('e2e A2：重试后仍非法才 blocked，记录附在盘产物清单与 ds
   assert.match(String(row.error), /dsh_workplan_update/, '必须给主 Agent 指明复核改判通道')
   assert.match(String(row.error), /产物已在盘上/)
   assert.match(String(row.error), /reports\/t7-核对报告\.md/, 'attempt 摘要/声明产物中确核在盘的清单必须随 blocked 行逐字留档')
+
+/* ------------------------------------------- [3.2.3 W2] 结算备份先于重派 */
+
+function writeBackup(cwd: string, mtimeMs: number, planId = 'wp-t7-unparsable', subtaskId = 'T1') {
+  const payload = JSON.parse(compliantOutput().split(`${EVIDENCE_MARKER_BEGIN}\n`)[1].split(`\n${EVIDENCE_MARKER_END}`)[0])
+  payload.planId = planId
+  payload.subtaskId = subtaskId
+  const p = join(cwd, 'reports', `wp-settlement-${planId}-${subtaskId}.json`)
+  writeFileSync(p, `${EVIDENCE_MARKER_BEGIN}\n${JSON.stringify(payload)}\n${EVIDENCE_MARKER_END}`)
+  utimesSync(p, new Date(mtimeMs), new Date(mtimeMs))
+  return p
+}
+
+test('W2-a：unparsable + 本次新写的合法结算备份 → 原地结算，不再重开子会话', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 't7-w2-fresh-'))
+  mkdirSync(join(cwd, 'reports'), { recursive: true })
+  writeFileSync(join(cwd, 'reports', 't7-核对报告.md'), '# T7 核对报告\n')
+  writeBackup(cwd, Date.now() + 60_000)
+  const { runtime, prompts } = makeRuntime([malformedOutput('第一轮')], cwd)
+  const session = makeSession(cwd)
+  session.append('user/message', buildPlanMessage(makePlan()))
+  seedLeaderSelfEffort(session, makePlan())
+  const final: any = await runtime.dispatchTool({ session, options: { cwd } }, { startPhases: MAIN_START_PHASES_FIXTURE }, new AbortController().signal)
+  assert.equal(prompts.length, 1, '已有本次合法备份时不得重开子会话')
+  assert.equal(rowOf(final).status, 'done', '备份必须经同一严格结算闸照常结算')
+  assert.equal(final.stats.done, 1)
+})
+
+test('W2-b：陈旧备份 → 拒绝采纳，仍按既有有界回喂重派', async () => {
+  const cwd = mkdtempSync(join(tmpdir(), 't7-w2-stale-'))
+  mkdirSync(join(cwd, 'reports'), { recursive: true })
+  writeFileSync(join(cwd, 'reports', 't7-核对报告.md'), '# T7 核对报告\n')
+  writeBackup(cwd, 1000)
+  const { runtime, prompts } = makeRuntime([malformedOutput('第一轮'), compliantOutput()], cwd)
+  const session = makeSession(cwd)
+  session.append('user/message', buildPlanMessage(makePlan()))
+  seedLeaderSelfEffort(session, makePlan())
+  const final: any = await runtime.dispatchTool({ session, options: { cwd } }, { startPhases: MAIN_START_PHASES_FIXTURE }, new AbortController().signal)
+  assert.equal(prompts.length, 2, '陈旧备份必须被拒，仍走有界回喂')
+  assert.equal(rowOf(final).status, 'done', '第二次合法回报照常结算')
+})
 })

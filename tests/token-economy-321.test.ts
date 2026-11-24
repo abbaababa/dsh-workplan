@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import { adjudicateResult, buildChildPrompt, buildPlannerPrompt, MAX_ORIGINAL_REQUEST_CHARS, validatePlan } from '../src/plan.js'
-import { createDelegateTool } from '../src/host.js'
+import { createDelegateTool, createVerifyTool } from '../src/host.js'
 
 /*
  * [3.2.2][省钱] 结构性省钱回归：
@@ -183,4 +183,46 @@ test('[3.2.2] originalRequest 的 wire 上限与平台回填上限一致（<=800
   const tooLong: any = planWithoutOriginalRequest()
   tooLong.taskUnderstanding.originalRequest = 'x'.repeat(MAX_ORIGINAL_REQUEST_CHARS + 1)
   assert.equal(validatePlan(tooLong).ok, false, '超过 8000 必须明确拒绝，不能留到回放才炸')
+})
+
+
+/* ------------------------------------------------------------------ 3.2.3 ------------------------------------------------------------------ */
+
+function childFor(plan: any) {
+  return buildChildPrompt({
+    plan,
+    subtask: plan.stages[0].subtasks[0],
+    stage: plan.stages[0],
+    dependencyResults: [],
+    cwd: '/tmp',
+    conversationContext: '',
+    llmRulesBrief: '部门负责人强制流程：BRIEF',
+    compactBackground: true,
+  })
+}
+
+test('[3.2.3][R1] 长请求与锚点同源时只补锚点未显示的尾部', () => {
+  const longRequest = 'A'.repeat(3999) + 'TAIL-MARKER' + 'B'.repeat(3000)
+  const plan: any = planWithoutOriginalRequest()
+  plan.taskAnchor = { text: longRequest, sha256: 'a'.repeat(64) }
+  plan.taskUnderstanding.originalRequest = longRequest
+  const child = childFor(plan)
+  const globalLine = child.split('\n').find((line: string) => line.startsWith('全局任务：')) ?? ''
+  assert.ok(globalLine.includes('锚点同源'), '应明确说明与锚点同源')
+  assert.ok(globalLine.includes('TAIL-MARKER'), '锚点没显示的尾部必须完整保留')
+  assert.ok(!globalLine.includes('A'.repeat(80)), '前 3,999 字不得在全局任务里再付一遍')
+})
+
+test('[3.2.3][R2/R4] 任务书不复述前三步细则，checks 口径只出现一次', () => {
+  const child = childFor(planWithoutOriginalRequest())
+  assert.ok(!child.includes('第一步全面、全盘、深入梳理、研究、思考自己的任务'), '旧复述句必须删除')
+  assert.ok(child.includes('approachBasis'), '关键串仍在上方五步协议中')
+  assert.equal(child.split('checks 可省略').length - 1, 1, 'checks 可省略只应出现一次')
+})
+
+test('[3.2.3][C1/C2] verify 工具 schema 必填与提示词口径一致', () => {
+  const tool: any = createVerifyTool({})
+  const phasesSchema = tool.parameters.properties.phases
+  assert.deepEqual(phasesSchema.properties.verification.required, ['retrospective'])
+  assert.deepEqual(phasesSchema.required, ['execution', 'verification'])
 })

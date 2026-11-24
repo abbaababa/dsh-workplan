@@ -27,10 +27,26 @@ export function envPositiveInt(name: string, fallback: number): number {
 }
 
 /**
- * 复杂任务（声明档 medium/high/xhigh/max）分工表人数下限：用户裁决 D1/D2，
- * 固定 8，不开放环境变量（裁决明示「少于 8 人硬性阻断」）。
+ * 复杂任务（声明档 medium/high/xhigh/max）分工表人数下限：用户裁决 D1/D2 原值 8。
+ * [3.2.4][O8] 2026-11-23 用户裁决放开：可用环境变量
+ * `DSH_WORKPLAN_MIN_COMPLEX_DELEGATE_MEMBERS` 覆盖（下限 1，非法/缺省回落 8）。
+ * 默认行为与旧裁决完全一致（8）；只有显式设置环境变量时才放宽。
+ * 另外：单阶段计划（stages.length === 1）不适用本下限——「可并行拆分」的
+ * 8 人下限对单阶段任务只会制造无解死锁，豁免逻辑在 llm-rules 人数闸。
  */
-export const MIN_COMPLEX_DELEGATE_MEMBERS = 8
+export const MIN_COMPLEX_DELEGATE_MEMBERS = Math.max(
+  1,
+  envPositiveInt('DSH_WORKPLAN_MIN_COMPLEX_DELEGATE_MEMBERS', 8),
+)
+
+/**
+ * [3.2.4][O6] 全计划专家总数上限：MAX_SUBTASKS(15) × MAX_COMPLEX_DELEGATE_MEMBERS(25)
+ * = 375 名专家 ⇒ 约 781 个 LLM 回合，没有任何全局闸——单个失控计划就能烧穿预算。
+ * 环境变量 `DSH_WORKPLAN_MAX_TOTAL_EXPERTS_PER_PLAN` 可调（默认 40）；超出即整单
+ * 拒绝，错误信息给出「精简名单 / 拆成多轮计划」两条出路。 enforce 点在 delegate
+ * review/dispatch（runtime）：已登记 delegates 合计 + 本次新增 ≤ 上限。
+ */
+export const MAX_TOTAL_EXPERTS_PER_PLAN = envPositiveInt('DSH_WORKPLAN_MAX_TOTAL_EXPERTS_PER_PLAN', 40)
 
 /**
  * 复杂任务分工表人数上限：用户裁决 D2 原为 12，2026-11-19 用户裁决扩大到 25

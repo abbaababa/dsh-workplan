@@ -315,6 +315,18 @@ test('第四步核验工具：五步齐全且验证通过 → passed', async () 
   assert.match(String(out.summary), /第一步 任务梳理/)
 })
 
+test('第四步核验工具：checks/allPassed 可省略（与结算闸同一口径，CH-01）', async () => {
+  const { runtime, child } = runtimeFixture()
+  const input = phases()
+  delete (input.verification as any).checks
+  delete (input.verification as any).allPassed
+  const out = await runtime.verifyTool({ session: child }, { phases: input })
+  assert.equal(out.ok, true)
+  assert.equal(out.passed, true)
+  assert.equal(out.phase, 'verification')
+  assert.match(String(out.message), /checks 未提交/)
+})
+
 test('第四步核验工具：验证未全部通过 → VERIFICATION_INCOMPLETE', async () => {
   const { runtime, child } = runtimeFixture()
   const input = phases()

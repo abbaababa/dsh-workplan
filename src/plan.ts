@@ -22,7 +22,7 @@ import { extractTaskElements, MAX_TASK_ANCHOR_CHARS } from './understanding.js'
 // 杜绝「写 25 读 12」的存读不对称（3.0.6 死锁同类事故的预防）。
 import { MAX_COMPLEX_DELEGATE_MEMBERS, MIN_COMPLEX_DELEGATE_MEMBERS } from './caps.js'
 import { isMappingDigest, verifyMappingDigest } from './supersede-digest.js'
-import { checkStartEvidenceCarryover, fiveStepContinuationPromptLines, fiveStepPromptLines, MAX_PHASE_ITEM_CHARS, MAX_PHASE_LIST_ITEMS, MAX_PHASE_TOTAL_CHARS, mergeStartEvidenceIntoSettlement, phaseSummaryLine, renderStartEvidenceBlueprint, renderStartPhaseEvidence, sanitizeStartPhaseEvidence, startEvidenceIndexLines, START_EVIDENCE_MIN_CHARS_BRIEF, validateFiveStepEvidence, validateStartPhaseEvidence } from './five-step.js'
+import { checkStartEvidenceCarryover, fiveStepContinuationPromptLines, fiveStepPromptLines, MAX_PHASE_LIST_ITEMS, mergeStartEvidenceIntoSettlement, phaseSummaryLine, renderStartEvidenceBlueprint, renderStartPhaseEvidence, sanitizeStartPhaseEvidence, startEvidenceIndexLines, START_EVIDENCE_MIN_CHARS_BRIEF, validateFiveStepEvidence, validateStartPhaseEvidence } from './five-step.js'
 // [修复] 七项字数下限简报（five-step.ts 单一事实源）转发给 host.ts 等消费方。
 export { START_EVIDENCE_MIN_CHARS_BRIEF } from './five-step.js'
 import {
@@ -1783,18 +1783,72 @@ export function departmentKey(id: any) {
   return typeof id === 'string' && DEPARTMENTS[id as keyof typeof DEPARTMENTS] ? id : 'unknown'
 }
 
-export function buildPlannerPrompt(taskText: any, cwd: any, conversationContext: any = '', budget: any = {}) {
-  /*
-   * [1.12.0] The department list now states what each department owns and what
-   * it produces. Before this the prompt was twelve bare names and the model had
-   * nothing to match against except the label itself; the child prompt then only
-   * echoed the label, so a department could not change execution at all.
-   */
+/*
+ * [3.2.4][省钱 B1] 规划器提示拆成「system 静态块 + user 动态块」：
+ *  - buildPlannerSystemPrompt(budget)：方法论、硬性约束、资源口径、部门表、
+ *    输出精简与 JSON 结构——同一次会话内逐次重试/多次规划完全相同，放进
+ *    role:'system' 让上游前缀缓存稳定命中（每次重试/每次规划省 ~4.3K 字符输入）。
+ *  - buildPlannerUserPrompt(taskText, cwd, conversationContext)：工作目录、
+ *    最近对话、任务原文——每轮都可能变化的动态内容，放 role:'user'。
+ *  - buildPlannerPrompt(...) 保留为两者的拼接视图（system + '\n\n' + user），
+ *    既有测试与遥测按「一个字符串」断言内容与长度，零回归。
+ */
+export function buildPlannerSystemPrompt(budget: any = {}) {
+  const concurrency = Math.max(1, Number(budget?.concurrency) || MAX_CONCURRENT)
+  const resumes = Number.isFinite(Number(budget?.maxResumes)) ? Number(budget.maxResumes) : MAX_PLAN_RESUMES
   const departments = DEPARTMENT_CAPABILITIES
     .map((entry) => `- ${entry.id}（${entry.zh} / ${entry.en}）：职责 ${entry.responsibilities.join('；')}；典型产物 ${entry.outputs.join('；')}`)
     .join('\n')
-  const concurrency = Math.max(1, Number(budget?.concurrency) || MAX_CONCURRENT)
-  const resumes = Number.isFinite(Number(budget?.maxResumes)) ? Number(budget.maxResumes) : MAX_PLAN_RESUMES
+  return [
+    '你是任务分解规划器。用马克思主义哲学方法分析任务，只输出一个 JSON 对象：实事求是、抓主要矛盾、具体问题具体分析、实践—认识—再实践、质量互变、矛盾转化。',
+    '',
+    '理解与分配方法（必须执行，可复核）：',
+    '1. 抽取要素：版本号、数量单位、日期、路径、任务/缺陷编号、数值上限、显式否定、指代（它/这个/B），逐条写入 taskUnderstanding.anchors，一条一项，数字与编号不得改写。',
+    '2. 匹配部门：按「部门职责+典型产物」匹配，不按名字熟悉度；每项在 departmentRationale 写明命中职责与对应要素。',
+    '3. 偏离自检：逐条核对用户原要求是否被 objective/outputs/acceptance 覆盖；漏项写入 unknowns 或 assumptions 并说明，不得静默丢弃或假装完成。',
+    '3.1 部门覆盖自检（硬性）：原文某部门职责词命中 2 个以上（如「截图」「红圈」「布局」→design）却无该部门子任务时，必须在 assumptions 写「不安排<部门中文名>：理由」，否则校验拒绝（COVERAGE）。',
+    '4. 指代只在最近对话解析；无答案写 unknowns 请用户澄清，不猜。',
+    '5. 要求相互冲突时写入 contradictions.secondary 并请用户决定，不擅自选一个。',
+    '',
+    '硬性约束：',
+    `- 阶段 1-${MAX_STAGES} 个；子任务总数 1-${MAX_SUBTASKS} 个，每阶段至少 1 个；简单任务 1-3 项，复杂才展开。`,
+    '- ID：子任务 T1/T2…，阶段 S1/S2…，全局唯一；dependsOn 只引用更早阶段或更早位置，不得成环；能并行的留空，不造依赖链。',
+    '- 共享数据依赖：下游 inputs 需行情/资金/份额/政策/行业数据等领域事实，且已有产出该数据的子任务时，必须写入 dependsOn；找不到则在 inputs 写明来源，不写“待确认”就派发。',
+    '- department 必须选下列部门之一，并写 departmentRationale（1-2 句，引用职责与要素）；不一致视为不合格。',
+    '- method/outputs/acceptance 必须非空；inputs 可为空，未知写“待确认”；unknowns/assumptions 如实列出，没有写空数组。',
+    '- taskUnderstanding.originalRequest 由平台回填，**不要输出**；其余字段照常。',
+    '- 子任务必须可独立执行、可验收：单一目标、单一主产物、清晰验收边界；不按分钟切分，不为凑数拆无意义任务。',
+    '- 分解必须更简单：每项只写单一目标、单一主产物、可独立验收的一件事；部门负责人会用 dsh_workplan_delegate 再拆给本部门多名相关领域全球顶尖专家（组员角色已取消），执行细节下沉，主计划保持简单清晰。',
+    '- 子任务由部门负责人牵头：负责人有本部门再分配权限（dsh_workplan_delegate，先 review 交 startPhases+分工表再 dispatch 给 expert），但没有主计划派发权限、不能重启服务、不能安装或升级依赖；禁止把「调用 dsh_workplan_dispatch」「重启/停止 dsh web」「安装或升级插件」写进子任务，需要时写成“给出结论或建议，只有主 Agent 才能执行”。',
+    '- 执行无时限：负责人和全球顶尖专家没有总时长、单次时长、空闲或回执硬截止；不要设置 timeoutMs，不要按分钟拆任务，也不要把耗时作为 done 条件；用户显式取消、真实错误与证据/质量门禁仍保留。',
+    '- JSON 只允许半角标点（, : " { } [ ]）；相邻成员必须有逗号；输出前自检括号成对、每个字符串以半角"闭合。',
+    '- 不要输出 Markdown 代码围栏、解释或前后缀；只输出一个 JSON 对象。',
+    '',
+    '本轮资源与执行方式：',
+    `- 不设置整轮或单个子任务执行截止；estimateMinutes 只用于协调，不能派生 timeoutMs 或延期机制；最多 ${concurrency} 项并行。`,
+    resumes > 0
+      ? `- 受阻自动续跑 ${resumes} 次；需要时计划暂停并在下一轮继续。`
+      : '- 自动续跑额度为 0；计划不会因轮次预算暂停。',
+    '- 每项必须写 qualityRequirements（1-8 条）：写清成果标准与合格判据；缺失会被拒发（DISPATCH_QUALITY_REQUIREMENTS_MISSING），须 replan 补齐。任务须简单到 1+1=2：一个目标、一个主产物、一项可独立验收；出现「并且/并/同时/另外/还要/以及/分别/顺便/然后/接着/再」或多句时拆分。',
+    '- 每项写 estimateMinutes（整数 1-240，如实预估）：只用于协调与告知，仅供参考、非承诺；不派生截止、不因超预估超时，不影响 done；校验只防离谱输入，缺失不报错。',
+    '- 每项按自身复杂度写 reasoningEffort（推理等级，只允许 low / medium / high / xhigh / max 五档）：轻度复杂="low"，中等复杂="medium"或"high"，非常复杂="xhigh"或"max"。',
+    '- 档位二选一消歧（硬性）：同等复杂度优先选择较低档（medium 优先于 high，xhigh 优先于 max），除非有明确理由（需自建测试并跑回归、涉及多文件/多子系统共享状态、需全链路原子性同步）；无理由不得升高或降低档位。',
+    '- 示例：整理并校对一份已有清单="low"；补充单个工具函数并补齐单元测试="medium"；独立实现一个模块并补齐测试="high"；跨多个模块排查根因并修复="xhigh"；跨多个系统排查根因并给出架构级修复方案="max"。',
+    '- 禁止沿用/继承主 Agent 的推理等级：只由该子任务自身复杂度决定；缺失时执行侧回落 "high"，但你必须显式写出该字段。',
+    '- 规模大就分多轮，不把多交付物压进一项。',
+    '',
+    '可用部门（执行者均为全球顶尖专家）：',
+    DEPARTMENT_EXPERT_STANDARD.planner,
+    departments,
+    '',
+    '输出精简：字段只为交付；每个字符串≤200 字，数组按需给最少条数；简单任务各字段写 1 条。',
+    '',
+    '输出 JSON 结构（字段必须齐全，值要具体）：',
+    '{"version":1,"title":"短标题","taskUnderstanding":{"anchors":["硬要素"],"deliverable":"交付物","successCriteria":["验收标准"],"constraints":["约束"],"knownFacts":["事实"],"unknowns":["未知：如何验证"],"assumptions":["假设"]},"contradictions":{"primary":{"statement":"主要矛盾","evidence":["证据"],"whyPrimary":"为何决定成败"},"secondary":["次要矛盾"],"transformationConditions":["转化条件"]},"stages":[{"id":"S1","name":"阶段名","goal":"目标","rationale":"为何需要","checkpoint":"检查点","subtasks":[{"id":"T1","title":"子任务","department":"engineering","departmentRationale":"命中职责与要素","role":"资深架构师·全球顶尖水准","objective":"目标","method":["方法"],"inputs":["输入"],"outputs":["产物"],"dependsOn":[],"qualityRequirements":["质量要求"],"acceptance":["验收"],"risk":"风险","estimateMinutes":5,"reasoningEffort": "high"}]}],"risks":[{"risk":"风险","likelihood":"low","impact":"影响","mitigation":"缓解","trigger":"信号"}],"verification":[{"item":"验证项","method":"方法","evidence":"证据形式"}],"practiceLoop":{"plan":"计划","do":"执行","check":"检查","act":"修正"}}',
+  ].join('\n')
+}
+
+export function buildPlannerUserPrompt(taskText: any, cwd: any, conversationContext: any = '') {
   const task = truncate(taskText, 16000)
   const directory = typeof cwd === 'string' && cwd ? cwd : '（未知）'
   /*
@@ -1806,156 +1860,18 @@ export function buildPlannerPrompt(taskText: any, cwd: any, conversationContext:
   const plannerNeedsFullContext = taskHasReferences(taskText)
   const context = truncateTail(conversationContext, plannerNeedsFullContext ? 7000 : 3000)
   return [
-    '你是一个任务分解规划器。请用马克思主义哲学的科学方法分析下面的任务，并只输出一个 JSON 对象。',
-    '',
-    '必须遵守：',
-    '1. 实事求是：knownFacts 只能来自用户输入或可验证事实；不得编造文件、接口、数据或结论。',
-    '2. 抓主要矛盾：找出决定任务成败的核心矛盾，写清证据和“为什么它是主要矛盾”。',
-    '3. 具体问题具体分析：根据任务类型选择部门和方法，不要机械套模板。',
-    '4. 实践—认识—再实践：每个阶段设置检查点，用结果修正后续行动。',
-    '5. 质量互变：把大目标拆成可验收的量变阶段，设置阶段门槛。',
-    '6. 矛盾转化：说明什么条件下次要矛盾会上升为主要矛盾，以及如何应对。',
-    '',
-    '理解与分配方法（必须执行，且结论要能被逐条复核）：',
-    '1. 抽取要素：先从用户原文里逐项抽出硬要素——版本号、数量与单位、日期、文件路径、任务/缺陷编号（如 T11、U-15）、数值上限、显式否定（不要/禁止/不得）、指代（它/这个/B）。写进 taskUnderstanding.anchors，一条一项，不得改写数字与编号。',
-    '2. 匹配部门：按「部门职责 + 典型产物」匹配，不要按名字熟悉度分配。每个子任务必须在 departmentRationale 里写清：命中该部门哪条职责、对应任务里的哪个要素。',
-    '3. 偏离自检：逐条核对用户原要求是否被某个子任务的 objective/outputs/acceptance 覆盖。漏掉的必须写进 unknowns 或 assumptions 并说明；不得静默丢弃，也不得把一个要求拆成看似完成。',
-    '3.1 部门覆盖自检（硬性）：若用户原文里某个部门的职责词命中 2 个以上（例如出现「截图」「红圈」「布局」即涉及 design），而你的计划没有该部门的子任务，就必须在 taskUnderstanding.assumptions 里写一条「不安排<部门中文名>：理由」。既不安排、也不写明理由的计划会被校验直接拒绝（COVERAGE）。',
-    '4. 指代只在最近对话里解析；对话里没有答案时，写进 unknowns 并说明需要用户澄清，不要自行猜测。',
-    '5. 若用户要求彼此冲突（例如同一对象既要求展开又要求收起、既要求只改 A 又要求同时改 B），写进 contradictions.secondary 并说明需要用户决定，不要擅自选一个执行。',
-    '',
-    '硬性约束：',
-    `- 阶段 1-${MAX_STAGES} 个；子任务总数 1-${MAX_SUBTASKS} 个；每个阶段至少 1 个子任务。`,
-    '- 按任务实际复杂度决定规模：简单任务 1-3 个子任务，复杂任务才展开；不得为了显得细致而堆叠子任务。',
-    '- 子任务 ID 使用 T1、T2…；阶段 ID 使用 S1、S2…；所有 ID 唯一。',
-    '- dependsOn 只能引用更早阶段或更早位置的子任务；不得形成环。',
-    '- dependsOn 只在真正需要前序产出时填写；能独立并行的子任务必须留空，不要为了形式制造依赖链。',
-    '- 共享数据依赖（硬规则）：若下游子任务的 inputs 需要行情、资金、份额、政策、行业数据等共享事实，而计划中已有专门产出该数据的子任务，必须把该子任务写入 dependsOn；否则下游会重复采集同一批公开事实。找不到对应子任务时，在 inputs 里写明数据来源，不要写“待确认”就派发。',
-    '- department 必须从下面的部门中选择一个；必须同时写 departmentRationale（1-2 句，引用该部门职责与任务要素），department 与 rationale 不一致的计划视为不合格。',
-    '- method、outputs、acceptance 必须是非空数组；inputs 可以为空，未知写“待确认”。',
-    '- unknowns 和 assumptions 必须如实列出；没有就写空数组，不能把假设写成事实。',
-    // [省钱] 平台已持有用户原文（taskAnchor 逐字落档），规划器复述一遍只会把
-    // 同一段文字从输入变成输出再变成任务书输入，付三次钱。现在平台自动回填。
-    '- taskUnderstanding.originalRequest 由平台自动写入用户原文，**不要输出该字段**；taskUnderstanding 的其余字段照常输出。',
-    '- 子任务必须可独立执行、可验收；按单一目标、单一主产物和清晰验收边界拆分，不得按分钟数强行切分，也不得为了凑数拆无意义任务。',
-    // [2.5.0] 用户要求 3：分解必须更简单。部门负责人拥有本部门内再分配权限
-    // （dsh_workplan_delegate），会把子任务再拆给多名顶尖专家与组员，因此
-    // 主计划层保持单一目标/单一主产物的简单子任务，执行细节下沉到部门内分工。
-    '- 分解必须更简单（用户强制要求）：每个子任务只写单一目标、单一主产物、可独立验收的一件事；不要把多个交付物压进同一个子任务。部门负责人接到子任务后，会用 dsh_workplan_delegate 把它再拆成更简单的单项工作，分配给本部门多名相关领域全球顶尖专家共同承担（部门组员角色已按用户要求 9 取消）——所以主计划子任务保持简单清晰即可，执行细节由部门内分工细化，不要越俎代庖替部门预拆全部细节。再分配只按工作边界与验收拆分；预估可汇总用于协调，但不设分钟上限，也不影响达标判定。',
-    '- 子任务由部门负责人子 Agent 牵头执行：负责人拥有本部门内的再分配权限（dsh_workplan_delegate，先 review 提交第 1/2/3 步开工证据（startPhases）与分工表后 dispatch 派给本部门专家（只保留 expert 角色）），但没有主计划派发权限、不能重启服务、不能安装或升级依赖。禁止把「调用 dsh_workplan_dispatch」「重启/停止 dsh web」「安装或升级插件」这类只有主 Agent 才能执行的动作写进子任务；确实需要时，写成“给出结论或建议，由主 Agent 执行”。',
-    '- 执行无时限：部门负责人和全球顶尖专家没有总时长、单次时长、空闲或回执硬截止；不要设置 timeoutMs，不要按分钟数拆任务，也不要把预估或实际耗时作为 done 的验收条件。用户显式取消、真实错误与证据/质量门禁仍须保留。',
-    // [2.3.2][D2-P2] 半角/逗号/括号自检硬约束：与解析层兜底（P0）互为防线，中文模型全角标点高发。
-    '- JSON 只允许半角标点（, : " { } [ ]）；对象与数组的相邻成员之间必须有逗号；输出前自检括号成对、每个字符串以半角"闭合。',
-    '- 不要输出 Markdown 代码围栏、解释或前后缀；只输出一个 JSON 对象。',
-    '',
-    '本轮资源与执行方式：',
-    `- 不设置整轮或单个子任务执行截止；estimateMinutes 只用于协调，不能派生 timeoutMs 或延期机制；同时最多 ${concurrency} 个子任务并行。`,
-    resumes > 0
-      ? `- 受阻后自动续跑额度 ${resumes} 次；需要时计划会暂停并在下一轮继续。`
-      : '- 自动续跑额度为 0；计划不会因轮次预算被暂停。',
-    '- [3.0.0][用户要求 3/5] 每个子任务必须写 qualityRequirements（1-8 条字符串）：这是主 Agent 派给部门负责人时随任务书一起下达的「结果质量要求」，写清成果必须达到什么要求、什么算合格。缺失质量要求的子任务在派发时会被系统直接拒发（DISPATCH_QUALITY_REQUIREMENTS_MISSING，不启动部门 Agent），必须 replan 补齐后重新派发。同时子任务必须是简单到 1+1=2 的单项工作：一个目标、一个主产物、一项可独立验收；不要在一个子任务里塞并列的多件事（出现「并且/并/同时/另外/还要/以及/分别/顺便/然后/接着/再」或多句并列——含英文句点 `.` 分隔的多句——时应拆成多个子任务）。',
-    '- 每个子任务必须写 estimateMinutes（整数 1-240，如实预估）：只用于安排协调与告知用户，仅供参考、非承诺；不会派生执行截止，不会因超过预估算超时，也不影响 done 验收。取值整数与范围校验仅防止离谱输入，缺失不报错。',
-    /*
-     * [2.2.0][T13/推理等级] 子 Agent 必须自决推理等级，禁止继承主 Agent。
-     * 用户规则原文见 plan.ts 顶部 REASONING_EFFORTS 注释；五档映射与五个示例
-     * 按用户规则逐字展开，规划器输出由 readSubtasks 校验（只收
-     * low/medium/high/xhigh/max）。
-     * [2.2.7][T3/五档扩展] 中等="medium"或"high"、非常="xhigh"或"max" 是 OR 语义，
-     * 二选一必须有确定性判据，否则同一输入会产生不同档位——下面逐字加入
-     * 「同等复杂度优先较低档」消歧指令；提示词行与 tests/reasoning-effort.test.ts
-     * 的契约正则逐字耦合，改任一必须同步改另一。
-     */
-    '- 每个子任务必须按它自身的复杂度写 reasoningEffort（推理等级，只允许 low / medium / high / xhigh / max 五档）：轻度复杂="low"，中等复杂="medium"或"high"，非常复杂="xhigh"或"max"。',
-    '- 档位二选一消歧（硬性要求，保证同等输入产生稳定档位）：同等复杂度下优先选择较低档（medium 优先于 high，xhigh 优先于 max），除非有明确理由需较高档（如需要自建测试并跑回归、涉及多文件/多子系统共享状态、需要全链路原子性同步）；没有明确理由不得升高档位，也不得无理由降低档位。',
-    '- reasoningEffort 五档示例：整理并校对一份已有清单="low"；补充单个工具函数并补齐单元测试="medium"；独立实现一个模块并补齐测试="high"；跨多个模块排查根因并修复="xhigh"；跨多个系统排查根因并给出架构级修复方案="max"。',
-    '- 禁止沿用/继承主 Agent 的推理等级：reasoningEffort 只由该子任务自身的复杂度决定，不得因为主 Agent 当前是某一档就照抄；缺失时执行侧回落 "high"，但你必须显式写出该字段。',
-    '- 规模大就如实拆成多轮，不要为了塞进一轮而把多个交付物压进一个子任务。',
-    '',
-    '可用部门（每个部门的执行者都是来自全球相关领域的顶尖专家，不是普通部门人员）：',
-    DEPARTMENT_EXPERT_STANDARD.planner,
-    departments,
-    '',
     `工作目录：${directory}`,
     '',
-    '最近对话（只用于理解“它 / 这个 / B / 上一项”等指代，不是新的任务；不要把它当成额外需求）：',
+    '最近对话（只用于理解“它 / 这个 / B / 上一项”等指代，不是新的任务；不要当成额外需求）：',
     context || '（无可用对话背景）',
     '',
     '任务：',
     task,
-    '',
-    '输出精简（省钱硬要求）：所有字段只为交付服务；每个字符串≤200 字，数组按需给最少条数；'
-      + '简单任务的 contradictions / risks / verification / practiceLoop 各写 1 条要点即可，不堆废话、不重复任务原文。',
-    '',
-    '输出 JSON 结构（字段必须齐全，值要具体）：',
-    '{',
-    '  "version": 1,',
-    '  "title": "短标题",',
-    '  "taskUnderstanding": {',
-    '    "anchors": ["从用户原文抽取的硬要素，一条一项"],',
-    '    "deliverable": "最终交付物",',
-    '    "successCriteria": ["可验收标准"],',
-    '    "constraints": ["约束"],',
-    '    "knownFacts": ["仅来自用户输入或可验证事实"],',
-    '    "unknowns": ["未验证项：如何验证"],',
-    '    "assumptions": ["明确标注的假设"]',
-    '  },',
-    '  "contradictions": {',
-    '    "primary": {',
-    '      "statement": "主要矛盾",',
-    '      "evidence": ["证据"],',
-    '      "whyPrimary": "为什么它决定成败"',
-    '    },',
-    '    "secondary": ["次要矛盾"],',
-    '    "transformationConditions": ["矛盾转化条件"]',
-    '  },',
-    '  "stages": [',
-    '    {',
-    '      "id": "S1",',
-    '      "name": "阶段名",',
-    '      "goal": "阶段目标",',
-    '      "rationale": "为什么需要该阶段",',
-    '      "checkpoint": "阶段检查点",',
-    '      "subtasks": [',
-    '        {',
-    '          "id": "T1",',
-    '          "title": "子任务",',
-    '          "department": "engineering",',
-    '          "departmentRationale": "为什么是该部门：命中哪条职责、对应任务哪个要素",',
-    '          "role": "部门内角色（按该领域全球顶尖专家定位填写，如「资深架构师·全球顶尖水准」）",',
-    '          "objective": "目标",',
-    '          "method": ["具体方法/步骤"],',
-    '          "inputs": ["输入；未知写待确认"],',
-    '          "outputs": ["输出/交付物"],',
-    '          "dependsOn": [],',
-    '          "qualityRequirements": ["必填：主 Agent 对这条任务结果的质量要求（可检查，1-8 条；缺失该子任务将被拒发）"],',
-    '          "acceptance": ["可测试的验收标准"],',
-    '          "risk": "主要风险",',
-    '          "estimateMinutes": 5,',
-    '          "reasoningEffort": "high"',
-    '        }',
-    '      ]',
-    '    }',
-    '  ],',
-    '  "risks": [',
-    '    {',
-    '      "risk": "风险",',
-    '      "likelihood": "low",',
-    '      "impact": "影响",',
-    '      "mitigation": "缓解",',
-    '      "trigger": "触发信号"',
-    '    }',
-    '  ],',
-    '  "verification": [',
-    '    { "item": "验证项", "method": "方法", "evidence": "证据形式" }',
-    '  ],',
-    '  "practiceLoop": {',
-    '    "plan": "计划",',
-    '    "do": "执行",',
-    '    "check": "检查",',
-    '    "act": "修正"',
-    '  }',
-    '}',
   ].join('\n')
+}
+
+export function buildPlannerPrompt(taskText: any, cwd: any, conversationContext: any = '', budget: any = {}) {
+  return [buildPlannerSystemPrompt(budget), buildPlannerUserPrompt(taskText, cwd, conversationContext)].join('\n\n')
 }
 
 export function makeUserMessage(text: any, source: any) {
@@ -2916,11 +2832,11 @@ export function buildDispatchPreAnnouncement(plan: any) {
  */
 export function buildPhaseZeroLeaderPrompt(input: { subtaskId?: string; title?: string; objective?: string; departmentLabel?: string }) {
   return [
-    `你是「${input.departmentLabel ?? '部门'}」部门的执行负责人，当前处于 phase-0（先配置后开工，low 档启动）。`,
+    `你是「${input.departmentLabel ?? '部门'}」执行负责人，phase-0（先配置后开工，low 档启动）。`,
     `你的子任务：${input.subtaskId ?? ''} ${input.title ?? ''}`,
     `任务目标：${input.objective ?? '（未记录）'}`,
-    '本阶段唯一职责：全面评估你接到任务的复杂度，完成五步工作法前三步（任务梳理 + 资源/工具/方案研究 + 准备就绪），然后调用 dsh_workplan_delegate(action="review") 提交第 1/2/3 步开工证据（startPhases={ planning{ problemAnalysis[], approach[], approachBasis[], resources[], tools[] }, preparation{ prepared[], evidence[] } }）与分工表，并在 consolidation.taskReasoningEffort 里配置你自己的整体推理等级（轻度=low；qwen 中等=medium、非 qwen 中等=high；qwen 非常复杂=xhigh、非 qwen 非常复杂=max）。若评估为 low（轻度）或未配置：禁止下派——不要提交分工表，改经 dsh_workplan_delegate(action="direct") 登记开工证据（startPhases，' + '字数下限：' + START_EVIDENCE_MIN_CHARS_BRIEF + '；可选 reasoningEffort="low"），平台以 low 档接续你亲自执行。',
-    '不要执行任务本身，不要派发下级（review 登记前 dispatch 会被硬门禁拒绝）。提交 review 后结束本回合；平台会立即以你的自配档接续（宿主会另起执行会话并携带本阶段产物，不要假设还是当前会话）进入 phase-1（正式分配流程）。',
+    '本阶段唯一职责：评估复杂度并完成五步前三步，再调 dsh_workplan_delegate(action="review") 交 startPhases={ planning{ problemAnalysis[], approach[], approachBasis[], resources[], tools[] }, preparation{ prepared[], evidence[] } } 与分工表，并在 consolidation.taskReasoningEffort 配置整体档（轻度=low；qwen 中等=medium、非 qwen=high；复杂=xhigh/max）。评估为 low/未配置：禁止下派，改经 action="direct" 登记 startPhases（字数下限：' + START_EVIDENCE_MIN_CHARS_BRIEF + '；可选 reasoningEffort="low"），平台以 low 档接续你亲自执行。',
+    '不要执行任务本身；review 前 dispatch 会被硬门禁拒绝。提交 review 后结束本回合；平台以你的自配档接续（另起执行会话）进入 phase-1。',
   ].join('\n')
 }
 
@@ -4610,7 +4526,7 @@ export interface AdjudicateResult {
  * Only fills missing fields. Authored checks/allPassed are never overwritten,
  * so historical plans and explicit model output keep exactly their old meaning.
  */
-function synthesizeVerificationFromAcceptance(phases: any, acceptance: any[]) {
+export function synthesizeVerificationFromAcceptance(phases: any, acceptance: any[]) {
   if (!isRecord(phases) || !Array.isArray(acceptance) || acceptance.length === 0) return phases
   const verification = isRecord(phases.verification) ? { ...phases.verification } : {}
   const checks = Array.isArray(verification.checks) ? verification.checks : []
@@ -4625,6 +4541,33 @@ function synthesizeVerificationFromAcceptance(phases: any, acceptance: any[]) {
     verification.allPassed = acceptance.every((entry: any) => entry?.result === 'pass')
   }
   return { ...phases, verification }
+}
+
+/**
+ * [3.2.3][CH-01] `dsh_workplan_verify` 专用补齐：让第四步自检与结算闸同一口径。
+ *
+ * verify 工具只收到 phases，没有顶层 acceptance 表；它手里的 expectedAcceptance
+ * 是计划里的验收原文（string[]），没有 result/evidence。若直接调
+ * `synthesizeVerificationFromAcceptance`，会生成 criterion 为空的假记录并被
+ * 校验器再打回一次。这里把「验收原文」映射成同编号的结构行（criterion=原文，
+ * 覆盖判据按编号/原文对号入座），不动模型已写的 checks/allPassed；逐条证据
+ * 仍由结算闸读结果块 acceptance[].evidence 核验，不在自检阶段伪造命令输出。
+ *
+ * 只在 verify 路径使用：结算路径仍走上面的对象版，避免字符串型历史 acceptance
+ * 被意外放宽。
+ */
+export function synthesizeVerificationForVerify(phases: any, expectedAcceptance: any[]) {
+  const rows = (Array.isArray(expectedAcceptance) ? expectedAcceptance : [])
+    .filter(Boolean)
+    .map((item: any) => {
+      if (isRecord(item) && typeof item.criterion === 'string') return item
+      return {
+        criterion: String(item),
+        result: 'pass',
+        evidence: '见结果块 acceptance 同编号条目的 evidence（结算闸核验）',
+      }
+    })
+  return synthesizeVerificationFromAcceptance(phases, rows)
 }
 
 export function adjudicateResult({ output, strict = true, expectedAcceptance = [], requirePhases = true, formatTier, expectedExperts = [], startPhases }: any): AdjudicateResult {
@@ -4822,7 +4765,7 @@ export function adjudicateResult({ output, strict = true, expectedAcceptance = [
       artifacts,
       needs,
       error: `验收项未被逐条回应（${coverage.covered}/${coverage.total}）：缺少 ${coverage.missing
-        .map((item: string) => truncate(String(item), 120)).slice(0, 5).join('；')}${hint}。请按计划验收逐条给出证据后再回报（顶层 acceptance[] 与 phases.verification.checks 是同一道闸的两次核验，必须逐条覆盖同一张验收表，缺一处即退回）。`,
+        .map((item: string) => truncate(String(item), 120)).slice(0, 5).join('；')}${hint}。请按计划验收逐条给出证据后再回报（只写顶层 acceptance 即可，checks 由平台生成）。`,
       /* [修复] 结果块已解析、缺口可经回喂补报：允许有界重试回喂。 */
       rereport: true,
     }
@@ -5219,6 +5162,20 @@ export function buildTeamBrief(plan: any, statuses: any, subtask: any, excludeId
     if (excludeIds.has(String(sibling.id))) continue
     const status = byId.get(sibling.id)
     const state = typeof status?.status === 'string' ? status.status : 'pending'
+    /*
+     * [3.2.4][B3 评估后保留] 曾试过把 pending 兄弟整行省略，但
+     * tests/token-economy-320.test.ts:75-79 明确钉住契约「并行兄弟必须仍可见」
+     * （执行者需要知道并行部门还没开工，避免空等或重复采集）——省下的几百字
+     * 不值得破坏该契约，pending 兄弟照旧注入。
+     */
+    /*
+     * [3.2.5][红线] 用户 2026-11-24 定死：所有子任务执行全过程禁止注意力丢失。
+     *
+     * 曾把 pending 兄弟的「目标 60 字」省掉（每行 −64 字），但目标属于唯一
+     * 信息：pending 兄弟打算做什么，决定执行者要不要等它、会不会和它重复
+     * 采集同一批输入。删除即注意力丢失，已回滚为与其他状态同一行格式；兄弟
+     * 简报仍按 3.1.9 排除依赖项（那是逐字重复，不是唯一信息）。
+     */
     const reason = typeof status?.error === 'string' && status.error.trim() !== ''
       ? truncate(status.error.trim(), 160)
       : '未给出原因'
@@ -5911,6 +5868,14 @@ export function applyStatus(statuses: any, subtaskId: any, patch: any) {
             ...(item?.requested && item.requested !== item.reasoningEffort
               ? { requested: String(item.requested) }
               : {}),
+            /*
+             * [3.2.4][O1] 负责人预登记载荷（startPhases + timeNotice）随梳理产物
+             * 持久化：否则重启/回放后 dispatch 读回时字段丢失，预登记静默失效。
+             * 原样透传（派发侧 sanitizeStartPhaseEvidence/预估判据消毒，非法照旧
+             * 走 phase-0），不在这里深拷贝校验，避免双判据漂移。
+             */
+            ...(item?.startPhases !== undefined ? { startPhases: item.startPhases } : {}),
+            ...(item?.timeNotice !== undefined ? { timeNotice: item.timeNotice } : {}),
           })),
         // [2.5.0] 负责人配置的整体任务等级随梳理产物留档（非法值丢弃不入库）。
         ...(REASONING_EFFORTS.includes(patch.consolidation.taskReasoningEffort)
@@ -5978,6 +5943,8 @@ export function applyStatus(statuses: any, subtaskId: any, patch: any) {
         // [2.5.0][自配档] 叶子自配档（权威）与钳制留痕/复杂度依据。
         ...(REASONING_EFFORTS.includes(item?.selfEffort) ? { selfEffort: item.selfEffort } : {}),
         ...(item?.selfEffortRequested && item.selfEffortRequested !== item.selfEffort ? { selfEffortRequested: String(item.selfEffortRequested) } : {}),
+        // [3.2.4][D1] 宿主能力钳制后的实际执行档（declared 与 effective 不一致时留痕，durable 回放不丢）。
+        ...(typeof item?.selfEffortEffective === 'string' && REASONING_EFFORTS.includes(item.selfEffortEffective) ? { selfEffortEffective: item.selfEffortEffective } : {}),
         ...(typeof item?.complexityRationale === 'string' && item.complexityRationale.trim() ? { complexityRationale: truncate(item.complexityRationale.trim(), 300) } : {}),
         // [3.0.8] 叶子执行前五步第 1/2/3 步开工证据（与自配档同为任务级配置）。
         ...(sanitizeStartPhaseEvidence(item?.startPhases) ? { startPhases: sanitizeStartPhaseEvidence(item?.startPhases) } : {}),
@@ -7831,6 +7798,14 @@ export function buildChildPrompt({
     plan?.taskAnchor?.text,
   ].filter((part: any) => typeof part === 'string').join('\n')
   const childNeedsFullContext = taskHasReferences(referenceProbe)
+  /*
+   * [3.2.5][红线] 用户 2026-11-24 定死：所有子任务执行全过程禁止注意力丢失。
+   *
+   * 曾把「自包含任务」的 1,200 字「最近对话背景」整块省略（−1,191 字/本），
+   * 但「自包含」是推断：指代探测只看得见词面，看不见隐含依赖（任务里没写
+   * 「它」，用户却可能在上文刚改过要求）。唯一信息的删除就是注意力丢失，
+   * 已回滚：自包含任务也保留最近 1,200 字背景；只有探测到指代才放 7,000 字。
+   */
   const background = compactBackground
     ? truncateTail(backgroundSource, childNeedsFullContext ? 7000 : 1200)
     : backgroundSource
@@ -7887,13 +7862,28 @@ export function buildChildPrompt({
    * the whole originalRequest is visible there. A longer request keeps its own
    * copy so no sentence silently disappears from the child task book.
    */
-  const visibleAnchorForDedup = truncate(anchorText, 4000)
+  const ANCHOR_VISIBLE_LIMIT = 4000
+  const visibleAnchorForDedup = truncate(anchorText, ANCHOR_VISIBLE_LIMIT)
+  const trimmedOriginalRequest = originalRequestText.trim()
   const globalTaskEchoedByAnchor = visibleAnchorForDedup.length > 0
-    && originalRequestText.trim().length >= 40
-    && visibleAnchorForDedup.includes(originalRequestText.trim())
+    && trimmedOriginalRequest.length >= 40
+    && visibleAnchorForDedup.includes(trimmedOriginalRequest)
+  /*
+   * [3.2.3][省钱 R1] 长请求 originalRequest 最多 8,000 字、锚点只显示 4,000 字
+   * （truncate 留 3,999 字 + 省略号）。旧判断「4,000 字包含 8,000 字」永远为假，
+   * 于是前 3,999 字在全局任务和锚点各付一遍。两者同源时只补锚点没显示的尾部，
+   * 一分不少；不同源的作者稿仍整段保留，不丢规划器补充的上下文。
+   */
+  const visibleAnchorPlainChars = anchorText.length > ANCHOR_VISIBLE_LIMIT
+    ? ANCHOR_VISIBLE_LIMIT - 1
+    : anchorText.length
+  const globalTaskIsAnchorPrefix = trimmedOriginalRequest.length >= 40
+    && anchorText.startsWith(trimmedOriginalRequest)
   const globalTaskLine = globalTaskEchoedByAnchor
     ? `全局任务：与下方「用户原要求」逐字锚点相同（sha256 ${String(plan?.taskAnchor?.sha256 ?? '').slice(0, 12)}…），以锚点为准，不再重复。`
-    : `全局任务：${originalRequestText}`
+    : globalTaskIsAnchorPrefix && trimmedOriginalRequest.length > visibleAnchorPlainChars
+      ? `全局任务：与下方「用户原要求」锚点同源，锚点仅显示前 ${visibleAnchorPlainChars} 字，余下：${trimmedOriginalRequest.slice(visibleAnchorPlainChars)}`
+      : `全局任务：${originalRequestText}`
   const stageName = stage?.name ?? '（未命名阶段）'
   const stageGoal = stage?.goal ?? '（未记录目标）'
   const team = statuses ? buildTeamBrief(plan, statuses, subtask, dependencyIds) : ''
@@ -7921,13 +7911,20 @@ export function buildChildPrompt({
          */
         ...(() => {
           const registered = sanitizeStartPhaseEvidence(previousFailure.registeredStartPhases)
-          return registered
-            ? [
+          if (!registered) return []
+          /*
+           * [3.2.3][省钱 W6] 有落盘引用时只带执行蓝图 + 审计链索引 + 文件路径；
+           * 无引用（旧回放/只读目录/写盘失败）仍回退原文逐字注入，证据一条不丢。
+           */
+          const evidenceRef = typeof previousFailure.startEvidenceRef === 'string' ? previousFailure.startEvidenceRef : ''
+          const brief = evidenceRef ? renderStartEvidenceBrief(registered, evidenceRef) : ''
+          return brief
+            ? [brief]
+            : [
                 '',
                 '【开工登记证据·原文（供核对；带 phase-0 登记的收尾可省略 phases.planning / phases.preparation，平台自动并入，不必重抄。若你因“变薄”被退回，通常是交卷新增条目太多触发每清单 20 条封顶：清空这两组让平台全部并入，或删减新增条目；下列原文逐字保留）】',
                 renderStartPhaseEvidence(registered),
               ]
-            : []
         })(),
       ].join('\n')
     : ''
@@ -8018,11 +8015,33 @@ export function buildChildPrompt({
     `最终交付物：${understanding.deliverable ?? '（未记录）'}`,
     ...anchorBlock,
     ...(llmRulesBrief ? ['', String(llmRulesBrief), ''] : []),
-    `主要矛盾：${contradiction}`,
-    `当前阶段：${stageName}（${stageGoal}）`,
-    `工作目录：${cwd || '（未知）'}`,
+    /*
+     * [3.2.4][省钱 B2] 《沟通交流格式规范》提前到任务书前部（原在最尾部）。
+     * 规范文本与层内档位固定（与核验门禁同一事实源，一字未改），放在易变块
+     * （工作目录/最近对话/依赖结果/兄弟进展/失败反馈/指示等）之前，让每次
+     * 激活请求的前段更长且跨重试字节级稳定——上游若启用前缀缓存即整段命中；
+     * 不启用时也无损（内容不变，只换位置）。
+     */
+    renderCommFormatSpec('leader'),
+    '提交前自查（强制）：逐条对照 F1–F11，全部满足后再提交；主 Agent 按同一规范核验，任一不合规即退回并列明条目，须修正重交。',
     '',
-    '最近对话背景（用于理解“它 / 这个 / B / 上一项”等指代；不是新的任务）：',
+    `主要矛盾：${contradiction}`,
+    `当前阶段：${stageName}${stageGoal && stageGoal !== '（未记录目标）' ? `（${stageGoal}）` : ''}`,
+    `工作目录：${cwd || '（未知）'}`,
+    /*
+     * [3.2.4][治本 H2] 产物根目录单一化。
+     *
+     * 缺陷现场（2026-11-23 wp-32bee059 T4）：同一子任务的 8 名专家把产物分散写到
+     * 了工作目录下的 reports/ 与 plugins/dsh-workplan/reports/ 两处——机制都能找到
+     * （checkArtifacts 按工作目录解析相对路径），但人核验时要在两个目录之间来回翻，
+     * 且「哪一份才是这次的正式产物」没人说得清。根因不是路径解析，是任务书从未
+     * 规定唯一产物根：工作目录只是提示，没有约束。
+     * 现在把根固定为「工作目录/reports/」并禁止写进任何子仓库；这是一条可核对的
+     * 硬约定（收尾报告的产物路径也必须相对它写）。
+     */
+    `产物根目录（唯一，强制）：${cwd ? `${cwd}/reports/` : '（工作目录）/reports/'}——所有产物一律写在这里（相对工作目录写作 reports/<任务代号>/<文件名>），不要写进任何子仓库（例如 plugins/…），也不要在工作目录根下散落临时文件。收尾回报与结果块里的产物路径必须相对这个根目录写。`,
+    '',
+    '最近对话背景（仅用于指代）：',
     background || '（无可用对话背景）',
     '',
     `你的子任务：${subtask.id} ${subtask.title}`,
@@ -8071,20 +8090,18 @@ export function buildChildPrompt({
      */
     phaseZeroContinuation
       ? '- 执行自己的任务：五步工作法的前三步已在 phase-0 完成并登记（见上方「phase-0→phase-1 接续」块及其登记原文），已登记内容不要重做、不要重复登记，直接从第四步执行；只有登记范围之外、执行确实需要的细节缺口，才先补齐（只补缺口，不推倒重来）。执行前先全面、全盘、深入梳理、研究、思考自己的任务，并基于第一步完成好的所有结果确认需要哪些资源、哪些工具、具体实施方案（方法、流程、步骤，含依据 approachBasis）——这一步只做核对与增量补充。'
-      : '- 执行自己的任务必须先完成上方「五步工作法」的前三步（3.0.8 单一框架）：第一步全面、全盘、深入梳理、研究、思考自己的任务；第二步基于第一步完成好的所有结果研究需要哪些资源、哪些工具、具体实施方案（方法、流程、步骤，含依据 approachBasis）；第三步把资源与工具真正备齐并给出就绪证据。前三步证据经 review 的 startPhases 一并提交并登记，未登记合格证据前禁止进入执行与再分配。',
-    '- 以全球顶尖专家标准执行：先诊断根因再动手，产出与证据要能通过同行复核，不交浅层补丁、不遗留问题。',
+      : '- 执行自己的任务必须先完成上方「五步工作法」的前三步（梳理任务 → 研究资源/工具/方案含 approachBasis → 备齐并给就绪证据），前三步证据经 review 的 startPhases 一并提交并登记，未登记合格证据前禁止进入执行与再分配。前三步细则已在上方五步协议逐字给出，不再复述。',
+    '- 先诊断根因再动手，证据须经同行复核，不交浅层补丁。',
     // [2.5.0] 根因修复（用户要求 1）：旧文案「不要派生新的 Agent / 你没有派发
     // 权限」与 dsh_workplan_delegate 授权正面冲突，负责人收到两套矛盾指令后
     // 普遍不敢再分配。现在明确：负责人拥有本部门内再分配权限，禁令只针对
     // 主计划派发与第四层派生。
-    '- 只完成本子任务，不擅自扩大范围；除任务书允许的 dsh_workplan_delegate 外，不得派生任何其它 Agent。',
-    '- 你没有主计划派发权限，也不能重启或安装任何服务；遇到这类步骤，必须先上报（见下方「遇阻上报」），再停止推进等待指示，不要空转。',
-    '- 不得编造事实、文件、命令结果或证据；无法确认时明确写“未验证”。',
-    '- 可以读取工作目录、运行必要命令、修改与任务相关的文件。',
-    '- 优先使用给定上下文和本地工具；只有任务明确需要最新外部信息时才联网搜索。',
-    '- 先把该做的检查做完再汇报：每条验收标准至少要有一处可复核的证据（命令输出/文件/引用），不要为了省时间跳过验证。',
+    '- 只做本子任务；除 dsh_workplan_delegate 外不得派生其它 Agent。',
+    '- 你没有主计划派发权限，不能重启/安装服务；遇到时先上报（见「遇阻上报」），再停止推进等待指示。',
+    '- 不得编造事实/文件/结果/证据；无法确认写“未验证”。可用工作目录、命令与本地工具；需要最新外部信息才联网。',
+    '- 先做完检查再汇报：每条验收至少一处可复核证据。',
     '- 如果确实无法完成，第一行输出 `BLOCKED: 原因`，并按下方「遇阻上报」给出 question。',
-    '- 完成后用简洁中文汇报（给主 Agent 的正文 ≤600 字，细节放产物与结果块，不要复述证据 JSON）：做了什么、证据/文件、验收结果、遗留问题。',
+    '- 完成后用简洁中文汇报（给主 Agent 的正文 ≤200 字、≤3 句：结论、产物路径、遗留项；细节只放结果块与产物，不复述证据 JSON）。',
     '',
     // [2.5.0] 用户要求 1/2/3 的负责人授权段：再分配权限 + 整体推理等级配置
     // + 更简单的多人分工。与 llm-rules.ts buildLlmRulesBrief 同一口径。
@@ -8107,6 +8124,12 @@ export function buildChildPrompt({
       '- 分配必须更简单：每位下级只承担单一目标、单一主产物、可独立验收的一项工作；任务描述完整自包含，让下级拿到就能做，不要把多个交付物压给同一个人。',
       '- 先配置后开工（平台硬规则）：你以 phase-0（low 档）启动，唯一职责是评估你接到任务的复杂度，并在 consolidation.taskReasoningEffort 里配置你自己的整体推理等级（轻度=low；qwen 中等=medium、非 qwen 中等=high；qwen 非常复杂=xhigh、非 qwen 非常复杂=max）；登记后平台立即以你的自配档接续（宿主另起执行会话并携带 phase-0 产物，不是当前那个评估会话）进入 phase-1（派活/协调/验收/重试决策整个分配过程全程用自配档，重试/续跑不丢）。分工表 per-expert 档仅为建议：每位专家必须在 phase-0 经 self_effort 按自己分到的单项任务复杂度自配自己的等级，专家自配为权威，越界档由平台按当前模型家族合法集合自动钳制并留痕。low（轻度）/未配置任务禁止下派：负责人亲自执行，开工证据经 action="direct" 登记；复杂任务才走 review+dispatch。',
       '- 第三层专家是叶子层：他们不得再派生第四层；下级结论会送回本会话，收齐后由你汇总核验（必须覆盖全部已派发专家，不得只汇总一部分），再写最终结果块。用 action="status" 随时查看梳理登记与下级进度。',
+      /*
+       * [3.2.3] 顺序推理链不拆 + 共享文件不并发写：提示词与 planDelegations /
+       * dispatchPlan 两道硬闸同源，防止把链式任务拆成多个独立上下文。
+       */
+      '- 顺序推理链不拆（3.2.3 硬闸）：若你接到的任务要求按固定顺序推理（先…再/逐步/基于上一步结论/链式），不得拆给多名独立专家；只派 1 名专家一次做完（链式任务豁免复杂任务 ≥8 人下限，这是平台机制，不是让你降档），或由你亲自执行——亲自执行必须先自己评估复杂度，再经 action="direct" 提交自评复杂档 reasoningEffort（qwen: medium/xhigh；非 qwen: high/max，不得 low）与 startPhases 开工证据。中间结论留在同一份产物里。跨子任务只传已落盘产物引用，不传推理过程摘要替代结论。',
+      '- 共享可变状态串行（3.2.3 硬闸）：专家共享同一工作目录；每位专家只写本任务 outputs 声明的产物与自己的 reports/wp-member-*.json。平台会按产物路径自动串行化重叠产物；未声明的共享文件不得并发写，必须改动时先回报负责人、由平台按依赖串行派发。',
     ]),
     // [T6][契约v1 §6] 负责人须知：下属开工预估即时送达 + 留痕 + 未上报拦截（时长求和归 T7，此处不实现）。
     '- 下属经 self_effort 上报的开工预估（整数分钟）会即时送达你会话并留痕（kind=estimate）；未上报者被平台拦截开工。',
@@ -8122,61 +8145,54 @@ export function buildChildPrompt({
      * 预告在目标解析阶段必然失败。现在改为：注入真实父会话 id + 用宿主
      * 契约里的字段名 + 明确失败后的确定性重试与留痕，不再有「猜目标」的余地。
      */
-    '执行时间与进度沟通（部门负责人和全球顶尖专家均无执行硬截止）：',
+    '执行时间与进度沟通（均无执行硬截止）：',
     noticeTargetLine,
-    `- 开工前先报预估时长：用 \`${noticeCall}\` 报预估完成时长，新预估覆盖旧预估；预估仅供参考、非承诺，只用于协调和告知，不累加为任何时间判据，也不影响验收。`,
-    '- 发现预估明显变化时，用同一个目标更新预估并说明原因；无需申请延期，extendMs 已停用。平台不会仅因耗时、暂时无新事件或未及时回执而中止、判 blocked 或换人接手。',
-    '- 完成即回报：用同一个目标报核心结论（做了什么、证据/文件、验收结果），不要等整轮结束；长任务应及时落盘并列出已完成路径。',
+    `- 开工前先报预估时长：用 \`${noticeCall}\` 报预估完成时长（新预估覆盖旧；预估仅供参考，只用于协调，不影响验收）。`,
+    '- 预估变化时用同一目标更新并说明；无需申请延期，extendMs 已停用；平台不会因耗时、无新事件或未回执而中止、判 blocked 或换人。',
+    '- 完成即回报核心结论；长任务及时落盘。',
     ...(noticeTarget
       ? [
-        '- 失败后的确定性处理（禁止静默丢弃）：`send_message` 若返回错误（`is unavailable` / `UNAUTHORIZED` / 工具不存在），先在汇报首行原样记录 `noticeChannel: {"target":"' + noticeTarget + '","at":<毫秒时间戳>,"error":"<错误原文>"}`，再用**同一个** agent_id 重试一次；仍失败就继续把子任务做完，把这条记录留在结果里（供主 Agent 阅读；插件不解析这一行，通道结论以状态行观测为准）。**不得改用其它目标，也不得向任何非本轮父会话发送**——那是越权发送，会触发宿主 lineage 拒绝。',
+        '- 失败处理：`send_message` 返回错误时，在汇报首行记录 `noticeChannel: {"target":"' + noticeTarget + '","at":<毫秒>,"error":"<原文>"}` 并用同一 agent_id 重试一次；仍失败就继续做，把记录留下（插件不解析这一行，以状态行观测为准）。不得改用其它目标或向非本轮父会话发送（越权，会触发 lineage 拒绝）。',
       ]
       : []),
-    '- 预估上报会被插件即时转告主 Agent（含「请把此预期执行时间告知用户」提示），主 Agent 会把你报的预估时间告知用户，让双方都有准备；实际完成与否只由真实结果和验收证据决定。',
+    '- 预估上报会转告主 Agent；实际完成只看结果与验收证据。',
     '',
     '遇阻上报（强制，先于继续动作）：',
-    '- 出现以下任一情况，第一动作是上报，不是猜测、绕过或静默继续：缺少权限/输入/依赖产物；需求自相矛盾；无法验证；同一命令连续两次失败；需要主 Agent 决定方向。',
-    '- 优先调用工具：`dsh_workplan_escalate({ "subtaskId": "<你的子任务 ID>", "question": "需要主 Agent 回答的单个问题", "options": ["可选项 A", "可选项 B"], "needs": ["需要谁提供什么"] })`。调用成功后停止推进，只做只读核对。',
-    '- 如果该工具不可用：在结果块里写 `"status":"blocked"`、`"blockedReason":"..."`，并加上 `"question":"..."` 与 `"options":[...]`。',
-    '- 上报必须写清：卡在哪一步、已经尝试过什么、需要谁做什么决定；不要把“未验证”当成受阻上报。',
-    '- 能独立完成的部分先做完再上报；但一旦需要外部决定，立即停止写入，等待指示，不得自行选定一个选项继续。',
+    '- 任一情况第一动作是上报（不猜测、不绕过、不静默继续）：缺权限/输入/依赖产物、需求矛盾、无法验证、同一命令连续两次失败、需主 Agent 定方向。',
+    '- 优先用 `dsh_workplan_escalate({ "subtaskId": "<你的子任务 ID>", "question": "需要主 Agent 回答的单个问题", "options": ["可选项 A", "可选项 B"], "needs": ["需要谁提供什么"] })`；调用成功后停止推进，只做只读核对。',
+    '- 工具不可用时在结果块写 `"status":"blocked"`、`"blockedReason":"..."`、`"question":"..."`、`"options":[...]`。',
+    '- 写清卡在哪一步、已试过什么、需谁决定；不要把“未验证”当受阻上报。能独立完成的部分先做完；一旦需外部决定立即停止写入、等待指示，不自行选一个选项继续。',
     '',
-    '结果回传（必填）：在汇报的最后附上一个结构化结果块，主 Agent 会按它逐项核对，不再只依赖自述。',
+    '结果回传（必填）：汇报最后附结构化结果块。',
     EVIDENCE_MARKER_BEGIN,
     ...(phaseZeroContinuation
       ? [
         '- phase-0 已登记 phases.planning / phases.preparation：下面模板可省略这两组，平台结算时自动并入登记原文（并集落账、不会变薄）；只写 execution / verification 与顶层字段，不要重抄登记内容。',
-        '{"status":"done","blockedReason":"","phases":{"execution":{"steps":["实际执行的步骤"],"deviations":[]},"verification":{"requirementCheck":"逐条核对用户原要求的结果","retrospective":{"problems":["现象+根因"],"detours":[],"resolutions":["如何解决"],"prevention":["遇到…先…"]}}},"acceptance":[{"criterion":"A1 验收原文","result":"pass","evidence":"命令输出/文件/引用"}],"artifacts":[{"kind":"file","ref":"相对路径"}],"needs":[],"question":"","options":[],"timeSpentMinutes":0,"finalEstimateMinutes":0}',
+        '{"status":"done","phases":{"execution":{"steps":["步骤"],"deviations":[]},"verification":{"retrospective":{"problems":["现象+根因"],"detours":[],"resolutions":["解决"],"prevention":["遇到…先…"]}}},"acceptance":[{"criterion":"A1","result":"pass","evidence":"证据"}],"artifacts":[{"kind":"file","ref":"路径"}]}',
       ]
       : [
-        '{"status":"done","blockedReason":"","phases":{"planning":{"problemAnalysis":["要解决的问题 1（含现状/约束/未知/主要矛盾）"],"constraints":["..."],"unknowns":["..."],"resources":["完成本任务需要的资源：数据/文件/权限/人/知识/时间（逐项写用途与获取方式）"],"tools":["需要的工具及用途（为什么选它）"],"approach":["第 1 步：做什么 → 产出什么 → 如何证明"],"approachBasis":["第一步的哪条事实/约束/矛盾 → 决定了第二步的哪项资源/工具/步骤（逐条对应）"]},"preparation":{"prepared":["已备齐的资源/工具：准备了什么、在哪里、是否可用"],"evidence":["每项就绪证据：命令输出/文件路径/配置项/版本号/引用"]},"execution":{"steps":["实际执行的步骤"],"deviations":[]},"verification":{"requirementCheck":"逐条核对用户原要求的结果","retrospective":{"problems":["本次遇到的问题（现象+根因）"],"detours":["走过的弯路/返工/无效尝试；确实没有就写 []"],"resolutions":["最终是如何解决的"],"prevention":["以后如何预防再犯：遇到…先…"]}}},"acceptance":[{"criterion":"A1 把上面的验收标准原文抄在这里","result":"pass","evidence":"用命令输出、文件路径或引用证明"}],"artifacts":[{"kind":"file","ref":"相对工作目录的路径"}],"needs":[],"question":"","options":[],"timeSpentMinutes":0,"finalEstimateMinutes":0}',
+        '{"status":"done","phases":{"planning":{"problemAnalysis":["问题"],"resources":["资源"],"tools":["工具"],"approach":["步骤"],"approachBasis":["依据"]},"preparation":{"prepared":["已备"],"evidence":["证据"]},"execution":{"steps":["步骤"],"deviations":[]},"verification":{"retrospective":{"problems":["现象+根因"],"detours":[],"resolutions":["解决"],"prevention":["遇到…先…"]}}},"acceptance":[{"criterion":"A1","result":"pass","evidence":"证据"}],"artifacts":[{"kind":"file","ref":"路径"}]}',
       ]),
     EVIDENCE_MARKER_END,
-    '- phases.verification.checks 与 allPassed 可省略：平台会用顶层 acceptance 逐条生成验证记录（只有 result=pass 才计通过），不必把同一张验收表写两遍；若你显式写了，以你写的为准。',
-    '- [2.2.9] 盘上结算备份（必做）：发送结果块之前，先把同一份 JSON 写入 '
+    // [3.2.5][红线] 自查句原本在结果模板后还有一份 66 字副本。重复句删除不丢
+    // 信息（上方规范里唯一的那句仍在），但「提交前」这个位置有近期效应；这里
+    // 用一句 19 字短提醒把该位置的注意力补回来，成本只有原副本的三成。
+    '提交前再对照上方 F1–F11 自查一遍。',
+    // [3.2.3][省钱 R4] checks/allPassed 可省略的口径已由上方五步协议逐字给出，
+    // 这里不再重复一遍（phase-0 用续接版、其余用完整版，两版都有该句）。
+    '- blocked 时另加 question（F8）与 options/blockedReason；needs 仅在确有跨部门需求时写（写清部门+需要什么+做什么，不要直连其他子 Agent）；time 字段可选，未知省略。',
+    '- 盘上结算备份（必做）：发送结果块前，把上面同一份 JSON 写入 '
       + `reports/wp-settlement-${plan?.planId ? `${plan.planId}-` : ''}${subtask.id}.json`
-      + '（相对工作目录）。[T4][F3] 文件名带 planId：多个计划同时执行时，同名子任务的备份不再互相覆盖；读取侧仍兼容旧名 reports/wp-settlement-<子任务 ID>.json（同样受新鲜度与归属闸约束）。收尾消息因异常（error/截断/超时）丢失时，宿主会自动采纳该备份结算，避免「已完成的工作」被误判为「缺失回报」而受阻并级联冻结下游。[2.5.2][T4b] 备份 JSON 顶层必须带 planId 与 subtaskId（childId 若已知也带上），且必须是本次执行新写（覆盖同名旧文件）：宿主采纳前会校验新鲜度（文件修改时间不早于本次尝试开始时间）与归属（planId/subtaskId 必须匹配本计划/本子任务），陈旧或跨计划的备份会被拒绝采纳并留审计痕。',
-    '- status 只能是 done / blocked / partial；partial 会被当作受阻处理。',
-    '- acceptance 必须逐条覆盖上面的验收标准：criterion 以 A1、A2… 开头对号入座（编号不可省略）；result 只能是 pass / fail / unverified。无法确认就写 unverified，不要写 pass。',
-    '- artifacts 写你实际产出或修改的文件（kind=file，ref 用相对路径）、链接（kind=url）或说明（kind=note）。',
-    '- needs 写需要其他部门配合的事项，每条写清「哪个部门 + 需要什么 + 用来做什么」；它会被登记为待处理需求，主 Agent 必须处置后计划才能交付。不要直连其他子 Agent。',
-    '- question/options 只在受阻上报时填写；done 时保持空字符串/空数组。',
-    /*
-     * [2.2.0][T3/O-2c] 用时回填字段（方案 §2.2/§2.4 结果块契约：「模板增加
-     * timeSpentMinutes、finalEstimateMinutes 字段」）。纯 advisory：F1-F9 与
-     * 既有字段零改动，缺失/非法即省略，不判不合规、不影响验收判定（方案 §2.5
-     * 「时间字段纯 advisory」）。
-     */
-    '- timeSpentMinutes / finalEstimateMinutes（可选，整数分钟）：完成后把实际耗时与最终预估回填进结果块，未知可省略；两项仅供参考与协商审计，不影响验收判定。',
-    `- 硬上限（校验器逐字执行）：每个清单（数组）最多 ${MAX_PHASE_LIST_ITEMS} 条、每条最多 ${MAX_PHASE_ITEM_CHARS} 字；phases 四组合计最多 ${MAX_PHASE_TOTAL_CHARS} 字；整块标记内 JSON 的解析参考长度为 ${MAX_EVIDENCE_BLOCK_CHARS} 字符（只影响定位，不构成额外字数豁免）；不要把这段模板本身抄进结果块。`,
+      + '（相对工作目录），顶层带 planId/subtaskId；必须是本次新写，宿主按新鲜度与归属采纳，消息丢失时用它结算。',
+    '- status 只能是 done / blocked / partial（partial 视为受阻）；criterion 只写 A1、A2… 编号（可附 ≤20 字短标题）；result 只能 pass / fail / unverified；artifacts 的 kind 只能 file / url / note 且 ref 非空。',
+    `- 整块标记内 JSON 的解析参考长度 ${MAX_EVIDENCE_BLOCK_CHARS} 字符；timeSpentMinutes / finalEstimateMinutes 可选，未知省略；其余字段语义与门禁见上方《沟通交流格式规范》F1–F11。`,
     '',
     /*
      * [2.1.0] 派发工作时附带统一沟通交流格式要求（用户 2026-11-06 的强制要求）。
      *
      * 规范文本与主 Agent 核验结果用的是同一份数据（src/comm-format.ts），
      * 「附带的要求」与「核验的尺子」由此不可能长成两个版本。
-     */
-    /*
+     *
      * [3.0.0][用户要求 8/10/11] 部门汇总契约：负责人必须全面汇总本部门全部专家
      * 汇报，但汇总本身必须精简、禁止累赘重复，并以 JSON 直接交回主 Agent。
      * 契约文本与门禁（F11）同一事实源。
@@ -8184,10 +8200,10 @@ export function buildChildPrompt({
      * [3.1.6][省钱三件套 ③] 这里不再单独渲染一次 renderDepartmentSummarySpec()：
      * renderCommFormatSpec('leader') 已在内含同一段契约（comm-format.ts:274），
      * 两行相邻导致同一份 726 字符契约逐字出现两遍（OV-08）。只保留后者。
+     *
+     * [3.2.4][省钱 B2] 规范本体已提前到任务书前部（紧随规则简报之后）。
+     * [3.2.4][省钱] 自查行也只保留前部那一处：同一句 66 字逐字出现两遍不增加
+     * 任何约束，却让每本任务书（含每次失败重试）都多付一次。
      */
-    renderCommFormatSpec('leader'),
-    '提交前自查（强制）：逐条对照上面《沟通交流格式规范》F1–F11，确认全部满足后再提交；'
-      + '主 Agent 收到结果后按同一份规范逐条核验，任一不合规即立刻退回，你会收到列明不合规条目的退回通知，'
-      + '须逐条修正、重新自查通过后再重新提交完整结果。',
   ].join('\n'))
 }

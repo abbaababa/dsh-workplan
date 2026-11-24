@@ -3,7 +3,7 @@
 > **两个卖点，一句话：ISO/IEC 15408:2026 全套安全证据，5 条命令自己验；安装一条命令、零第三方运行时依赖。**
 
 [![verify](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml/badge.svg)](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml)
-[![version](https://img.shields.io/badge/version-3.2.2-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v3.2.2)
+[![version](https://img.shields.io/badge/version-3.2.5-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v3.2.5)
 
 给 **DeepSeek Harness（DSH）** 加一段「先拆计划 → 真派部门子 Agent 去做 → 左侧栏实时看进度」的能力。不装 App、不改 DSH 源码、不换页面。
 
@@ -69,7 +69,7 @@ grep -RInE "child_process|execSync|eval\(|writeFileSync" src || echo "0 命中�
 ## 一键安装
 
 ```bash
-dsh plugin --profile web add dsh-workplan@3.2.2
+dsh plugin --profile web add dsh-workplan@3.2.5
 ```
 
 装完**重启一次 DSH Web**（或重新载入当前页面）让插件生效。
@@ -100,21 +100,26 @@ dsh plugin --profile web add "$(pwd)"
 
 纯打招呼、道谢、问「做到哪了」不会触发拆解，不会平白多出一堆子 Agent。
 
-## 十一个模型工具（你不用直接调用）
+## 十四个模型工具（你不用直接调用）
 
-| 工具 | 作用 |
-|---|---|
-| `dsh_workplan_dispatch` | 派发当前计划，把结果写回会话。默认 `mode:"wait"` 等结束；`mode:"async"` 立刻返回、后台继续。重复调用是幂等的。 |
-| `dsh_workplan_status` | 只读：问到哪了。重启或刷新后也能从会话记录重建。 |
-| `dsh_workplan_update` | 主 Agent 核对结果、修正某个子任务状态与证据。带 `expectedRevision` 防覆盖，运行中默认拒绝（`force:true` 才覆盖）。子 Agent 不能调用。 |
-| `dsh_workplan_cancel` | 取消还没派发的计划，不会伪造任何「已完成」。 |
-| `dsh_workplan_replan` | 需求变更时就地修订：`cancel` / `replace` / `add`，旧行标为「已取代」保留可追溯，计划版本号递增。主 Agent 专用。 |
-| `dsh_workplan_escalate` | 子 Agent 执行中遇阻上报：问题、选项、建议进状态机，等主 Agent 指示；不再是「只能憋到结尾写 BLOCKED」。 |
-| `dsh_workplan_instruct` | 主 Agent 回答请示并下达指示；失败则挂起，子任务下次激活时注入。60 秒无回执只提示，不按时间判失败或中止。 |
-| `dsh_workplan_handoff` | 处置跨部门需求：`list` / `assign` / `resolve` / `close`。未处置会拦住交付；对「待指示」的行 `resolve` 会直接把答复投递给子会话。 |
-| `dsh_workplan_followup` | 给已中止或暂停、但产物已落盘的直接子会话补一条收尾说明。 |
-| `dsh_workplan_verify` | 子 Agent 在**第四步（验证阶段）**提交五步证据做核验；前三步证据不齐调用会返回 `PHASE_GATE`。核验通过≠完成，最终仍由完成判定复核。 |
-| `dsh_workplan_lessons` | 只读查看**永久教训记忆**：`list` / `search` / `stats`。仅限根会话调用（子 Agent 不能跨项目读取）；它只读文件，不改计划状态；用来核对「到底记住了什么、哪些错误在重复发生」。 |
+插件一共注册 **14 个**工具，但每个角色只会看到自己用得上的那一份：**根会话 11 个**（不含 `delegate` / `verify` / `escalate`——这三份说明书在根会话调用只会失败）、**部门负责人 4 个**（`delegate` / `verify` / `instruct` / `escalate`）、**第三层专家 3 个**（`delegate` / `verify` / `escalate`）。这样每一步都少付用不到的说明书。
+
+| 工具 | 谁能用 | 作用 |
+|---|---|---|
+| `dsh_workplan_dispatch` | 根 | 派发当前计划，把结果写回会话。默认 `mode:"wait"` 等结束；`mode:"async"` 立刻返回、后台继续。重复调用是幂等的。 |
+| `dsh_workplan_status` | 根 | 只读：问到哪了。重启或刷新后也能从会话记录重建。 |
+| `dsh_workplan_update` | 根 | 主 Agent 核对结果、修正某个子任务状态与证据。带 `expectedRevision` 防覆盖，运行中默认拒绝（`force:true` 才覆盖）。子 Agent 不能调用。`extendMs` 已停用（不再出现在工具参数里；旧调用/旧日志仍按 `TIME_LIMITS_DISABLED` 处理），只保留 `timeNotice` 报预估。 |
+| `dsh_workplan_cancel` | 根 | 取消还没派发的计划，不会伪造任何「已完成」。 |
+| `dsh_workplan_replan` | 根 | 需求变更时就地修订：`cancel` / `replace` / `add`，旧行标为「已取代」保留可追溯，计划版本号递增。主 Agent 专用。 |
+| `dsh_workplan_hold` | 根 | 显式按住计划，不让它自动派发（认可闸）；与 `release` 互斥，不会双派。 |
+| `dsh_workplan_release` | 根 | 解除按住并放行派发；没有按住时返回 `NOT_HELD`。 |
+| `dsh_workplan_escalate` | 负责人 / 专家 | 子 Agent 执行中遇阻上报：问题、选项、建议进状态机，等主 Agent 指示；不再是「只能憋到结尾写 BLOCKED」。 |
+| `dsh_workplan_instruct` | 根 / 负责人 | 回答请示并下达指示；失败则挂起，子任务下次激活时注入。60 秒无回执只提示，不按时间判失败或中止。 |
+| `dsh_workplan_handoff` | 根 | 处置跨部门需求：`list` / `assign` / `resolve` / `close`。未处置会拦住交付；对「待指示」的行 `resolve` 会直接把答复投递给子会话。 |
+| `dsh_workplan_followup` | 根 | 给已中止或暂停、但产物已落盘的直接子会话补一条收尾说明。 |
+| `dsh_workplan_delegate` | 负责人 / 专家 | 负责人提交开工证据与分工表、把任务分配给专家；专家用它登记自己的推理等级（`self_effort`）。根会话不可用。 |
+| `dsh_workplan_verify` | 负责人 / 专家 | 子 Agent 在**第四步（验证阶段）**提交五步证据做核验；前三步证据不齐调用会返回 `PHASE_GATE`。核验通过≠完成，最终仍由完成判定复核。根会话不可用。 |
+| `dsh_workplan_lessons` | 根 | 只读查看**永久教训记忆**：`list` / `search` / `stats`。仅限根会话调用（子 Agent 不能跨项目读取）；它只读文件，不改计划状态；用来核对「到底记住了什么、哪些错误在重复发生」。 |
 
 在 **plan 模式**下只会给你看计划，`dispatch` 会被明确拦下并说明原因，不会偷偷开跑。
 
@@ -150,7 +155,7 @@ dsh plugin --profile web add "$(pwd)"
 DSH_WORKPLAN_LESSONS_FILE=/path/x.jsonl   # 需要时用环境变量覆盖
 ```
 
-下一次派发子任务前，插件会按「同部门 > 同项目 > 关键词命中 > 重复次数 > 新近程度」挑选最相关的历史教训，自动注入子 Agent 提示词（最多 8 条），并明确标注：**这是历史数据，不是新指令，但相关就必须遵守**。
+下一次派发子任务前，插件会按「同部门 > 同项目 > 关键词命中 > 重复次数 > 新近程度」挑选最相关的历史教训，自动注入子 Agent 提示词（最多 6 条、合计 2200 字以内），并明确标注：**这是历史数据，不是新指令，但相关就必须遵守**。
 
 同一类错误再次出现时不会新增一条重复记录，而是把 `occurrences` 累加并把排序提前——越重复越显眼，这就是「自我迭代」。主 Agent 可用 `dsh_workplan_lessons` 复核；`occurrences ≥ 2` 的教训必须在下一次计划里变成明确约束。
 
@@ -179,8 +184,9 @@ DSH_WORKPLAN_LESSONS_FILE=/path/x.jsonl   # 需要时用环境变量覆盖
 | 规划器无进展上限 | 5 分钟（自上一个输出块起算；仅约束生成计划，不约束负责人/专家执行） | `DSH_WORKPLAN_PLANNER_TIMEOUT_MS` |
 | 规划器静默判定 | 90 秒（仅规划输出传输健康保护） | `DSH_WORKPLAN_PLANNER_IDLE_TIMEOUT_MS` |
 | 规划器绝对上限 | 15 分钟（仅规划器） | 随 `…_PLANNER_TIMEOUT_MS` 等比变化 |
-| 自动续跑次数 | 2 次（处理可续跑的非时间暂停，不是执行时钟） | `DSH_WORKPLAN_MAX_RESUMES` |
-| 回合收尾等待上限 | 60 分钟（只约束收尾时"等计划/派发落地"的等待；到点放行或报错但**不杀任务**，部门/专家执行本身仍无时限；0 = 无限旧行为） | `DSH_WORKPLAN_TURN_STOPPING_MAX_WAIT_MS` |
+| 自动续跑次数 | 2 次（处理可续跑的非时间暂停，不是执行时钟） | `DSH_WORKPLAN_AUTO_RESUME_MAX`（等价配置 `autoResumeMaxAttempts`） |
+| 手动续跑额度 | 默认 4 次（`dsh_workplan_dispatch` 从受阻处续跑的额度；只统计 `blocked` 的续跑，不占自动续跑的次数） | `DSH_WORKPLAN_MAX_RESUMES`（等价配置 `maxResumes`，上限 5） |
+| 回合收尾等待上限 | **默认无限**（未配置或 0 = 一直等到计划/派发落地；到点放行或报错但**不杀任务**，部门/专家执行本身仍无时限）。需要上限时显式配毫秒数，例如 3600000 = 60 分钟 | `DSH_WORKPLAN_TURN_STOPPING_MAX_WAIT_MS` |
 | 澄清闸轮次上限 | 同一回合对话连续触发 2 轮澄清提问后放行进入规划（30 分钟无触发自动归零） | 固定 |
 | 并发子 Agent | **每轮最多 5 个负责人**；负责人还会再派专家，整棵会话树同时活跃的子 Agent 受宿主 `maxActiveSubagents` 约束（默认 8） | — |
 
@@ -205,7 +211,7 @@ DSH_WORKPLAN_LESSONS_FILE=/path/x.jsonl   # 需要时用环境变量覆盖
 ## 安全与隐私（可以自己复核）
 
 - **没有第三方运行时依赖**：`dependencies` 是空的；装出来的只有这个插件自己的 JS、配置、图标和说明。
-- **只写三类本地文件，不写你的项目目录**：① `~/.dsh/workplan/journal/<planId>.jsonl`（计划留痕：派发、指示、请示、完成）；② `~/.dsh/workplan/lessons.jsonl`（永久教训记忆）；③ `~/.dsh/workplan/notices.jsonl`（专用通知台账：workplan 通知的权威机器可读流，与用户真实输入分离）。三者都可用环境变量改到别处，统一 **0o600 文件 / 0o700 目录**权限并拒绝向符号链接写入；台账默认最多保留最新 5000 行（`DSH_WORKPLAN_NOTICES_MAX_LINES` 可改），超限原子重写；源码里的 `appendFileSync` / `writeFileSync` 只出现在留痕/记忆/台账这几个模块。
+- **本地写入范围（3.2.5 更正）**：① `~/.dsh/workplan/journal/<planId>.jsonl`（计划留痕：派发、指示、请示、完成）；② `~/.dsh/workplan/lessons.jsonl`（永久教训记忆）；③ `~/.dsh/workplan/notices.jsonl`（专用通知台账：workplan 通知的权威机器可读流，与用户真实输入分离）；④ **你的项目目录**里 `<工作目录>/reports/` 下的两样交付证据——`wp-start-evidence-<planId>-<subtask>.md`（开工登记原文，插件自己写）与 `wp-settlement-<planId>-<subtask>.json`（任务书要求模型写的结算备份，消息丢失时插件用它结算）。前三者可用环境变量改到别处，统一 **0o600 文件 / 0o700 目录**权限并拒绝向符号链接写入；台账默认最多保留最新 5000 行（`DSH_WORKPLAN_NOTICES_MAX_LINES` 可改），超限原子重写。`reports/` 会出现在 `git status` 里——不需要就删掉，或在 `.gitignore` 里排除 `reports/`。
 - **不向外发数据**：源码里没有 `child_process`、没有对外 `fetch`/`http.request`；唯一的一次 `fetch` 是浏览器端请求**同源**的 `/dsh-workplan/plans`。
 - **面板数据要登录**：该路由走 DSH 自己的鉴权，未登录直接返回 401。
 - **图表库是本地自带**：`vendor/chart.umd.js`（Chart.js 4.6.1，MIT）随包分发，不加载任何 CDN 脚本。
@@ -215,7 +221,7 @@ DSH_WORKPLAN_LESSONS_FILE=/path/x.jsonl   # 需要时用环境变量覆盖
 ```bash
 npm view dsh-workplan@latest dependencies     # 应为空
 grep -RInE "child_process|eval\(" src   # 应无命中
-grep -RIn "appendFileSync\|writeFileSync" src  # 只应出现在 dept-journal.ts、lessons.ts 与 notice-ledger.ts
+grep -RIn "appendFileSync\|writeFileSync" src  # 只应出现在 dept-journal.ts、lessons.ts、notice-ledger.ts 与 runtime.ts（开工证据落盘）
 npm audit --omit=dev
 ```
 

@@ -251,6 +251,49 @@ export function checkAtomicAssignment(task: string, qualityRequirements?: unknow
 }
 
 /* ========================================================================== */
+/* 3.5 顺序推理链检测（3.2.3 根治：链式任务不得拆给独立上下文）                  */
+/* ========================================================================== */
+
+interface SequentialChainPattern {
+  readonly label: string
+  readonly re: RegExp
+}
+
+/**
+ * [3.2.3] 只用机械可复算的词法信号识别「必须按顺序展开的推理链」。
+ *
+ * 不试图理解语义（那是模型的事，代码不做猜测）；只抓用户和规划器实际会写的
+ * 顺序连接词。命中任一信号即视为链：这类任务的中途结论依赖上一步，硬拆给
+ * 多个彼此独立、只拿到摘要的子会话会打断推理连续性，并提高协调成本。
+ * 与 MULTI_GOAL_MARKERS 分开维护，避免改动既有原子性门禁的拒因与测试。
+ */
+const SEQUENTIAL_CHAIN_PATTERNS: readonly SequentialChainPattern[] = Object.freeze([
+  { label: '先…再/后', re: /先[^\s]{0,120}?(?:再|然后|接着|之后|后)/ },
+  { label: '依次/逐一', re: /依次|逐一/ },
+  { label: '逐步/分阶段', re: /逐步|分步|分步骤|一步一步|分阶段/ },
+  { label: '第 N 步', re: /第[一二三四五六七八九十\d]+步/ },
+  { label: '串行/顺序执行', re: /串行|顺序执行/ },
+  { label: '链式/推理链', re: /链式|推理链|依赖链/ },
+  { label: '基于上一步', re: /基于(?:上一步|前一步|前面|上述|上一阶段)(?:的)?(?:结论|结果|产出|证据|输出)/ },
+  { label: '在上一步基础上', re: /在(?:上一步|前一步|上述)(?:的)?(?:结论|结果|产出|证据|输出)/ },
+  { label: '最后一步', re: /最后一步/ },
+])
+
+export interface SequentialChainCheck {
+  sequential: boolean
+  markers: string[]
+}
+
+export function detectSequentialChainTask(task: string): SequentialChainCheck {
+  const text = String(task ?? '').replace(/\s+/g, ' ')
+  const markers: string[] = []
+  for (const pattern of SEQUENTIAL_CHAIN_PATTERNS) {
+    if (pattern.re.test(text)) markers.push(pattern.label)
+  }
+  return { sequential: markers.length > 0, markers }
+}
+
+/* ========================================================================== */
 /* 4. 专家精简 JSON 汇报（用户要求 7）                                         */
 /* ========================================================================== */
 
@@ -454,7 +497,7 @@ export function checkDepartmentSummary(summary: unknown, expectedExperts: readon
     const joined = covered.join('\n').toLowerCase()
     const missing = expectedExperts.filter((member) => member.trim() !== '' && !joined.includes(member.trim().toLowerCase()))
     if (missing.length > 0) {
-      violations.push(`sources 未覆盖全部已派发专家，缺少：${missing.join('、')}（每条写「专家名：一句关键成果」）`)
+      violations.push(`sources 未覆盖全部已派发专家，缺少：${missing.join('、')}（每条写专家名即可；成果一句话由平台从各专家汇报自动补充，不必手写）`)
     }
   }
   if (extra.length > 0) {
@@ -469,16 +512,11 @@ export function checkDepartmentSummary(summary: unknown, expectedExperts: readon
 export function renderExpertReportSpec(): string {
   return [
     '【专家成果汇报契约 · JSON mode · 用户强制要求 7】',
-    '完成后必须在证据块 JSON 里额外给出 report 字段，只写下面四项，禁止写长文、禁止前后重复：',
-    '  "report": {',
-    '    "keyResults": ["关键成果"],',
-    '    "keyInfo": ["关键信息"],',
-    '    "importantInfo": ["重要信息"],',
-    '    "leadRequirements": ["负责人要求的东西"]',
-    '  }',
-    ...EXPERT_REPORT_FIELDS.map((field) => `- ${field.name}（${field.label}）：${field.description}`),
-    `- 每个数组最多 ${MAX_REPORT_ITEMS} 条、每条最多 ${MAX_REPORT_ITEM_CHARS} 字符；同一信息只能出现一次（禁止累赘和重复）。`,
-    '- 门禁：缺 report、字段缺失、条数越界、单条超长、或出现重复项，结果一律退回重交（REPORT_INVALID / REPORT_NOT_CONCISE）。',
+    '证据块 JSON 里额外给出 report，只写四项，禁止长文与重复：',
+    '{"report":{"keyResults":["关键成果"],"keyInfo":["关键信息"],"importantInfo":["重要信息"],"leadRequirements":["负责人要求的东西"]}}',
+    '- keyResults/leadRequirements 至少 1 条；keyInfo/importantInfo 可空但字段必须在。',
+    `- 每数组最多 ${MAX_REPORT_ITEMS} 条、每条最多 ${MAX_REPORT_ITEM_CHARS} 字符；同一信息只出现一次。`,
+    '- 门禁：缺 report、字段缺失、条数越界、单条超长或重复，退回重交（REPORT_INVALID / REPORT_NOT_CONCISE）。',
   ].join('\n')
 }
 
@@ -486,16 +524,10 @@ export function renderExpertReportSpec(): string {
 export function renderDepartmentSummarySpec(): string {
   return [
     '【部门汇总契约 · JSON mode · 用户强制要求 8/10/11】',
-    '你的结果除了常规证据块，必须额外给出 departmentSummary 字段：全面、深入整理汇总本部门全部专家汇报，只保留关键信息、关键成果、重要信息与主 Agent 要求的东西，禁止累赘和重复；汇总完成后直接交回主 Agent。',
-    '  "departmentSummary": {',
-    '    "keyResults": ["关键成果"],',
-    '    "keyInfo": ["关键信息"],',
-    '    "importantInfo": ["重要信息"],',
-    '    "sources": ["专家名：一句关键成果"]',
-    '  }',
-    ...DEPARTMENT_SUMMARY_FIELDS.map((field) => `- ${field.name}（${field.label}）：${field.description}`),
-    `- keyResults/keyInfo/importantInfo 每个数组最多 ${MAX_REPORT_ITEMS} 条、每条最多 ${MAX_REPORT_ITEM_CHARS} 字符；sources 最多 ${MAX_SOURCES_ITEMS} 条（不受 6 条精简上限约束——必须逐人覆盖本部门全部已派发专家，覆盖是诚实硬要求），同一信息只能出现一次。`,
-    '- 门禁：缺 departmentSummary、字段缺失、未覆盖全部专家、或出现重复项，结果一律退回重交（DEPARTMENT_SUMMARY_INVALID / DEPARTMENT_SUMMARY_NOT_CONCISE）。',
+    '除常规证据块外，必须额外给出 departmentSummary：全面汇总本部门全部专家汇报，只留关键信息/成果与主 Agent 要求的东西，禁止累赘重复，直接交回主 Agent。',
+    '{"departmentSummary":{"keyResults":["关键成果"],"keyInfo":["关键信息"],"importantInfo":["重要信息"],"sources":["专家名"]}}',
+    `- keyResults 至少 1 条；keyResults/keyInfo/importantInfo 每项最多 ${MAX_REPORT_ITEMS} 条、每条最多 ${MAX_REPORT_ITEM_CHARS} 字符；sources 最多 ${MAX_SOURCES_ITEMS} 条且必须逐人覆盖全部已派发专家——每条只写专家名即可（[3.2.4][W3] 成果一句话由平台从各专家汇报自动补充，不必手写，省输出 token）；同一信息只出现一次。`,
+    '- 门禁：缺字段、未覆盖全部专家或重复，退回重交（DEPARTMENT_SUMMARY_INVALID / DEPARTMENT_SUMMARY_NOT_CONCISE）。',
   ].join('\n')
 }
 

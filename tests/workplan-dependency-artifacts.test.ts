@@ -65,7 +65,8 @@ test('产物检查只核对 file，缺失项被单独列出', () => {
     return target.endsWith('src/api.ts')
   })
 
-  assert.deepEqual(seen, ['/repo/src/api.ts', '/repo/docs/api.md'])
+  // [3.2.4] 工作目录基座优先，缺失时再按 <cwd>/reports 基座核对（产物根契约）。
+  assert.deepEqual(seen, ['/repo/src/api.ts', '/repo/docs/api.md', '/repo/reports/docs/api.md'])
   assert.equal(result.artifacts[0].exists, true)
   assert.equal(result.artifacts[1].exists, false)
   assert.equal(result.artifacts[2].exists, undefined, 'url 不做文件系统检查')

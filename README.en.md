@@ -3,7 +3,7 @@
 > **Two selling points, one line: a full ISO/IEC 15408:2026 evidence pack you can verify with 5 commands, and a one-command install with zero runtime dependencies.**
 
 [![verify](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml/badge.svg)](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml)
-[![version](https://img.shields.io/badge/version-3.2.2-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v3.2.2)
+[![version](https://img.shields.io/badge/version-3.2.5-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v3.2.5)
 
 Adds "plan first → dispatch real department subagents → watch progress in the sidebar" to **DeepSeek Harness (DSH)**. No app, no DSH source patch, no page replacement.
 
@@ -80,7 +80,7 @@ The full contract — roles, data shapes, state machine, recovery, and the three
 ## Install
 
 ```bash
-dsh plugin --profile web add dsh-workplan@3.2.2
+dsh plugin --profile web add dsh-workplan@3.2.5
 ```
 
 Restart the DSH Web process (or reload the page) so the bundle is picked up.
@@ -150,7 +150,8 @@ A passing retrospective is appended to the **permanent lesson memory** at `~/.ds
 | Planner no-progress ceiling | 5 min from the last output chunk; planning only, not lead/expert execution | `DSH_WORKPLAN_PLANNER_TIMEOUT_MS` |
 | Planner stall window | 90 s of missing output after streaming starts; transport health only | `DSH_WORKPLAN_PLANNER_IDLE_TIMEOUT_MS` |
 | Planner absolute ceiling | 15 min; planning only | Scales with `…_PLANNER_TIMEOUT_MS` |
-| Automatic resumes | 2; non-time pause recovery, not an execution clock | `DSH_WORKPLAN_MAX_RESUMES` |
+| Automatic resumes | 2; non-time pause recovery, not an execution clock | `DSH_WORKPLAN_AUTO_RESUME_MAX` (config `autoResumeMaxAttempts`) |
+| Manual resume budget | 4 by default; `dsh_workplan_dispatch` re-runs blocked rows only | `DSH_WORKPLAN_MAX_RESUMES` (config `maxResumes`, max 5) |
 | Subagent concurrency | **Up to 5 leads per round**; the whole tree is capped by the host's `maxActiveSubagents` (default 8) | — |
 
 Individual model connections, Bash commands, and disposal waits retain their local health checks; they are not department task deadlines. Without automatic time-based termination, genuinely stuck work can keep consuming concurrency and spend, so use the dashboard/`status` and explicitly cancel or redirect it. Legacy deadlines, extension journals, timeout counts, and criterion fields remain readable history but never arm new timers.

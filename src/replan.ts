@@ -28,6 +28,7 @@ import {
   messageText,
   truncate,
 } from './plan.js'
+import { normalizeQualityRequirements } from './v3-contract.js'
 
 export const REPLAN_MARKER_BEGIN = '<!-- DSH-WORKPLAN-REPLAN:BEGIN -->'
 export const REPLAN_MARKER_END = '<!-- DSH-WORKPLAN-REPLAN:END -->'
@@ -193,6 +194,12 @@ const REPLACEMENT_FIELDS = [
   'inputs',
   'outputs',
   'acceptance',
+  /*
+   * [3.2.4][治本] 替换行可显式改质量要求；未给时继承旧行（mergeReplacement 语义）。
+   * 与 add 同一个消毒器，保证 replan 两条路径都能满足
+   * DISPATCH_QUALITY_REQUIREMENTS_MISSING 门禁。
+   */
+  'qualityRequirements',
   'risk',
   // [2.2.0][T13b/推理等级] 替换行可显式改档位；未给时 mergeReplacement 继承旧行。
   // [2.2.7][T4/五档+G1] 档位合法集合 = REASONING_EFFORTS（low / medium / high /
@@ -212,7 +219,10 @@ function mergeReplacement(old: any, replacement: any, id: string, reason: string
      * 不用 null 覆盖，避免派发期回落 high 与「继承旧行」语义分叉。
      */
     if (key === 'reasoningEffort' && replacement[key] === null) continue
-    next[key] = clone(replacement[key])
+    // [3.2.4] 质量要求走与首次规划同一消毒器：去空、去重、条数/长度上限。
+    next[key] = key === 'qualityRequirements'
+      ? normalizeQualityRequirements(replacement[key])
+      : clone(replacement[key])
   }
   next.id = id
   delete next.supersededAt
@@ -283,6 +293,7 @@ function replanFieldError(raw: any, allowedEfforts?: readonly string[] | null): 
         ? `reasoningEffort "${effort}" 不在当前模型家族的推理等级集合 {${allowedEfforts.join(' / ')}} 内（qwen 系仅 low / medium / xhigh；非 qwen 系仅 low / high / max），必须改用集合内档位`
         : null
   return list('dependsOn', 12, MAX_SUBTASKS - 1)
+    ?? list('qualityRequirements', 8, 400)
     ?? list('method', 8, 800)
     ?? list('inputs', 12, 800)
     ?? list('outputs', 12, 800)
@@ -459,6 +470,21 @@ export function planReplan(plan: any, changes: any, options: any = {}): ReplanRe
       acceptance: Array.isArray(raw.acceptance) && raw.acceptance.length > 0
         ? raw.acceptance.map((item: any) => truncate(String(item), 800))
         : ['复述完成的工作并给出可核对证据'],
+      /*
+       * [3.2.4][治本] replan 新增行必须能带 qualityRequirements。
+       *
+       * 缺陷现场（2026-11-23 wp-32bee059 T6）：replan 的 newSubtask 构造器
+       * 整块没有映射 qualityRequirements，而 plan.ts:1457 又规定「激活时刻之后
+       * 的新计划必填质量要求，缺失即拒发 DISPATCH_QUALITY_REQUIREMENTS_MISSING」。
+       * 两条规则叠加成死局：replan 建的行永远过不了派发门禁，再 replan 一次也
+       * 补不上——因为本函数根本不读这个字段。
+       * 现在按与首次规划同一消毒器（normalizeQualityRequirements：去空、去重、
+       * 条数/长度上限）收下；缺失则留空，由 validatePlan 的同口径门禁照旧拒发
+       * （不在这里静默造一条假要求，避免把"没写"伪装成"写了"）。
+       */
+      ...(normalizeQualityRequirements(raw.qualityRequirements).length > 0
+        ? { qualityRequirements: normalizeQualityRequirements(raw.qualityRequirements) }
+        : {}),
       risk: truncate(String(raw.risk ?? '需求变更后新增，原计划未覆盖'), 1000),
       // [2.2.0][T13b/推理等级] 只登记字段名：显式档位经 replanFieldError 五档白名单
       // 校验后原样透传（low / medium / high / xhigh / max）；缺失时本行不经
