@@ -121,7 +121,14 @@ export function confirmationSeq(session: any, sourcePlanId: string, successorPla
 
 function definedSubtasks(plan: any): any[] {
   try {
-    return flattenSubtasks(plan).map((entry: any) => entry.subtask)
+    /*
+     * [3.2.7] 已重规划的死行（subtask.supersededAt 有值）不是「已定义子任务」：
+     * 旧实现把它们一起算进来，迁移映射与覆盖率的分母因此被撑大，迁移会被迫
+     * 为一个永远不会再被执行的死行去凑目标。
+     */
+    return flattenSubtasks(plan)
+      .map((entry: any) => entry.subtask)
+      .filter((subtask: any) => !subtask?.supersededAt)
   } catch {
     return []
   }

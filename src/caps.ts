@@ -12,7 +12,7 @@
  *
  * 环境变量（全部可选，默认即用户裁决值，不设则行为与 3.1.0 默认完全一致）：
  *  - DSH_WORKPLAN_MAX_COMPLEX_DELEGATE_MEMBERS：复杂任务专家人数上限，默认 25
- *    （仍强制 ≥ MIN_COMPLEX_DELEGATE_MEMBERS=8，防止把上限配得比下限低）。
+ *    （仍强制 ≥ MIN_COMPLEX_DELEGATE_MEMBERS，防止把上限配得比下限低）。
  *  - DSH_WORKPLAN_MAX_SOURCES_ITEMS：部门汇总 sources 条数上限，默认 30
  *    （必须 ≥ 专家人数上限，否则「逐人覆盖」硬要求与条数上限互相矛盾——
  *    3.0.6 死锁的复发条件，故默认值取 25+余量）。

@@ -62,11 +62,13 @@ test('lifecycle events match the tool-surface baseline', async () => {
 test('baseline declares the version it was confirmed against', async () => {
   const baseline = JSON.parse(await read('tests/fixtures/tool-surface.json'))
   const host = await read('src/host.ts')
-  const meta = host.match(/export const meta = \{[\s\S]*?version:\s*'([^']+)'/)
+  const meta = host.match(/export const meta = \{[\s\S]*?version:\s*(?:'([^']+)'|(PLUGIN_VERSION))/)
   assert.ok(meta, 'src/host.ts must declare meta.version')
+  // 单一来源：meta.version 直接取 PLUGIN_VERSION 常量时，回退去读常量声明处。
+  const hostVersion = meta![1] ?? host.match(/export const PLUGIN_VERSION = '([^']+)'/)?.[1]
   assert.equal(
     baseline.version,
-    meta![1],
+    hostVersion,
     'tool-surface baseline must be re-confirmed whenever the plugin version changes',
   )
 })

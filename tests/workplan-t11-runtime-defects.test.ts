@@ -23,6 +23,7 @@ import { join } from 'node:path'
 
 import { createStatuses } from '../src/plan.js'
 import { createWorkplanRuntime } from '../src/runtime.js'
+import { leafPhases } from './helpers/member-done-outcome.js'
 import { MAIN_START_PHASES_FIXTURE } from './helpers/main-deep-think.js'
 
 const ROOT = 'session-root'
@@ -146,6 +147,7 @@ const selfArgs = (minutes: any, over: any = {}) => ({
 function doneOutcome(marker: string) {
   const evidence = {
     status: 'done',
+    phases: leafPhases(),
     summary: `${marker} 完成摘要`,
     acceptance: [
       { criterion: 'c1', result: 'pass', evidence: 'e1' },

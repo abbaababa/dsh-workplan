@@ -230,7 +230,7 @@ test('提示词同步：负责人任务书人数口径为 low 禁派＋direct �
   // [3.0.8] 「两轮思考产物」表述改为「第 1/2/3 步证据」（单框架收口）；
   // [3.1.0] 上限 12→25 且与 caps.ts 常量同源（环境变量覆盖时提示词不漂移）。
   assert.ok(brief.includes('low/未配置任务禁止下派——负责人亲自执行，第 1/2/3 步证据经 dsh_workplan_delegate(action="direct") 登记（' + START_EVIDENCE_MIN_CHARS_BRIEF + '；可选 reasoningEffort="low"）'))
-  assert.ok(brief.includes(`复杂任务（medium/high/xhigh/max）合计不少于 ${MIN_COMPLEX_DELEGATE_MEMBERS} 人且最多 ${MAX_COMPLEX_DELEGATE_MEMBERS} 人，少于 ${MIN_COMPLEX_DELEGATE_MEMBERS} 人硬性阻断，超过上限平台拒收（可精简名单或拆两轮派发，绝不静默丢人无痕）`))
+  assert.ok(brief.includes(`复杂任务（medium/high/xhigh/max）合计不少于 ${MIN_COMPLEX_DELEGATE_MEMBERS} 人且最多 ${MAX_COMPLEX_DELEGATE_MEMBERS} 人，少于 ${MIN_COMPLEX_DELEGATE_MEMBERS} 人硬性阻断（**单阶段计划与顺序推理链一样豁免此下限**，别为了凑人数去拆无意义的独立专家），超过上限平台拒收（可精简名单或拆两轮派发，绝不静默丢人无痕）`))
   assert.ok(!brief.includes('最多 12 人'), '旧「最多 12 人」口径必须移除')
   assert.ok(brief.includes('startPhases={ planning{ problemAnalysis[], approach[], approachBasis[], resources[], tools[] }, preparation{ prepared[], evidence[] } }'), '3.0.8 负责人告知块必须带 startPhases 开工证据口径')
   assert.ok(!brief.includes('两轮思考产物'), '旧「两轮思考产物」表述须已移除')

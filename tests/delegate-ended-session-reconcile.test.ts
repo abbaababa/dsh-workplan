@@ -98,7 +98,7 @@ test('F1：子会话已释放但父会话有持久结算快照，running 收敛�
 test('F1：结算快照里有合格结果块时收敛为 done（与 F10 判据同源）', () => {
   const block = [
     '<!-- WORKPLAN_EVIDENCE:START -->',
-    '{"status":"done","report":{"keyResults":["完成行业景气度分析"],"keyInfo":[],"importantInfo":[],"leadRequirements":["核实结论"]}}',
+    '{"status":"done","phases":{"execution":{"steps":["完成行业景气度分析"]},"verification":{"allPassed":true,"requirementCheck":"验收覆盖"}},"report":{"keyResults":["完成行业景气度分析"],"keyInfo":[],"importantInfo":[],"leadRequirements":["核实结论"]}}',
     '<!-- WORKPLAN_EVIDENCE:END -->',
   ].join('\n')
   const delegates = [{ member: '资金面专家', childId: 'c-10', status: 'running' }]

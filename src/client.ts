@@ -1945,7 +1945,8 @@ window.__ModuleLoader__.load({
           h('div', null, h('strong', null, `${t('how')}：`), h(Bullets, { items: subtask.method })),
           h('div', null, h('strong', null, `${t('doneWhen')}：`), h(Bullets, { items: subtask.acceptance })),
           subtask.outputs?.length ? h('div', null, h('strong', null, `${t('willDeliver')}：`), h(Bullets, { items: subtask.outputs })) : null,
-          subtask.dependsOn?.length ? h('p', { className: 'dsh-wp-muted' }, `${t('waitFor')}：先等前面的工作做完，才能开始这一步。`) : null,
+          // [3.2.7][P2] 已完成/进行中的子任务不该再显示「先等前面的工作做完」。
+          subtask.dependsOn?.length && status !== 'done' && status !== 'in_progress' ? h('p', { className: 'dsh-wp-muted' }, `${t('waitFor')}：先等前面的工作做完，才能开始这一步。`) : null,
         ),
         h(TimeNegotiation, { item, subtask, t }),
         status === 'in_progress' ? h(Progress, { value: pct, tone }) : null,
@@ -3595,7 +3596,22 @@ window.__ModuleLoader__.load({
       }
       const finished = phase === 'result'
       const text = finished ? contentText(block) : ''
-      const failed = finished && block?.isError === true
+      /*
+       * [3.2.7][P2] 工具返回 {ok:false} 时也是失败，不能只认宿主给的 isError。
+       * 旧实现只判 isError：业务层拒绝（DELEGATE_ALREADY_RUNNING 之类）在工作
+       * 面板上仍显示绿色「做好了」，用户以为成功。
+       */
+      const payloadFailed = (() => {
+        if (block?.isError === true) return true
+        if (!text) return false
+        try {
+          const parsed = JSON.parse(text)
+          return parsed?.ok === false
+        } catch {
+          return /"ok"\s*:\s*false/.test(text)
+        }
+      })()
+      const failed = finished && payloadFailed
       const label = failed
         ? t('toolFailed')
         : phase === 'preparing'

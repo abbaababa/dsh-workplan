@@ -296,6 +296,37 @@ function parsePreparationPhase(preparationRaw: any, errors: string[], required: 
  * criterion must have a verification check; a shorter list is treated as an
  * incomplete 第四步 verification rather than "some checks are better than none".
  */
+/**
+ * [3.2.7][P0] 第三层叶子（专家）结算专用的五步核验：只校验第四步
+ * （execution）与第四步收尾（verification）两组。
+ *
+ * 规划（planning）与准备（preparation）由开工登记与平台自动并入承载，叶子
+ * 不必重抄（见 five-step.ts 的「平台自动并入」契约）；但一份 `status:"done"`
+ * 的汇报如果连「实际怎么做的」和「逐条验证过没有」都没有，就不该被记成完成。
+ * 旧实现只校验 F10 的 report 四字段，五步契约在第三层完全落空。
+ */
+export function validateLeafExecutionEvidence(value: any, expectedAcceptance: any = []): { ok: boolean; errors: string[] } {
+  const errors: string[] = []
+  if (!isRecord(value)) {
+    return { ok: false, errors: ['phases 缺失：第三层专家交卷同样必须附第四步（execution）与验证（verification）两组证据'] }
+  }
+  const steps = Array.isArray((value as any).execution?.steps)
+    ? (value as any).execution.steps.filter((step: any) => typeof step === 'string' && step.trim() !== '')
+    : []
+  if (steps.length === 0) errors.push('phases.execution.steps 为空：第四步要逐条写清实际是怎么做完的')
+  const verification = (value as any).verification
+  if (!isRecord(verification)) {
+    errors.push('phases.verification 缺失：第四步收尾必须逐条验证验收标准并附可复核证据')
+  } else if (verification.allPassed === true && Array.isArray(expectedAcceptance)) {
+    const explicit = expectedAcceptance.filter((entry: any) => isRecord(entry) && typeof entry.result === 'string')
+    const failed = explicit.filter((entry: any) => entry.result !== 'pass')
+    if (failed.length > 0) {
+      errors.push(`phases.verification.allPassed 与验收表冲突：${failed.length}/${explicit.length} 项 result 不是 pass，不得报全部通过`)
+    }
+  }
+  return { ok: errors.length === 0, errors }
+}
+
 export function validateFiveStepEvidence(value: any, expectedAcceptance: any = [], fillStart: any = null): PhaseValidation {
   const errors: string[] = []
   let failedPhase: PhaseValidation['failedPhase'] = null
@@ -410,6 +441,23 @@ export function validateFiveStepEvidence(value: any, expectedAcceptance: any = [
     }
   }
   const expected = Array.isArray(expectedAcceptance) ? expectedAcceptance.filter(Boolean) : []
+  /*
+   * 自报 allPassed 不得与验收表打架：模型可以把 verification.allPassed 写成 true，
+   * 同时在顶层 acceptance 里留 result!=="pass"。旧实现直接采信自报值，于是一份
+   * 不可交付的计划被记成 done。这里用验收表复核，冲突即以验收表为准并报错。
+   */
+  let allPassed = verification.allPassed
+  if (allPassed && expected.length > 0) {
+    // 只对「显式写了 result 字符串」的验收项复核：expectedAcceptance 既可能是
+    // 对象数组，也可能是纯字符串数组（老调用方），后者的 result 不存在，不能算冲突。
+    const explicit = expected.filter((entry: any) => isRecord(entry) && typeof entry.result === 'string')
+    const failedAcceptance = explicit.filter((entry: any) => entry.result !== 'pass')
+    if (failedAcceptance.length > 0) {
+      allPassed = false
+      fail('verification', `phases.verification.allPassed 与你提交的验收表冲突：${failedAcceptance.length}/${expected.length} 项 result 不是 pass，不得报全部通过`)
+    }
+  }
+  verification.allPassed = allPassed
   if (expected.length > 0 && verification.checks.length < expected.length) {
     fail(
       'verification',
@@ -446,6 +494,11 @@ export function validateFiveStepEvidence(value: any, expectedAcceptance: any = [
     ...execution.steps,
     ...execution.deviations,
     verification.requirementCheck,
+    // 逐项验证记录与复盘同样属于「交卷人自己写的内容」，必须计入上限，
+    // 否则 checks 每条 3×800 字、复盘任意长都能整体绕开 6000 字硬上限。
+    ...verification.checks.flatMap((check) => [check.criterion, check.method, check.evidence]),
+    ...Object.values(retroCheck.retrospective ?? {}).flatMap((value) =>
+      typeof value === 'string' ? [value] : Array.isArray(value) ? value.filter((item) => typeof item === 'string') as string[] : []),
   ].reduce((sum, item) => sum + item.length, 0)
   /*
    * [3.2.0] 字数上限只约束「交卷人自己写的内容」。由平台并入的登记证据

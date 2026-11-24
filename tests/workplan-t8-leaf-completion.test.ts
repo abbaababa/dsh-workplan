@@ -42,6 +42,7 @@ import {
   flushPendingWorkplanUpdates,
 } from '../src/plan.js'
 import { createWorkplanRuntime, reconstructFromSession } from '../src/runtime.js'
+import { leafPhases } from './helpers/member-done-outcome.js'
 import { readDeptMessages } from '../src/dept-journal.js'
 import { seedLeaderSelfEffort } from './helpers/self-effort-contract.js'
 import { MAIN_START_PHASES_FIXTURE } from './helpers/main-deep-think.js'
@@ -129,6 +130,7 @@ function fakeSession(id: string, parentId: string | null, catalog: string[] = []
 function doneOutcome(marker: string) {
   const evidence = {
     status: 'done',
+    phases: leafPhases(),
     summary: `${marker} 完成摘要`,
     acceptance: [
       { criterion: 'c1', result: 'pass', evidence: 'e1' },

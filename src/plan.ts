@@ -20,7 +20,7 @@ import {
 import { extractTaskElements, MAX_TASK_ANCHOR_CHARS } from './understanding.js'
 // [3.1.0] 复杂任务专家人数上限单一真源（caps.ts）：存档消毒、门禁、提示词同源，
 // 杜绝「写 25 读 12」的存读不对称（3.0.6 死锁同类事故的预防）。
-import { MAX_COMPLEX_DELEGATE_MEMBERS, MIN_COMPLEX_DELEGATE_MEMBERS } from './caps.js'
+import { MAX_COMPLEX_DELEGATE_MEMBERS, MAX_TOTAL_EXPERTS_PER_PLAN, MIN_COMPLEX_DELEGATE_MEMBERS } from './caps.js'
 import { isMappingDigest, verifyMappingDigest } from './supersede-digest.js'
 import { checkStartEvidenceCarryover, fiveStepContinuationPromptLines, fiveStepPromptLines, MAX_PHASE_LIST_ITEMS, mergeStartEvidenceIntoSettlement, phaseSummaryLine, renderStartEvidenceBlueprint, renderStartPhaseEvidence, sanitizeStartPhaseEvidence, startEvidenceIndexLines, START_EVIDENCE_MIN_CHARS_BRIEF, validateFiveStepEvidence, validateStartPhaseEvidence } from './five-step.js'
 // [修复] 七项字数下限简报（five-step.ts 单一事实源）转发给 host.ts 等消费方。
@@ -1797,7 +1797,7 @@ export function buildPlannerSystemPrompt(budget: any = {}) {
   const concurrency = Math.max(1, Number(budget?.concurrency) || MAX_CONCURRENT)
   const resumes = Number.isFinite(Number(budget?.maxResumes)) ? Number(budget.maxResumes) : MAX_PLAN_RESUMES
   const departments = DEPARTMENT_CAPABILITIES
-    .map((entry) => `- ${entry.id}（${entry.zh} / ${entry.en}）：职责 ${entry.responsibilities.join('；')}；典型产物 ${entry.outputs.join('；')}`)
+    .map((entry) => `- ${entry.id}（${entry.zh} / ${entry.en}）：职责 ${entry.responsibilities.join('；')}；典型产物 ${entry.outputs.join('；')}；覆盖判定用关键词 ${(entry.keywords ?? []).slice(0, 8).join('、')}`)
     .join('\n')
   return [
     '你是任务分解规划器。用马克思主义哲学方法分析任务，只输出一个 JSON 对象：实事求是、抓主要矛盾、具体问题具体分析、实践—认识—再实践、质量互变、矛盾转化。',
@@ -1812,10 +1812,11 @@ export function buildPlannerSystemPrompt(budget: any = {}) {
     '',
     '硬性约束：',
     `- 阶段 1-${MAX_STAGES} 个；子任务总数 1-${MAX_SUBTASKS} 个，每阶段至少 1 个；简单任务 1-3 项，复杂才展开。`,
+    `- 专家预算（不可突破）：每个复杂子任务的负责人至少派 ${MIN_COMPLEX_DELEGATE_MEMBERS} 名专家，但**整份计划的专家总数上限是 ${MAX_TOTAL_EXPERTS_PER_PLAN} 人**。请按「阶段数 × 每阶段人数 ≤ ${MAX_TOTAL_EXPERTS_PER_PLAN}」控制规模；否则后半段派发会被平台整单拒绝（DELEGATE_PLAN_EXPERTS_EXCEEDED），前面的钱就白花了。`,
     '- ID：子任务 T1/T2…，阶段 S1/S2…，全局唯一；dependsOn 只引用更早阶段或更早位置，不得成环；能并行的留空，不造依赖链。',
     '- 共享数据依赖：下游 inputs 需行情/资金/份额/政策/行业数据等领域事实，且已有产出该数据的子任务时，必须写入 dependsOn；找不到则在 inputs 写明来源，不写“待确认”就派发。',
-    '- department 必须选下列部门之一，并写 departmentRationale（1-2 句，引用职责与要素）；不一致视为不合格。',
-    '- method/outputs/acceptance 必须非空；inputs 可为空，未知写“待确认”；unknowns/assumptions 如实列出，没有写空数组。',
+    '- department 必须选下列部门之一，并写 departmentRationale（1-2 句，引用职责与要素）；平台只做长度截断，**不做语义一致性校验**，别为此反复重写。',
+    '- method/outputs/acceptance 必须非空；**qualityRequirements 必须是非空字符串数组**（对结果的质量要求；缺了会在派发时被硬拒 DISPATCH_QUALITY_REQUIREMENTS_MISSING，还得 replan 一遍）；inputs 可为空，未知写“待确认”；unknowns/assumptions 如实列出，没有写空数组。',
     '- taskUnderstanding.originalRequest 由平台回填，**不要输出**；其余字段照常。',
     '- 子任务必须可独立执行、可验收：单一目标、单一主产物、清晰验收边界；不按分钟切分，不为凑数拆无意义任务。',
     '- 分解必须更简单：每项只写单一目标、单一主产物、可独立验收的一件事；部门负责人会用 dsh_workplan_delegate 再拆给本部门多名相关领域全球顶尖专家（组员角色已取消），执行细节下沉，主计划保持简单清晰。',
@@ -8128,7 +8129,7 @@ export function buildChildPrompt({
        * [3.2.3] 顺序推理链不拆 + 共享文件不并发写：提示词与 planDelegations /
        * dispatchPlan 两道硬闸同源，防止把链式任务拆成多个独立上下文。
        */
-      '- 顺序推理链不拆（3.2.3 硬闸）：若你接到的任务要求按固定顺序推理（先…再/逐步/基于上一步结论/链式），不得拆给多名独立专家；只派 1 名专家一次做完（链式任务豁免复杂任务 ≥8 人下限，这是平台机制，不是让你降档），或由你亲自执行——亲自执行必须先自己评估复杂度，再经 action="direct" 提交自评复杂档 reasoningEffort（qwen: medium/xhigh；非 qwen: high/max，不得 low）与 startPhases 开工证据。中间结论留在同一份产物里。跨子任务只传已落盘产物引用，不传推理过程摘要替代结论。',
+      `- 顺序推理链不拆（3.2.3 硬闸）：若你接到的任务要求按固定顺序推理（先…再/逐步/基于上一步结论/链式），不得拆给多名独立专家；只派 1 名专家一次做完（链式任务豁免复杂任务 ≥${MIN_COMPLEX_DELEGATE_MEMBERS} 人下限，这是平台机制，不是让你降档），或由你亲自执行——亲自执行必须先自己评估复杂度，再经 action="direct" 提交自评复杂档 reasoningEffort（qwen: medium/xhigh；非 qwen: high/max，不得 low）与 startPhases 开工证据。中间结论留在同一份产物里。跨子任务只传已落盘产物引用，不传推理过程摘要替代结论。`,
       '- 共享可变状态串行（3.2.3 硬闸）：专家共享同一工作目录；每位专家只写本任务 outputs 声明的产物与自己的 reports/wp-member-*.json。平台会按产物路径自动串行化重叠产物；未声明的共享文件不得并发写，必须改动时先回报负责人、由平台按依赖串行派发。',
     ]),
     // [T6][契约v1 §6] 负责人须知：下属开工预估即时送达 + 留痕 + 未上报拦截（时长求和归 T7，此处不实现）。

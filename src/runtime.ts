@@ -167,7 +167,7 @@ import {
   buildPhaseZeroDelegateePrompt,
   resolveTaskEffort,
 } from './llm-rules.js'
-import { checkStartEvidenceCarryover, phaseGateFromErrors, phaseSummaryLine, renderStartPhaseEvidence, sanitizeStartPhaseEvidence, START_EVIDENCE_MIN_CHARS_BRIEF, validateFiveStepEvidence, validateStartPhaseEvidence } from './five-step.js'
+import { checkStartEvidenceCarryover, phaseGateFromErrors, phaseSummaryLine, renderStartPhaseEvidence, sanitizeStartPhaseEvidence, START_EVIDENCE_MIN_CHARS_BRIEF, validateFiveStepEvidence, validateLeafExecutionEvidence, validateStartPhaseEvidence } from './five-step.js'
 import {
   lessonStats,
   rankLessons,
@@ -179,7 +179,7 @@ import {
 import { computeMappingDigest, verifyMappingDigest } from './supersede-digest.js'
 import { supersedePlanRecord } from './supersede.js'
 // [3.1.0] 人数上限单一真源（caps.ts）：报错文案与门禁同源。
-import { MAX_COMPLEX_DELEGATE_MEMBERS, MAX_TOTAL_EXPERTS_PER_PLAN } from './caps.js'
+import { MAX_COMPLEX_DELEGATE_MEMBERS, MAX_TOTAL_EXPERTS_PER_PLAN, MIN_COMPLEX_DELEGATE_MEMBERS } from './caps.js'
 import { leaderPreRegisterEnabled as capsLeaderPreRegisterEnabled } from './caps.js'
 // [3.1.0] 排队等待上限环境变量化（默认 10 分钟不变）＋规划器并发预算环境变量化。
 import { envPositiveInt } from './caps.js'
@@ -413,6 +413,24 @@ let activationQueueCooldownUntil = 0
  * 再次调用 self_effort，命中这里直接幂等返回，绝不重复拉起两个 phase-1 会话。
  */
 const deferredContinuations = new Set<string>()
+
+/**
+ * [3.2.7] 交接过渡标记是否仍然「有主」。
+ *
+ * 旧实现在两处收敛器里只看 durable 的 `continuationPending===true` 就直接跳过，
+ * 而这个标记由内存表 deferredContinuations 兑现。进程重启后内存表已空、标记还在，
+ * 该成员就永远卡在 running：既不判停滞、也不发通知，负责人会无限等下去。
+ * 现在只有本进程里确实还挂着对应的后台接续时才跳过；否则按正常判据继续。
+ */
+function continuationArmedFor(item: any): boolean {
+  if (deferredContinuations.size === 0) return false
+  const subtaskId = typeof item?.subtaskId === 'string' ? item.subtaskId : ''
+  const member = typeof item?.member === 'string' ? item.member : ''
+  if (!subtaskId || !member) return false
+  const suffix = `${subtaskId}:${member}:`
+  for (const key of deferredContinuations) if (key.includes(suffix)) return true
+  return false
+}
 
 /** [3.1.8] 后台接续最多重试多久（默认 10 分钟；与宿主排队上限同量级）。 */
 const DEFERRED_CONTINUATION_MAX_WAIT_MS = envPositiveInt('DSH_WORKPLAN_DEFERRED_CONTINUATION_MAX_WAIT_MS', 10 * 60 * 1000)
@@ -1428,17 +1446,11 @@ export async function runPlanner(ctx: any, options: any) {
       const validated = validatePlan(raw, { allowedEfforts: allowedEffortsForModel(modelSelection.model) })
       if (validated.ok) {
         /*
-         * [省钱] originalRequest is derived from the user's own message (the
-         * same text taskAnchor will seal). This removes up to 8,000 characters
-         * of planner output per plan while keeping the context audit's verbatim
-         * check meaningful; authored values from older plans are preserved.
-         */
-        fillOriginalRequestFromTask(validated.plan, taskText)
-        /*
-         * [1.12.0] Structure alone is not understanding. Run the three-stage
-         * audit against the user's own words before the plan can be returned;
-         * a deviation becomes a retry error so the planner gets one chance to
-         * fix it, and a second failure degrades instead of dispatching.
+         * [3.2.7][P0] 审计必须在回填 originalRequest **之前**跑。
+         * 旧顺序是先 fillOriginalRequestFromTask（把用户原文塞进计划），再拿
+         * 计划文本去比用户原文——hard anchor 永远命中、覆盖率永远 100%，计划
+         * 整体漏掉用户的关键约束也判 aligned。先审计、过关后再回填，比对对象
+         * 才是「规划器自己写的理解」。
          */
         const guard = validatePlanContext(validated.plan, {
           taskText,
@@ -1447,6 +1459,11 @@ export async function runPlanner(ctx: any, options: any) {
           strict: contextGuardStrict(),
         })
         if (guard.ok) {
+          /*
+           * [省钱] originalRequest 仍由用户原文回填（省掉最多 8,000 字规划器
+           * 输出），只是改到审计通过之后，避免自比。
+           */
+          fillOriginalRequestFromTask(validated.plan, taskText)
           const plan: any = validated.plan
           plan.taskAnchor = guard.audit.anchor
           plan.understandingAudit = compactUnderstandingAudit(guard.audit)
@@ -1757,7 +1774,21 @@ function adjudicateExpertReport(outcome: any): { ok: true } | { ok: false; rejec
     }
   }
   const report = checkExpertReport((payload as any).report)
-  if (!Array.isArray(report.violations) || report.violations.length === 0) return { ok: true }
+  if (!Array.isArray(report.violations) || report.violations.length === 0) {
+    /*
+     * [3.2.7][P0] F10 只证明「汇报格式对」，不证明「活真的干完并验证过」。
+     * 旧实现到此就记 done：专家即使完全没写第四步执行与验证，也照样算完成，
+     * 负责人汇总就建立在未经核验的成果上。这里补上第四步/验证两组证据的核验。
+     */
+    const leaf = validateLeafExecutionEvidence((payload as any).phases, (payload as any).acceptance)
+    if (!leaf.ok) {
+      return {
+        ok: false,
+        rejection: `专家汇报未通过五步契约核验（第四步执行与验证），结果退回重交：${leaf.errors.slice(0, 3).join('；')}`,
+      }
+    }
+    return { ok: true }
+  }
   return {
     ok: false,
     rejection: `专家汇报未通过 F10 精简汇报契约核验，结果退回重交：${report.violations.slice(0, 4).join('；')}`,
@@ -3336,6 +3367,13 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
         ackTimers.push(noticeTimer)
         // 未收到回执只保留 ackOverdue 提示；执行等待没有硬截止，绝不因此 blocked/abort。
         const watchdog = createProgressWatchdog({
+          /*
+           * [3.2.7][文档诚实] 这里的 false 是刻意的：idleMs/hardMs 都是 Infinity，
+           * 执行等待没有硬截止，绝不因超时 blocked/abort（300s 定时器事故的根治）。
+           * 也就是说 watchdog 在唯一的生产调用点上是「只观测、不执法」。
+           * 真正的停滞收敛由 markStalledDelegates 负责（子会话消失 + 无结束快照
+           * + 活体探针都为空才判死），不是这里的超时臂。
+           */
           enforceTimeouts: false,
           getSeq: () => {
             try {
@@ -5241,7 +5279,8 @@ export function reconcileEndedDelegateSessions(
   const next = list.map((item: any) => {
     if (!item || item.status !== 'running' || item.escalation || item.closure === 'escalated') return item
     // [3.1.8] 交接过渡期不判停滞：phase-0 会话已释放、phase-1 正在后台接续。
-    if (item.continuationPending === true) return item
+    // [3.2.7] 但必须确有后台接续在等（见 continuationArmedFor），否则重启后的陈旧标记会把成员永久挂起。
+    if (item.continuationPending === true && continuationArmedFor(item)) return item
     const childId = typeof item.childId === 'string' ? item.childId : ''
     if (!childId) {
       unresolved.push({ member: String(item.member ?? '?'), childId: null, reason: 'childId 未登记' })
@@ -5362,7 +5401,8 @@ export function markStalledDelegates(
   const next = list.map((item: any) => {
     if (!item || item.status !== 'running' || item.escalation || item.closure === 'escalated') return item
     // [3.1.8] 交接过渡期不判停滞：phase-0 会话已释放、phase-1 正在后台接续。
-    if (item.continuationPending === true) return item
+    // [3.2.7] 但必须确有后台接续在等（见 continuationArmedFor），否则重启后的陈旧标记会把成员永久挂起。
+    if (item.continuationPending === true && continuationArmedFor(item)) return item
     const childId = typeof item.childId === 'string' ? item.childId : ''
     if (!childId) return item
     let live: any = null
@@ -8928,7 +8968,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       return truncate([head, `子任务 ${subtaskId} 的成员 ${member} 的结算链发生异常（${truncate(reason, 300)}），台账可能仍为 running，不能视为仍在运行。`, '请人工核对产物后重派或标记受阻。', reuse, tail].join('\n'), 4000)
     }
     if (kind === 'stalled') {
-      return truncate([head, `子任务 ${subtaskId} 的成员 ${member} 已超过 120 秒没有任何存活会话或结束快照（${truncate(reason, 300)}），判定为停滞：不是完成，也不是普通的结果块不合格。`, '台账已写 failed(stalled)；请核验其已落盘产物后决定重派、补派或按实标记受阻。', reuse, tail].join('\n'), 4000)
+      return truncate([head, `子任务 ${subtaskId} 的成员 ${member} 已超过 ${Math.round(DELEGATE_STALL_MS / 1000)} 秒没有任何存活会话或结束快照（${truncate(reason, 300)}），判定为停滞：不是完成，也不是普通的结果块不合格。`, '台账已写 failed(stalled)；请核验其已落盘产物后决定重派、补派或按实标记受阻。', reuse, tail].join('\n'), 4000)
     }
     return truncate([head, `子任务 ${subtaskId} 的成员 ${member} 的会话已结束（读时对账确认），但结果块未通过核验（${truncate(reason, 300)}）。`, '台账已写 failed；请核验产物后决定重派或按实标记受阻。', reuse, tail].join('\n'), 4000)
   }
@@ -9778,8 +9818,16 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       delivery: { status: delivery, ...(messageId ? { messageId } : {}), latencyMs, ...(deliveryError ? { code: 'DELIVERY_FAILED', error: deliveryError } : {}) },
     })
     const journalInfo = journal.result.ok ? {} : { journal: { ok: false, code: journal.result.code, error: journal.result.error } }
-    const revision = Number(row.revision ?? 0) + 1
-    const delegates = (Array.isArray(row.delegates) ? row.delegates : []).map((item: any) => (item?.childId === member.childId
+    /*
+     * [3.2.7][P0] 等 sendMessage 期间别处可能已经把另一个成员结算成 done。
+     * 旧实现用 await 之前的 row.delegates 快照整表写回：B 刚判完成就被回退成
+     * running，负责人以为没做完又重派——同一个专家白跑两遍。这里改读当下台账，
+     * 只补丁请示的那一个成员，其余成员保持最新状态。
+     */
+    const liveRowNow = (Array.isArray(record.statuses) ? record.statuses : [])
+      .find((item: any) => item?.subtaskId === row.subtaskId) ?? row
+    const revision = Number(liveRowNow.revision ?? row.revision ?? 0) + 1
+    const delegates = (Array.isArray(liveRowNow.delegates) ? liveRowNow.delegates : []).map((item: any) => (item?.childId === member.childId
       ? {
           ...item,
           // [3.0.5] 待指示必须显式落在第三层台账：负责人改派闸门与看板都读这个字段。
@@ -11353,6 +11401,24 @@ ${startEvidenceRef
       return { ok: false, code: 'SELF_EFFORT_CONTINUATION_FAILED', subtaskId, member: member.member, selfEffort, error: text }
     }
     const written = applyContinuation(activation)
+    if (!written) {
+      /*
+       * [3.2.7][P0] 直接路径也必须回收孤儿会话。
+       * 旧实现只有后台路径检查 applyContinuation 的空返回：直接路径照样返回
+       * {ok:true, continuation:'started'}，而台账其实已归别的会话，于是多起的
+       * phase-1 会话照跑照花钱却不在任何行里——既不结算，也不会被判停滞。
+       */
+      try { await activation?.dispose?.() } catch { /* 回收失败不改变“已有归属”的结论 */ }
+      return {
+        ok: false,
+        code: 'SELF_EFFORT_MEMBER_TAKEN',
+        planId: record.plan.planId,
+        subtaskId,
+        member: member.member,
+        selfEffort,
+        error: '该成员已有另一个 phase-1 会话在跑（并发接续），本次多起的会话已回收；请勿重复调用 self_effort，等现有会话完成或由负责人重派。',
+      }
+    }
     attachSettlement(activation, typeof activation?.childId === 'string' ? activation.childId : null)
     interruptChildContinuable((ctx as any).subagents, childSession.id, leaderAgent, leaderId)
     return {
@@ -11771,7 +11837,7 @@ ${startEvidenceRef
           ok: false,
           code: 'DELEGATE_DIRECT_EFFORT_INVALID',
           subtaskId,
-          error: `direct 只接受 reasoningEffort="low"（缺失默认 low）；"${String(directEffortRaw)}" 不被接受。复杂任务（medium/high/xhigh/max）请走 review+dispatch（≥8 人闸），direct 不是复杂任务通道。例外：顺序推理链任务可经 direct 自评复杂档（qwen: medium/xhigh；非 qwen: high/max）亲自执行，不得 low。`,
+          error: `direct 只接受 reasoningEffort="low"（缺失默认 low）；"${String(directEffortRaw)}" 不被接受。复杂任务（medium/high/xhigh/max）请走 review+dispatch（≥${MIN_COMPLEX_DELEGATE_MEMBERS} 人闸），direct 不是复杂任务通道。例外：顺序推理链任务可经 direct 自评复杂档（qwen: medium/xhigh；非 qwen: high/max）亲自执行，不得 low。`,
         }
       }
       const directEffort = chainDirect && typeof directEffortRaw === 'string' ? directEffortRaw : 'low'
@@ -11995,7 +12061,7 @@ ${startEvidenceRef
      * [3.2.4][O6] 全计划专家总数上限：MAX_SUBTASKS(15) × 单任务人数上限(25) =
      * 375 名专家 ⇒ 约 781 个 LLM 回合，旧实现没有任何全局闸，单个失控计划就能
      * 烧穿预算。派发前统计全计划已登记 delegates 合计 + 本轮真正要新启动的成员
-     * （done / 已在跑的成员不重复计），超过 MAX_TOTAL_EXPERTS_PER_PLAN（默认 40，
+     * （done / 已在跑的成员不重复计），超过 MAX_TOTAL_EXPERTS_PER_PLAN（3.2.6 起默认 30，
      * 环境变量 DSH_WORKPLAN_MAX_TOTAL_EXPERTS_PER_PLAN 可调）即整单拒绝。
      */
     const planWideRegistered = (Array.isArray(record.statuses) ? record.statuses : [])
@@ -12312,6 +12378,15 @@ ${stashedEvidenceRef
           entry.startedAt = Date.now()
           if (memberQueued) entry.queuedMs = Date.now() - activationBeganAt
           registerDelegatesInMemory()
+        } else {
+          /*
+           * [3.2.7][P0] 并发派发撞车：另一个批次已经把该成员接到别的会话上。
+           * 旧实现只是不覆盖台账，却把本次多起出来的 phase-1 会话留活着——
+           * 它照跑、照烧钱、写同一份产物目录，结算时又按 childId 找不到行被
+           * 丢弃，纯属孤儿。这里就地回收，并把本轮的指向改回真实会话。
+           */
+          childId = liveEntry.childId
+          try { await activation?.dispose?.() } catch { /* 回收失败不改变“已有归属”的结论 */ }
         }
         if (activation && typeof activation.result?.then === 'function') {
           const settledChildId = childId
@@ -12934,13 +13009,26 @@ ${stashedEvidenceRef
     if (isTerminalPhase(record.phase) || record.cancelled === true) {
       throw new PlanError('计划已是终态，不再设闸门', 'PLAN_TERMINAL')
     }
-    if (record.dispatchedAt || record.dispatchPromise) {
+    /*
+     * [3.2.7][P0] 闸门不能只认「有没有 dispatchedAt」。
+     * 自动派发会把 dispatchedAt 立刻写上，于是 hold 在它声明要解决的场景里
+     * 必然失败——用户想「先别跑，等我确认」时已经没有任何入口。
+     * 现在只有在「真的有东西开始动了」之后才拒绝：派发进行中（dispatchPromise）
+     * 仍然拒绝（避免与在途派发赛跑），但已派发且尚无任何子任务/成员开跑时，
+     * 允许补设闸门，拦住后续补派与自动续跑。
+     */
+    const anythingStarted = (Array.isArray(record.statuses) ? record.statuses : []).some((row: any) => {
+      if (row?.closure === 'replanned') return false
+      if (typeof row?.status === 'string' && row.status !== 'pending') return true
+      return Array.isArray(row?.delegates) && row.delegates.some((item: any) => item?.childId || item?.status === 'running')
+    })
+    if (record.dispatchPromise || (record.dispatchedAt && anythingStarted)) {
       return {
         ok: false,
         code: 'ALREADY_RUNNING',
         planId: record.plan.planId,
         planCreatedAt: record.plan?.createdAt,
-        error: '计划已开跑，闸门只能设在尚未派发的计划上；如需停止执行请取消后重新规划。',
+        error: '计划已开跑（已有子任务或成员开始执行），闸门只能设在尚未开跑的计划上；如需停止执行请取消后重新规划。',
       }
     }
     if (isDispatchHeld(record)) {

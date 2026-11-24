@@ -248,13 +248,13 @@ export const PROMPT_ORDER = 40
  * 自报版本时被误导，用户也拿不到真实版本（用户要求 13/G 要如实报告版本）。
  * 硬编码字符串与 meta 双写是根因，改为同一常量派生。
  */
-export const PLUGIN_VERSION = '3.2.6'
+export const PLUGIN_VERSION = '3.2.7'
 
 const PROMPT_SECTION = [
   '本会话已启用自动任务分解。每个新任务的第一个模型步骤前生成计划并显示在对话；看到【任务分解】后，未自动派发或需续跑/重试时再调用 dsh_workplan_dispatch（默认 wait；较久用 mode:"async"）。只收到「任务分解已在后台生成中」时不要手动派发，先告知用户正在分配并等待。',
   '会话状态：插件自动输出「任务正在分配中，请稍等一下......」与「任务已经完成分配，正在执行中......」，逐字冻结、由平台发送，你不得重复；缺一条说明环节未走通，先报告。计划消息逐字携带任务原文，不得删改。',
   '质量要求：子任务必须带 qualityRequirements；负责人→专家缺它拒发（DELEGATE_QUALITY_REQUIREMENTS_MISSING），主 Agent→负责人缺它拒发（DISPATCH_QUALITY_REQUIREMENTS_MISSING），须 replan 补齐。',
-  '极简任务（硬门槛）：一条任务=一个动作、一个主产物、一项可独立验收，单句 ≤300 字符，不含「并且/同时/另外/还要/以及/分别/顺便」；否则拒发（DELEGATE_TASK_NOT_ATOMIC）。',
+  '极简任务（硬门槛）：一条任务=一个动作、一个主产物、一项可独立验收，单句 ≤300 字符，不含「并且/同时/另外/还要/以及/分别/顺便/然后/接着」与连词位置的「并」「再」；否则拒发（DELEGATE_TASK_NOT_ATOMIC）。注意「合并/并发/并行/兼并」这类构词不算并列词。',
   '角色与汇报：role 只允许 expert（组员已取消）。专家用 report（keyResults/keyInfo/importantInfo/leadRequirements）按 F10 汇报；负责人用 departmentSummary（keyResults/keyInfo/importantInfo/sources）按 F11 汇总全部专家；汇总交回后由你整理成最终成果。',
   `${PLUGIN_VERSION} 版本（用户要求 13）：本插件当前版本为 ${PLUGIN_VERSION}；对外表述一律写 ${PLUGIN_VERSION}。`,
   '主 Agent 五步开工证据协议（3.0.8）：执行自己的任务必须先完成前三步——第一步全面、全盘、深入梳理、研究、思考自己的任务；第二步基于刚才第一步完成好的所有结果，再全面、全盘、深入地开展梳理、研究和思考，研究资源、工具与高效执行、少走弯路、确保完美完成自己任务的方法、流程和步骤并写清依据；第三步备齐资源与工具并给出就绪证据。首次 dsh_workplan_dispatch 必须随附 startPhases={ planning{ problemAnalysis, resources, tools, approach, approachBasis }, preparation{ prepared, evidence } }；缺失或不合格硬拒（START_EVIDENCE_MISSING/START_EVIDENCE_INCOMPLETE）。登记后持久化，续跑/重试/重启自动读档；重规划的新计划须重新提交前三步。',
@@ -907,7 +907,7 @@ function createDelegateTool(runtime: any) {
   return {
     name: 'dsh_workplan_delegate',
     description:
-      '部门负责人/第三层专家专用派发。负责人 action=review 交 startPhases+consolidation.assignments；dispatch 派 expert；direct 登记亲自执行（普通任务 low；顺序推理链任务必须自评复杂档 reasoningEffort：qwen medium/xhigh、非 qwen high/max，不得 low）；status 查看。专家叶子 action=self_effort 交 reasoningEffort+复杂度依据（complexityReason 枚举或 complexityRationale，二选一）+startPhases+timeNotice，平台按自配档接续 phase-1。任务必须极简（一动作/主产物/可独立验收、≤300 字符、带 qualityRequirements 1-8 条/每条≤400）；low/未配置禁派；复杂任务 8-25 人；待指示成员禁止改派，先用 instruct 答复。startPhases 各字段下限：problemAnalysis/approach≥40字，resources/approachBasis/prepared/evidence≥20字，tools≥10字。',
+      `部门负责人/第三层专家专用派发。负责人 action=review 交 startPhases+consolidation.assignments；dispatch 派 expert；direct 登记亲自执行（普通任务 low；顺序推理链任务必须自评复杂档 reasoningEffort：qwen medium/xhigh、非 qwen high/max，不得 low）；status 查看。专家叶子 action=self_effort 交 reasoningEffort+复杂度依据（complexityReason 枚举或 complexityRationale，二选一）+startPhases+timeNotice，平台按自配档接续 phase-1。任务必须极简（一动作/主产物/可独立验收、≤300 字符、带 qualityRequirements 1-8 条/每条≤400）；low/未配置禁派；复杂任务 ${MIN_COMPLEX_DELEGATE_MEMBERS}-${MAX_COMPLEX_DELEGATE_MEMBERS} 人；待指示成员禁止改派，先用 instruct 答复。startPhases 各字段下限：${START_EVIDENCE_MIN_CHARS_BRIEF}。`,
     parameters: {
       type: 'object',
       properties: {
@@ -995,8 +995,8 @@ function createDelegateTool(runtime: any) {
                     enum: ['low', 'medium', 'high', 'xhigh', 'max'],
                   },
                   /*
-                   * [3.2.4][O1] 负责人预登记（仅当环境变量 DSH_WORKPLAN_LEADER_PRE_REGISTER=1
-                   * 时生效，3.2.6 起默认开）：分工表条目可随附该成员的开工证据与开工前预估，
+                   * [3.2.4][O1] 负责人预登记（3.2.6 起默认开；环境变量
+                   * DSH_WORKPLAN_LEADER_PRE_REGISTER=0/false/off 可关）：分工表条目可随附该成员的开工证据与开工前预估，
                    * 平台在派发前替成员登记（delivery 视为已送达——信息由负责人本人
                    * 撰写），成员免跑 phase-0、直接以分工表档接续 phase-1。缺省或
                    * 非法 ⇒ 该成员照旧走 phase-0（fail-open）。
@@ -1318,7 +1318,9 @@ function createInstructTool(runtime: any) {
           type: 'string',
         },
       },
-      required: ['subtaskId', 'instruction'],
+      // subtaskId 在 runtime.instructTool 里是可选省略项（省略=对整份当前计划说话），
+      // schema 强制必填会让模型在不知道 subtaskId 时无法提问，直接换成一句瞎编的 id。
+      required: ['instruction'],
       additionalProperties: false,
     },
     output: {
@@ -1370,9 +1372,9 @@ function createHoldTool(runtime: any) {
   return {
     name: 'dsh_workplan_hold',
     description:
-      '把当前会话尚未派发的计划设为「认可闸门」按住状态：在用户明确认可前，自动与手动派发都会被拒绝'
+      '把当前会话的计划设为「认可闸门」按住状态：在用户明确认可前，自动与手动派发都会被拒绝'
       + '（dsh_workplan_dispatch 返回 DISPATCH_HELD）。用于任务要求先经用户认可再执行、'
-      + '而任务锚点又未被关键词识别命中的场景。只能设在尚未派发的计划上；已开跑的计划不设闸门。'
+      + '而任务锚点又未被关键词识别命中的场景。派发进行中，或已有子任务/成员真正开始执行时不能设闸门（会返回 ALREADY_RUNNING）；已派发但尚无任何子任务开跑时仍可补设。'
       + '解除唯一出口：用户明确认可后调用 dsh_workplan_release（登记留痕并开跑）。',
     parameters: {
       type: 'object',
@@ -1473,7 +1475,10 @@ function createReleaseTool(runtime: any) {
         },
         mode: {
           type: 'string',
-          enum: ['sync', 'async'],
+          // 与 dsh_workplan_dispatch 同一枚举：两个工具的同一个参数必须是同一套值。
+          // 旧 schema 这里只收 sync/async，runtime 却把非 async 一律当 wait，
+          // 'sync' 只是个能过校验、又被静默改写的别名，已统一为 wait/async。
+          enum: ['wait', 'async'],
         },
       },
     },
@@ -1549,6 +1554,9 @@ function createHandoffTool(runtime: any) {
         },
         department: {
           type: 'string',
+          // runtime 只认 DEPARTMENTS 闭集，schema 写自由字符串会让模型先猜一个
+          // 不存在的部门名，再被 INVALID_DEPARTMENT 拒一次（多烧一轮）。
+          enum: [...DEPARTMENT_IDS],
         },
         response: {
           type: 'string',
@@ -1934,7 +1942,11 @@ export function apply(ctx: any, config: WorkplanConfig = {}) {
      * 自动续跑」这个能力在用户机器上从来没打开过（1h57m 空窗的直接原因）。
      */
     autoResume: autoResumeEnabledFrom(config.autoResume, settingEnv('DSH_WORKPLAN_AUTO_RESUME')),
-    autoResumeMaxAttempts: numericSetting(config.autoResumeMaxAttempts, 'DSH_WORKPLAN_AUTO_RESUME_MAX'),
+    /*
+     * auto-resume.ts:64 明写「0 disables」，但 numericSetting 默认拒绝 0，
+     * 于是把次数配成 0 的人拿到的是默认值（继续续跑=继续烧钱）。这里显式允许 0。
+     */
+    autoResumeMaxAttempts: numericSetting(config.autoResumeMaxAttempts, 'DSH_WORKPLAN_AUTO_RESUME_MAX', true),
     // [3.2.3] 默认关闭；只有显式配置或显式环境变量才打开（与快路径风险相称）。
     deterministicFastPath: config.deterministicFastPath === true
       || /^(1|true|yes|on)$/i.test(String(settingEnv('DSH_WORKPLAN_DETERMINISTIC_FAST_PATH') ?? '').trim()),
@@ -2151,7 +2163,7 @@ export function apply(ctx: any, config: WorkplanConfig = {}) {
 
 export const meta = {
   name,
-  version: '3.2.6',
+  version: PLUGIN_VERSION,
   promptOrder: PROMPT_ORDER,
   routes: ['/dsh-workplan/plans', '/dsh-workplan/vendor/chart.umd.js'],
 }

@@ -292,7 +292,9 @@ function replanFieldError(raw: any, allowedEfforts?: readonly string[] | null): 
       : Array.isArray(allowedEfforts) && allowedEfforts.length > 0 && !allowedEfforts.includes(effort)
         ? `reasoningEffort "${effort}" 不在当前模型家族的推理等级集合 {${allowedEfforts.join(' / ')}} 内（qwen 系仅 low / medium / xhigh；非 qwen 系仅 low / high / max），必须改用集合内档位`
         : null
-  return list('dependsOn', 12, MAX_SUBTASKS - 1)
+  // 与 src/plan.ts 的 { itemMax: 16, max: MAX_SUBTASKS - 1 } 同一口径：
+  // 旧的 itemMax=12 会让 13-16 字符的合法依赖在 replan 时被判超长。
+  return list('dependsOn', 16, MAX_SUBTASKS - 1)
     ?? list('qualityRequirements', 8, 400)
     ?? list('method', 8, 800)
     ?? list('inputs', 12, 800)
@@ -418,16 +420,22 @@ export function planReplan(plan: any, changes: any, options: any = {}): ReplanRe
    * add 走独立数组：它不替代任何旧行，只是把新工作追加进新一轮。
    * 放进独立阶段，避免打乱原阶段的位置/依赖顺序。
    */
+  /*
+   * [3.2.7] 一次 replan 的多个新增共用一个「本轮追加阶段」。
+   * 旧实现把 stageId 的重算放在循环内，每加 1 个子任务就新开 1 个阶段：
+   * 批量新增 5 条时阶段数暴涨、撞 MAX_STAGES 被整单拒绝，用户只能一条条重试。
+   */
+  let replanStageId = `replan-r${revision}`
+  for (let suffix = 0; next.stages.some((item: any) => item?.id === replanStageId); suffix += 1) {
+    replanStageId = `replan-r${revision}${suffix === 0 ? 'x' : `x${suffix}`}`
+  }
   for (const [index, raw] of additions.entries()) {
     if (!isRecord(raw)) return fail(REPLAN_CODES.INVALID_SUBTASK, 'newSubtask 必须是对象')
     /*
      * 阶段 ID 与用户已有阶段撞名时，不能把新任务插进计划中部（T4 反例 V）：
      * 位置会决定依赖顺序。撞名就换一个后缀，保证新阶段始终追加在末尾。
      */
-    let stageId = `replan-r${revision}`
-    for (let suffix = 0; next.stages.some((item: any) => item?.id === stageId); suffix += 1) {
-      stageId = `replan-r${revision}${suffix === 0 ? 'x' : `x${suffix}`}`
-    }
+    const stageId = replanStageId
     const requestedId = typeof raw.id === 'string' ? raw.id.trim() : ''
     const newId = requestedId || nextId(next, `R${revision}-${index + 1}`)
     if (newId.length > 16) return fail(REPLAN_CODES.INVALID_SUBTASK, `子任务 id 最长 16 个字符：${newId}`)

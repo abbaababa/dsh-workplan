@@ -32,7 +32,12 @@ export const STEP_HARD_MULTIPLIER = 1.25
 export const DEFAULT_STEP_BUDGET = 60
 
 export type StepBudgetConfig = {
-  /** null = 关闭（默认）。>0 = 软上限；硬上限 = ceil(soft × 1.25)。 */
+  /**
+   * null = 关闭（**必须显式**用 0/false/off/no 关闭）。
+   * >0 = 软上限；硬上限 = ceil(soft × 1.25)。
+   * 未配置时的真实默认是 DEFAULT_STEP_BUDGET(=60)，不是 null——旧注释把它写成
+   * 「默认关闭」，与实际行为相反，导致按注释判断成本的人得出相反结论。
+   */
   soft: number | null
   hard: number
 }
@@ -44,7 +49,8 @@ export function parseStepBudget(raw: string | undefined | null): StepBudgetConfi
     const soft = DEFAULT_STEP_BUDGET
     return { soft, hard: Math.ceil(soft * STEP_HARD_MULTIPLIER) }
   }
-  if (text === '0' || text === 'false' || text === 'off') return { soft: null, hard: 0 }
+  // 'no' 与 auto-resume 的开关口径保持一致：同一个值在两个开关上不能有两种含义。
+  if (text === '0' || text === 'false' || text === 'off' || text === 'no') return { soft: null, hard: 0 }
   const n = Number(text)
   if (Number.isInteger(n) && n > 0) {
     return { soft: n, hard: Math.ceil(n * STEP_HARD_MULTIPLIER) }

@@ -24,9 +24,10 @@ test('package.json, package-lock.json and meta.version stay in sync', async () =
   const lock = await readJson('package-lock.json')
   const host = await readFile(path.resolve(process.cwd(), 'src/host.ts'), 'utf8')
 
-  const meta = host.match(/export const meta = \{[\s\S]*?version:\s*'([^']+)'/)
+  const meta = host.match(/export const meta = \{[\s\S]*?version:\s*(?:'([^']+)'|(PLUGIN_VERSION))/)
   assert.ok(meta, 'src/host.ts must declare meta.version')
-  const hostVersion = meta![1]
+  // 单一来源：meta.version 直接取 PLUGIN_VERSION 常量时，回退去读常量声明处。
+  const hostVersion = meta![1] ?? host.match(/export const PLUGIN_VERSION = '([^']+)'/)?.[1]
 
   assert.equal(pkg.version, lock.version, 'package-lock root version must equal package.json')
   assert.equal(pkg.version, lock.packages?.['']?.version, 'package-lock packages[""] version must equal package.json')
