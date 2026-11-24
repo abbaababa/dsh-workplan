@@ -23,12 +23,13 @@
 - 本批红线回滚后的实测（新测量脚本、确定性 15 子任务夹具）：负责人任务书 **12,797 字符**、phase-1 接续 **11,524 字符**、根工具面 **9,622 字符**（直接测量）。
   同夹具旧口径为推算值（新值 + 逐项已单独验证的删减量，−19 字新提醒已扣除）：负责人 12,845（+67 重复自查，−48，−0.4%）、phase-1 11,687（再 +115 phase-0 残留文案，−163，−1.4%）、根工具面 10,098（+476 已删 schema，−4.7%）。子 Agent 工具面（负责人 7,389 / 专家 6,886）本批未动。
   说明：早前草稿里的「13,088 / 11,930」把 pending 目标按 7 行估算（实际夹具约 3 行），属推算误差，已按实测差值更正；这项回滚后本批在子任务书上的净收益很小（仅重复自查），这是红线的必然代价。
-- 测试：`tests/time-extension-transaction.test.ts` 的 schema 用例改为断言两个已停用字段不再宣告、`timeNotice` 仍保留；全套 **1510 例，pass=1509 / fail=0 / cancelled=0 / todo=1，exit=0**。
+- 测试：`tests/time-extension-transaction.test.ts` 的 schema 用例改为断言两个已停用字段不再宣告、`timeNotice` 仍保留；全套 **1514 例，pass=1513 / fail=0 / cancelled=0 / todo=1，exit=0**。
 
 
 ### 三、验证
 
-- `npm run build`（含 tsc）通过；`npm test`：**1510 例，pass=1509 / fail=0 / cancelled=0 / todo=1，exit=0**（含新增红线守门 4 例）。
+- `npm run build`（含 tsc）通过；`npm test`：**1514 例，pass=1513 / fail=0 / cancelled=0 / todo=1，exit=0**（含新增红线守门 4 例）。
+- CI：首次 tag 跑在 Node 22 上暴露一处测试嵌套问题（`tests/workplan-unparsable-retry.test.ts` 的两个子测试写在父用例回调里，Node 22 会取消未 await 的子测试），已把它们提升为顶层用例；修复提交 `226b367` 后，tag 运行 `45334519374` 的 Build/Test（Node 22 与 26）与 Release 全部 success。
 - 终态实测（`node scripts/measure-injection.mjs`，字符数非账单 token）：根工具面 **9,622**（11 个工具，删除 2 个已停用参数后 −476）、负责人任务书 **12,797**、phase-1 接续 **11,524**、专家任务书 **4,813**、PROMPT_SECTION **3,663**、规划器提示词 **5,757**、加权样例 **107,092**。
 - 版本统一 **3.2.5**：`package.json` / `package-lock.json`（两处）/ `PLUGIN_VERSION` / `meta.version` / 三份 README 徽章与安装命令 / `tests/fixtures/tool-surface.json`。
 - 运行中的 DSH 由用户手动重启后生效；发布制品以 GitHub Release 与 npm registry 登记为准。

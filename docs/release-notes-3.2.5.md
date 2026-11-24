@@ -28,14 +28,15 @@
 
 - 规划器请求拆 system/user：静态方法论进 system，跨重试字节级稳定，上游前缀缓存可命中。
 - 计划消息与结果消息的大 JSON 移入 `source.durable`：可见文本不再带 22KB plan JSON，结果消息压到一行 ≤500 字。
-- 五步法接续版 2,662 → 1,323 字符；负责人任务书 11,119 → 8,676；专家任务书 5,006 → 3,678；14 个工具 schema 行为长文 22,621 → 16,124（必填/枚举/阈值/错误码全部保留）。
+- 五步法接续版 2,662 → 1,323 字符；负责人任务书 11,119 → 8,676；专家任务书 5,006 → 3,678；14 个工具 schema 行为长文 22,621 → 16,124（必填/枚举/阈值/错误码全部保留）。以上为 3.2.3 当时的样例口径，与本文件「验证」节的 3.2.5 新夹具数字不可直接横比。
 - F11 部门汇总 `sources` 只写专家名，成果一句话由平台从成员结算行自动补全（每次结算省约 1,000 字符输出）。
 - 全计划专家总数上限 `MAX_TOTAL_EXPERTS_PER_PLAN`（默认 40）与单阶段计划豁免，避免 15×25=375 人的无界回合。
 
 ## 验证
 
 - `npm run build`（含 `tsc`）通过。
-- `npm test`：**1510 例，pass=1509 / fail=0 / cancelled=0 / todo=1，exit=0**。
+- `npm test`：**1514 例，pass=1513 / fail=0 / cancelled=0 / todo=1，exit=0**（含 `tests/attention-red-line.test.ts` 红线守门 4 例）。
+- CI：tag 运行 `45334519374`，Build/Test（Node 22 与 26）与 Release 全 success。
 - 终态实测（字符数非账单 token）：根工具面 9,622；负责人任务书 12,797；phase-1 接续 11,524；专家任务书 4,813；PROMPT_SECTION 3,663；规划器 5,757；加权样例 107,092。
 - 版本统一 3.2.5：`package.json`、`package-lock.json`（两处）、`PLUGIN_VERSION`、`meta.version`、三份 README、`tests/fixtures/tool-surface.json`。
 
@@ -52,10 +53,13 @@ dsh plugin --profile web add dsh-workplan@3.2.5
 - `~/.dsh/workplan/journal/`、`~/.dsh/workplan/lessons.jsonl`、`~/.dsh/workplan/notices.jsonl`（可用环境变量改到别处；0o600 文件 / 0o700 目录，拒绝写符号链接）。
 - 工作目录下 `reports/`：`wp-start-evidence-<planId>-<subtask>.md`（插件自己写）与 `wp-settlement-<planId>-<subtask>.json`（任务书要求模型写的结算备份，消息丢失时用它结算）。不需要就在 `.gitignore` 里排除 `reports/`。
 
-## 发布证据（发布后回填）
+## 发布证据（2026-11-24 回填）
 
-- 发布提交：`<sha>`
+- 发布提交：`226b3679a091ed7b914481b0c192aca76a75917d`（tag 对象 `d59d7f965c6050919e7a6a0a3fd0c5dc1b7fcb48` 指向该提交）
 - Git tag：`v3.2.5`
+- 构建指纹：`f50f5d236f84fb66`（`cat lib/host.js lib/runtime.js lib/plan.js lib/watchdog.js | shasum -a 256 | cut -c1-16`；连续两次 `npm run build` 结果一致）
 - GitHub Release：`https://github.com/abbaababa/dsh-workplan/releases/tag/v3.2.5`
-- npm：`dsh-workplan@3.2.5`，tarball `https://registry.npmjs.org/dsh-workplan/-/dsh-workplan-3.2.5.tgz`
-- 索引源 PR：`<PR 链接>`
+  - 制品 `dsh-workplan-3.2.5.tgz`：2,062,293 字节，sha256 `71166781dbdf7092a5944cf22bddbfd31a20219f38f282707b3b18655d705f9b`（`gh release download` 下载复核一致）
+- npm：`dsh-workplan@3.2.5`，`dist-tags.latest = 3.2.5`（2026-11-24T05:41:26Z），tarball `https://registry.npmjs.org/dsh-workplan/-/dsh-workplan-3.2.5.tgz`，sha1 `9ac73385772c4814e3e5616cbc3f59ef586b84b5`，161 文件 / 2,062,293 字节（下载复核一致）；provenance 透明日志 `https://search.sigstore.dev/?logIndex=4070239801`
+- CI：tag 运行 `45334519374`，Build（22/26）、Test（22/26）、Release 全 success（首次运行 `45333607979` 因 Node 22 的子测试嵌套问题失败，修复提交 `226b367` 后转绿）
+- 索引源：`https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/18401`（tarball 指向 v3.2.5；描述工具数 11→14）
