@@ -227,7 +227,8 @@ test('H20 未知部门在面板回退到 dept.unknown，不回显原文（client
   assert.match(client, /\[1\.12\.0\]\[D-09\] 未知部门不再回显原文/, 'D-09 说明注释必须存在')
   assert.match(
     client,
-    /return value === key \? t\('dept\.unknown'\) : value/,
+    // [3.2.7] t() 对缺失键返回 '—'（不是 key），旧比较永远不成立；两种缺失都要兜。
+    /return value === key \|\| value === '—' \? t\('dept\.unknown'\) : value/,
     'deptName 缺键时必须回退 dept.unknown',
   )
 })

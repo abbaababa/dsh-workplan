@@ -61,6 +61,7 @@ window.__ModuleLoader__.load({
                 "resumeExhausted": "自动续跑额度已用尽，需要主 Agent 直接接手完成",
                 "refresh": "刷新",
                 "updatedAt": "更新于",
+                "loading": "正在读取任务进度…",
                 "empty": "还没有任务进度",
                 "emptyHint": "先发一句话说明你要做什么，系统会自动安排步骤和执行角色。",
                 "error": "读取失败",
@@ -299,6 +300,7 @@ window.__ModuleLoader__.load({
                 "resumeExhausted": "The automatic resume budget is used up; the main agent has to finish this directly",
                 "refresh": "Refresh",
                 "updatedAt": "Updated",
+                "loading": "Loading task progress…",
                 "empty": "No task progress yet",
                 "emptyHint": "Send one sentence about what you need; the system will lay out the steps and owners.",
                 "error": "Could not load",
@@ -1278,7 +1280,8 @@ window.__ModuleLoader__.load({
              * 或任务行文案。语言表缺键时统一显示「未知部门 / Unknown」，原文只
              * 留在服务端记录里供审计。
              */
-            return value === key ? t('dept.unknown') : value;
+            // [3.2.7][P2] t() 对缺失键返回 '—'（不是 key），旧比较永远不成立。
+            return value === key || value === '—' ? t('dept.unknown') : value;
         }
         /*
          * [1.11.0] 跨部门需求的四档文案（用户 m00687）。
@@ -1290,12 +1293,14 @@ window.__ModuleLoader__.load({
         function handoffStatusText(t, status) {
             const key = `handoff.${String(status ?? '')}`;
             const value = t(key);
-            return value === key ? String(status || '') : value;
+            // [3.2.7][P2] 同上：把 t() 的 '—' 也算作缺失。
+            return value === key || value === '—' ? String(status || '') : value;
         }
         function levelText(t, value) {
             const key = `level.${value}`;
             const text = t(key);
-            return text === key ? String(value || '') : text;
+            // [3.2.7][P2] 同上。
+            return text === key || text === '—' ? String(value || '') : text;
         }
         function stageLabel(t, index) {
             return `${t('stepPrefix')} ${index + 1} ${t('stepSuffix')}`.trim();
@@ -2905,7 +2910,13 @@ window.__ModuleLoader__.load({
             return h('section', { className: 'dsh-wp-chart-card dsh-wp-donut-card' }, h('div', { className: 'dsh-wp-section-title' }, t('statusChart')), h('div', { className: 'dsh-wp-donut-wrap' }, h('svg', { className: 'dsh-wp-donut', viewBox: '0 0 100 100', role: 'img', 'aria-label': t('statusChart') }, h('circle', {
                 cx: 50, cy: 50, r: radius, fill: 'none',
                 stroke: 'var(--dsw-alias-bg-layer-2)', strokeWidth: 12,
-            }), arcs), h('div', { className: 'dsh-wp-donut-center' }, h('strong', null, `${percent}%`), h('span', null, t('stats.done')))), h('div', { className: 'dsh-wp-legend' }, legend.map((item) => h('span', { key: item.key, className: 'dsh-wp-legend-item' }, h('i', { className: 'dsh-wp-legend-dot', style: { background: item.color } }), `${item.label} ${item.value}`))));
+            }), arcs), h('div', { className: 'dsh-wp-donut-center' }, 
+            /*
+             * [3.2.7][P2] 还没有任何工作项时，「完成率」是未知而不是 0%：
+             * 计划卡片的同一指标显示「—」，圆环却写 0%，两处对同一事实给出
+             * 相反结论。统一成「—」。
+             */
+            h('strong', null, total > 0 ? `${percent}%` : '—'), h('span', null, t('stats.done')))), h('div', { className: 'dsh-wp-legend' }, legend.map((item) => h('span', { key: item.key, className: 'dsh-wp-legend-item' }, h('i', { className: 'dsh-wp-legend-dot', style: { background: item.color } }), `${item.label} ${item.value}`))));
         }
         function TaskBars({ sessions, t, onSelect }) {
             return h('section', { className: 'dsh-wp-chart-card dsh-wp-task-bars' }, h('div', { className: 'dsh-wp-section-title' }, t('taskChart')), (Array.isArray(sessions) ? sessions : []).map((session) => {
@@ -2954,7 +2965,11 @@ window.__ModuleLoader__.load({
                     setTimeout(reveal, 60);
                 }
             }, []);
-            const activeSessions = useMemo(() => sessions.filter((session) => session.phase !== 'cancelled'), [sessions]);
+            /*
+             * [3.2.7][P2] superseded（已由他计划承接）也是终态：它既不推进、也不该
+             * 进「进行中」数量、更不该把完成率拉低。旧实现只过滤 cancelled。
+             */
+            const activeSessions = useMemo(() => sessions.filter((session) => session.phase !== 'cancelled' && session.phase !== 'superseded'), [sessions]);
             const totals = useMemo(() => {
                 let total = 0;
                 let done = 0;
@@ -3122,7 +3137,14 @@ window.__ModuleLoader__.load({
                     role: 'status',
                 }, t('trimNotice'))
                 : null, activeSessions.length > 0 ? h('div', { className: 'dsh-wp-statbar', role: 'list' }, h('div', { className: 'dsh-wp-stat dsh-wp-stat--tasks', role: 'listitem' }, h('div', { className: 'dsh-wp-stat-value' }, activeSessions.length), h('div', { className: 'dsh-wp-stat-label' }, t('sessionCount'))), h('div', { className: 'dsh-wp-stat', role: 'listitem' }, h('div', { className: 'dsh-wp-stat-value' }, totals.total), h('div', { className: 'dsh-wp-stat-label' }, t('workItems'))), h('div', { className: 'dsh-wp-stat dsh-wp-stat--done', role: 'listitem' }, h('div', { className: 'dsh-wp-stat-value' }, totals.done), h('div', { className: 'dsh-wp-stat-label' }, t('stats.done'))), h('div', { className: 'dsh-wp-stat dsh-wp-stat--active', role: 'listitem' }, h('div', { className: 'dsh-wp-stat-value' }, totals.inProgress), h('div', { className: 'dsh-wp-stat-label' }, t('stats.inProgress'))), h('div', { className: 'dsh-wp-stat dsh-wp-stat--blocked', role: 'listitem' }, h('div', { className: 'dsh-wp-stat-value' }, totals.blocked), h('div', { className: 'dsh-wp-stat-label' }, t('stats.blocked')))) : null, activeSessions.length > 0 ? h('div', { className: 'dsh-wp-scope-note' }, t('allPlansHint')) : null, activeSessions.length === 0
-                ? h('div', { className: 'dsh-wp-empty' }, h('div', { style: { fontWeight: 650, marginBottom: '4px' } }, t('empty')), h('div', null, t('emptyHint')))
+                /*
+                 * [3.2.7][P2] 首次打开时数据还没到（loading=true、sessions 为空），
+                 * 旧实现直接渲染「还没有任务进度」，用户会先看到一句不实的空状态。
+                 * 加载中且没有错误时显示「正在读取」，只有真的读到空才说空。
+                 */
+                ? (loading && !error
+                    ? h('div', { className: 'dsh-wp-empty' }, h('div', { style: { fontWeight: 650, marginBottom: '4px' } }, t('loading')))
+                    : h('div', { className: 'dsh-wp-empty' }, h('div', { style: { fontWeight: 650, marginBottom: '4px' } }, t('empty')), h('div', null, t('emptyHint'))))
                 : h('div', { className: 'dsh-wp-groups' }, 
                 // [用户要求] 总览块（完成率环 + 每个任务的进度）上移到分组之前：
                 // 用户要求红圈的「每个任务的进度」必须显示在「进行中」组之上。

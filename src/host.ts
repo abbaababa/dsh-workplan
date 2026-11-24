@@ -248,7 +248,7 @@ export const PROMPT_ORDER = 40
  * 自报版本时被误导，用户也拿不到真实版本（用户要求 13/G 要如实报告版本）。
  * 硬编码字符串与 meta 双写是根因，改为同一常量派生。
  */
-export const PLUGIN_VERSION = '3.2.7'
+export const PLUGIN_VERSION = '3.2.8'
 
 const PROMPT_SECTION = [
   '本会话已启用自动任务分解。每个新任务的第一个模型步骤前生成计划并显示在对话；看到【任务分解】后，未自动派发或需续跑/重试时再调用 dsh_workplan_dispatch（默认 wait；较久用 mode:"async"）。只收到「任务分解已在后台生成中」时不要手动派发，先告知用户正在分配并等待。',
