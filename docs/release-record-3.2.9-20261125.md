@@ -55,10 +55,24 @@
 - 分支：`abbaababa:wp327`，head `9f9673119d6f446ebce692fdef0c8180a3ce284d`
 - 基于：`upstream/main` `ea97dfefbf02bfa82ab8fc20ee1f666c705b39a8`
 - 改动：仅 `data/plugins/abbaababa__dsh-workplan.yml` 的 `tarball`，从 `v3.2.6` 改为 `v3.2.9`；description 保留 14 tools 口径。
-- PR 状态（2026-11-25 12:47 +08:00）：`OPEN`，`mergeable=MERGEABLE`，`mergeStateStatus=UNSTABLE`，`PR check` 仍在运行（Build 步骤耗时较长）；以 PR 页面最终检查结果为准。
+- PR 状态（2026-11-25 13:56 +08:00 复核）：`OPEN`，`mergeable=MERGEABLE`，`mergeStateStatus=CLEAN`；`PR check / check` 于 `2026-11-25T05:28:45Z` 成功，`PR check / Submission gate` 于 `2026-11-25T05:29:48Z` 成功；无 auto-merge。此前记录的 `UNSTABLE` 是 Build 步骤未跑完时的中间态，已被最终结果取代。
 - 当前账号对 `awesome-dsh-plugin` 仓库权限为只读（`push=false`），无法自行合并；合并由上游维护者完成。
 - 合并后刷新链路：`sync-readme` → `build-site`（`docs/index.json` 较快更新）→ `dsh-plugin-catalog` npm 包（仅每日 02:23 UTC 或手动 `workflow_dispatch`）→ jsDelivr + DSH `pluginMarket` 缓存（约 10 分钟）。
 - 因此截至本记录，DSH 市场索引尚未显示 3.2.9；这是上游合并/重建链路的预期延迟，不是本插件发布失败。
+
+## 交付三态（避免把“已发布”“待外部动作”“待人工重启”混为一谈）
+
+1. **已发布且可复核**：GitHub Release `v3.2.9` 与 npm `dsh-workplan@3.2.9` 均已上线；Release 资产、npm shasum、CI 结果见上表。判定依据：Release 页面/资产可下载、`npm view dsh-workplan@3.2.9` 返回 3.2.9 且 `dist-tags.latest=3.2.9`。
+2. **已提交、等待上游动作**：索引源 PR #18582 已更新为 3.2.9，检查全绿且 `mergeStateStatus=CLEAN`，但本账号对上游只读，不能代合并；在合并前市场目录不会出现 3.2.9。判定依据：PR 页面状态、`gh pr view 18582 --json state,mergeable,mergeStateStatus,statusCheckRollup`。
+3. **可选、待用户人工动作**：冷启动核验。当前进程已热加载 3.2.9；重启只用于确认 profile 冷启动与面板一致，不影响已发布产物。判定依据：重启后 `dsh_workplan_status` 的 `version`/`buildHash` 与本次记录一致。
+
+## 冷启动核验清单（用户重启后执行，代理不得自行重启）
+
+- [ ] 重启 DSH 后，在新会话调用 `dsh_workplan_status`；确认 `version=3.2.9`、`build=72a75c57eab069ba`、`pid` 与启动时间已更新。
+- [ ] 确认 `dsh_workplan_dispatch/status/update/cancel/replan/hold/release/instruct/handoff/followup/lessons` 等工具仍可见；负责人/专家工具不在根会话越权出现。
+- [ ] 打开左侧进度面板，确认计划行、状态色与 `status` 文本一致；计划完成后可正常交付。
+- [ ] 若 `version` 不是 3.2.9 或 `build` 不是 `72a75c57eab069ba`，先检查 Web profile 的 `dsh.profile.bundles` 是否仍含 `dsh-workplan`，再按 `RELEASING.md` 的回滚/重装步骤处理，不要直接改运行中进程。
+
 
 ## 运行态
 
