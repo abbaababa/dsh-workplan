@@ -784,20 +784,20 @@ function auditClarifyNeedRules(
     }
   }
   const FORECAST = /(预测|预判|走势|涨跌|行情)/
+  const MARKET_FORECAST_CUE = /(走势|涨跌|行情|股价|大盘|指数|基金|股票|ETF|LOF|板块|开盘|收盘|点位|A股|港股|美股)/i
+  const NON_MARKET_SUBJECT = /(?:行业|市场|技术|业务|项目|工期|进度|流量|销量|营收|增长|性能|负载|趋势|风险|成本|收益|人口|天气|气温)/
   const SUBJECT = /(?:\d{6}|[A-Z]{2,}\d+|[「『“"《][^」』”"》]{2,20}[」』”"》])/
   /*
    * [3.2.7][P1] 中文标的名同样是「可识别标的」。
-   * 旧实现只认 6 位代码、字母+数字、或带引号的名字：用户说「预测贵州茅台下月
-   * 的走势」时标的就在句子里，却判成「没有标的」并反问一轮，白烧一轮 token。
-   * 只认「简称 + 时间词 + 走势类词」这种明确结构，避免把动词本身当名字
-   * （「预测走势」仍应判缺标的，所以要求名字至少 3 个字且不含预测类动词）。
+   * 同时避免把「分析行业发展趋势」「预测项目工期」这类非行情任务误判成缺股票代码。
    */
   const SUBJECT_CJK = /(?:[\u4e00-\u9fff]{3,10})(?=(?:下月|下周|明日|后市|未来|本月)?的?(?:走势|涨跌|行情|表现))/u
   const FORECAST_VERB_ONLY = /^(?:预测|预判|分析|判断|研究)(?:一下|下|一波)?$/
   const cjkHit = text.match(SUBJECT_CJK)?.[0] ?? ''
   // The missing subject may already be named in the conversation (「它走势如何」 after
   // the user quoted a ticker). Only the task's own words make it a forecast request.
-  if (FORECAST.test(text) && !SUBJECT.test(both) && (!cjkHit || FORECAST_VERB_ONLY.test(cjkHit))) {
+  const isGenericNonMarket = !MARKET_FORECAST_CUE.test(text) && NON_MARKET_SUBJECT.test(text)
+  if (FORECAST.test(text) && !isGenericNonMarket && !SUBJECT.test(both) && (!cjkHit || FORECAST_VERB_ONLY.test(cjkHit))) {
     return {
       needed: true,
       rule: 'C3',

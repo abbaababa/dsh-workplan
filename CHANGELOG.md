@@ -1,3 +1,25 @@
+## 3.3.0 — 2026-11-25（底层逻辑冲突清零 + 极致省 Token 版）
+
+本版针对全量源码底层逻辑审计暴露的死锁、竞态、策略打架与重复开销问题做了系统性改造；全部质量门禁、反编造证据与无执行超时契约原样保留，不改持久化 schema，旧计划可原样回放。
+
+### 一、底层逻辑矛盾、死锁与竞态清零
+
+- **消除人数死锁与策略打架**：`MIN_COMPLEX_DELEGATE_MEMBERS` 默认从 `3` 调为 `1`（仍支持 `DSH_WORKPLAN_MIN_COMPLEX_DELEGATE_MEMBERS` 环境变量与 `planDelegations({ minHeadcount })` 按需调高），彻底消除 `15×3=45 > MAX_TOTAL_EXPERTS_PER_PLAN(30)` 的预算死锁及强耦合任务与人数下限之间的二律背反。
+- **修复运行期并发覆盖与死循环**：`persistStartEvidenceFile` 按 `member` 名称叠加 SHA-256 短哈希分文件落盘（避免同子任务多名专家及纯中文专家名互踩）；`auditClarifyNeed` 改为按会话隔离澄清轮次并在建计划时清零；`maybePlan` 将用户确认回复置于寒暄拦截之前；`canResumePlan` 跳过 `takeoverRequired===true` 项；`armAutoResume` 忽略 `closure==='replanned'` 旧行；移除无执行超时后的冗余兜底轮询与死代码。
+- **修复账本与信封截断**：`appendUserMessage` 对 `workplan-cancel` / `CANCEL_MARKER_BEGIN` 豁免 500 字符上限，防止长取消信封被拦腰截断；`flushPreHeadNotices` 补发时同步镜像写入 `notices.jsonl` 账本。
+- **修复上下文、工具与看板细节**：`extractHardFacts` 改为按类型配额抽取（防止大量路径挤掉百分比与哈希）；`deriveLeaderEstimate` 放宽成员名单至 `MAX_COMPLEX_DELEGATE_MEMBERS(25)` 并保留 `>120960` 分钟 fail-closed 上界；`buildTeamBrief` 将单行最小预算从 `96` 降至 `36` 以保留全部并行兄弟；`fileWriteGuardReason` 放宽仅带 `path` 无写入内容键的未知只读工具；`createReplanTool` 补齐 `reasoningEffort` 字段，`createDelegateTool` 补齐 `direct`/`self_effort` 渲染分支，`createLessonsTool` 修正「预防」错别字；`client.ts` 过滤已重规划旧行、保留详细错误摘要、修正档位回退并移除底部重复图表。
+
+### 二、极致省 Token 改造
+
+- **静态注入总基准下降 32.3%**：`scripts/measure-injection.mjs` 加权注入从 **106,954 字符**降至 **72,415 字符**（系统提示词 `-42.7%`、14 个工具 schema `-42.3%`、phase-1 接续五步 `-59.6%`、专家任务书 `-37.4%`）。
+- **专家任务书缓存前缀命中 >85%**：将静态 `rulesBrief` 前移至动态【你的分工】之前，同部门多名专家共享前缀比例超过 85%，显著放大供应商 KV 前缀缓存命中。
+- **动态执行减耗**：默认启用 `deterministicFastPath`（跳过简单任务额外规划模型调用，支持配置或环境变量关闭）、默认不强制拆 3 倍专家、收紧 RCR 角色上下文包默认预算（`planning=1200`、`execution=2400`）。
+
+### 三、一致性与验证
+
+- 新增回归测试 `tests/audit-fixes-and-token-economy.test.ts`（12 项），覆盖上述全部缺陷修复与省 token 守门。
+- 版本同步：`package.json` / `package-lock.json` / `src/host.ts` / 本 CHANGELOG / 三份 README / `tests/fixtures/tool-surface.json` 全部 3.3.0。
+
 ## 3.2.9 — 2026-11-25（五项上下文优化：隔离 / 压缩 / RCR / Latent Brief / ASTC 等价实现）
 
 本版按用户 2026-11-25 的五项要求，改插件源码实现上下文成本与决策质量的统一优化；全部为增量能力，不加新工具、不改持久化 schema、旧计划可原样回放。

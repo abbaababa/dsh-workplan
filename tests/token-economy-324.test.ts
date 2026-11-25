@@ -21,8 +21,8 @@ function assignmentsOf(count: number) {
   }))
 }
 
-test('[O8] 单阶段计划豁免复杂任务人数下限；多阶段计划不豁免（3.2.6 下限 3）', () => {
-  const input = { consolidation: { assignments: assignmentsOf(2), taskReasoningEffort: 'high' }, model: 'gpt-4o' }
+test('[O8] 单阶段计划豁免复杂任务人数下限；多阶段计划在设定下限时阻断', () => {
+  const input = { consolidation: { assignments: assignmentsOf(2), taskReasoningEffort: 'high' }, model: 'gpt-4o', minHeadcount: 3 }
   const multi = planDelegations(input)
   assert.equal(multi.ok, false)
   assert.equal(multi.code, 'DELEGATE_HEADCOUNT_MIN')
@@ -31,9 +31,9 @@ test('[O8] 单阶段计划豁免复杂任务人数下限；多阶段计划不豁
   assert.equal(single.members.length, 2)
 })
 
-test('[O6/O8] caps 常量：MIN 可用环境变量覆盖（3.2.6 默认 3），MAX_TOTAL_EXPERTS_PER_PLAN 存在', async () => {
+test('[O6/O8] caps 常量：MIN 默认 1 且可用环境变量覆盖，MAX_TOTAL_EXPERTS_PER_PLAN 存在', async () => {
   const base = await import('../src/caps.js')
-  assert.equal(base.MIN_COMPLEX_DELEGATE_MEMBERS, 3)
+  assert.equal(base.MIN_COMPLEX_DELEGATE_MEMBERS, 1)
   assert.ok(base.MAX_TOTAL_EXPERTS_PER_PLAN >= 1)
   process.env.DSH_WORKPLAN_MIN_COMPLEX_DELEGATE_MEMBERS = '5'
   try {
@@ -50,8 +50,8 @@ test('[O6/O8] caps 常量：MIN 可用环境变量覆盖（3.2.6 默认 3），M
   const fallbackSpec = '../src/caps.js?o8-fallback=1'
   const fallback: typeof base = await import(fallbackSpec)
   delete process.env.DSH_WORKPLAN_MIN_COMPLEX_DELEGATE_MEMBERS
-  assert.equal(bad.MIN_COMPLEX_DELEGATE_MEMBERS, 3, '缺省回落 3')
-  assert.equal(fallback.MIN_COMPLEX_DELEGATE_MEMBERS, 3, '非法值回落 3')
+  assert.equal(bad.MIN_COMPLEX_DELEGATE_MEMBERS, 1, '缺省回落 1')
+  assert.equal(fallback.MIN_COMPLEX_DELEGATE_MEMBERS, 1, '非法值回落 1')
 })
 
 test('[3.2.4] 规划器拆分：system 块含全部静态内容，user 块只含动态三段，拼接视图与旧口径一致', async () => {

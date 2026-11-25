@@ -525,7 +525,7 @@ test('E1 单元：非 qwen medium 声明按钳制前判复杂 ⇒ 放行＋钳�
 })
 
 test('E2 单元：非 qwen medium 2 人 ⇒ DELEGATE_HEADCOUNT_MIN（复杂判定在钳制前，人数下限闸不被钳制豁免）', () => {
-  const r = planDelegations({ consolidation: goodConsolidation({ taskReasoningEffort: 'medium', assignments: eight().slice(0, 2) }), model: OTHER })
+  const r = planDelegations({ consolidation: goodConsolidation({ taskReasoningEffort: 'medium', assignments: eight().slice(0, 2) }), model: OTHER, minHeadcount: 3 })
   assert.equal(r.ok, false)
   assert.equal(r.code, 'DELEGATE_HEADCOUNT_MIN')
 })
@@ -539,8 +539,8 @@ test('E3 单元：declared 记忆同时驱动禁派闸与复杂判定：钳制�
 
 /* ---------- F 非 low 既有行为回归（S4） ---------- */
 
-test('F1 回归：复杂人数下限闸原样（qwen medium，2 人拦）；组员角色取消后全专家合法', () => {
-  const two = planDelegations({ consolidation: goodConsolidation({ taskReasoningEffort: 'medium', assignments: eight().slice(0, 2) }), model: QWEN })
+test('F1 回归：复杂人数下限闸原样（qwen medium，配置下限 3 时 2 人拦）；组员角色取消后全专家合法', () => {
+  const two = planDelegations({ consolidation: goodConsolidation({ taskReasoningEffort: 'medium', assignments: eight().slice(0, 2) }), model: QWEN, minHeadcount: 3 })
   assert.equal(two.code, 'DELEGATE_HEADCOUNT_MIN')
   // [3.0.0][用户要求 9] 8 人全部为专家是唯一合法形态，不再有配比闸。
   const allExpert = eight().map((m) => ({ ...m, role: 'expert' }))

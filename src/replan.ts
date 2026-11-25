@@ -293,8 +293,8 @@ function replanFieldError(raw: any, allowedEfforts?: readonly string[] | null): 
         ? `reasoningEffort "${effort}" 不在当前模型家族的推理等级集合 {${allowedEfforts.join(' / ')}} 内（qwen 系仅 low / medium / xhigh；非 qwen 系仅 low / high / max），必须改用集合内档位`
         : null
   // 与 src/plan.ts 的 { itemMax: 16, max: MAX_SUBTASKS - 1 } 同一口径：
-  // 旧的 itemMax=12 会让 13-16 字符的合法依赖在 replan 时被判超长。
-  return list('dependsOn', 16, MAX_SUBTASKS - 1)
+  // 参数顺序为 list(key, maxItems, itemMaxLen)。
+  return list('dependsOn', MAX_SUBTASKS - 1, 16)
     ?? list('qualityRequirements', 8, 400)
     ?? list('method', 8, 800)
     ?? list('inputs', 12, 800)

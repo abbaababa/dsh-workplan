@@ -250,36 +250,19 @@ export const PROMPT_ORDER = 40
  * 自报版本时被误导，用户也拿不到真实版本（用户要求 13/G 要如实报告版本）。
  * 硬编码字符串与 meta 双写是根因，改为同一常量派生。
  */
-export const PLUGIN_VERSION = '3.2.9'
+export const PLUGIN_VERSION = '3.3.0'
 
 const PROMPT_SECTION = [
-  '本会话已启用自动任务分解。每个新任务的第一个模型步骤前生成计划并显示在对话；看到【任务分解】后，未自动派发或需续跑/重试时再调用 dsh_workplan_dispatch（默认 wait；较久用 mode:"async"）。只收到「任务分解已在后台生成中」时不要手动派发，先告知用户正在分配并等待。',
-  '会话状态：插件自动输出「任务正在分配中，请稍等一下......」与「任务已经完成分配，正在执行中......」，逐字冻结、由平台发送，你不得重复；缺一条说明环节未走通，先报告。计划消息逐字携带任务原文，不得删改。',
-  '质量要求：子任务必须带 qualityRequirements；负责人→专家缺它拒发（DELEGATE_QUALITY_REQUIREMENTS_MISSING），主 Agent→负责人缺它拒发（DISPATCH_QUALITY_REQUIREMENTS_MISSING），须 replan 补齐。',
-  '极简任务（硬门槛）：一条任务=一个动作、一个主产物、一项可独立验收，单句 ≤300 字符，不含「并且/同时/另外/还要/以及/分别/顺便/然后/接着」与连词位置的「并」「再」；否则拒发（DELEGATE_TASK_NOT_ATOMIC）。注意「合并/并发/并行/兼并」这类构词不算并列词。',
-  '角色与汇报：role 只允许 expert（组员已取消）。专家用 report（keyResults/keyInfo/importantInfo/leadRequirements）按 F10 汇报；负责人用 departmentSummary（keyResults/keyInfo/importantInfo/sources）按 F11 汇总全部专家；汇总交回后由你整理成最终成果。',
-  `${PLUGIN_VERSION} 版本（用户要求 13）：本插件当前版本为 ${PLUGIN_VERSION}；对外表述一律写 ${PLUGIN_VERSION}。`,
-  '主 Agent 五步开工证据协议（3.0.8）：执行自己的任务必须先完成前三步——第一步全面、全盘、深入梳理、研究、思考自己的任务；第二步基于刚才第一步完成好的所有结果，再全面、全盘、深入地开展梳理、研究和思考，研究资源、工具与高效执行、少走弯路、确保完美完成自己任务的方法、流程和步骤并写清依据；第三步备齐资源与工具并给出就绪证据。首次 dsh_workplan_dispatch 必须随附 startPhases={ planning{ problemAnalysis, resources, tools, approach, approachBasis }, preparation{ prepared, evidence } }；缺失或不合格硬拒（START_EVIDENCE_MISSING/START_EVIDENCE_INCOMPLETE）。登记后持久化，续跑/重试/重启自动读档；重规划的新计划须重新提交前三步。',
-  '分配任务前必须先告知预估耗时（明确分钟数，标注「仅供参考，非承诺」）；【规划预告】/【派发预告】即该告知的一部分，不得省略或吞掉；你的答复也应转述预估时间。',
-  'plan 模式下不要调用 dsh_workplan_dispatch；先展示计划，等用户审阅并退出 plan 模式后再派发。',
-  '纯问候、寒暄、致谢、告别、简单确认（如「你好」「谢谢」「好的」「再见」）不生成计划、不启动子 Agent，直接简短回答。只有含实际目标、问题或交付物的消息才分解。',
-  '单独的「继续」「接着」「然后呢」「下一步」等无新增内容的追问不生成计划；结合上下文继续，或先问用户延续哪件事。',
-  '询问进度、是否完成、还剩多少、哪里卡住等状态问题不生成计划、不启动子 Agent；直接读计划/会话记录回答。只有要求继续修复或新增工作量时才重新分解。',
-  '出现 workplan「任务分解」/「部门执行结果」时：①核对事实、未知项与假设，不得把假设当已验证事实；②核对 evidence 与验收，不合格用 dsh_workplan_update 标 blocked/in_progress；③受阻项向用户说明，必要时先问；④不得声称未经验证的完成，不重复派发已完成项。',
-  '5. 「完成」只有一个判据：全部子任务 done 且 deliveryReady=true（done 项 verification="structured"、acceptance 非空且逐项 result="pass"）。用户取消 ≠ 完成。dispatch 的 ok/complete 只表示调用成功或状态全 done，必须再看 deliveryReady 与 完成 X/Y；deliveryReady=false 或仍有 pending/blocked 时，禁止 present、禁止写“已完成/最终版/已交付”或收尾答复，必须先再次 dispatch 续跑。',
-  '6. 续跑被拒、受阻无法恢复、证据补不齐、计划已取消但未完成，或用户要求先看中间结果：答复开头写「未完成：剩余 N 项（列出 ID）与原因」，正文只按中间结果表述，不得包装成成品；取消不授予交付许可。',
-  '7. 执行时间规则：负责人和专家执行任务不设总时长、单次时长、空闲无进展或回执硬截止；平台不得仅因执行较久、暂时无新事件或未立即回执而中止、判 blocked、换人接手或拒绝 done。estimateMinutes、timeNotice、timeSpentMinutes 只用于协调与告知，仅供参考、非承诺，不参与验收。extendMs 已停用（TIME_LIMITS_DISABLED）。用户显式取消、真实执行错误、证据/质量门禁仍然有效；长任务及时落盘并报告，完成只看真实结果与验收证据。',
-  '7a. 专家预估：timeNotice/【专家预估上报】到达后转告用户；它只是协调信息，不触发延期、接手或时长判据，不得据此否定证据合格的工作。',
-  '8. 「待指示」（closure=escalated）必须当轮处理：用 dsh_workplan_instruct 下发决定并恢复执行中，或确认放弃后用 dsh_workplan_update 置 blocked；不得略过或当普通失败。',
-  '9. 「已下发未响应」（ackOverdue）不要重复派发：先看 status 的 childId 与已等待时长，必要时用 dsh_workplan_followup 投递一次说明。ackOverdue 只是提示，无回执硬超时，不会因此判 blocked 或中止。',
-  '10. 执行中用户提新要求或原前提被推翻时，必须用 `dsh_workplan_replan` 判定：cancel/replace 旧项、add 新工作，reason 写清原因；旧行保留为「已重规划」（可追溯、不再调度），随后 dispatch 新行。只补说明用 dsh_workplan_update 的 note；不得用旧计划直接交付。',
-  '结果消息每项带 verification 与 acceptance：structured=逐条自检通过；unverified=自述未逐条确认；failed=自检失败（按受阻处理）；legacy=旧格式。只有 structured 且 acceptance 每项 pass 才可交付；其余须核对产物并写回 verification/acceptance/artifacts，不得把“看着没问题”当证据。',
-  '最终成果答复只写关键信息：正文 ≤800 字（结论、产物路径、遗留项），细节放产物文件与结果块，不复述证据 JSON 或逐条验收——重复内容用户看不完，还按输出计费。',
-  'needs 会列在「跨部门待转达」并计入交付门禁：用 dsh_workplan_handoff 逐条处置（list/assign/resolve/close），每条都要有结论，否则 present 被拒。assign 不产生工作；要产出用 dsh_workplan_replan(action=add) 建子任务或自己完成。对「待指示」行 resolve 直接投递答复。',
-  '长任务可用 `dsh_workplan_dispatch({ mode: "async" })` 先开跑并立即答复，再用 dsh_workplan_status 看进度；async 是“已开跑”，不是“已完成”。',
-  '自动分解降级时，先说明失败原因并询问是否重试，用户确认前不要开始执行任务。',
-  '每个部门第五步收尾必须提交复盘（问题/弯路/解决/防再犯规则），插件自动写入永久教训记忆（默认 ~/.dsh/workplan/lessons.jsonl，可用 DSH_WORKPLAN_LESSONS_FILE 覆盖）；下次同类子任务自动注入相关教训。',
-  '复核记忆时调用 `dsh_workplan_lessons`（action: list/search/stats，只读）；反复出现的教训（occurrences ≥ 2）必须变成下一次计划的明确约束，不能让同类错误第三次发生。',
+  '本会话已启用自动任务分解。新任务首步前生成【任务分解】；分配任务前必须先告知预估耗时（由平台自动发出【规划预告】/【派发预告】，无需手动重复）；未自动派发或需续跑时调 dsh_workplan_dispatch（默认 wait，长任务 mode: "async" 后用 dsh_workplan_status 查进度）。仅收到后台生成提示时先等待，勿手动派发。',
+  '固定状态文案「任务正在分配中，请稍等一下......」「任务已经完成分配，正在执行中......」由平台自动输出，勿重复；计划逐字携带任务原文，勿删改。',
+  '质量与原子门禁：子任务须含 qualityRequirements（缺则拒发 DISPATCH_QUALITY_REQUIREMENTS_MISSING / DELEGATE_QUALITY_REQUIREMENTS_MISSING，须 replan 补齐）；任务须极简单句 ≤300 字、单目标单产物，不含并列连词（DELEGATE_TASK_NOT_ATOMIC）。role 仅允许 expert（组员已取消）；专家按 F10 交 report，负责人按 F11 交 departmentSummary 汇总全部专家。',
+  `${PLUGIN_VERSION} 版本（用户要求 13）：本插件当前版本为 ${PLUGIN_VERSION}，对外一律写 ${PLUGIN_VERSION}。`,
+  '主 Agent 五步开工证据协议（3.0.8）：首次 dsh_workplan_dispatch 须附 startPhases——第一步全面、全盘、深入梳理、研究、思考自己的任务；第二步基于刚才第一步完成好的所有结果，再全面、全盘、深入地开展梳理、研究和思考（资源、工具与少走弯路的方法、流程和步骤及 approachBasis）；第三步备齐资源工具并给就绪证据。缺或不达标硬拒（START_EVIDENCE_MISSING / START_EVIDENCE_INCOMPLETE）；登记后持久化，重规划新计划须重交。',
+  'plan 模式下禁止 dispatch；纯寒暄/确认/单独“继续”/问进度不分解，直接答复或查状态；自动分解降级时先报原因并等用户确认是否重试。',
+  '交付唯一判据：全部子任务 done 且 deliveryReady=true（verification="structured" 且 acceptance 全 pass），取消≠完成；未就绪或需先看中间结果时禁止 present/宣称完成，开头写「未完成：剩余 N 项与原因」并继续 dispatch 续跑。最终答复正文 ≤800 字（结论/产物路径/遗留项），不复述证据 JSON。',
+  '无执行时限：不设总时长、单次时长、空闲无进展或回执硬截止，不得仅因执行较久、暂时无新事件或未立即回执而中止；estimateMinutes、timeNotice、timeSpentMinutes 只用于协调与告知（专家预估到达后转告用户），extendMs 已停用（TIME_LIMITS_DISABLED）；用户显式取消、真实执行错误、证据/质量门禁仍然有效。',
+  '闭环处理：①待指示（closure=escalated）当轮用 dsh_workplan_instruct 答复或 update 置 blocked；②ackOverdue 先查 status 必要时 followup，勿重派；③需求/前提变化用 dsh_workplan_replan（cancel/replace/add）后 dispatch，仅补说明用 update.note；④「跨部门待转达」（needs）须用 dsh_workplan_handoff 逐条处置完，否则拦截 present。',
+  '复盘与教训：每个部门第四步收尾必须提交复盘（问题/弯路/解决/防再犯），自动落永久教训记忆（可用 dsh_workplan_lessons 只读查询）；重复教训（occurrences≥2）须写入后续约束。',
 ].join('\n')
 
 /**
@@ -392,40 +375,24 @@ export type WorkplanConfig = {
 function createUpdateTool(runtime: any) {
   return {
     name: 'dsh_workplan_update',
-    description:
-      '更新子任务状态与证据。verification：structured=自检、unverified=自述、legacy=旧、failed=失败。done 需 verification 与 acceptance（每项 pass），否则 present 被拒。',
+    description: '更新子任务状态/证据（done 需 structured + acceptance 全 pass）或登记 timeNotice。',
     parameters: {
       type: 'object',
       properties: {
-        planId: {
-          type: 'string',
-        },
-        subtaskId: {
-          type: 'string',
-        },
-        status: {
-          type: 'string',
-          enum: ['pending', 'in_progress', 'done', 'blocked'],
-        },
-        progress: {
-          type: 'integer',
-        },
-        evidence: {
-          type: 'array',
-          items: { type: 'string' },
-        },
-        verification: {
-          type: 'string',
-          enum: ['structured', 'legacy', 'unverified', 'failed'],
-        },
+        planId: { type: 'string' },
+        subtaskId: { type: 'string' },
+        status: { type: 'string', enum: ['pending', 'in_progress', 'done', 'blocked'] },
+        progress: { type: 'integer' },
+        evidence: { type: 'array', items: { type: 'string' } },
+        verification: { type: 'string', enum: ['structured', 'legacy', 'unverified', 'failed'] },
         acceptance: {
           type: 'array',
           items: {
             type: 'object',
             properties: {
-              criterion: { type: 'string', description: '验收项（A1/A2…）。' },
-              result: { type: 'string', enum: ['pass', 'fail', 'unverified'], description: '结果。' },
-              evidence: { type: 'string', description: '证据（文件/命令输出/测试结果）。' },
+              criterion: { type: 'string' },
+              result: { type: 'string', enum: ['pass', 'fail', 'unverified'] },
+              evidence: { type: 'string' },
             },
             required: ['criterion', 'result'],
             additionalProperties: false,
@@ -444,47 +411,16 @@ function createUpdateTool(runtime: any) {
             additionalProperties: false,
           },
         },
-        missingArtifacts: {
-          type: 'array',
-          items: { type: 'string' },
-        },
-        expectedRevision: {
-          type: 'integer',
-        },
-        force: {
-          type: 'boolean',
-        },
-        note: {
-          type: 'string',
-        },
-        /*
-         * [1.12.0][D-28] 结果消息指引的 `update + instruction` 必须真的能通过
-         * schema 校验。runtime 的 updateStatus 一直读 args.instruction，但这里
-         * 因 additionalProperties:false 从未声明该字段：严格宿主会直接拒绝，
-         * 模型只能看到「该动作不存在」。与 dsh_workplan_instruct 等价，二选一。
-         */
-        instruction: {
-          type: 'string',
-        },
-        /*
-         * [3.2.4][省钱 R5] extendMs 与 criterionApproval 已从 schema 移除。
-         *
-         * 生产路径里 `criterionV2Active()` 恒为 false（src/criterion.ts:98-107），
-         * 延期事务与「判据 v2 用户批准」两条分支都不可达；extendMs 一律返回
-         * TIME_LIMITS_DISABLED（src/runtime.ts:7194-7204）。继续在 schema 里声明
-         * 它们，只会让主会话的每一次请求都多付这段说明，还会诱导模型调用一次
-         * 注定被拒的工具。runtime 仍保留旧字段的兼容读取（旧日志/旧客户端），
-         * 但不再向模型宣告。
-         */
-        /*
-         * [2.2.0][T5/O-4c] O-2a 专家开工预告：{declaredMinutes, reason}。
-         * 属「只记录、不改判定」的时限信息，运行中同样放行。
-         */
+        missingArtifacts: { type: 'array', items: { type: 'string' } },
+        expectedRevision: { type: 'integer' },
+        force: { type: 'boolean' },
+        note: { type: 'string' },
+        instruction: { type: 'string' },
         timeNotice: {
           type: 'object',
           properties: {
-            declaredMinutes: { type: 'number', description: '分钟数（仅供参考）。' },
-            reason: { type: 'string', description: '理由（可选）。' },
+            declaredMinutes: { type: 'number' },
+            reason: { type: 'string' },
           },
           required: ['declaredMinutes'],
           additionalProperties: false,
@@ -537,20 +473,13 @@ function createUpdateTool(runtime: any) {
 function createReplanTool(runtime: any) {
   return {
     name: 'dsh_workplan_replan',
-    description:
-      '按需求变更重规划：旧项标「已重规划」（不调度、不计剩余），替换项生成接替行，新增工作生成新行。只补说明用 update 的 note。执行中调用返回 REPLAN_PLAN_RUNNING 并记 changeRequest，本轮后用同一组 changes 重试；成功后须再 dispatch 新行。',
+    description: '需求变更重规划（cancel/replace/add）；执行中返回 REPLAN_PLAN_RUNNING；成功后须再 dispatch。',
     parameters: {
       type: 'object',
       properties: {
-        planId: {
-          type: 'string',
-        },
-        reason: {
-          type: 'string',
-        },
-        changeText: {
-          type: 'string',
-        },
+        planId: { type: 'string' },
+        reason: { type: 'string' },
+        changeText: { type: 'string' },
         changes: {
           type: 'array',
           minItems: 1,
@@ -558,37 +487,23 @@ function createReplanTool(runtime: any) {
           items: {
             type: 'object',
             properties: {
-              subtaskId: {
-                type: 'string',
-              },
-              action: {
-                type: 'string',
-                enum: ['cancel', 'replace', 'add'],
-              },
-              reason: { type: 'string', description: '该子任务受影响的原因；省略时继承顶层 reason。' },
+              subtaskId: { type: 'string' },
+              action: { type: 'string', enum: ['cancel', 'replace', 'add'] },
+              reason: { type: 'string' },
               replacement: {
                 type: 'object',
                 properties: {
-                  id: { type: 'string', description: '接替行 ID（默认在旧 ID 后加 b）；最长 16 字符，不能与现有 ID 重复。' },
+                  id: { type: 'string' },
                   title: { type: 'string' },
-                  department: {
-                    type: 'string',
-                    /* [1.12.0][D-07] 与规划入口同源：模型先选合法 key，而不是先写自由文本再被运行期拒绝。 */
-                    enum: [...DEPARTMENT_IDS],
-                  },
+                  department: { type: 'string', enum: [...DEPARTMENT_IDS] },
                   role: { type: 'string' },
                   objective: { type: 'string' },
                   method: { type: 'array', items: { type: 'string' } },
                   inputs: { type: 'array', items: { type: 'string' } },
                   outputs: { type: 'array', items: { type: 'string' } },
                   acceptance: { type: 'array', items: { type: 'string' } },
-                  /* [3.2.4][治本] 接替行同样必须能带质量要求，否则替换出来的新行
-                   * 也过不了 DISPATCH_QUALITY_REQUIREMENTS_MISSING 门禁。 */
-                  qualityRequirements: {
-                    type: 'array',
-                    items: { type: 'string' },
-                    description: '质量要求 1-8 条（每条 ≤400 字）：未给时继承旧行。',
-                  },
+                  qualityRequirements: { type: 'array', items: { type: 'string' } },
+                  reasoningEffort: { type: 'string', enum: ['low', 'medium', 'high', 'xhigh', 'max'] },
                   risk: { type: 'string' },
                 },
                 additionalProperties: false,
@@ -596,30 +511,18 @@ function createReplanTool(runtime: any) {
               newSubtask: {
                 type: 'object',
                 properties: {
-                  id: { type: 'string', description: '新行 ID；省略时自动生成 R<修订号>-<序号>。' },
+                  id: { type: 'string' },
                   title: { type: 'string' },
                   objective: { type: 'string' },
-                  department: {
-                    type: 'string',
-                    /* [1.12.0][D-07] 同 replacement.department：枚举与规划入口同源。 */
-                    enum: [...DEPARTMENT_IDS],
-                  },
+                  department: { type: 'string', enum: [...DEPARTMENT_IDS] },
                   role: { type: 'string' },
                   method: { type: 'array', items: { type: 'string' } },
                   inputs: { type: 'array', items: { type: 'string' } },
                   outputs: { type: 'array', items: { type: 'string' } },
                   acceptance: { type: 'array', items: { type: 'string' } },
                   dependsOn: { type: 'array', items: { type: 'string' } },
-                  /*
-                   * [3.2.4][治本] 新增行必须能带质量要求：派发门禁
-                   * DISPATCH_QUALITY_REQUIREMENTS_MISSING 只认这个字段，
-                   * 旧 schema 不收它 ⇒ replan 建的行永远过不了门禁（死局）。
-                   */
-                  qualityRequirements: {
-                    type: 'array',
-                    items: { type: 'string' },
-                    description: '质量要求 1-8 条（每条 ≤400 字）：写清什么算合格、什么算不合格。缺它会被派发门禁直接拒发（DISPATCH_QUALITY_REQUIREMENTS_MISSING）。',
-                  },
+                  qualityRequirements: { type: 'array', items: { type: 'string' } },
+                  reasoningEffort: { type: 'string', enum: ['low', 'medium', 'high', 'xhigh', 'max'] },
                   risk: { type: 'string' },
                   reason: { type: 'string' },
                 },
@@ -672,35 +575,25 @@ function createReplanTool(runtime: any) {
 function createCancelTool(runtime: any) {
   return {
     name: 'dsh_workplan_cancel',
-    description:
-      '取消尚未派发/等待派发的计划。取消≠完成：有未完成项或证据缺口时 present 仍被拒。superseded 把责任转给承接计划，V1–V8 复算（源计划已取消且未全 done、承接更晚且非终态、映射覆盖全部源项、目标 done+structured 且验收全通过、会话含两个 planId 的用户确认），任一不满足返回 SUPERSEDE_* 且状态不变。',
+    description: '取消（cancelled）或取代（superseded，须满足 V1-V8 映射覆盖与用户确认）计划；取消≠完成。',
     parameters: {
       type: 'object',
       properties: {
-        planId: {
-          type: 'string',
-        },
-        reason: {
-          type: 'string',
-        },
-        disposition: {
-          type: 'string',
-          enum: ['cancelled', 'superseded'],
-        },
+        planId: { type: 'string' },
+        reason: { type: 'string' },
+        disposition: { type: 'string', enum: ['cancelled', 'superseded'] },
         supersededBy: {
           type: 'object',
           properties: {
-            planId: {
-              type: 'string',
-            },
+            planId: { type: 'string' },
             mapping: {
               type: 'array',
               items: {
                 type: 'object',
                 properties: {
-                  from: { type: 'string', description: '源计划子任务 ID。' },
-                  to: { type: 'string', description: '承接计划子任务 ID。' },
-                  basis: { type: 'string', description: '覆盖依据（为什么这两项是同一责任）。' },
+                  from: { type: 'string' },
+                  to: { type: 'string' },
+                  basis: { type: 'string' },
                 },
                 required: ['from', 'to', 'basis'],
                 additionalProperties: false,
@@ -752,12 +645,7 @@ function createCancelTool(runtime: any) {
 function createFollowupTool(runtime: any) {
   return {
     name: 'dsh_workplan_followup',
-    description:
-      '把一条说明投递给本会话的某个**直接子会话**，让它继续跑一个正常回合。'
-      + '用途仅限：子任务被预算/超时中止、但产物已在盘上，且用户明确同意补发 follow-up 时，'
-      + '让子会话自己收尾，从而让它自己的 turn/end 变成 completed。'
-      + '它不写计划状态、不触发交付、也不改变界面判定；投递本身不等于完成。'
-      + '不是直接子会话（父会话 catalog 未登记）一律拒绝。',
+    description: '向直接子会话投递 follow-up 说明（不改状态、不等于完成）。',
     parameters: {
       type: 'object',
       properties: {
@@ -816,8 +704,7 @@ function createFollowupTool(runtime: any) {
 function createEscalateTool(runtime: any) {
   return {
     name: 'dsh_workplan_escalate',
-    description:
-      '子 Agent 遇阻时向父会话上报并置「待指示」。第三层专家可用：请示经 delegate 登记到本部门台账，由负责人用 dsh_workplan_instruct 答复。3.0.5：专家上报后负责人禁止改派，须梳理本部门状态与方案后答复原专家并让其继续。遇阻第一动作是调用本工具，然后停止推进、只做只读核对，等待指示；不要自行选一个选项继续。',
+    description: '子 Agent/专家遇阻上报置「待指示」，随后停写待父会话 instruct 答复（答复前禁止改派）。',
     parameters: {
       type: 'object',
       properties: {
@@ -909,42 +796,26 @@ function createDelegateTool(runtime: any) {
   return {
     name: 'dsh_workplan_delegate',
     description:
-      `部门负责人/第三层专家专用派发。负责人 action=review 交 startPhases+consolidation.assignments；dispatch 派 expert；direct 登记亲自执行（普通任务 low；顺序推理链任务必须自评复杂档 reasoningEffort：qwen medium/xhigh、非 qwen high/max，不得 low）；status 查看。专家叶子 action=self_effort 交 reasoningEffort+复杂度依据（complexityReason 枚举或 complexityRationale，二选一）+startPhases+timeNotice，平台按自配档接续 phase-1。任务必须极简（一动作/主产物/可独立验收、≤300 字符、带 qualityRequirements 1-8 条/每条≤400）；low/未配置禁派；复杂任务 ${MIN_COMPLEX_DELEGATE_MEMBERS}-${MAX_COMPLEX_DELEGATE_MEMBERS} 人；待指示成员禁止改派，先用 instruct 答复。startPhases 各字段下限：${START_EVIDENCE_MIN_CHARS_BRIEF}。`,
+      `负责人/专家派发工具：review(交 startPhases+consolidation)、dispatch(派 expert，${MIN_COMPLEX_DELEGATE_MEMBERS}-${MAX_COMPLEX_DELEGATE_MEMBERS}人)、direct(亲自执行：普通 low/顺序链自评复杂档)、status(查状态)、self_effort(专家自配档+依据+startPhases+timeNotice)。startPhases 下限：${START_EVIDENCE_MIN_CHARS_BRIEF}。`,
     parameters: {
       type: 'object',
       properties: {
-        action: {
-          type: 'string',
-          enum: ['review', 'dispatch', 'direct', 'status', 'self_effort'],
-          description: 'review=交证据+分工；dispatch=派发；direct=登记亲自执行（普通任务 low；顺序链任务自评复杂档）；status=查看；self_effort=自配等级+证据+开工前预估 timeNotice。',
-        },
-        reasoningEffort: {
-          type: 'string',
-          enum: ['low', 'medium', 'high', 'xhigh', 'max'],
-        },
-        complexityRationale: {
-          type: 'string',
-          description: 'prose 复杂度依据；与 complexityReason 二选一即可。',
-        },
-        complexityReason: {
-          type: 'string',
-          enum: ['facts', 'dependencies', 'verification-difficulty'],
-          description: '复杂度依据枚举三选一：facts=任务事实多且杂；dependencies=跨模块/跨系统依赖；verification-difficulty=验证难度高。与 complexityRationale 二选一。',
-        },
-        member: {
-          type: 'string',
-        },
+        action: { type: 'string', enum: ['review', 'dispatch', 'direct', 'status', 'self_effort'], description: 'review/dispatch/direct/status/self_effort（self_effort 须附 timeNotice 开工前预估）' },
+        reasoningEffort: { type: 'string', enum: ['low', 'medium', 'high', 'xhigh', 'max'] },
+        complexityRationale: { type: 'string' },
+        complexityReason: { type: 'string', enum: ['facts', 'dependencies', 'verification-difficulty'] },
+        member: { type: 'string' },
         startPhases: {
           type: 'object',
           properties: {
             planning: {
               type: 'object',
               properties: {
-                problemAnalysis: { type: 'array', items: { type: 'string' }, description: '任务梳理（≥40字）' },
-                resources: { type: 'array', items: { type: 'string' }, description: '资源（≥20字）' },
-                tools: { type: 'array', items: { type: 'string' }, description: '工具（≥10字）' },
-                approach: { type: 'array', items: { type: 'string' }, description: '方法步骤（≥40字）' },
-                approachBasis: { type: 'array', items: { type: 'string' }, description: '依据（≥20字）' },
+                problemAnalysis: { type: 'array', items: { type: 'string' } },
+                resources: { type: 'array', items: { type: 'string' } },
+                tools: { type: 'array', items: { type: 'string' } },
+                approach: { type: 'array', items: { type: 'string' } },
+                approachBasis: { type: 'array', items: { type: 'string' } },
               },
               required: ['problemAnalysis', 'approach', 'approachBasis', 'resources', 'tools'],
               additionalProperties: false,
@@ -952,8 +823,8 @@ function createDelegateTool(runtime: any) {
             preparation: {
               type: 'object',
               properties: {
-                prepared: { type: 'array', items: { type: 'string' }, description: '已备（≥20字）' },
-                evidence: { type: 'array', items: { type: 'string' }, description: '就绪证据（≥20字）' },
+                prepared: { type: 'array', items: { type: 'string' } },
+                evidence: { type: 'array', items: { type: 'string' } },
               },
               required: ['prepared', 'evidence'],
               additionalProperties: false,
@@ -964,10 +835,10 @@ function createDelegateTool(runtime: any) {
         },
         timeNotice: {
           type: 'object',
-          description: 'self_effort 必填：本人任务预估执行时间（整数分钟）；未提交/不合格硬拒 ESTIMATE_MISSING / ESTIMATE_INVALID。',
+          description: 'self_effort 必填：开工前预估耗时（整数分钟；缺/非法硬拒 ESTIMATE_MISSING / ESTIMATE_INVALID）',
           properties: {
-            declaredMinutes: { type: 'integer', minimum: 1, maximum: 10080, description: '正整数分钟（≥1，≤10080）；只用于协调，不设截止。' },
-            reason: { type: 'string', description: '可选：预估理由（≤300 字符）。' },
+            declaredMinutes: { type: 'integer', minimum: 1, maximum: 10080 },
+            reason: { type: 'string' },
           },
           required: ['declaredMinutes'],
           additionalProperties: false,
@@ -975,37 +846,19 @@ function createDelegateTool(runtime: any) {
         consolidation: {
           type: 'object',
           properties: {
-            taskReasoningEffort: {
-              type: 'string',
-              enum: ['low', 'medium', 'high', 'xhigh', 'max'],
-            },
+            taskReasoningEffort: { type: 'string', enum: ['low', 'medium', 'high', 'xhigh', 'max'] },
             assignments: {
               type: 'array',
-              // [3.0.0] 用户 2026-11-14 第 5/6/9 条：组员角色取消、任务极简、质量要求必填；3.1.0 上限随 caps.ts。
               items: {
                 type: 'object',
                 properties: {
-                  member: { type: 'string', description: '专家的姓名或代号。' },
-                  role: { type: 'string', enum: ['expert'], description: '只能是 expert（本部门相关领域全球顶尖专家）。' },
-                  task: { type: 'string', description: '一个动作、一个主产物、单句≤300 字符；并列/多句拒发 DELEGATE_TASK_NOT_ATOMIC。' },
-                  qualityRequirements: {
-                    type: 'array',
-                    items: { type: 'string' },
-                  },
-                  reasoningEffort: {
-                    type: 'string',
-                    enum: ['low', 'medium', 'high', 'xhigh', 'max'],
-                  },
-                  /*
-                   * [3.2.4][O1] 负责人预登记（3.2.6 起默认开；环境变量
-                   * DSH_WORKPLAN_LEADER_PRE_REGISTER=0/false/off 可关）：分工表条目可随附该成员的开工证据与开工前预估，
-                   * 平台在派发前替成员登记（delivery 视为已送达——信息由负责人本人
-                   * 撰写），成员免跑 phase-0、直接以分工表档接续 phase-1。缺省或
-                   * 非法 ⇒ 该成员照旧走 phase-0（fail-open）。
-                   */
+                  member: { type: 'string' },
+                  role: { type: 'string', enum: ['expert'] },
+                  task: { type: 'string' },
+                  qualityRequirements: { type: 'array', items: { type: 'string' } },
+                  reasoningEffort: { type: 'string', enum: ['low', 'medium', 'high', 'xhigh', 'max'] },
                   startPhases: {
                     type: 'object',
-                    description: '（可选，3.2.6 起默认开预登记；DSH_WORKPLAN_LEADER_PRE_REGISTER=0 可关）该成员的五步第 1/2/3 步开工证据：{planning:{problemAnalysis[],approach[],approachBasis[],resources[],tools[]},preparation:{prepared[],evidence[]}}；字数下限与 review 相同。',
                     properties: {
                       planning: { type: 'object' },
                       preparation: { type: 'object' },
@@ -1014,7 +867,6 @@ function createDelegateTool(runtime: any) {
                   },
                   timeNotice: {
                     type: 'object',
-                    description: '（可选，3.2.6 起默认开预登记；DSH_WORKPLAN_LEADER_PRE_REGISTER=0 可关）该成员的开工前预估：{declaredMinutes: 正整数分钟(1-10080), reason?}。',
                     properties: {
                       declaredMinutes: { type: 'integer', minimum: 1, maximum: 10080 },
                       reason: { type: 'string' },
@@ -1076,6 +928,20 @@ function createDelegateTool(runtime: any) {
             + '｜下级结论会送回本会话；收齐汇总核验后再写最终结果块。action="status" 可查看进度。',
           )
         }
+        if (result.action === 'direct') {
+          const effort = String(result.effectiveEffort ?? result.reasoningEffort ?? 'low')
+          return textContent(
+            `${String(result.subtaskId ?? '')} 亲自执行开工证据已登记（档位 ${effort}）`
+            + (result.continued ? '｜平台已按该档接续 phase-1，请勿重做前三步。' : `｜${String(result.hint ?? '可直接开始第四步执行。')}`),
+          )
+        }
+        if (result.action === 'self_effort') {
+          const effort = String(result.selfEffort ?? result.effectiveEffort ?? result.reasoningEffort ?? '?')
+          return textContent(
+            `${String(result.subtaskId ?? '')} 专家自配档已登记（${String(result.member ?? '')}｜档位 ${effort}）`
+            + `｜${String(result.hint ?? '平台将按自配档接续 phase-1，请等待接续或结束本步。')}`,
+          )
+        }
         const delegates = Array.isArray(result.delegates) ? result.delegates : []
         return textContent(
           `${String(result.subtaskId ?? '')} 第三层状态：梳理${result.consolidation ? '已登记' : '未登记'}；下级 ${delegates.length} 人`
@@ -1106,81 +972,74 @@ function createDelegateTool(runtime: any) {
 export function createVerifyTool(runtime: any) {
   return {
     name: 'dsh_workplan_verify',
-    description:
-      '部门子 Agent 第四步核验：交 execution/verification 增量（有 phase-0 登记时 planning/preparation 自动并入；无登记四组齐全），返回 passed/gaps。通过不代表完成：结果块仍须写 execution/verification。',
+    description: '部门子 Agent 第四步核验：交 execution/verification（有登记时 planning/preparation 自动并入）。',
     parameters: {
       type: 'object',
       properties: {
-        subtaskId: {
-          type: 'string',
-        },
+        subtaskId: { type: 'string' },
         phases: {
           type: 'object',
           properties: {
             planning: {
               type: 'object',
               properties: {
-                problemAnalysis: { type: 'array', items: { type: 'string' }, description: '任务梳理（≥40字）' },
-                constraints: { type: 'array', items: { type: 'string' }, description: '约束条件' },
-                unknowns: { type: 'array', items: { type: 'string' }, description: '未知或待确认项' },
-                approach: { type: 'array', items: { type: 'string' }, description: '方法步骤（≥40字）' },
-                approachBasis: { type: 'array', items: { type: 'string' }, description: '依据（≥20字）' },
-                resources: { type: 'array', items: { type: 'string' }, description: '资源（≥20字）' },
-                tools: { type: 'array', items: { type: 'string' }, description: '工具（≥10字）' },
+                problemAnalysis: { type: 'array', items: { type: 'string' } },
+                constraints: { type: 'array', items: { type: 'string' } },
+                unknowns: { type: 'array', items: { type: 'string' } },
+                approach: { type: 'array', items: { type: 'string' } },
+                approachBasis: { type: 'array', items: { type: 'string' } },
+                resources: { type: 'array', items: { type: 'string' } },
+                tools: { type: 'array', items: { type: 'string' } },
               },
               required: ['problemAnalysis', 'approach', 'approachBasis', 'resources', 'tools'],
             },
             preparation: {
               type: 'object',
               properties: {
-                prepared: { type: 'array', items: { type: 'string' }, description: '已备（≥20字）' },
-                evidence: { type: 'array', items: { type: 'string' }, description: '就绪证据（≥20字）' },
+                prepared: { type: 'array', items: { type: 'string' } },
+                evidence: { type: 'array', items: { type: 'string' } },
               },
               required: ['prepared', 'evidence'],
             },
             execution: {
               type: 'object',
               properties: {
-                steps: { type: 'array', items: { type: 'string' }, description: '实际执行的步骤' },
-                deviations: { type: 'array', items: { type: 'string' }, description: '偏离原思路的地方与原因' },
+                steps: { type: 'array', items: { type: 'string' } },
+                deviations: { type: 'array', items: { type: 'string' } },
               },
               required: ['steps'],
             },
             verification: {
               type: 'object',
               properties: {
-                allPassed: { type: 'boolean', description: '全部通过=true；否则 false' },
+                allPassed: { type: 'boolean' },
                 checks: {
                   type: 'array',
                   items: {
                     type: 'object',
                     properties: {
-                      criterion: { type: 'string', description: '验收标准（A1/A2…）' },
-                      method: { type: 'string', description: '验证方式' },
-                      evidence: { type: 'string', description: '命令输出/文件/引用' },
+                      criterion: { type: 'string' },
+                      method: { type: 'string' },
+                      evidence: { type: 'string' },
                     },
                     required: ['criterion', 'method', 'evidence'],
                   },
                 },
-                requirementCheck: { type: 'string', description: '逐条核对用户原要求的结果' },
+                requirementCheck: { type: 'string' },
                 retrospective: {
                   type: 'object',
                   properties: {
-                    problems: { type: 'array', items: { type: 'string' }, description: '问题（现象+根因），≥1 条' },
-                    detours: { type: 'array', items: { type: 'string' }, description: '弯路；没有写 []' },
-                    resolutions: { type: 'array', items: { type: 'string' }, description: '解决，≥1 条' },
-                    prevention: { type: 'array', items: { type: 'string' }, description: '防再犯（遇到…先…），≥1 条' },
+                    problems: { type: 'array', items: { type: 'string' } },
+                    detours: { type: 'array', items: { type: 'string' } },
+                    resolutions: { type: 'array', items: { type: 'string' } },
+                    prevention: { type: 'array', items: { type: 'string' } },
                   },
                   required: ['problems', 'detours', 'resolutions', 'prevention'],
                 },
               },
-              // [3.2.3][省钱 C1] 与提示词 CH-01 对齐：checks/allPassed 可省略，
-              // 运行时 synthesizeVerificationForVerify 会按顶层 acceptance 补齐。
               required: ['retrospective'],
             },
           },
-          // [3.2.3][省钱 C2] 有 phase-0 登记时 planning/preparation 平台自动并入；
-          // 四组齐全的硬要求由 validateFiveStepEvidence 在运行时把门，不靠 schema 逼模型重写。
           required: ['execution', 'verification'],
         },
       },
@@ -1237,15 +1096,14 @@ export function createVerifyTool(runtime: any) {
 function createLessonsTool(runtime: any) {
   return {
     name: 'dsh_workplan_lessons',
-    description:
-      '查看永久教训记忆（部门收尾自动落盘）：action=list/search/stats，只读，不改计划状态；第四步核验时用它核对重复错误。',
+    description: '只读查询永久教训记忆（list/search/stats）。',
     parameters: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['list', 'search', 'stats'], description: '默认 list' },
-        department: { type: 'string', description: 'list 时按部门筛选（如 engineering）' },
-        query: { type: 'string', description: 'search 时的关键词' },
-        limit: { type: 'number', description: '最多返回多少条（1–50，默认 10）' },
+        action: { type: 'string', enum: ['list', 'search', 'stats'] },
+        department: { type: 'string' },
+        query: { type: 'string' },
+        limit: { type: 'number' },
       },
       additionalProperties: false,
     },
@@ -1277,7 +1135,7 @@ function createLessonsTool(runtime: any) {
         const lines = lessons.slice(0, 8).map((item: any) =>
           `- [${String(item.department ?? '')}] ${String(item.title ?? '')}（${String(item.occurrences ?? 1)} 次）`
           + `｜问题：${String((item.problems ?? []).join('；'))}`
-          + `｜预览：${String((item.prevention ?? []).join('；'))}`)
+          + `｜预防：${String((item.prevention ?? []).join('；'))}`)
         return textContent(`永久教训记忆（${lessons.length}/${String(result.total ?? lessons.length)} 条，文件 ${file}）：\n${lines.join('\n')}`)
       },
     },
@@ -1299,8 +1157,7 @@ function createLessonsTool(runtime: any) {
 function createInstructTool(runtime: any) {
   return {
     name: 'dsh_workplan_instruct',
-    description:
-      '向「待指示」子任务下发决定：投递给对应子会话并恢复执行中（closure=instructed）。根会话可答复第一层部门行；负责人可答复自己派出的第三层专家（subtaskId 填部门行 ID 或省略，用 member/sessionId 指定，至少其一）。3.0.5：第三层只能答复已提交请示的原专家，投递成功后原专家继续执行；待指示期间负责人不得改派。仅目标子会话的直接父会话可调用；投递失败状态不变，按 hint 重试或用 update 放弃。',
+    description: '向「待指示」直接子会话/原专家下发决定并恢复执行（待指示期间禁止改派）。',
     parameters: {
       type: 'object',
       properties: {
@@ -1373,11 +1230,7 @@ function createInstructTool(runtime: any) {
 function createHoldTool(runtime: any) {
   return {
     name: 'dsh_workplan_hold',
-    description:
-      '把当前会话的计划设为「认可闸门」按住状态：在用户明确认可前，自动与手动派发都会被拒绝'
-      + '（dsh_workplan_dispatch 返回 DISPATCH_HELD）。用于任务要求先经用户认可再执行、'
-      + '而任务锚点又未被关键词识别命中的场景。派发进行中，或已有子任务/成员真正开始执行时不能设闸门（会返回 ALREADY_RUNNING）；已派发但尚无任何子任务开跑时仍可补设。'
-      + '解除唯一出口：用户明确认可后调用 dsh_workplan_release（登记留痕并开跑）。',
+    description: '将未开跑的计划置「认可闸门」按住，用户认可前禁止派发；用 release 解除。',
     parameters: {
       type: 'object',
       properties: {
@@ -1436,52 +1289,38 @@ function createHoldTool(runtime: any) {
 function createReleaseTool(runtime: any) {
   return {
     name: 'dsh_workplan_release',
-    description:
-      '解除当前会话计划的「认可闸门」并立即派发：先登记用户认可的留痕（gateHistory，durable 回放不丢），'
-      + '再调用派发链（与 dsh_workplan_dispatch 同一套闸门：终态/startPhases 等照常生效）。'
-      + '仅当计划处于认可闸门之下时可用；若派发因 startPhases 等门禁被拒，闸门保持已解除，'
-      + '补齐后直接重发 dispatch 即可，认可事实无需重来。仅根会话可用。',
+    description: '解除「认可闸门」留痕并立即派发（同 dispatch 门禁；仅根会话）。',
     parameters: {
       type: 'object',
       properties: {
-        planId: {
-          type: 'string',
-        },
-        note: {
-          type: 'string',
-        },
+        planId: { type: 'string' },
+        note: { type: 'string' },
         startPhases: {
           type: 'object',
           properties: {
             planning: {
               type: 'object',
               properties: {
-                problemAnalysis: { type: 'array', items: { type: 'string' }, description: '任务梳理（≥40字）' },
-                resources: { type: 'array', items: { type: 'string' }, description: '资源（≥20字）' },
-                tools: { type: 'array', items: { type: 'string' }, description: '工具（≥10字）' },
-                approach: { type: 'array', items: { type: 'string' }, description: '方法步骤（≥40字）' },
-                approachBasis: { type: 'array', items: { type: 'string' }, description: '依据（≥20字）' },
+                problemAnalysis: { type: 'array', items: { type: 'string' } },
+                resources: { type: 'array', items: { type: 'string' } },
+                tools: { type: 'array', items: { type: 'string' } },
+                approach: { type: 'array', items: { type: 'string' } },
+                approachBasis: { type: 'array', items: { type: 'string' } },
               },
               required: ['problemAnalysis', 'approach', 'approachBasis', 'resources', 'tools'],
             },
             preparation: {
               type: 'object',
               properties: {
-                prepared: { type: 'array', items: { type: 'string' }, description: '已备（≥20字）' },
-                evidence: { type: 'array', items: { type: 'string' }, description: '就绪证据（≥20字）' },
+                prepared: { type: 'array', items: { type: 'string' } },
+                evidence: { type: 'array', items: { type: 'string' } },
               },
               required: ['prepared', 'evidence'],
             },
           },
           required: ['planning', 'preparation'],
         },
-        mode: {
-          type: 'string',
-          // 与 dsh_workplan_dispatch 同一枚举：两个工具的同一个参数必须是同一套值。
-          // 旧 schema 这里只收 sync/async，runtime 却把非 async 一律当 wait，
-          // 'sync' 只是个能过校验、又被静默改写的别名，已统一为 wait/async。
-          enum: ['wait', 'async'],
-        },
+        mode: { type: 'string', enum: ['wait', 'async'] },
       },
     },
     /*
@@ -1536,8 +1375,7 @@ function createReleaseTool(runtime: any) {
 function createHandoffTool(runtime: any) {
   return {
     name: 'dsh_workplan_handoff',
-    description:
-      '处置跨部门需求（needs）：未处置拦住交付。无常驻部门代理：assign 只登记责任，产出用 dsh_workplan_replan(action=add) 建子任务或自己完成；待指示行 resolve 直接投递答复。动作 list/assign/resolve/close；仅根会话可调用。',
+    description: '处置跨部门需求 needs（list/assign/resolve/close，仅根会话）；未处置拦交付。',
     parameters: {
       type: 'object',
       properties: {
@@ -1616,8 +1454,7 @@ function createHandoffTool(runtime: any) {
 function createStatusTool(runtime: any) {
   return {
     name: 'dsh_workplan_status',
-    description:
-      '只读查看当前计划各子任务状态与进度，不启动 Agent、不改状态。async 派发后或用户问“做到哪了”时使用，是进度的唯一可信来源。',
+    description: '只读查看计划状态与进度（不派发、不改状态）。',
     parameters: {
       type: 'object',
       properties: {
@@ -1720,28 +1557,23 @@ function createDispatchTool(runtime: any) {
   return {
     name: 'dsh_workplan_dispatch',
     description:
-      '派发当前会话尚未执行的任务计划（主 Agent 五步开工证据协议 3.0.8）。计划显示后必须先调用；wait 等本轮结束，async 立即返回 running。首次派发必须随附 startPhases（problemAnalysis/approach≥40字，resources/approachBasis/prepared/evidence≥20字，tools≥10字），缺失/不合格硬拒（START_EVIDENCE_MISSING / START_EVIDENCE_INCOMPLETE）；登记后持久化，续跑/重试/重启自动读档，重规划的新计划须重交。complete=false 表示未做完，必须再次派发续跑，不得当最终结果；重复调用幂等。',
+      `派发或续跑计划（wait/async；幂等）。遵守五步开工证据协议：首次须附 startPhases（${START_EVIDENCE_MIN_CHARS_BRIEF}），缺失硬拒 START_EVIDENCE_MISSING；未就绪须继续派发。`,
     parameters: {
       type: 'object',
       properties: {
-        planId: {
-          type: 'string',
-        },
-        mode: {
-          type: 'string',
-          enum: ['wait', 'async'],
-        },
+        planId: { type: 'string' },
+        mode: { type: 'string', enum: ['wait', 'async'] },
         startPhases: {
           type: 'object',
           properties: {
             planning: {
               type: 'object',
               properties: {
-                problemAnalysis: { type: 'array', items: { type: 'string' }, description: '任务梳理（≥40字）' },
-                resources: { type: 'array', items: { type: 'string' }, description: '资源（≥20字）' },
-                tools: { type: 'array', items: { type: 'string' }, description: '工具（≥10字）' },
-                approach: { type: 'array', items: { type: 'string' }, description: '方法步骤（≥40字）' },
-                approachBasis: { type: 'array', items: { type: 'string' }, description: '依据（≥20字）' },
+                problemAnalysis: { type: 'array', items: { type: 'string' } },
+                resources: { type: 'array', items: { type: 'string' } },
+                tools: { type: 'array', items: { type: 'string' } },
+                approach: { type: 'array', items: { type: 'string' } },
+                approachBasis: { type: 'array', items: { type: 'string' } },
               },
               required: ['problemAnalysis', 'approach', 'approachBasis', 'resources', 'tools'],
               additionalProperties: false,
@@ -1749,8 +1581,8 @@ function createDispatchTool(runtime: any) {
             preparation: {
               type: 'object',
               properties: {
-                prepared: { type: 'array', items: { type: 'string' }, description: '已备（≥20字）' },
-                evidence: { type: 'array', items: { type: 'string' }, description: '就绪证据（≥20字）' },
+                prepared: { type: 'array', items: { type: 'string' } },
+                evidence: { type: 'array', items: { type: 'string' } },
               },
               required: ['prepared', 'evidence'],
               additionalProperties: false,
@@ -1958,9 +1790,11 @@ export function apply(ctx: any, config: WorkplanConfig = {}) {
      * 于是把次数配成 0 的人拿到的是默认值（继续续跑=继续烧钱）。这里显式允许 0。
      */
     autoResumeMaxAttempts: numericSetting(config.autoResumeMaxAttempts, 'DSH_WORKPLAN_AUTO_RESUME_MAX', true),
-    // [3.2.3] 默认关闭；只有显式配置或显式环境变量才打开（与快路径风险相称）。
-    deterministicFastPath: config.deterministicFastPath === true
-      || /^(1|true|yes|on)$/i.test(String(settingEnv('DSH_WORKPLAN_DETERMINISTIC_FAST_PATH') ?? '').trim()),
+    // 极简单动作快路径默认开启，跳过整轮规划器 LLM 调用省 token（可配置 false 或 DSH_WORKPLAN_DETERMINISTIC_FAST_PATH=0 关闭）。
+    deterministicFastPath: strictCompletionEnabledFrom(
+      config.deterministicFastPath,
+      settingEnv('DSH_WORKPLAN_DETERMINISTIC_FAST_PATH'),
+    ),
     /*
      * [1.11.0] 三态解析（显式配置 > 显式环境变量 > 默认 true）。
      * 与 autoResume 用同一种写法：未配置时走默认值，而不是悄悄等于 false。
@@ -2283,6 +2117,12 @@ const READ_ONLY_TOOLS = new Set([
   'present', 'todo_write', 'ask_user_question',
 ])
 
+const KNOWN_WRITE_TOOLS = new Set(['write', 'edit', 'str_replace_editor', 'apply_patch'])
+const WRITE_CONTENT_KEYS = [
+  'content', 'file_text', 'new_str', 'new_string', 'old_string', 'old_str',
+  'patch', 'edits', 'text', 'data', 'body', 'value', 'append', 'overwrite',
+]
+
 function isWriteShapedCall(exec: any) {
   const name = exec?.name
   if (typeof name !== 'string' || !name) return false
@@ -2292,8 +2132,11 @@ function isWriteShapedCall(exec: any) {
   if (READ_ONLY_TOOLS.has(name)) return false
   // A patch tool names its target(s) inside the patch text, not in an argument.
   if (typeof args.input === 'string' && /\*\*\* (Update|Add|Delete|Move) File/.test(args.input)) return true
-  // Every other write form names a single target: file_path or path.
-  return typeof args.file_path === 'string' || typeof args.path === 'string'
+  const hasTargetPath = typeof args.file_path === 'string' || typeof args.path === 'string'
+  if (!hasTargetPath) return false
+  // Historical write tools always pass through; unknown tools must also carry a content-bearing arg so read-like tools (stat/cat/read_file) aren't falsely blocked.
+  if (KNOWN_WRITE_TOOLS.has(name)) return true
+  return WRITE_CONTENT_KEYS.some((key) => args[key] !== undefined)
 }
 
 /*

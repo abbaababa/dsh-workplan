@@ -12,7 +12,7 @@
  * in this file is allowed to escape as an unhandled rejection from a listener.
  */
 
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 
@@ -151,7 +151,7 @@ import {
   evaluateCriterion,
   sanitizeCriterionException,
 } from './criterion.js'
-import { auditClarifyNeed, auditDepartmentCoverage, buildTaskAnchor, compactUnderstandingAudit, extractTaskElements, validatePlanContext } from './understanding.js'
+import { auditClarifyNeed, auditDepartmentCoverage, buildTaskAnchor, compactUnderstandingAudit, extractTaskElements, resetClarifyRounds, validatePlanContext } from './understanding.js'
 // [2.3.9][T3] LLM 家族检测 + 推理等级静态约束（用户强制要求 1/2；详见 llm-rules.ts 头注释）。
 // [2.3.9][T4b] 追加第三层派发纯逻辑核：buildLlmRulesBrief（要求 1/2 全文告知注入，
 // 部门层与专家/组员层共用同一事实源）、planDelegations（负责人「先全面梳理再分配」
@@ -2043,13 +2043,16 @@ export function prepareDelegateRegistrationBase(current: any, incoming: any): an
  * 但每次接续不再为审计链的全文付费。写盘失败（无 cwd / 只读目录 / 证据非法）
  * 一律返回 null——调用点据此回退「全文注入」，绝不因这条路丢证据。
  */
-export function persistStartEvidenceFile(cwd: any, planId: any, subtaskId: any, evidence: any): string | null {
+export function persistStartEvidenceFile(cwd: any, planId: any, subtaskId: any, evidence: any, member?: any): string | null {
   try {
     if (typeof cwd !== 'string' || !cwd) return null
     const sanitized = sanitizeStartPhaseEvidence(evidence)
     if (!sanitized) return null
     const safe = (value: any) => String(value ?? 'unknown').replace(/[^A-Za-z0-9_.-]/g, '_').slice(0, 80)
-    const rel = join('reports', `wp-start-evidence-${safe(planId)}-${safe(subtaskId)}.md`)
+    const memberName = typeof member === 'string' && member.trim() !== '' ? member.trim() : ''
+    const memberHash = memberName ? createHash('sha256').update(memberName).digest('hex').slice(0, 8) : ''
+    const memberSuffix = memberName ? `-${safe(memberName)}-${memberHash}` : ''
+    const rel = join('reports', `wp-start-evidence-${safe(planId)}-${safe(subtaskId)}${memberSuffix}.md`)
     const abs = join(cwd, rel)
     mkdirSync(dirname(abs), { recursive: true })
     writeFileSync(abs, [
@@ -2057,6 +2060,7 @@ export function persistStartEvidenceFile(cwd: any, planId: any, subtaskId: any, 
       '',
       `- 计划：${String(planId ?? '')}`,
       `- 子任务：${String(subtaskId ?? '')}`,
+      ...(memberName ? [`- 专家：${memberName}`] : []),
       `- 生成时间：${new Date().toISOString()}`,
       '',
       renderStartPhaseEvidence(sanitized),
@@ -3529,16 +3533,20 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
         if (backupProbe?.verdict) {
           settleFromOutput(record, subtask, backupProbe.text ?? '', guard, options, backupProbe.verdict,
             probeInterruptedEvidence(backupProbe.text ?? '', subtask, options.cwd, options.artifactExists))
+          if (backupProbe.verdict.blockedKind === 'comm-format') {
+            const rejectedRow = record.statuses.find((item: any) => item?.subtaskId === subtask.id)
+            if (rejectedRow) Object.assign(rejectedRow, { commFormatAttempt: attempt })
+          }
           record.errors = [
             ...(record.errors ?? []),
-            `${subtask.id}: 本次回报不可结算（${settleVerdict?.verification}），已采纳盘上结算备份 ${backupProbe.path}（[3.2.3] 本地恢复，未重派）`,
+            `${subtask.id}: 本次回报不可结算（${settleVerdict?.verification}），已采纳盘上结算备份 ${backupProbe.path}（本地恢复，未重派）`,
           ].slice(-20)
           return
         }
         if (backupProbe?.reason) {
           record.errors = [
             ...(record.errors ?? []),
-            `${subtask.id}: 拒绝采纳盘上结算备份 ${backupProbe.path}——${backupProbe.reason}（文件 mtime=${backupProbe.mtimeMs === null ? '未知' : new Date(backupProbe.mtimeMs).toISOString()}，本次尝试 startedAt=${new Date(Number(attemptRow()?.startedAt ?? 0)).toISOString()}；[2.5.2][T4b][D2] 新鲜度/归属闸），落回有界回喂`,
+            `${subtask.id}: 拒绝采纳盘上结算备份 ${backupProbe.path}——${backupProbe.reason}（文件 mtime=${backupProbe.mtimeMs === null ? '未知' : new Date(backupProbe.mtimeMs).toISOString()}，本次尝试 startedAt=${new Date(Number(attemptRow()?.startedAt ?? 0)).toISOString()}；新鲜度/归属闸），落回有界回喂`,
           ].slice(-20)
         }
         if (settleVerdict && settleVerdict.verification === 'unparsable') {
@@ -3563,122 +3571,8 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
           }
           return
         }
-        /*
-         * [2.2.9] 结果块**缺失**（子会话收尾异常：error/截断/超时）= 与 unparsable
-         * 同族的有界回喂重试，且优先采纳盘上结算备份。
-         *
-         * 红字复发族根因（用户 2026-11-10 截图：T1 超时/缺失结算→blocked→级联
-         * 冻结→「已结束·需处理」）：结算唯一载体是收尾消息块，单点、原子、无
-         * 盘上备份；丢块后旧实现一次即 blocked。现在两层恢复：
-         *  ① 盘上备份优先：子会话按提示词约定在收尾前把结果块 JSON 写入
-         *     reports/wp-settlement-<subtaskId>.json（见 plan.ts 子提示词）；
-         *     消息块缺失时读该文件重裁决，合法即照常结算（来源留档）；
-         *  ② 无备份且预算够一个空闲窗口 → 抛 EVIDENCE_MISSING 回喂同一子会话，
-         *     附在盘产物清单与「只补交结果块、勿重做已完成工作」；重试耗尽才
-         *     按实 blocked（既有 settleFromOutput 路径，严格性不变：缺失永不计 done）。
-         */
         if (settleVerdict && settleVerdict.missingBlock === true) {
-          /*
-           * [T4][F3] 备份文件名纳入 planId（旧固定名在多计划并发时会被同名子任务
-           * 互相覆盖）。读取顺序：新名优先；只有「文件不存在」才回退旧名。无论哪个
-           * 名字，都必须通过下面的新鲜度 + 归属闸；存在但过不了闸的文件一律拒绝，
-           * 不静默改读另一个文件。
-           */
-          const backupCandidates = settlementBackupPaths(
-            options.cwd ?? process.cwd(),
-            String(record.plan.planId ?? ''),
-            String(subtask.id),
-          )
-          let settleBackup = backupCandidates[0]
-          let backupVerdict: any = null
-          let backupText = ''
-          /*
-           * [2.5.2][T4b][D2] 备份采纳前的新鲜度+归属闸。根因
-           * （reports/D1-D2-root-cause-diagnosis.md §2）：固定文件名跨计划跨会话
-           * 复用，旧实现读到合法 JSON 即采纳、不做任何校验——本次误采纳 T1 的
-           * 陈旧截图任务结算（假完成）与 T2 的陈旧基金基线结算（误 blocked），
-           * 级联冻结 T3/T4/T5。现在：
-           *  ① 新鲜度：备份 mtime 必须 >= 本次尝试 startedAt（只认本次尝试内
-           *     新写的备份；提示词同步要求覆盖旧文件）。
-           *  ② 归属：备份 JSON 顶层含 planId/subtaskId 则必须与本计划/本子任务
-           *     一致（裸 JSON 或标记块内 JSON 两个入口都查；无这些字段的旧格式
-           *     备份仍受新鲜度闸约束，adjudicateResult 对额外顶层字段容忍）。
-           *  ③ 任一不满足 ⇒ 不采纳，写 record.errors 审计行（含文件 mtime 与
-           *     startedAt），落回下方既有 EVIDENCE_MISSING 有界回喂路径。
-           *     结算严格性不变：缺失永不计 done。
-           */
-          let backupRejectReason = ''
-          let backupMtimeMs: number | null = null
-          const backupAttemptStartedAt = Number(attemptRow()?.startedAt ?? 0)
-          for (const backupPath of backupCandidates) {
-            let backupStat: any
-            try {
-              backupStat = statSync(backupPath)
-            } catch {
-              continue
-            }
-            settleBackup = backupPath
-            backupMtimeMs = backupStat.mtimeMs
-            if (backupStat.mtimeMs < backupAttemptStartedAt) {
-              backupRejectReason = '陈旧备份（mtime 早于本次尝试 startedAt，非本次执行新写）'
-              break
-            }
-            try {
-              backupText = readFileSync(backupPath, 'utf8')
-            } catch {
-              break
-            }
-              let backupMeta: any = null
-              try {
-                backupMeta = JSON.parse(backupText)
-              } catch {
-                const beginAt = backupText.lastIndexOf(EVIDENCE_MARKER_BEGIN)
-                const endAt = backupText.indexOf(EVIDENCE_MARKER_END, beginAt + EVIDENCE_MARKER_BEGIN.length)
-                if (beginAt >= 0 && endAt > beginAt) {
-                  try { backupMeta = JSON.parse(backupText.slice(beginAt + EVIDENCE_MARKER_BEGIN.length, endAt).trim()) } catch { backupMeta = null }
-                }
-              }
-              const metaPlanId = typeof backupMeta?.planId === 'string' && backupMeta.planId ? backupMeta.planId : null
-              const metaSubtaskId = typeof backupMeta?.subtaskId === 'string' && backupMeta.subtaskId ? backupMeta.subtaskId : null
-              if (metaPlanId && metaPlanId !== record.plan.planId) {
-                backupRejectReason = `归属不匹配（备份 planId=${metaPlanId} ≠ 本计划 ${record.plan.planId}）`
-              } else if (metaSubtaskId && metaSubtaskId !== subtask.id) {
-                backupRejectReason = `归属不匹配（备份 subtaskId=${metaSubtaskId} ≠ 本子任务 ${subtask.id}）`
-              } else {
-                backupVerdict = adjudicateResult({
-                  output: backupText,
-                  strict: true,
-                  expectedAcceptance: Array.isArray(subtask?.acceptance) ? subtask.acceptance : [],
-                  // [3.0.8] 开工-结算一致性比对输入（行级登记值，历史行跳过）。
-                  startPhases: settleRow?.startPhases ?? undefined,
-                  // [修复] 备份采纳与消息路径同一 F11 口径（见 settleVerdict 处注释）。
-                  formatTier: settleDelegates.length > 0 ? 'leader' : undefined,
-                  expectedExperts: settleDelegates,
-                })
-                if (!backupVerdict || backupVerdict.missingBlock === true || backupVerdict.verification === 'unparsable') backupVerdict = null
-              }
-            break
-          }
-          if (backupRejectReason) {
-            record.errors = [
-              ...(record.errors ?? []),
-              `${subtask.id}: 拒绝采纳盘上结算备份 ${settleBackup}——${backupRejectReason}（文件 mtime=${backupMtimeMs === null ? '未知' : new Date(backupMtimeMs).toISOString()}，本次尝试 startedAt=${new Date(backupAttemptStartedAt).toISOString()}；[2.5.2][T4b][D2] 新鲜度/归属闸），落回 EVIDENCE_MISSING 回喂`,
-            ].slice(-20)
-          }
-          if (backupVerdict) {
-            settleFromOutput(record, subtask, backupText, guard, options, backupVerdict,
-              probeInterruptedEvidence(backupText, subtask, options.cwd, options.artifactExists))
-            // [3.2.4][W7] 备份结算若为格式退回，同样记账真实尝试号。
-            if (backupVerdict.blockedKind === 'comm-format') {
-              const rejectedRow = record.statuses.find((item: any) => item?.subtaskId === subtask.id)
-              if (rejectedRow) Object.assign(rejectedRow, { commFormatAttempt: attempt })
-            }
-            record.errors = [
-              ...(record.errors ?? []),
-              `${subtask.id}: 消息结果块缺失，已采纳盘上结算备份 ${settleBackup}（[2.2.9] 恢复路径）`,
-            ].slice(-20)
-            return
-          }
+          // 盘上结算备份已由上方统一 readSettlementBackupVerdict 探测并处理，此处直接走 EVIDENCE_MISSING 有界回喂。
           const missingLanded = probeInterruptedArtifacts(output, subtask, options.cwd, options.artifactExists)
           const missingError = new PlanError(
             '结果块缺失，本次回报不能结算（工作本身不计失败）'
@@ -4489,7 +4383,8 @@ function tryDeterministicPlan(input: any) {
   if (!eligible.ok || !eligible.department) return null
   try {
     const text = String(input.taskText).trim()
-    const effort = classifyModelFamily(input.modelSelection?.model) === 'qwen' ? 'medium' : 'high'
+    // 极简单动作单文件任务直接用 low 档：省规划器 LLM 的同时避免无意义的三层扩编。
+    const effort = 'low'
     const deliverable = `完成：${text}`
     const raw = {
       version: 1,
@@ -7336,46 +7231,6 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         hint: '请移除 extendMs，直接继续执行；如需汇报预估变化，只传 timeNotice（纯信息，不影响验收）。',
       }
     }
-    /*
-     * [SCv2-T4][Q1-B/C05/C06] extendMs 用户批准闸（判据 v2 生效计划专用）：
-     * 第一次超时不再自动放宽——未携带合格用户批准留痕（criterionApproval）一律
-     * 拒绝（EXTEND_NEEDS_USER_APPROVAL），批准时间晚于当前时刻 likewise 拒绝
-     * （C-4 推荐 A：批准仅在本次尝试结算前有效，事后追认无效）。
-     * 未生效计划（历史/在途，Q5-A/D-1）保持 2.3.0 旧行为，既有回归零改动。
-     * 留痕 5 项：任务 ID（subtaskId）、批准原文/来源（reason/source）、批准时间
-     * （at）、放宽后分钟数（extendedMinutes，事务内回填）、适用范围（scope）。
-     */
-    const criterionActive = criterionV2Active(record.plan?.createdAt)
-    let criterionApproval: ReturnType<typeof sanitizeCriterionException> = null
-    if (hasExtend && criterionActive) {
-      criterionApproval = sanitizeCriterionException(args?.criterionApproval)
-      if (!criterionApproval) {
-        return {
-          ok: false,
-          code: 'EXTEND_NEEDS_USER_APPROVAL',
-          planId: record.plan.planId,
-          planCreatedAt: record.plan?.createdAt,
-          subtaskId,
-          error: '判据 v2 已对该计划生效：extendMs 放宽必须先取得用户明确批准并留痕（Q1-B），本次调用未携带合格的 criterionApproval。',
-          hint: '请先向用户申请例外批准，再随 extendMs 传 criterionApproval={ approvedBy:"user", at:<批准时间 epoch 毫秒>, reason:<批准原文/来源>, scope:"task"|"plan" }（5 项留痕：任务 ID、批准原文/来源、批准时间、放宽后分钟数、适用范围；无留痕＝未批准）。未获批准时不得放宽：按判据层未达标处理，用 dsh_workplan_replan(replace) 转接替子任务只补缺口。',
-        }
-      }
-      if (criterionApproval.at > Date.now()) {
-        return {
-          ok: false,
-          code: 'EXTEND_APPROVAL_INVALID_TIME',
-          planId: record.plan.planId,
-          planCreatedAt: record.plan?.createdAt,
-          subtaskId,
-          error: `criterionApproval.at（${criterionApproval.at}）晚于当前时刻：批准必须在本次尝试结算前取得，事后追认无效（C-4 推荐 A）。`,
-          hint: '请使用用户实际批准的时间（epoch 毫秒，Asia/Shanghai 展示）；结算后只能批准接替行，不能追改本次判定。',
-        }
-      }
-    }
-    /*
-     * [2.2.0][T5/O-4c] timeNotice 的校验放在入口统一做（所有路径共享）：
-     * 非法预告不该因为调用同时带了 status/instruction 就被静默接受。
-     */
     if (hasTimeNotice) {
       const problem = validateTimeNotice(timeNoticeArg)
       if (problem) {
@@ -7388,23 +7243,6 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
           error: problem.error,
           hint: problem.hint,
         }
-      }
-    }
-    /*
-     * [2.2.0][T5/O-4c] 延期事务与状态改判分开提交：方案 §2.2 把 extendMs 定为
-     * 「放宽时间的唯一写路径」，要求原子与可审计；一次调用既改判定又改时限会让
-     * 失败路径出现半写（判定已落、时限未落，或相反）。组合调用显式拒绝，模型分
-     * 两次提交即可（两者都不需要 force）。
-     */
-    if (hasExtend && statusRequested) {
-      return {
-        ok: false,
-        code: 'EXTEND_REQUIRES_DEDICATED_CALL',
-        planId: record.plan.planId,
-        planCreatedAt: record.plan?.createdAt,
-        subtaskId,
-        error: '延期事务必须单独提交：同一次调用不要同时传 status 与 extendMs（放宽是原子、可审计的唯一写路径）',
-        hint: '先单独调用 extendMs 放宽时限，再用另一次调用改判状态。',
       }
     }
     /*
@@ -7567,98 +7405,8 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         }
       }
     }
-    /*
-     * [2.2.0][T5/O-4c] 延期事务（放宽时间的唯一写路径，方案 §2.2；D2/D3 效果 +
-     * §5.4 防滥用）：
-     *  1. 预算：初始协商上限取 T4 resolveSubtaskTimeoutMs 的计划层解析值；累计
-     *     放宽（timeJournal 中 action:'extend' 之和）≤ 初始上限 × 1。方案没有给
-     *     MAX_EXTEND_MS 数值，单次上限派生为「剩余延期预算」，不自拟常量。
-     *  2. 执行：校验通过才调用 T4 extendDeadline——它负责 deadlineAt += extendMs、
-     *     重置一次性计时器、同步 watchdog，并追加 timeJournal（action:'extend'）。
-     *     回放侧（本文件 replay 白名单）的累加语义与此一致：deadlineAt 累加 +
-     *     同形 journal 条目，所以回放代码不需要改。
-     *  3. 纯时限事务不改状态判定：回执只带时限结果与审计字段。
-     */
-    let extension: any = null
-    if (hasExtend) {
-      const budget = extendBudgetOf(record, subtaskId)
-      if (extendMsArg > budget.remainingMs) {
-        return {
-          ok: false,
-          code: 'EXTEND_BUDGET_EXHAUSTED',
-          planId: record.plan.planId,
-          planCreatedAt: record.plan?.createdAt,
-          subtaskId,
-          budget,
-          error: `extendMs ${extendMsArg}ms 超出剩余延期预算 ${budget.remainingMs}ms：`
-            + `累计延期 ${budget.usedMs}ms，初始协商上限 ${budget.initialMs}ms（上限 × 1 = ${budget.capMs}ms）`,
-          hint: '放宽永远有界：该任务应转入新轮续跑（auto-resume）或转 escalate 请主 Agent/用户裁决。',
-        }
-      }
-      const extended = extendDeadline(record, subtaskId, extendMsArg, {
-        by: 'agent',
-        reason: typeof args?.reason === 'string'
-          ? args.reason
-          : (typeof args?.note === 'string' ? args.note : ''),
-      })
-      if (!extended.ok) {
-        return {
-          ok: false,
-          code: extended.code,
-          planId: record.plan.planId,
-          planCreatedAt: record.plan?.createdAt,
-          subtaskId,
-          error: extended.error,
-          hint: extended.hint,
-        }
-      }
-      extension = extended
-      /*
-       * [SCv2-T4][Q1-B/C08] 批准留痕落行（criterionException，最终定名）：
-       * 放宽后分钟数由本次 extendMs 回填；timeJournal 追加 action:'criterion-exception'
-       * 审计条目。回放白名单已追加 criterionException，刷新/重启不丢批准记录。
-       */
-      if (criterionActive && criterionApproval) {
-        const extendRow = record.statuses.find((item: any) => item?.subtaskId === subtaskId)
-        if (extendRow) {
-          extendRow.criterionException = {
-            ...criterionApproval,
-            extendedMs: extendMsArg,
-            extendedMinutes: Math.round((extendMsArg / 60000) * 100) / 100,
-          }
-          const approvalJournal = Array.isArray(extendRow.timeJournal) ? extendRow.timeJournal : []
-          approvalJournal.push({
-            at: Date.now(),
-            action: 'criterion-exception',
-            by: 'user',
-            extendMs: extendMsArg,
-            scope: criterionApproval.scope,
-            reason: truncate(criterionApproval.reason, 300),
-          })
-          extendRow.timeJournal = approvalJournal.slice(-20)
-        }
-      }
-      /*
-       * [2.3.0][T1] 用户要求 1 后半段：放宽成功后必须把「最新执行时间」告知
-       * 专家，同时附「必须在保证工作质量的前提下高效率执行」硬要求，让专家
-       * 有准备（收到通知继续当前工作，不重新开始）。投递失败不回滚延期——
-       * 时限已经推移，只是告知通道未达：留档 errors，回执带 childNotified
-       * 供主 Agent 决定是否用 dsh_workplan_followup 补发。
-       */
-      extension.childNotified = (await notifyExpertOfExtension(ctx, agent, record, subtaskId, extension.deadlineAt)).ok
-    }
     if (!statusRequested) {
       if (hasTimeNotice) recordTimeNotice(record, subtaskId, timeNoticeArg, session)
-      /*
-       * 纯时限事务到此结束。方案 §2.2 效果 3：状态行 revision +1（延期/预告也是
-       * 行变更，同样受 STALE_WRITE 乐观锁保护）；状态与判定一个字段都不改。
-       *
-       * [3.1.7][P2 U-20] 收口第 4 条旁路：旧实现直接 `row.revision = …`、
-       * `row.updatedBy = 'agent'` 裸写行对象，绕过 applyStatus 这个自称唯一的
-       * 写入口（T3 X-01 四条旁路之一）。现在改走 applyStatus 的纯抬号 patch
-       * （不带 status/closure，只带 revision/updatedBy），让所有行变更都经过
-       * 同一道消毒与不变量校验；语义完全不变（状态与判定一个字段都不改）。
-       */
       record.statuses = applyStatus(record.statuses, subtaskId, {
         revision: Number(current?.revision ?? 0) + 1,
         updatedBy: 'agent',
@@ -7675,23 +7423,13 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         status: written?.status ?? current?.status ?? null,
         revision: written?.revision ?? Number(current?.revision ?? 0),
         updatedBy: written?.updatedBy ?? 'agent',
-        ...(extension
-          ? {
-              deadlineAt: extension.deadlineAt,
-              timerRearmed: extension.timerRearmed,
-              watchdogRearmed: extension.watchdogRearmed,
-              childNotified: extension.childNotified === true,
-            }
-          : {}),
         ...(hasTimeNotice ? { timeNotice: written?.timeNotice ?? null } : {}),
-        // [SCv2-T4] 批准留痕随纯时限事务回执下发（仅生效计划且本次携带批准时）。
-        ...(criterionActive && criterionApproval ? { criterionException: written?.criterionException ?? null } : {}),
         timeJournal: Array.isArray(written?.timeJournal) ? written.timeJournal.slice(-10) : [],
         stats: snapshot.stats,
         deliveryReady: readiness.ready,
         deliveryBlockers: readiness.blockers.slice(0, 12),
         deliveryRemaining: readiness.remaining.slice(0, 20),
-        hint: '时限协商已记录：状态与判定未改，不需要 force；放宽永远有界，超出累计上限请转新轮续跑或转 escalate 请主 Agent 裁决。',
+        hint: '开工预估已记录：状态与判定未改，不需要 force。',
       }
     }
     const revision = Number(current?.revision ?? 0) + 1
@@ -7712,7 +7450,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
      * 这是「复核改判」恢复路径的判据边界：恢复也必须经用户批准留痕。
      */
     let manualCriterionFields: any = null
-    if (status === 'done' && criterionActive) {
+    if (status === 'done' && criterionV2Active(record.plan?.createdAt)) {
       const settledAt = Date.now()
       let leaderForCriterion: any = null
       try { leaderForCriterion = deriveLeaderEstimate(current) } catch { leaderForCriterion = null }
@@ -8411,7 +8149,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         if (isPlanModeActive(ctx, session)) return stopTimer('PLAN_MODE')
         if (record.phase !== 'paused') return stopTimer('PHASE_NOT_PAUSED')
         const live = derivePlanSnapshot(record.statuses)
-        const livePending = (record.statuses ?? []).filter((item: any) => item?.status === 'pending').length
+        const livePending = (record.statuses ?? []).filter((item: any) => item?.closure !== 'replanned' && item?.status === 'pending').length
         if (Number(live.stats?.total ?? 0) === 0 || livePending === 0) return stopTimer('NOTHING_PENDING')
         const controller = new AbortController()
         record.abortRequested = false
@@ -11204,6 +10942,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       record.plan?.planId,
       subtaskId,
       leafStartPhases,
+      member.member,
     )
     /*
      * [3.2.9] 专家 phase-1 接续同样携带角色上下文包：验收标准/约束/依赖产物/
@@ -12310,7 +12049,7 @@ ${startEvidenceRef
        * 索引 + 文件路径；拿不到就维持原文全文注入，证据完整性与安全阀不变。
        */
       const stashedEvidenceRef = stashedStartPhases
-        ? (persistStartEvidenceFile(cwd, record.plan?.planId, subtaskId, stashedStartPhases) ?? '')
+        ? (persistStartEvidenceFile(cwd, record.plan?.planId, subtaskId, stashedStartPhases, assignment.member) ?? '')
         : ''
       const selfContinuation = priorSelf && stashedStartPhases && registeredEstimate
         ? `【自配档接续·开工证据读档】你的自配推理等级 \`${priorSelf}\` 与五步第 1/2/3 步开工证据均已登记生效（成员自配为权威）。继续勿重做：直接执行正式任务，不要重新评估复杂度、不要重复提交开工证据。正式执行必须严格按你第二步理清的方法、流程、步骤进行，全程少走弯路：先查历史教训、先验证再动手、不重复试错。你的开工预估已登记并送达部门负责人（约 ${registeredEstimate.declaredMinutes} 分钟，整数分钟），无需重复上报。
@@ -14475,31 +14214,8 @@ async function maybePlan(ctx: any, state: any, payload: any, downstream: any, op
     return list.length ? messageText(list[list.length - 1]).trim() : ''
   })()
   if (!taskText) return downstream
-  if (lastHumanText && isSocialMessage(lastHumanText)) return downstream
-  if (lastHumanText && isVagueContinuation(lastHumanText)) return downstream
-  if (lastHumanText && isStatusQuestion(lastHumanText)) return downstream
-  /*
-   * [3.0.7] 确认回复路由（用户想法，原话）：「收到用户确认回复后，你应该结合所
-   * 有上下文全面、深入分析、思考、研究后，开始依据得出的所有结果分配任务」。
-   * 用户 2026-11-18 补充裁决：「用户确认后，无论任务是否已经生成，都必须结合
-   * 所有上下文和用户的回复，全面、深入开展分析、思考、研究，然后依据得出的
-   * 所有结果开始分配任务」——分析在先、派发现在，插件不得在钩子层不经分析
-   * 机械开跑。落到三条出口，全部在 activeTurns 标记与取代/取消逻辑之前：
-   *  ① 已有已提交未派发的计划（被认可闸门按住或 plan-first 未派发）→ 解除
-   *     闸门（留痕 gateHistory，记下用户确认原文）、刷新 conversationContext
-   *     （含确认消息的全量上下文），并给主 Agent 下分析-派发指令；本回合标记
-   *     activeTurns：主 Agent 若未在回合内派发，收尾闸门会拦停 steer「请派发」
-   *     作为兜底，绝不留下「确认后无人派发」的尾巴；
-   *  ② 任务分解正在后台进行 → 只标记 userConfirmed，原分解不被取代中止。后台
-   *     分解本身就是「结合所有上下文的深入分析研究」，计划一生成即跳过认可
-   *     闸门、刷新上下文后自动派发（＝依据分析得出的结果分配任务）；
-   *  ③ 其余（无计划/已在执行/终态）→ 交还主 Agent 结合上下文正常答复，绝不做
-   *     任务分解——确认消息不再是新任务。
-   */
-  // [3.1.2] 触发条件用最新单条消息（lastHumanText），不再用全量拼接文本：
-  // 否则单条确认（如「认可」）永远进不了本路由，出口①解闸派发 / 出口②盖章
-  // 全部空转，确认消息反而落到下方真实任务路径取代并杀死在途后台规划。
-  if (isUserConfirmation(lastHumanText)) {
+  // 确认回复路由优先于社交短语判定（与 onInboxInserted 同序），否则「好的/可以/没问题/ok」会被 isSocialMessage 拦截导致认可闸门永远不放行。
+  if (lastHumanText && isUserConfirmation(lastHumanText)) {
     if (existing?.plan && !existing.dispatchedAt && !isTerminalPhase(existing.phase)
       && !existing.dispatchPromise && existing.phase !== 'executing' && !existing.degraded
       && existing.planner?.outcome !== 'SALVAGED') {
@@ -14555,6 +14271,9 @@ async function maybePlan(ctx: any, state: any, payload: any, downstream: any, op
     }
     return downstream
   }
+  if (lastHumanText && isSocialMessage(lastHumanText)) return downstream
+  if (lastHumanText && isVagueContinuation(lastHumanText)) return downstream
+  if (lastHumanText && isStatusQuestion(lastHumanText)) return downstream
   /*
    * [1.8.7] Remember that this turn carries a real task.
    *
@@ -14772,7 +14491,7 @@ async function maybePlan(ctx: any, state: any, payload: any, downstream: any, op
    * 关闭方式：DSH_WORKPLAN_CLARIFY_GATE=0（保留给需要旧行为的自动化）。
    */
   if (!clarifyGateDisabled()) {
-    const clarify = auditClarifyNeed(taskText, conversationContext)
+    const clarify = auditClarifyNeed(taskText, conversationContext, session?.id ?? '')
     if (clarify.needed) {
       const createdAt = Date.now()
       state.records.set(session.id, {
@@ -14972,8 +14691,8 @@ async function maybePlan(ctx: any, state: any, payload: any, downstream: any, op
      * 疑点 fail-closed 回落原 runPlanner，语义不变。
      */
     const fastPlan = tryDeterministicPlan({
-      enabled: options?.deterministicFastPath === true
-        || /^(1|true|yes|on)$/i.test(String(process.env.DSH_WORKPLAN_DETERMINISTIC_FAST_PATH ?? '').trim()),
+      enabled: options?.deterministicFastPath !== false
+        && !/^(0|false|no|off)$/i.test(String(process.env.DSH_WORKPLAN_DETERMINISTIC_FAST_PATH ?? '').trim()),
       taskText,
       conversationContext,
       cwd: session.header?.cwd ?? options.cwd,
@@ -15099,6 +14818,7 @@ async function maybePlan(ctx: any, state: any, payload: any, downstream: any, op
     if (!planningEntry.superseded && existing?.plan) state.records.set(session.id, existing)
     return
   }
+  resetClarifyRounds(session?.id ?? '')
   const planId = `wp-${randomUUID()}`
   const createdAt = Date.now()
   /*

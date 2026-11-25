@@ -58,8 +58,9 @@ export const SUPERSEDE_CODES = {
 
 export type SupersedeCode = (typeof SUPERSEDE_CODES)[keyof typeof SUPERSEDE_CODES]
 
-/** V8 的确认词，逐字取自规则设计 §6.2。 */
+/** V8 的确认词，逐字取自规则设计 §6.2；否定前导词（「不同意」「不确认」「不可以」等）必须排除。 */
 const CONFIRMATION_WORDS = /确认|同意|可以|按此执行/u
+const NEGATED_CONFIRMATION = /(?:不|别|勿|绝不|并非|并不是|未|没|没有|拒绝|反对)\s*(?:确认|同意|可以|按此执行)/u
 
 /** mapping 上限：计划最多 15 项，留出审计余量，防止异常输入撑爆日志。 */
 const MAX_MAPPING_ENTRIES = 100
@@ -114,6 +115,7 @@ export function confirmationSeq(session: any, sourcePlanId: string, successorPla
     if (kind !== undefined && kind !== 'user') continue
     const text = messageText(message)
     if (!text || !text.includes(sourcePlanId) || !text.includes(successorPlanId)) continue
+    if (NEGATED_CONFIRMATION.test(text)) continue
     if (CONFIRMATION_WORDS.test(text)) return i
   }
   return -1

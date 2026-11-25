@@ -67,17 +67,17 @@ function consolidation(overrides: any = {}) {
 function planWith(tier: string | undefined, count: number, model: string | null, extra: any = {}) {
   const overrides: any = { assignments: assignmentsOf(count), ...extra }
   if (tier !== undefined) overrides.taskReasoningEffort = tier
-  return planDelegations({ consolidation: consolidation(overrides), model })
+  return planDelegations({ consolidation: consolidation(overrides), model, minHeadcount: 3 })
 }
 
-test('A1：model=null，四个复杂档各 2 人 → DELEGATE_HEADCOUNT_MIN（D1 全档触发；3.2.6 下限 3）', () => {
+test('A1：model=null，四个复杂档各 2 人 → DELEGATE_HEADCOUNT_MIN（D1 全档触发；配置下限 3）', () => {
   for (const tier of COMPLEX_TIERS) {
     const plan = planWith(tier, 2, null)
     console.log(`[254-min-headcount] A1 ${tier} 2人 → ok=${plan.ok} code=${plan.code}`)
     assert.equal(plan.ok, false)
     assert.equal(plan.code, 'DELEGATE_HEADCOUNT_MIN')
     assert.ok(plan.error!.includes('2'), 'error 须含当前人数 2')
-    assert.ok(plan.error!.includes(String(MIN_COMPLEX_DELEGATE_MEMBERS)), 'error 须含下限 3')
+    assert.ok(plan.error!.includes('3'), 'error 须含下限 3')
     assert.ok(plan.error!.includes(tier), 'error 须含声明档')
     assert.ok(plan.error!.includes('D1/D2'), 'error 须注明用户决策 D1/D2')
   }
@@ -132,6 +132,7 @@ test('边界：taskEffortFallback=max 且 consolidation 无该字段 → 2 人�
     consolidation: consolidation({ assignments: assignmentsOf(2) }),
     model: null,
     taskEffortFallback: 'max',
+    minHeadcount: 3,
   })
   console.log(`[254-min-headcount] 边界 fallback=max 2人 → code=${plan.code}`)
   assert.equal(plan.ok, false)
@@ -218,6 +219,7 @@ test('拒因顺序回归：人数闸前的既有闸仍先拒（3.0.8 新顺序�
   const bare = planDelegations({
     consolidation: { taskReasoningEffort: 'max', assignments: assignmentsOf(2) },
     model: null,
+    minHeadcount: 3,
   })
   console.log(`[254-min-headcount] 顺序 无梳理字段 2人 → code=${bare.code}（字数闸已废除，落到人数闸）`)
   assert.equal(bare.code, 'DELEGATE_HEADCOUNT_MIN')

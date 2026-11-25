@@ -1257,11 +1257,13 @@ window.__ModuleLoader__.load({
     }
 
     function allEntries(session: any) {
-      const byId = new Map((Array.isArray(session?.statuses) ? session.statuses : []).map((item: any) => [item.subtaskId, item]))
+      const byId = new Map<string, any>((Array.isArray(session?.statuses) ? session.statuses : []).map((item: any) => [item.subtaskId, item]))
       const entries: any[] = []
       for (const stage of Array.isArray(session?.stages) ? session.stages : []) {
         for (const subtask of Array.isArray(stage?.subtasks) ? stage.subtasks : []) {
-          entries.push({ stage, subtask, item: byId.get(subtask.id) })
+          const item = byId.get(subtask.id)
+          if (subtask?.supersededAt || item?.closure === 'replanned') continue
+          entries.push({ stage, subtask, item })
         }
       }
       return entries
@@ -1315,8 +1317,10 @@ window.__ModuleLoader__.load({
     }
 
     function plainError(value: any) {
-      const text = typeof value === 'string' ? value : ''
+      const text = typeof value === 'string' ? value.trim() : ''
       if (!text) return ''
+      // 保留详细诊断原文（>24 字不覆盖成模糊泛化语），只把极短模糊错误翻成人话。
+      if (text.length > 24) return text
       if (text.includes('超时')) return '这件事花的时间太长，系统先停下来了。'
       if (text.includes('上游') || text.includes('依赖')) return '前面的工作还没做完，所以这一步暂时不能开始。'
       if (text.includes('未启动')) return '这次没有启动负责这件事的 Agent。'
@@ -1931,8 +1935,11 @@ window.__ModuleLoader__.load({
        * 五档（旧计划/他模型计划可在本会话回放展示），故 Pill 继续按五档显示、
        * 不得按家族删档——家族合法性以发送前的收窄/拒绝为准，不靠 UI 过滤兜底。
        */
-      const effort = typeof subtask?.reasoningEffort === 'string' && ['low', 'medium', 'high', 'xhigh', 'max'].includes(subtask.reasoningEffort)
-        ? subtask.reasoningEffort
+      const rawEffort = typeof item?.effortOverride === 'string' && item.effortOverride
+        ? item.effortOverride
+        : subtask?.reasoningEffort
+      const effort = typeof rawEffort === 'string' && ['low', 'medium', 'high', 'xhigh', 'max'].includes(rawEffort)
+        ? rawEffort
         : null
       return h('div', { className: `dsh-wp-subtask dsh-wp-tone-${tone}` },
         h('div', { className: 'dsh-wp-subtask-head' },
@@ -1987,7 +1994,7 @@ window.__ModuleLoader__.load({
             h('ul', { className: 'dsh-wp-muted' },
               item.delegates.map((member: any, memberIndex: number) => h('li', { key: `${String(member?.childId ?? member?.member ?? '')}-${memberIndex}` },
                 `└ ${String(member?.member ?? '?')}`
-                + `（${member?.role === 'expert' ? t('delegateExpert') : t('delegateMember')}）`
+                + `（${member?.role === 'member' ? t('delegateMember') : t('delegateExpert')}）`
                 + `｜${t('reasoningEffort')}：${String(member?.effort ?? '?')}`
                 + (member?.requested && member.requested !== member.effort ? `（越界钳制自 ${String(member.requested)}）` : '')
                 + (member?.selfEffort ? `｜自配档 ${String(member.selfEffort)}${member?.selfEffortRequested && member.selfEffortRequested !== member.selfEffort ? `（钳制自 ${String(member.selfEffortRequested)}）` : ''}` : '｜自配档 待自配')
@@ -2023,7 +2030,7 @@ window.__ModuleLoader__.load({
               ? t('delegateAwaitingSummary')
               : fill(t('delegateCompletionSummary'), { done: item.delegateCompletion.done, total: item.delegateCompletion.total }))
           : null,
-        status !== 'blocked' && item?.summary ? h('p', { className: 'dsh-wp-muted' }, `${t('summary')}：${plainError(item.summary)}`) : null,
+        status !== 'blocked' && item?.summary ? h('p', { className: 'dsh-wp-muted' }, `${t('summary')}：${String(item.summary)}`) : null,
         /*
          * [1.10.0] R-02：「卡住原因」只属于没做完的行。
          *
@@ -2291,6 +2298,7 @@ window.__ModuleLoader__.load({
         for (const subtask of subtasks) {
           if (subtask?.id == null) continue
           const item = byId.get(String(subtask.id))
+          if (subtask?.supersededAt || item?.closure === 'replanned') continue
           entries.push({ title: String(subtask?.title ?? ''), status: String(item?.status ?? 'pending') })
         }
       }
@@ -3429,7 +3437,7 @@ window.__ModuleLoader__.load({
           live,
           ended,
           finished,
-          urgent: live.filter((session: any) => urgentPhases.includes(session.phase)).length,
+          urgent: live.filter((session: any) => urgentPhases.includes(sessionPhaseOf(session))).length,
           /*
            * [1.6.0] 「已结束」组也需要「需处理」角标：卡住的计划停了仍然是卡住的，
            * 判定用后端下发的 suspendedPhase（原派发阶段），而不是被收敛后的 ended。
@@ -3541,10 +3549,6 @@ window.__ModuleLoader__.load({
               ? h(SessionGroup, { key: 'ended', group: 'ended', list: groups.ended, hasLive: groups.live.length > 0, urgent: groups.urgentEnded, t, openSessionId, setOpenSessionId })
               : null,
             h(SessionGroup, { key: 'done', group: 'done', list: groups.finished, hasLive: groups.live.length > 0 || groups.ended.length > 0, urgent: 0, t, openSessionId, setOpenSessionId }),
-            // 图表放两组之后：两张卡各 ≈246px，排在组前会让首屏看不到任何一张任务卡
-            // （设计稿 §8 第 12 条，T8 复核时复现在 1.4.2 源码里）。
-            // [1.6.0] 「未结束」= 进行中 + 已结束但未完成：两者都还没做完，都是用户要盯的对象。
-            h(GroupCharts, { liveCount: groups.live.length + groups.ended.length, doneCount: groups.finished.length, liveBars, hiddenBars: Math.max(0, groups.live.length + groups.ended.length - 6), t }),
           ),
         /*
          * [T4] 始终挂载的回到顶部按钮：作为 .dsh-wp 的最后一个直接子元素，

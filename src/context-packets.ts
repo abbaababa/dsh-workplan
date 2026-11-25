@@ -60,7 +60,7 @@ export function buildExpertContextPacket(input: ExpertContextInput): string {
   const stage: ContextStage = input.stage === 'planning' ? 'planning' : 'execution'
   const budgetChars = Number.isFinite(Number(input.budgetChars))
     ? Math.max(400, Math.floor(Number(input.budgetChars)))
-    : (stage === 'planning' ? 1500 : 3200)
+    : (stage === 'planning' ? 1200 : 2400)
   const current = statusOf(input.statuses, subtaskId)
   const items: ContextItem[] = []
 
@@ -285,14 +285,13 @@ export function buildExpertContextPacket(input: ExpertContextInput): string {
   const brief = compileBrief(sources, { budgetChars: Math.max(600, budgetChars - 200) })
   const omittedLines = renderContextOmissions(routed.omitted, 20)
   return [
-    `【RCR 角色上下文包｜role=expert｜stage=${stage}｜member=${clip(input.member, 60)}｜cwd=${clip(input.cwd, 80)}｜预算 ${budgetChars} 字｜选中 ${routed.selected.length} 条 / ${routed.usedChars} 字${routed.overflowChars > 0 ? `（must 溢出 ${routed.overflowChars} 字）` : ''}｜简报实际 ${brief.chars} 字】`,
+    `【RCR 角色上下文包｜expert/${stage}｜${clip(input.member, 40)}｜预算 ${budgetChars}｜选中 ${routed.selected.length} 条/${brief.chars} 字】`,
     renderBrief(brief, {
       title: 'Latent Brief / ASTC',
       includeOmitted: true,
-      omittedLimit: 20,
+      omittedLimit: 12,
     }),
     ...(omittedLines ? ['', omittedLines] : []),
-    '',
-    '使用纪律：硬事实逐字照做；软摘要只作线索，需要原文按 ref 读取；不要重复采集已落盘产物，也不要重复上报已答复的需求。',
+    '纪律：硬事实逐字照做；软摘要作线索，按 ref 取原文；勿重复采集已落盘产物或重复上报已答复需求。',
   ].join('\n')
 }

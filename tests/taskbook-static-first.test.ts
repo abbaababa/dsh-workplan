@@ -34,14 +34,14 @@ function commonPrefix(a: string, b: string): number {
   return i
 }
 
-test('同部门 8 名专家共享 ≥3000 字符前缀（缓存可命中），且差异只在尾部', () => {
+test('同部门 8 名专家共享高比例静态前缀（缓存可命中），且差异只在尾部', () => {
   const prompts = Array.from({ length: 8 }, (_v, i) =>
     expert(`专家-${i + 1}`, `完成第 ${i + 1} 项独立子任务并产出验收证据`))
   let minShared = Number.POSITIVE_INFINITY
   for (let i = 1; i < prompts.length; i += 1) minShared = Math.min(minShared, commonPrefix(prompts[0], prompts[i]))
   assert.ok(
-    minShared >= 3000,
-    `8 份任务书的最小共享前缀必须 ≥3000 字符（实测 ${minShared}）；成员名不得出现在前缀里`,
+    minShared >= 1800 && minShared / prompts[0].length > 0.75,
+    `8 份任务书的最小共享前缀必须 ≥1800 字符且占比 >75%（实测 ${minShared}/${prompts[0].length}）；成员名不得出现在前缀里`,
   )
   // 差异必须落在尾部：动态分工段必须整体位于共享前缀之后
   const dynamicAt = prompts[0].indexOf('【你的分工】（本任务书中唯一因专家而异的部分）')

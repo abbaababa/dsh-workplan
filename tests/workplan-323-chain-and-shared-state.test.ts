@@ -46,11 +46,12 @@ test('planDelegations：链式任务豁免 ≥8 人下限，1 名专家可放行
   assert.equal(result.ok, true, result.ok ? '' : String(result.error))
 })
 
-test('planDelegations：非链式复杂任务 1 人仍被 HEADCOUNT_MIN 拒（豁免不扩大）', () => {
+test('planDelegations：配置下限时非链式复杂任务 1 人仍被 HEADCOUNT_MIN 拒（豁免不扩大）', () => {
   const result = planDelegations({
     model: 'deepseek-chat',
     consolidation: { ...CONSOLIDATION, assignments: EIGHT.slice(0, 1) },
     parentTaskText: ATOMIC_TASK,
+    minHeadcount: 3,
   })
   assert.equal(result.ok, false)
   assert.equal(result.code, 'DELEGATE_HEADCOUNT_MIN')

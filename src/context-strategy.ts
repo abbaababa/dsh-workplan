@@ -208,18 +208,18 @@ export function decideDelegationStrategy(input: DelegationStrategyInput = {}): D
 
   let guidance: string
   if (lowEffort) {
-    guidance = '本任务为 low/未配置档，平台规则禁止下派：负责人亲自执行（action="direct"，按 low 登记 startPhases）；若 review 时自配为复杂档，再以实际整体档重新判断是否拆分。'
+    guidance = 'low/未配置档禁止下派：负责人亲自执行（action="direct" 交 startPhases）；若自配为复杂档再按实际档判定。'
   } else if (lane === 'leader-direct') {
-    guidance = '本任务高度耦合或单线程连续：不得拆给多名独立专家。由负责人亲自执行（action="direct"，按自评档登记 startPhases）并压缩中间过程，所有关键结论与精确值写进同一份产物。'
+    guidance = '强耦合/单线程连续：禁拆多人，由负责人亲自执行（action="direct" 自评档+startPhases），关键结论与精确值写进同一份产物。'
   } else if (lane === 'single-expert') {
-    guidance = '本任务应单通道完成：只派 1 名专家一次做完，不要为凑人数拆成互相看不见的上下文；中间结论与精确值写进同一份产物。'
+    guidance = '单通道完成：只派 1 名专家一次做完，勿为凑人数硬拆；中间结论与精确值写进同一份产物。'
   } else {
-    guidance = '任务可独立并行：按极简原则拆分给多名专家，每个专家只拿自己的任务书与角色上下文包。token 重的探索先派 1 名只读侦察专家，回传 ≤800 字且含精确引用/产物路径的简报，其他专家复用简报，不重复采集。'
+    guidance = '可独立并行：按极简原则拆给多名专家；重探索任务先派 1 名只读侦察专家回传 ≤800 字精确引用简报供复用。'
   }
   const signalText = assessment.signals.length > 0
     ? assessment.signals.map((item) => item.label).join('、')
     : '无明确信号'
-  const promptLine = `【上下文策略｜独立度${independent ? '高' : '低'}｜耦合分 ${assessment.couplingScore}/10｜信号：${signalText}】${guidance}`
+  const promptLine = `【上下文策略｜独立度${independent ? '高' : '低'}｜耦合 ${assessment.couplingScore}/10｜${signalText}】${guidance}`
   return {
     lane,
     contextMode,
