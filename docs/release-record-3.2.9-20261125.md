@@ -62,9 +62,10 @@
 
 ## 运行态
 
-- 当前 Web profile（`~/.dsh/profiles/web`）的 `dsh.profile.bundles` **不包含** `dsh-workplan`；虽然 `node_modules/dsh-workplan` 已链接到源码目录，但该 profile 未加载插件，当前 GUI 的模型工具面也没有 `dsh_workplan_*`。
-- 因此不能在本 GUI 内用 `dsh_workplan_status` 自报 `v3.2.9`；需要先把 `dsh-workplan` 加入 profile bundles（或使用已加载它的 headless profile），再由用户**手动重启** DSH。
-- 磁盘构建指纹：`707c53497fd7b3d5`（`cat lib/host.js lib/runtime.js lib/plan.js lib/watchdog.js | shasum -a 256 | cut -c1-16`）。重启后 `dsh_workplan_status` 应显示 `v3.2.9`、`runtime.buildHash` 与该指纹一致。
+- 发布后按用户确认，把 `dsh-workplan` 加入了 Web profile 的 `dsh.profile.bundles`（`~/.dsh/profiles/web/package.json`，改前已备份为 `package.json.bak-<时间戳>`）；插件依赖仍指向源码目录的软链接。
+- 加入后本会话已实际加载插件，`dsh_workplan_status` 返回：`v3.2.9｜build 72a75c57eab069ba｜pid 88664｜启动 2026/11/25 11:52:20`，工具 `dsh_workplan_*` 已出现在模型工具面。
+- 运行态 build 指纹算法是「`lib/` 下除 `client.js` 外全部 `.js` 排序后逐个入哈希」；按同一算法对磁盘计算得到 `72a75c57eab069ba`，与运行态一致。注意：`cat lib/host.js lib/runtime.js lib/plan.js lib/watchdog.js | shasum -a 256 | cut -c1-16` 只覆盖 4 个文件，得到 `707c53497fd7b3d5`，不是运行态 build 值；两者不可混用。
+- 仍建议用户手动重启一次 DSH，用冷启动再确认 profile 组成、左侧进度面板与 `status` 三处一致；禁止由代理自行重启。重启后 `dsh_workplan_status` 应继续显示 `v3.2.9` 与 `build 72a75c57eab069ba`（除非又改了源码并重新构建）。
 
 ## 隐私与写入范围
 
