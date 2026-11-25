@@ -3,7 +3,7 @@
 > **Two selling points, one line: a full ISO/IEC 15408:2026 evidence pack you can verify with 5 commands, and a one-command install with zero runtime dependencies.**
 
 [![verify](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml/badge.svg)](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml)
-[![version](https://img.shields.io/badge/version-3.2.8-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v3.2.8)
+[![version](https://img.shields.io/badge/version-3.2.9-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v3.2.9)
 
 Adds "plan first → dispatch real department subagents → watch progress in the sidebar" to **DeepSeek Harness (DSH)**. No app, no DSH source patch, no page replacement.
 
@@ -69,6 +69,18 @@ Every work item carries a department label (Engineering, Research, Design, Produ
 
 The full contract — roles, data shapes, state machine, recovery, and the three places to update together — is in **[Collaboration contract](https://github.com/abbaababa/dsh-workplan/blob/main/docs/collaboration.md)**; per-department duties and handoff checklists are in **[Departments and handoffs](https://github.com/abbaababa/dsh-workplan/blob/main/docs/departments.md)**.
 
+## Context optimization in 3.2.9 (and its real boundary)
+
+3.2.9 adds five layers of context control:
+
+1. **Delegation-vs-compression decision**: sequential chains, cross-source adjudication, single final decisions, and shared mutable state are treated as strongly coupled; leads are told not to split them across independent experts, and `DELEGATE_COUPLED_SPLIT` rejects a forced split with two actionable exits (one expert, or lead `direct`).
+2. **Subagent isolation**: exploration-heavy work first spawns a read-only recon expert that returns a ≤800-character brief with exact references/artifact paths; other experts reuse it.
+3. **RCR (role-conditioned context routing)**: experts receive a scoped packet (user anchor, acceptance criteria, constraints, dependency artifacts, lessons, cross-department answers) instead of only a one-line task; `must` items are never dropped for budget. Phase-0 only evaluates complexity and does not receive the execution packet.
+4. **Latent Brief + KV-prefix cache metering**: structured hard-fact/soft-summary briefs with a reusable compile cache; read-only `llm/stream` usage metering exposes real `cacheRead/cacheWrite` in `dsh_workplan_status`.
+5. **ASTC-style soft/hard compression**: numbers, paths, hashes, IDs, commands, and acceptance IDs are kept verbatim first (one sentence ≤600 chars, total ≤budget; overflow falls back to an exact-value list plus `ref`); narrative text becomes a soft summary; omitted items keep a retrievable `ref`.
+
+**Honest boundary:** items 4 and 5 are **plugin-level equivalents**, not in-model KV-tensor sharing or real soft tokens. The plugin can only send text requests; literal KV/ASTC requires DSH kernel changes plus local inference. See [the literal design](docs/literal-kv-astc-kernel-design.md), [the 3.2.9 architecture](docs/context-optimization-3.2.9.md), and [release notes](docs/release-notes-3.2.9.md). Set `DSH_WORKPLAN_CACHE_METER=0` to disable cache metering.
+
 ## Requirements
 
 | Item | Detail |
@@ -80,7 +92,7 @@ The full contract — roles, data shapes, state machine, recovery, and the three
 ## Install
 
 ```bash
-dsh plugin --profile web add dsh-workplan@3.2.8
+dsh plugin --profile web add dsh-workplan@3.2.9
 ```
 
 Restart the DSH Web process (or reload the page) so the bundle is picked up.

@@ -47,6 +47,9 @@ import {
   renderDepartmentSummarySpec,
   renderQualityRequirementsBlock,
 } from './v3-contract.js'
+// [3.2.9] 执行通道判定 + 依赖摘要的软硬信息压缩（纯函数，无宿主依赖）。
+import { decideDelegationStrategy, renderDelegationStrategyLine } from './context-strategy.js'
+import { condenseText } from './context-brief.js'
 
 export const PLAN_VERSION = 1
 
@@ -5211,7 +5214,7 @@ export function buildTeamBrief(plan: any, statuses: any, subtask: any, excludeId
         ? `；产出 ${truncate(sibling.outputs.join('、'), 80)}`
         : '')
     const summary = state === 'done' && typeof status?.summary === 'string' && status.summary
-      ? `｜摘要：${truncate(status.summary, 80)}`
+      ? `｜摘要：${condenseText(status.summary, 80)}`
       : ''
     lines.push(
       `- ${sibling.id} ${departmentLabel(sibling.department)}：目标 ${truncate(sibling.objective, 60)}${outputHint}｜状态：${state}${summary}`,
@@ -5232,7 +5235,16 @@ export function buildTeamBrief(plan: any, statuses: any, subtask: any, excludeId
      */
     return excludeIds.size > 0 ? '（依赖项已在上方单列；没有其他并行兄弟部门的新进展。）' : ''
   }
-  return truncate(lines.join('\n'), 1500)
+  const joined = lines.join('\n')
+  if (joined.length <= 1500) return joined
+  /*
+   * [3.2.9] 不再对整块做一次 truncate：一条超长摘要会把后面的兄弟行（尤其是
+   * pending/blocked）整块切掉，违反「并行兄弟必须仍可见」的 3.2.5 红线。
+   * 改为按行数均分预算、逐行收缩；每行开头保留 ID/部门/状态，完整摘要与
+   * 产物引用在 status.siblingSubtasks 中可查，不删除唯一信息。
+   */
+  const perLine = Math.max(96, Math.floor(1500 / Math.max(1, lines.length)) - 1)
+  return truncate(lines.map((line) => truncate(line, perLine)).join('\n'), 1500)
 }
 
 /**
@@ -7696,8 +7708,12 @@ export function dependencyResultBrief(value: any): string {
   const raw = typeof value === 'string' ? value : ''
   const withoutEvidence = raw.split(/<!--\s*WORKPLAN_EVIDENCE:START\s*-->/)[0]
   const text = withoutEvidence.replace(/\s+/g, ' ').trim()
-  /* [3.2.0][省钱] 1200→800：依赖摘要只留关键结论与可消费产物，细节读原产物。 */
-  return truncate(text, 800)
+  /*
+   * [3.2.9] ASTC 式压缩：数字/路径/哈希/编号/命令等硬事实优先逐字保留，
+   * 叙述性内容压成软摘要；普通内容受 800 字预算约束，硬事实可溢出并指向原文。
+   * 旧实现直接 truncate，可能把唯一产物路径从中间截断。
+   */
+  return condenseText(text, 800, 'status.summary')
 }
 
 export function buildChildPrompt({
@@ -7887,6 +7903,24 @@ export function buildChildPrompt({
       : `全局任务：${originalRequestText}`
   const stageName = stage?.name ?? '（未命名阶段）'
   const stageGoal = stage?.goal ?? '（未记录目标）'
+  /*
+   * [3.2.9] 上下文策略提示：负责人拿到的不是「一律拆 8 人」的口号，而是按
+   * 任务文本判定的通道建议。memberCount 取 2 只用于让「独立可拆」分支可达；
+   * 真正的硬门禁在 llm-rules.ts#planDelegations，同一判定函数。
+   */
+  const plannedEffort = typeof subtask?.reasoningEffort === 'string' && subtask.reasoningEffort
+    ? subtask.reasoningEffort
+    : 'low'
+  const delegationStrategyLine = renderDelegationStrategyLine(decideDelegationStrategy({
+    // 与 planDelegations 的 parentTaskText 同源：objective + method，不把 title 的
+    // 宣传性措辞算成耦合信号，避免提示词与硬闸看到两份不同文本。
+    taskText: [
+      subtask?.objective,
+      ...(Array.isArray(subtask?.method) ? subtask.method : []),
+    ].filter((item: any) => typeof item === 'string' && item.trim() !== '').join('\n'),
+    memberCount: 2,
+    taskEffort: plannedEffort,
+  }))
   const team = statuses ? buildTeamBrief(plan, statuses, subtask, dependencyIds) : ''
   /*
    * [3.2.1][治本] 只有真的存在「已完成且非依赖」的并行兄弟时，才多付一句
@@ -8028,6 +8062,7 @@ export function buildChildPrompt({
     '',
     `主要矛盾：${contradiction}`,
     `当前阶段：${stageName}${stageGoal && stageGoal !== '（未记录目标）' ? `（${stageGoal}）` : ''}`,
+    ...(delegationStrategyLine ? [delegationStrategyLine] : []),
     `工作目录：${cwd || '（未知）'}`,
     /*
      * [3.2.4][治本 H2] 产物根目录单一化。

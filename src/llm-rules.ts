@@ -35,6 +35,9 @@ import {
 } from './plan.js'
 // [3.0.8] 注入 five-step 的五步提示词段落（buildDelegateePrompt 使用）。
 import { fiveStepContinuationPromptLines, fiveStepPromptLines, START_EVIDENCE_MIN_CHARS_BRIEF } from './five-step.js'
+// [3.2.9] 执行通道判定：顺序链之外的「跨源矛盾裁决 / 单决策 / 共享可变状态」
+// 同样不能拆给多个互相看不见的上下文；与 plan.ts 的提示词行共用同一函数。
+import { decideDelegationStrategy, type DelegationStrategy } from './context-strategy.js'
 // [3.0.0] 用户 2026-11-14 第 5、6、7、9 条要求的纯逻辑契约（零依赖模块）：
 // 极简任务硬门槛 + 质量要求硬门槛 + 专家精简 JSON 汇报契约。
 import {
@@ -225,7 +228,14 @@ export function buildLlmRulesBrief(info: LlmRulesBriefInfo = {}): string {
    * [3.2.3] 顺序链不拆 + 共享文件不并发写：提示词提前说清，硬闸在
    * planDelegations（链拆分拒收）与 dispatchPlan（按产物路径互斥）执行。
    */
-  lines.push(`- 顺序推理链（先…再/逐步/基于上一步结论）不得拆给多个独立专家上下文：只派 1 名专家一次做完（链式任务豁免复杂任务 ≥${MIN_COMPLEX_DELEGATE_MEMBERS} 人下限，全链写进同一份产物），或由负责人亲自执行——亲自执行必须先自评复杂度，再经 action="direct" 提交自评复杂档 reasoningEffort（qwen: medium/xhigh；非 qwen: high/max，不得 low）+ startPhases 开工证据；跨子任务只传已落盘产物引用。共享可变文件只写本任务 outputs 声明的产物，未声明的共享文件不要并发写。`)
+  /*
+   * [3.2.9] 派发/分工纪律只属于负责人；专家是叶子层，收到 action="direct"/
+   * DELEGATE_COUPLED_SPLIT 只会制造不可执行指令。专家侧的共享产物纪律已由
+   * buildDelegateePrompt 的『共享可变状态纪律』单独承担。
+   */
+  if (info.tier !== 'delegate') {
+    lines.push(`- 顺序推理链（先…再/逐步/基于上一步结论）不得拆给多个独立专家上下文：只派 1 名专家一次做完（链式任务豁免复杂任务 ≥${MIN_COMPLEX_DELEGATE_MEMBERS} 人下限，全链写进同一份产物），或由负责人亲自执行——亲自执行必须先自评复杂度，再经 action="direct" 提交自评复杂档 reasoningEffort（qwen: medium/xhigh；非 qwen: high/max，不得 low）+ startPhases 开工证据；跨子任务只传已落盘产物引用。跨源矛盾裁决/单一最终决策/共享可变状态同属强耦合，同样不得拆给多名独立专家（3.2.9 硬闸 DELEGATE_COUPLED_SPLIT）。共享可变文件只写本任务 outputs 声明的产物，未声明的共享文件不要并发写。`)
+  }
   /*
    * [3.2.4][治本 H3] 单批人数软上限：宿主子代理并发位是整个会话树共享的
    * （subagent.maxActiveSubagents，默认 4-8 量级），排队超过 120 秒预算后
@@ -316,6 +326,11 @@ export interface DelegationPlan {
    * dispatch 读回时供禁派闸消费）；null=未配置。可选字段：不改各显式错误返回的形状。
    */
   taskEffortDeclared?: string | null
+  /**
+   * [3.2.9] 本次分工的执行通道判定（与提示词、耦合闸同一函数）。
+   * 只对 ok:true 的成功返回携带；旧的错误返回形状不变。
+   */
+  contextStrategy?: DelegationStrategy
   consolidation?: {
     assignments: number
     taskReasoningEffort?: string | null
@@ -576,16 +591,45 @@ export function planDelegations(input: {
     }
   }
   /*
+   * [3.2.9] 跨源矛盾裁决/单决策/共享可变状态的硬闸。
+   *
+   * 顺序链闸只覆盖「先…再」这一种耦合；用户第 1 条明确点名「需要跨源矛盾
+   * 裁决」这类决策高度耦合的任务也不应强行拆分子代理。这里用与提示词同一个
+   * decideDelegationStrategy 判定：耦合分 ≥3 且拟派多人 ⇒ 拒收，给出两条
+   * 可照做出路（1 名专家一次做完 / 负责人 direct）。只对明确信号生效，
+   * 不拦普通的多专家并行任务；单阶段计划与顺序链的既有豁免不变。
+   */
+  const delegationStrategy: DelegationStrategy = decideDelegationStrategy({
+    taskText: input.parentTaskText,
+    memberCount: members.length,
+    taskEffort: taskEffort ?? input.taskEffortFallback,
+    singleStagePlan: input.singleStagePlan,
+  })
+  const coupledSingleLane = delegationStrategy.lane !== 'split' && delegationStrategy.couplingScore >= 3
+  if (coupledSingleLane && members.length > 1) {
+    const signals = delegationStrategy.signals
+      .filter((item) => item.weight > 0)
+      .map((item) => item.label)
+      .join('、') || '强耦合'
+    return {
+      ...empty,
+      code: 'DELEGATE_COUPLED_SPLIT',
+      error: `本子任务被判定为决策高度耦合（${signals}；耦合分 ${delegationStrategy.couplingScore}/10），不得拆给 ${members.length} 名互相看不见完整推理的独立专家。两条可照做的出路：1) 只派 1 名专家从头到尾一次做完（平台豁免复杂任务 ≥${MIN_COMPLEX_DELEGATE_MEMBERS} 人下限，把全部中间结论与精确值写进同一份产物）；2) 负责人亲自执行——action="direct" + reasoningEffort 自评复杂档（qwen: medium/xhigh；非 qwen: high/max，不得 low）+ startPhases 开工证据；跨子任务只传已落盘产物引用。`,
+    }
+  }
+  /*
    * [2.5.4][T4] 用户决策 D1/D2 人数下限硬门禁：
    * 复杂任务（声明档 medium/high/xhigh/max）expert+member 合计必须 ≥8 人，
    * 不足直接阻断分派。人数按完整分工表计（3.1.0 起无截断，上限闸已在上方）。
    * [3.2.3] 例外：顺序推理链任务豁免——链式任务只能 1 人连续执行，≥8 人
    * 下限是为「可并行拆分」设计的，对链式任务只会制造无解死锁。
    * [3.2.4][O8] 例外 2：单阶段计划（stages.length === 1）豁免同一死锁；
+   * [3.2.9] 例外 3：耦合分 ≥3 的单通道任务（跨源裁决/单决策）豁免——只能 1 人
+   * 连续完成，≥N 人下限对它只会制造无解死锁；拆分请求已在上方耦合闸拒收。
    * 下限本身可用 DSH_WORKPLAN_MIN_COMPLEX_DELEGATE_MEMBERS 调整（3.2.6 起默认 3，
    * 旧值 8 会把每个复杂任务都强制拆成 8 个独立子代理会话）。
    */
-  if (complexTask && !sequentialChain && !input.singleStagePlan && members.length < MIN_COMPLEX_DELEGATE_MEMBERS) {
+  if (complexTask && !sequentialChain && !input.singleStagePlan && !coupledSingleLane && members.length < MIN_COMPLEX_DELEGATE_MEMBERS) {
     return {
       ok: false,
       code: 'DELEGATE_HEADCOUNT_MIN',
@@ -633,6 +677,8 @@ export function planDelegations(input: {
     taskEffortClamped,
     // [2.5.5][T3] 钳制前原始声明随 ok 返回，供平台持久化为 taskReasoningEffortDeclared。
     taskEffortDeclared: typeof rawTaskEffort === 'string' ? rawTaskEffort : null,
+    // [3.2.9] 成功分工的执行通道判定（供 delegate review 展示与后续审计）。
+    contextStrategy: delegationStrategy,
     consolidation: {
       assignments: members.length,
       taskReasoningEffort: taskEffort,
@@ -669,6 +715,12 @@ export function buildDelegateePrompt(input: {
   rulesBrief: string
   cwd?: string
   leadSessionId?: string
+  /**
+   * [3.2.9] 角色上下文包（RCR/ Latent Brief / ASTC）：用户原要求锚点、验收标准、
+   * 约束、依赖产物、历史教训、跨部门答复等，按 expert/planning|execution 路由。
+   * 缺省空串 = 旧调用方/旧测试逐字不变。
+   */
+  contextPacket?: string
   extraContext?: string
   /**
    * [3.1.9][省钱] true = phase-1 接续任务书：前三步已在 phase-0 登记，
@@ -757,6 +809,7 @@ export function buildDelegateePrompt(input: {
      * plugins/dsh-workplan/reports/ 各有一半）。
      */
     `- 产物根目录（唯一，强制）：${input.cwd ? `${input.cwd}/reports/` : '（工作目录）/reports/'}——所有产物一律写在这里（相对工作目录写作 reports/<任务代号>/<文件名>），不要写进任何子仓库（例如 plugins/…）。回报里的产物路径必须相对它写。`,
+    ...(input.contextPacket ? ['', input.contextPacket] : []),
     ...(qualityBlock ? ['', qualityBlock] : []),
     ...(input.extraContext ? ['', input.extraContext] : []),
     ...(input.rulesBrief ? ['', input.rulesBrief] : []),
@@ -767,7 +820,7 @@ export function buildDelegateePrompt(input: {
  * [2.5.0][自配档] phase-0 任务书（叶子）：唯一职责=评估复杂度+提交 self_effort。
  * extraContext 可携带重试简报（重派仍未自配时不丢已完成部分）。
  */
-export function buildPhaseZeroDelegateePrompt(input: { departmentLabel?: string; member: DelegationAssignment; cwd?: string; extraContext?: string }) {
+export function buildPhaseZeroDelegateePrompt(input: { departmentLabel?: string; member: DelegationAssignment; cwd?: string; contextPacket?: string; extraContext?: string }) {
   const roleLabel = '本部门相关领域全球顶尖专家'
   const qualityBlock = renderQualityRequirementsBlock(input.member.qualityRequirements ?? [], '部门负责人')
   /*
@@ -786,6 +839,7 @@ export function buildPhaseZeroDelegateePrompt(input: { departmentLabel?: string;
     `- 你分到的任务：${input.member.task}`,
     `- 工作目录：${input.cwd || '（未知）'}`,
     `- 产物根目录（唯一，强制）：${input.cwd ? `${input.cwd}/reports/` : '（工作目录）/reports/'}——正式执行的产物一律写在这里，不要写进任何子仓库（例如 plugins/…）。`,
+    ...(input.contextPacket ? ['', input.contextPacket] : []),
     ...(qualityBlock ? ['', qualityBlock] : []),
     ...(input.extraContext ? ['', input.extraContext] : []),
   ].join('\n')

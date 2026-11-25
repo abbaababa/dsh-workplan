@@ -29,7 +29,7 @@ npm run check
 npm test
 
 # 3. 生成物可复现：重新构建后 git 不应有差异
-npm run build && git diff --exit-code -- lib client.js
+npm run build && test -z "$(git status --porcelain -- lib client.js)"
 ```
 
 `npm test` 会先构建再跑全部用例；`npm run check` 是 `tsc --noEmit`。任何一步失败都不要打 tag。
@@ -90,7 +90,7 @@ PASS 判据：脚本最后打印 `RESULT: PASS` 且 EXIT=0，六条断言全 PAS
 ## 2. 提交与打标签
 
 ```bash
-git add -A
+git add package.json package-lock.json CHANGELOG.md README.md README.en.md README.zh.md src lib client.js docs tests release.sh .github/workflows/verify.yml .github/workflows/release.yml .gitignore
 git commit -m "Release 1.7.0: collaboration contract, async dispatch, write guards"
 git tag -a v1.7.0 -m "v1.7.0 协作契约版"
 git push origin main

@@ -43,7 +43,7 @@ test('CHANGELOG and README mention the version being shipped', async () => {
     'CHANGELOG must have a "## <version> — <date>" heading for the shipped version',
   )
 
-  for (const file of ['README.md', 'README.en.md']) {
+  for (const file of ['README.md', 'README.en.md', 'README.zh.md']) {
     const readme = await readFile(path.resolve(process.cwd(), file), 'utf8')
     assert.ok(
       readme.includes(`dsh-workplan@${pkg.version}`),

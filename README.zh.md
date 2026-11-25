@@ -3,7 +3,7 @@
 > **两个卖点，一句话：ISO/IEC 15408:2026 全套安全证据，5 条命令自己验；安装一条命令、零第三方运行时依赖。**
 
 [![verify](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml/badge.svg)](https://github.com/abbaababa/dsh-workplan/actions/workflows/verify.yml)
-[![version](https://img.shields.io/badge/version-3.2.8-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v3.2.8)
+[![version](https://img.shields.io/badge/version-3.2.9-blue.svg)](https://github.com/abbaababa/dsh-workplan/releases/tag/v3.2.9)
 
 给 **DeepSeek Harness（DSH）** 加一段「先拆计划 → 真派部门子 Agent 去做 → 左侧栏实时看进度」的能力。不装 App、不改 DSH 源码、不换页面。
 
@@ -69,7 +69,7 @@ grep -RInE "child_process|execSync|eval\(|writeFileSync" src || echo "0 命中�
 ## 一键安装
 
 ```bash
-dsh plugin --profile web add dsh-workplan@3.2.8
+dsh plugin --profile web add dsh-workplan@3.2.9
 ```
 
 装完**重启一次 DSH Web**（或重新载入当前页面）让插件生效。
@@ -100,7 +100,24 @@ dsh plugin --profile web add "$(pwd)"
 
 纯打招呼、道谢、问「做到哪了」不会触发拆解，不会平白多出一堆子 Agent。
 
-## 九个模型工具（你不用直接调用）
+## 3.2.9 的五项上下文优化（先看边界，再看能力）
+
+3.2.9 按“该拆子代理才拆、该在主上下文想清楚就别乱拆”的原则，给插件加了五层能力：
+
+1. **执行通道判定**：顺序链、跨源矛盾裁决、单一最终决策、共享可变状态这类强耦合任务，负责人任务书会明确“不得拆给多名独立专家”；硬要拆会被 `DELEGATE_COUPLED_SPLIT` 拒收，并给出“1 名专家一次做完 / 负责人 direct”两条出路。
+2. **子代理上下文隔离**：探索重的任务先派只读侦察，回传 ≤800 字且带精确引用/产物路径的简报，其他专家复用简报，不重复采集。
+3. **RCR（角色条件上下文路由）**：专家不再只拿到一句任务描述，而是按 `expert/execution` 获得用户锚点、验收标准、约束、依赖产物、历史教训、跨部门答复；“必须”条目不会因预算被丢弃。phase-0 只做复杂度评估，不注入执行期包。
+4. **Latent Brief + KV 前缀缓存计量**：把父轨迹/兄弟结论压成“硬事实 + 软摘要 + 引用”的结构化简报，同一输入复用编译缓存；只读观察 `llm/stream` 的 `cacheRead/cacheWrite`，在 `dsh_workplan_status` 里显示真实命中，不编造。
+5. **ASTC 式软/硬压缩**：数字、路径、哈希、编号、命令、验收编号等硬事实优先逐字保留（单句≤600、总量≤预算；超出退精确值清单+ref）；叙述性内容压成软摘要；省略项保留 ref，原文仍可检索。
+
+**边界必须说清楚**：第 4、5 项是**插件级等价实现**，不是模型内 KV 张量共享或真正的 soft token——插件只能发文本请求，拿不到模型内部。字面实现需要改 DSH 内核并自建本地推理，设计见 [docs/literal-kv-astc-kernel-design.md](docs/literal-kv-astc-kernel-design.md)；3.2.9 的架构与预算见 [docs/context-optimization-3.2.9.md](docs/context-optimization-3.2.9.md)，发布说明见 [docs/release-notes-3.2.9.md](docs/release-notes-3.2.9.md)。
+
+想关掉缓存计量：`DSH_WORKPLAN_CACHE_METER=0`；人数下限/上限与负责人预登记仍有原有的 `DSH_WORKPLAN_*` 开关。
+
+## 十四个模型工具（你不用直接调用）
+
+插件一共注册 **14 个**工具：根会话 11 个、部门负责人 4 个、第三层专家 3 个；每个角色只看到自己用得上的那一份。
+
 
 | 工具 | 作用 |
 |---|---|
@@ -113,6 +130,12 @@ dsh plugin --profile web add "$(pwd)"
 | `dsh_workplan_instruct` | 主 Agent 回答请示并下达指示；失败则挂起，子任务下次激活时注入。带 60s/180s 回执检查。 |
 | `dsh_workplan_handoff` | 处置跨部门需求：`list` / `assign` / `resolve` / `close`。未处置会拦住交付；对「待指示」的行 `resolve` 会直接把答复投递给子会话。 |
 | `dsh_workplan_followup` | 给因真实异常或用户取消而中断、但产物已落盘的直接子会话补一条收尾说明。 |
+
+| `dsh_workplan_hold` | 显式按住计划，不让它自动派发（认可闸）；与 `release` 互斥，不会双派。 |
+| `dsh_workplan_release` | 解除按住并放行派发；没有按住时返回 `NOT_HELD`。 |
+| `dsh_workplan_delegate` | 负责人提交开工证据与分工表、把任务分配给专家；专家用它登记自己的推理等级（`self_effort`）。根会话不可用。 |
+| `dsh_workplan_verify` | 子 Agent 在第四步提交五步证据做核验；前三步证据不齐调用会返回 `PHASE_GATE`。根会话不可用。 |
+| `dsh_workplan_lessons` | 只读查看永久教训记忆：`list` / `search` / `stats`；仅限根会话。 |
 
 在 **plan 模式**下只会给你看计划，`dispatch` 会被明确拦下并说明原因，不会偷偷开跑。
 

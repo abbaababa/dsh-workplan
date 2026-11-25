@@ -1,3 +1,41 @@
+## 3.2.9 — 2026-11-25（五项上下文优化：隔离 / 压缩 / RCR / Latent Brief / ASTC 等价实现）
+
+本版按用户 2026-11-25 的五项要求，改插件源码实现上下文成本与决策质量的统一优化；全部为增量能力，不加新工具、不改持久化 schema、旧计划可原样回放。
+
+### 一、什么时候拆子代理、什么时候在主上下文压缩
+
+- 新增 `src/context-strategy.ts`：对任务文本做确定性独立性评估（顺序链 +3、跨源矛盾裁决 +3、单一最终决策 +3、共享可变状态 +3、串行依赖 +1、极简单动作 +1、独立并行 -2～-4、探索重 0），输出 `lane=split|single-expert|leader-direct` 与 `contextMode=isolate|compressed-main`。
+- 负责人任务书新增一行【上下文策略】：独立并行才拆多名专家；强耦合/单线程则明确“不得拆给多名独立专家”，由负责人 `direct` 或只派 1 名专家一次做完。
+- `planDelegations` 新增硬闸 `DELEGATE_COUPLED_SPLIT`：跨源矛盾裁决/单一最终决策/共享可变状态且耦合分 ≥3、拟派多人时拒收，给出“1 名专家一次做完 / 负责人 direct”两条可照做出路；该通道同时豁免复杂任务人数下限，避免“1 人被下限拒、多人被耦合闸拒”的无解死锁。
+
+### 二、子代理上下文隔离
+
+- 探索/检索/汇总类任务在策略行中提示“先派 1 名只读侦察专家，回传 ≤800 字且含精确引用/产物路径的简报，其他专家复用简报，不重复采集”。
+- 依赖摘要、兄弟摘要统一走 ASTC 式压缩：硬事实优先逐字保留（单句≤600 字、总量≤预算；超出退到精确值清单+ref），软内容压成摘要；原文仍按 `ref` 可检索，不删除唯一信息。
+
+### 三、RCR（角色条件上下文路由）
+
+- 新增 `src/context-router.ts`：按 `role`（planner/leader/expert/verifier/root）与 `stage`（planning/preparation/execution/verification/retro）过滤，再按 must/high/normal/low、角色/阶段匹配、相关性打分，在字符预算内选条目；`must` 永不因预算丢弃，允许溢出并显式记账。
+- 省略条目只进 `omitted` 索引（id/kind/ref/reason），原文仍在计划/状态/产物里可取回。
+- 新增 `src/context-packets.ts#buildExpertContextPacket`：专家此前只有“任务 + 质量要求”，现在按 expert/execution（3200 字）获得（phase-0 只做复杂度评估，不注入执行期包）用户锚点、验收 A1..An、约束、依赖产物、已完成兄弟摘要、历史教训、跨部门答复与主 Agent 指示；不重复任务书已有的质量要求块。
+
+### 四、Latent Briefing / KV 前缀缓存（插件级等价实现）
+
+- 新增 `src/context-brief.ts`：句子级区分硬事实（数字/百分比/路径/哈希/编号/命令/错误码/必须/不得/验收编号）与软内容；硬事实优先逐字保留（单句≤600、总量≤预算；超出退精确值清单+ref），软内容压成摘要；已被吸收/重复/超预算的内容只留 id/ref；同一输入复用编译缓存（最多 256 条），内容哈希与渲染结果稳定（缓存命中标记只留在结构化字段，不进提示词）。
+- 新增 `src/cache-meter.ts`：只读挂载 `llm/stream`，观察供应商真实返回的 `cacheReadTokens/cacheWriteTokens`，按会话累计调用/输入/缓存读/缓存写/命中率；`dsh_workplan_status` 新增 `cache` 字段与一行“KV前缀缓存”展示；`DSH_WORKPLAN_CACHE_METER=0` 可关闭。
+- 这不是模型内 KV 共享：插件拿不到 KV 张量；本版只做“结构化简报 + 稳定前缀 + 供应商缓存计量”的可验证等价实现，字面实现见 `docs/literal-kv-astc-kernel-design.md`。
+
+### 五、ASTC 式软/硬信息压缩
+
+- `dependencyResultBrief` 从直接截断 800 字改为“硬事实优先 + 软摘要 + 原文引用”，避免把唯一产物路径从中间截断。
+- 兄弟 done 摘要同样走软/硬压缩；`compileBrief`/`condenseText` 都保证同一输入的稳定输出，便于复用与缓存命中。
+
+### 六、一致性与验证
+
+- 新增/更新测试：`context-strategy`、`context-router`、`context-brief`、`cache-meter`、`workplan-context-329`，覆盖耦合闸、角色/阶段路由、must 溢出、硬事实保留、缓存命中、llm/stream 透传且只调一次 next。
+- 全量 `npm test` 通过；构建产物 `lib/` 与 `client.js` 已同步。
+- 版本同步：`package.json` / `package-lock.json` / `src/host.ts` / 本 CHANGELOG / 三份 README 全部 3.2.9。
+
 ## 3.2.8 — 2026-11-25（收尾：面板口径最后 4 条）
 
 3.2.7 修完审计 53 条里的 49 条，剩 4 条纯前端显示口径（不影响花钱与正确性），本版补完。

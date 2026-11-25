@@ -39,7 +39,7 @@ TOE 对外暴露 **2 类接口**：9 个 Agent 工具（宿主注入给模型调
 |---|---|---|---|---|
 | `/dsh-workplan/plans` | GET | 返回面板所需的计划状态数据 | `x-content-type-options: nosniff`、`referrer-policy: no-referrer`（`HARDENING_HEADERS`，见 `tests/security-headers.test.ts`） | 非该路径一律拒绝（`src/runtime.ts` L5516）；只读，无写入接口 |
 
-### 1.3 宿主生命周期订阅（4 个）／ Host lifecycle subscriptions
+### 1.3 宿主生命周期订阅（5 个）／ Host lifecycle subscriptions
 
 这些事件是插件与 DSH 宿主的内部协作入口，不是新增模型工具或 HTTP 路由。
 
@@ -49,6 +49,7 @@ TOE 对外暴露 **2 类接口**：9 个 Agent 工具（宿主注入给模型调
 | `agent/inbox/inserted` | followup/queue 消息进入 live inbox | 收尾正在等待旧规划时，不同真实人类任务入队即中止旧规划，防止旧结果迟到覆盖 | 只认 `source.kind=user` 或省略的人类消息；同任务、状态问题和内部 workplan 通知不取消；旧规划经 `superseded + AbortController` 静默退出 |
 | `agent/created` | 任一 Agent 创建完成、发布到注册表之前 | [3.1.6] 子 Agent 的 `agent.ctx` 注册同名 system-prompt section（子会话提示）覆盖全局「主 Agent 专属段」，把 5,354 字符的主 Agent 指引从部门负责人/专家每步注入中移除；根会话不动 | 只读 `session.header`（parentSession/origin/delegationDepth）判角色；WeakSet 保证每 Agent 只注册一次；任何异常 fail-open（保留全局段，只多付 token、不影响能力）；不改工具权限与任何判定逻辑 |
 | `agent/turn-stopping` | 自然收尾且 next-step inbox 为空 | 等待在途规划结算，并把成功/降级/澄清结果一次性交回主 Agent；随后执行既有未完成与认可闸门 | 若等待期间已由另一规划接替，旧 waiter 退出；held 计划交回后仍等待用户认可，不进入重复 steer |
+| `llm/stream` | 每次模型流式调用（waterfall） | [3.2.9] 只读观察 `usage` 块，按会话累计 `cacheReadTokens/cacheWriteTokens`，供 `dsh_workplan_status` 展示；透传全部块，不改写请求 | 只调一次 `next()`；`DSH_WORKPLAN_CACHE_METER=0` 关闭；挂载/记账异常 fail-open，不影响模型调用 |
 
 ### 1.4 不存在的接口（负面声明）／ Interfaces that do NOT exist
 

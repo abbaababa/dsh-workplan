@@ -49,9 +49,11 @@ test('registered HTTP routes match the tool-surface baseline', async () => {
 
 test('lifecycle events match the tool-surface baseline', async () => {
   const host = await read('src/host.ts')
+  const cacheMeter = await read('src/cache-meter.ts')
   const baseline = JSON.parse(await read('tests/fixtures/tool-surface.json'))
 
-  const found = [...host.matchAll(/ctx\.on\('([^']+)'/g)].map((m) => m[1])
+  // 3.2.9: llm/stream 只读计量注册在 cache-meter.ts，不在 host.ts；两处合并抽取。
+  const found = [...`${host}\n${cacheMeter}`.matchAll(/ctx\.on\('([^']+)'/g)].map((m) => m[1])
   assert.deepEqual(
     [...new Set(found)].sort(),
     [...baseline.events].sort(),

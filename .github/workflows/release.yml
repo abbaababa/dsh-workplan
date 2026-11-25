@@ -47,7 +47,7 @@ jobs:
         run: npm run build
 
       - name: 校验提交的构建产物没有过期
-        run: git diff --exit-code -- lib client.js
+        run: test -z "$(git status --porcelain -- lib client.js)"
 
   # 第 2 步 · 测试：依赖 build 完成。npm test 会重新构建后运行全部用例，
   # 内置「版本四处一致」「计时器句柄分类」「cancelled===0」等硬断言。
@@ -127,11 +127,20 @@ jobs:
               --clobber \
               dsh-workplan-*.tgz
           else
-            gh release create "${GITHUB_REF_NAME}" \
-              --repo "${GITHUB_REPOSITORY}" \
-              --title "${GITHUB_REF_NAME}" \
-              --generate-notes \
-              dsh-workplan-*.tgz
+            NOTES_FILE="docs/release-notes-${GITHUB_REF_NAME#v}.md"
+            if [ -f "$NOTES_FILE" ]; then
+              gh release create "${GITHUB_REF_NAME}" \
+                --repo "${GITHUB_REPOSITORY}" \
+                --title "${GITHUB_REF_NAME}" \
+                --notes-file "$NOTES_FILE" \
+                dsh-workplan-*.tgz
+            else
+              gh release create "${GITHUB_REF_NAME}" \
+                --repo "${GITHUB_REPOSITORY}" \
+                --title "${GITHUB_REF_NAME}" \
+                --generate-notes \
+                dsh-workplan-*.tgz
+            fi
           fi
 
       - name: 发布到 npm（官方索引源）

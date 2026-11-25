@@ -38,8 +38,8 @@
 #      src/host.ts 的 meta.version（sed 精确匹配唯一一行）、
 #      CHANGELOG.md 顶部插入新小节、生成 docs/release-notes-X.Y.Z.md
 #   ③ npm run check → npm test（含 build 与 version-sync 四处一致断言）→
-#      重新 build → git diff --exit-code -- lib client.js（产物可复现）
-#   ④ git add -A → commit "Release X.Y.Z: 说明" → tag -a vX.Y.Z → push 分支与 tag
+#      重新 build → test -z "$(git status --porcelain -- lib client.js)"（产物可复现，含未跟踪新文件）
+#   ④ git add <发布白名单>（不用 git add -A，避免带入 reports/ 与 .t8-*）→ commit → tag -a vX.Y.Z → push 分支与 tag
 #   ⑤ 按 tag 干净检出（clone 到临时目录）→ npm ci → build → npm pack → 记录 sha256
 #   ⑥ gh release create vX.Y.Z 附 tgz 制品（Release 不带制品会让索引源 404，教训见 §3）
 #   ⑦ curl 验证 Release 制品 URL 可下载（HTTP 200，仍在步骤⑥内完成）
@@ -182,9 +182,10 @@ else
   log "tag $TAG 可用 ✓"
 fi
 CUR_VERSION="$(node -p "require('./package.json').version")"
+SKIP_VERSION_BUMP=0
 if [[ $CUR_VERSION == "$VERSION" ]]; then
-  if [[ $DRY_RUN -eq 1 ]]; then warn "package.json 当前版本已是 ${VERSION}（正式发布会在此中止）"
-  else die "package.json 当前版本已是 ${VERSION}，请换一个新版本号"; fi
+  SKIP_VERSION_BUMP=1
+  log "package.json 当前版本已是 ${VERSION}：进入幂等发布模式（跳过版本四处同步，仍会检查/构建/测试/提交/tag）"
 else
   log "当前版本 $CUR_VERSION → 目标版本 $VERSION ✓"
 fi
@@ -194,18 +195,33 @@ fi
 # ---------- 步骤②：版本四处同步 ----------
 do_version_bump() {
   log "── 步骤②：版本四处同步 ──"
+  if [[ ${SKIP_VERSION_BUMP:-0} -eq 1 ]]; then
+    log "已是目标版本：跳过 package.json / host / CHANGELOG / 发布说明同步（幂等模式）"
+    return 0
+  fi
   # 四处之一/之二：package.json 与 package-lock.json（npm version 原子完成）
   run npm version "$VERSION" --no-git-tag-version
-  # 四处之三：src/host.ts 的 meta.version（形如 version: 'X.Y.Z', 的行必须恰好一处）
-  local cnt
-  cnt="$(grep -cE "^[[:space:]]*version: '[^']*',([[:space:]]*)$" src/host.ts || true)"
-  [[ $cnt == 1 ]] || die "src/host.ts 中形如 version: '…', 的行有 $cnt 处（预期恰好 1 处），为防误改中止"
-  if [[ $DRY_RUN -eq 1 ]]; then
-    log "[dry-run] 将执行: sed 修改 src/host.ts 该行 → version: '$VERSION',"
+  # 四处之三：src/host.ts。3.1.5 起 meta.version 取 PLUGIN_VERSION 常量；
+  # 优先改常量，旧仓库才回退到 version: 'X.Y.Z' 行。
+  if grep -qE "^export const PLUGIN_VERSION = '[^']*'" src/host.ts; then
+    if [[ $DRY_RUN -eq 1 ]]; then
+      log "[dry-run] 将执行: sed 修改 src/host.ts PLUGIN_VERSION → '$VERSION'"
+    else
+      sed_inplace "s/^export const PLUGIN_VERSION = '[^']*'/export const PLUGIN_VERSION = '$VERSION'/" src/host.ts
+      grep -qE "^export const PLUGIN_VERSION = '$VERSION'" src/host.ts || die "src/host.ts PLUGIN_VERSION 写入后校验失败"
+      log "src/host.ts PLUGIN_VERSION → $VERSION ✓"
+    fi
   else
-    sed_inplace "s/^([[:space:]]*)version: '[^']*',([[:space:]]*)$/\1version: '$VERSION',\2/" src/host.ts
-    grep -qE "^[[:space:]]*version: '$VERSION'," src/host.ts || die "src/host.ts 版本写入后校验失败"
-    log "src/host.ts meta.version → $VERSION ✓"
+    local cnt
+    cnt="$(grep -cE "^[[:space:]]*version: '[^']*',([[:space:]]*)$" src/host.ts || true)"
+    [[ $cnt == 1 ]] || die "src/host.ts 中形如 version: '…', 的行有 $cnt 处（预期恰好 1 处），为防误改中止"
+    if [[ $DRY_RUN -eq 1 ]]; then
+      log "[dry-run] 将执行: sed 修改 src/host.ts 该行 → version: '$VERSION',"
+    else
+      sed_inplace "s/^([[:space:]]*)version: '[^']*',([[:space:]]*)$/\1version: '$VERSION',\2/" src/host.ts
+      grep -qE "^[[:space:]]*version: '$VERSION'," src/host.ts || die "src/host.ts 版本写入后校验失败"
+      log "src/host.ts meta.version → $VERSION ✓"
+    fi
   fi
   # 四处之四：CHANGELOG.md 顶部插入新小节（格式与现有条目一致：## 版本 — 日期）
   if [[ $DRY_RUN -eq 1 ]]; then
@@ -258,10 +274,10 @@ do_build_checks() {
   run npm test
   run npm run build
   if [[ $DRY_RUN -eq 1 ]]; then
-    log "[dry-run] 将执行: git diff --exit-code -- lib client.js"
+    log "[dry-run] 将执行: test -z \"$(git status --porcelain -- lib client.js)\""
   else
-    git diff --exit-code -- lib client.js || die "重新构建后 lib/ 或 client.js 出现差异：产物过期，禁止发布（RELEASING.md §1）"
-    log "构建产物可复现 ✓"
+    test -z "$(git status --porcelain -- lib client.js)" || die "重新构建后 lib/ 或 client.js 出现差异（含未跟踪新文件）：产物过期，禁止发布（RELEASING.md §1）"
+    log "构建产物可复现（含未跟踪新文件检查）✓"
   fi
 }
 
@@ -293,14 +309,15 @@ do_w5_probe() {
 do_commit_tag_push() {
   log "── 步骤④：提交 / 打 tag / 推送 ──"
   if [[ $DRY_RUN -eq 1 ]]; then
-    log "[dry-run] 将执行: git add -A"
+    log "[dry-run] 将执行: git add <发布白名单>"
     log "[dry-run] 将执行: git commit -m 'Release $VERSION: $SUMMARY'"
     log "[dry-run] 将执行: git tag -a $TAG -m '$TAG $SUMMARY'"
     log "[dry-run] 将执行: git push origin $BRANCH"
     log "[dry-run] 将执行: git push origin $TAG"
     return 0
   fi
-  git add -A
+  git add package.json package-lock.json CHANGELOG.md README.md README.en.md README.zh.md src lib client.js docs tests
+  git add release.sh .github/workflows/verify.yml .github/workflows/release.yml .gitignore 2>/dev/null || true
   if [[ -n $(git status --porcelain) ]]; then
     git commit -m "Release $VERSION: $SUMMARY"
   else

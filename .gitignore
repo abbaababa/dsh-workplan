@@ -38,3 +38,7 @@ node_modules
 dist-tests-t*/
 dist-tests-final-t*/
 .tmp-agent*/
+
+# 3.2.9：本地会话日志/一次性探针，禁止进入发布提交
+.t8-leaf-journal-*/
+scripts/_t1-*.mjs

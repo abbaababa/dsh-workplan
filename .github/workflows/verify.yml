@@ -34,4 +34,4 @@ jobs:
         run: npm run verify
 
       - name: Fail when committed build output is stale
-        run: git diff --exit-code -- lib client.js
+        run: test -z "$(git status --porcelain -- lib client.js)"
