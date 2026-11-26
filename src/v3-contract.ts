@@ -534,23 +534,18 @@ export function checkDepartmentSummary(summary: unknown, expectedExperts: readon
 /** 渲染专家汇报的 JSON 契约（嵌入专家任务书）。 */
 export function renderExpertReportSpec(): string {
   return [
-    '【专家成果汇报契约 · JSON mode · 用户强制要求 7】',
-    '证据块 JSON 里额外给出 report，只写四项，禁止长文与重复：',
-    '{"report":{"keyResults":["关键成果"],"keyInfo":["关键信息"],"importantInfo":["重要信息"],"leadRequirements":["负责人要求的东西"]}}',
-    '- keyResults/leadRequirements 至少 1 条；keyInfo/importantInfo 可空但字段必须在。',
-    `- 每数组最多 ${MAX_REPORT_ITEMS} 条、每条最多 ${MAX_REPORT_ITEM_CHARS} 字符；同一信息只出现一次。`,
-    '- 门禁：缺 report、字段缺失、条数越界、单条超长或重复，退回重交（REPORT_INVALID / REPORT_NOT_CONCISE）。',
+    '【专家成果汇报契约 · JSON mode · 要求 7】',
+    '证据块 JSON 附 report（禁长文与重复）：{"report":{"keyResults":["关键成果"],"keyInfo":["关键信息"],"importantInfo":["重要信息"],"leadRequirements":["负责人要求"]}}',
+    `- keyResults/leadRequirements ≥1 条，四键齐全；每项 ≤${MAX_REPORT_ITEMS} 条、≤${MAX_REPORT_ITEM_CHARS} 字，不重复；违规退回（REPORT_INVALID / REPORT_NOT_CONCISE）。`,
   ].join('\n')
 }
 
 /** 渲染部门汇总的 JSON 契约（嵌入部门负责人任务书）。 */
 export function renderDepartmentSummarySpec(): string {
   return [
-    '【部门汇总契约 · JSON mode · 用户强制要求 8/10/11】',
-    '除常规证据块外，必须额外给出 departmentSummary：全面汇总本部门全部专家汇报，只留关键信息/成果与主 Agent 要求的东西，禁止累赘重复，直接交回主 Agent。',
-    '{"departmentSummary":{"keyResults":["关键成果"],"keyInfo":["关键信息"],"importantInfo":["重要信息"],"sources":["专家名"]}}',
-    `- keyResults 至少 1 条；keyResults/keyInfo/importantInfo 每项最多 ${MAX_REPORT_ITEMS} 条、每条最多 ${MAX_REPORT_ITEM_CHARS} 字符；sources 最多 ${MAX_SOURCES_ITEMS} 条且必须逐人覆盖全部已派发专家——每条只写专家名即可（[3.2.4][W3] 成果一句话由平台从各专家汇报自动补充，不必手写，省输出 token）；同一信息只出现一次。`,
-    '- 门禁：缺字段、未覆盖全部专家或重复，退回重交（DEPARTMENT_SUMMARY_INVALID / DEPARTMENT_SUMMARY_NOT_CONCISE）。',
+    '【部门汇总契约 · JSON mode · 要求 8/10/11】',
+    '证据块 JSON 附 departmentSummary（精简汇总全部专家，禁重复）：{"departmentSummary":{"keyResults":["关键成果"],"keyInfo":["关键信息"],"importantInfo":["重要信息"],"sources":["专家名"]}}',
+    `- keyResults ≥1 条；keyResults/keyInfo/importantInfo 每项最多 ${MAX_REPORT_ITEMS} 条、≤${MAX_REPORT_ITEM_CHARS} 字；sources 最多 ${MAX_SOURCES_ITEMS} 条覆盖全部已派发专家，每条只写专家名即可（成果一句话由平台从各专家汇报自动补充，不必手写）；违规退回（DEPARTMENT_SUMMARY_INVALID / DEPARTMENT_SUMMARY_NOT_CONCISE）。`,
   ].join('\n')
 }
 

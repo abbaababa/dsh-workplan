@@ -77,9 +77,11 @@
 ## 运行态
 
 - 发布后按用户确认，把 `dsh-workplan` 加入了 Web profile 的 `dsh.profile.bundles`（`~/.dsh/profiles/web/package.json`，改前已备份为 `package.json.bak-<时间戳>`）；插件依赖仍指向源码目录的软链接。
-- 加入后本会话已实际加载插件，`dsh_workplan_status` 返回：`v3.2.9｜build 72a75c57eab069ba｜pid 88664｜启动 2026/11/25 11:52:20`，工具 `dsh_workplan_*` 已出现在模型工具面。
-- 运行态 build 指纹算法是「`lib/` 下除 `client.js` 外全部 `.js` 排序后逐个入哈希」；按同一算法对磁盘计算得到 `72a75c57eab069ba`，与运行态一致。注意：`cat lib/host.js lib/runtime.js lib/plan.js lib/watchdog.js | shasum -a 256 | cut -c1-16` 只覆盖 4 个文件，得到 `707c53497fd7b3d5`，不是运行态 build 值；两者不可混用。
-- 仍建议用户手动重启一次 DSH，用冷启动再确认 profile 组成、左侧进度面板与 `status` 三处一致；禁止由代理自行重启。重启后 `dsh_workplan_status` 应继续显示 `v3.2.9` 与 `build 72a75c57eab069ba`（除非又改了源码并重新构建）。
+- 发布后热加载的会话进程：`v3.2.9｜build 72a75c57eab069ba｜pid 88664｜启动 2026/11/25 11:52:20`，工具 `dsh_workplan_*` 已出现在模型工具面。
+- 2026-11-25 19:28 用户首次冷启动重启后：`v3.2.9｜build 7d35b43fb3248f39｜pid 32521｜启动 2026/11/25 19:28:00`。差异根因不是发布包：本地曾有 macOS/同步工具生成的 `src/* 2.ts`、`lib/* 2.js` 重复副本（未跟踪、未被任何模块 import），而运行态 build 算法会枚举 `lib/` 下全部 `.js`，副本因此被算进哈希。已删除重复副本并执行 `npm run build`；磁盘 `lib/` 哈希恢复为 `72a75c57eab069ba`，`git diff --quiet -- lib client.js` 为 0；npm 已发布的 3.2.9 tarball 中重复文件数为 0。
+- 2026-11-25 19:54:57 用户第二次冷启动重启后：`v3.2.9｜build 72a75c57eab069ba｜pid 41249｜启动 2026/11/25 19:54:57`。运行态构建指纹与发布态（磁盘 `lib/` 哈希）一致，冷启动复验通过。
+- 插件加载硬证据：`plugin_manager list_plugins` 返回 `entryId=include:dsh-workplan-plugin`、`moduleName=file:///Users/open/.dsh/profiles/web/node_modules/dsh-workplan/lib/host.js`、`enabled=true`、`fiberPhase=active`；profile `package.json` 的插件版本为 3.2.9；`dsh_workplan_status` 版本为 3.2.9。左侧进度面板的视觉呈现由用户目视复核。
+- 运行态 build 指纹算法是「`lib/` 下除 `client.js` 外全部 `.js` 排序后逐个入哈希」；按同一算法对磁盘计算得到 `72a75c57eab069ba`。注意：`cat lib/host.js lib/runtime.js lib/plan.js lib/watchdog.js | shasum -a 256 | cut -c1-16` 只覆盖 4 个文件，得到 `707c53497fd7b3d5`，不是运行态 build 值；两者不可混用。
 
 ## 隐私与写入范围
 

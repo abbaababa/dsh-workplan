@@ -890,7 +890,11 @@ export function goalObjectiveFromText(text: any) {
  * it to both the planner and every child. Plugin-generated plan/result rows are
  * excluded to avoid feeding the plan back into itself.
  */
-function recentConversation(session: any, maxChars = MAX_CONVERSATION_CHARS) {
+export function isPluginConversationKind(kind: unknown): boolean {
+  return typeof kind === 'string' && (kind === 'workplan' || kind.startsWith('workplan-'))
+}
+
+export function recentConversation(session: any, maxChars = MAX_CONVERSATION_CHARS) {
   if (!session || typeof session.eventAt !== 'function') return ''
   const parts: string[] = []
   let seq = typeof session.seq === 'number' ? session.seq - 1 : -1
@@ -904,7 +908,7 @@ function recentConversation(session: any, maxChars = MAX_CONVERSATION_CHARS) {
     if (event.type !== 'user/message' && event.type !== 'assistant/message') continue
     const message = event.data?.message ?? event.data
     const kind = message?.source?.kind
-    if (kind === 'workplan' || kind === 'workplan-result') continue
+    if (isPluginConversationKind(kind)) continue
     const text = messageText(message).trim()
     if (!text) continue
     const line = `${event.type === 'user/message' ? '用户' : '助手'}：${truncate(text, 1200)}`
@@ -3072,32 +3076,6 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
           throw child.controller.signal.reason ?? abortError()
         }
         /*
-         * [2.0.0] 自我学习闭环的入口：把与本子任务最相关的历史教训注入提示词。
-         *
-         * 记忆读取失败不能影响本次派发（宁可不带教训，也不能因此不做任务），
-         * 所以整段用 try/catch 兜底；文件不存在时 renderLessonsBrief 返回空串。
-         */
-        let lessonsBrief = ''
-        try {
-          lessonsBrief = renderLessonsBrief({
-            department: subtask.department,
-            title: subtask.title,
-            objective: subtask.objective,
-            cwd: options.cwd,
-          })
-        } catch {
-          lessonsBrief = ''
-        }
-        /*
-         * [2.2.7] 子会话档位同样要过模型能力这道闸：计划里的 low / medium /
-         * high / xhigh / max 五档值是规划器按通用五档规则写的（[2.2.7][T4]；旧
-         * 三档计划中的 low/high/max 属五档子集，回放零迁移），可子会话用的就是
-         * 主链路模型（modelSelection）。
-         * 若该模型不声明这些档（qwen 只声明 low/medium/xhigh），照发必被宿主
-         * 在请求前抛 UNSUPPORTED_REASONING_EFFORT——派发期即中断。查询不可用
-         * 时保持旧行为；查询成功后钳制到等效档，空清单则不发送该字段。
-         */
-        /*
          * [2.5.0] 用户要求 2「全程应用」的执行点：每次激活（首发/重试/续跑）
          * 都经 resolveTaskEffort 单一判据读档——负责人通过 delegate review
          * 配置的整体等级（状态行 effortOverride，durable 回放不丢）优先于
@@ -3111,6 +3089,23 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
          */
         const selfEffortConfigured = typeof effortRow?.effortOverride === 'string' && effortRow.effortOverride.length > 0
         const phaseZeroActivation = !phaseZeroCompleted && !selfEffortConfigured
+        /*
+         * [2.0.0][3.3.0] 自我学习闭环：仅在 phase-1 正式执行读取并注入相关教训；
+         * phase-0（buildPhaseZeroLeaderPrompt）不消费教训，跳过无谓磁盘读取与排序。
+         */
+        let lessonsBrief = ''
+        if (!phaseZeroActivation) {
+          try {
+            lessonsBrief = renderLessonsBrief({
+              department: subtask.department,
+              title: subtask.title,
+              objective: subtask.objective,
+              cwd: options.cwd,
+            })
+          } catch {
+            lessonsBrief = ''
+          }
+        }
         const requestedChildEffort = phaseZeroActivation ? 'low' : resolveTaskEffort({
           override: effortRow?.effortOverride,
           planned: subtask.reasoningEffort,
@@ -3188,6 +3183,10 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
                 title: subtask.title,
                 objective: subtask.objective,
                 departmentLabel: DEPARTMENTS[subtask.department as keyof typeof DEPARTMENTS]?.zh ?? String(subtask.department ?? '部门'),
+                taskAnchor: typeof record?.plan?.taskAnchor?.text === 'string' ? record.plan.taskAnchor.text : String(record?.plan?.taskUnderstanding?.originalRequest ?? ''),
+                deliverable: typeof record?.plan?.taskUnderstanding?.deliverable === 'string' ? record.plan.taskUnderstanding.deliverable : '',
+                acceptance: Array.isArray(subtask.acceptance) ? subtask.acceptance : [],
+                qualityRequirements: Array.isArray(subtask.qualityRequirements) ? subtask.qualityRequirements : [],
               }) : buildChildPrompt({
                 plan: record.plan,
                 subtask,
@@ -4256,6 +4255,7 @@ export function buildRoundResult(record: any, sessionId: any, limits: any) {
   return buildResultMessage({
     planId: record.plan.planId,
     planCreatedAt: record.plan?.createdAt,
+    taskAnchorText: typeof record.plan?.taskAnchor?.text === 'string' ? record.plan.taskAnchor.text : String(record.plan?.taskUnderstanding?.originalRequest ?? ''),
     sessionId,
     dispatchedAt: record.dispatchedAt ?? Date.now(),
     statuses,
@@ -10936,7 +10936,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     const qualityRequirements = Array.isArray(assignment?.qualityRequirements) && assignment.qualityRequirements.length > 0
       ? assignment.qualityRequirements
       : (Array.isArray((member as any)?.qualityRequirements) ? (member as any).qualityRequirements : [])
-    const rulesBrief = buildLlmRulesBrief({ model, effort: selfEffort, requested: correction.adjusted ? raw : null, correctionReason: correction.reason ?? null, tier: 'delegate', memberName: member.member, memberRole: member.role })
+    const rulesBrief = buildLlmRulesBrief({ model, effort: selfEffort, requested: correction.adjusted ? raw : null, correctionReason: correction.reason ?? null, tier: 'delegate', memberName: member.member, memberRole: member.role, phase1: true })
     const startEvidenceRef = persistStartEvidenceFile(
       typeof childSession.header?.cwd === 'string' ? childSession.header.cwd : '',
       record.plan?.planId,
@@ -10985,11 +10985,11 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       leadSessionId: leaderId,
       continuation: true,
       contextPacket: expertContextPacket,
-      extraContext: `【phase-0→phase-1 接续——继续勿重做（只补缺口）】你已在 phase-0 完成复杂度评估并自配推理等级 \`${selfEffort}\`（依据：${truncate(rationaleOrReason, 300)}${correction.adjusted ? `；请求档 ${raw} 越界已被平台钳制为 ${selfEffort}` : ''}${selfEffortSupport !== null && selfEffortEffective !== selfEffort ? `；模型能力钳制：宿主清单 [${selfEffortSupport.join('/')}]，实际以 ${selfEffortEffective || '宿主默认档'} 执行` : ''}）。平台已按你的自配档接续（宿主另起执行会话，不是刚才那个 phase-0 评估会话）：不要重新评估复杂度；下方登记证据已覆盖的部分不要重做，登记范围之外的细节若缺失，先补齐再执行（只补缺口，不推倒重来）。正式执行必须严格按你第二步理清的方法、流程、步骤进行，全程少走弯路：先查历史教训、先验证再动手、不重复试错。
+      extraContext: `【phase-0→phase-1 接续——继续勿重做（只补缺口）】已自配推理等级 \`${selfEffort}\`（依据：${truncate(rationaleOrReason, 300)}${correction.adjusted ? `；请求档 ${raw} 越界已被平台钳制为 ${selfEffort}` : ''}${selfEffortSupport !== null && selfEffortEffective !== selfEffort ? `；模型能力钳制：宿主清单 [${selfEffortSupport.join('/')}]，实际以 ${selfEffortEffective || '宿主默认档'} 执行` : ''}）。新会话按自配档直接执行第四/五步，勿重估或重做已登记内容，仅补缺口并严按第二步方案少走弯路。
 
 ${startEvidenceRef
   ? renderStartEvidenceBrief(leafStartPhases, startEvidenceRef)
-  : '\n【开工登记证据·原文（phase-0 已登记的完整前三步成果；收尾可省略 phases.planning / phases.preparation，平台会自动并入，不必重抄；下列原文供核对）】\n' + renderStartPhaseEvidence(leafStartPhases)}`,
+  : '【开工登记证据·原文（收尾可省略 phases.planning / phases.preparation，平台自动并入，不必重抄）】\n' + renderStartPhaseEvidence(leafStartPhases)}`,
     })
     const buildContinuationSpec = (parentAgent: any) => ({
       provider: 'spawn',
@@ -11991,15 +11991,6 @@ ${startEvidenceRef
         skippedRunning += 1
         continue
       }
-      const rulesBrief = buildLlmRulesBrief({
-        model,
-        effort: assignment.effort,
-        requested: assignment.requested ?? null,
-        correctionReason: assignment.correctionReason ?? null,
-        tier: 'delegate',
-        memberName: assignment.member,
-        memberRole: assignment.role,
-      })
       const retryBrief = prior
         ? buildDelegateRetryBrief(prior, probeDelegateLandedArtifacts(cwd, assignment.member), consolidationApproach)
         : ''
@@ -12048,51 +12039,63 @@ ${startEvidenceRef
        * [3.2.3][省钱 W6] 与上面自配档路径同一落盘器：拿得到 ref 就只带蓝图 +
        * 索引 + 文件路径；拿不到就维持原文全文注入，证据完整性与安全阀不变。
        */
-      const stashedEvidenceRef = stashedStartPhases
+      const stashedEvidenceRef = !leafPhaseZero && stashedStartPhases
         ? (persistStartEvidenceFile(cwd, record.plan?.planId, subtaskId, stashedStartPhases, assignment.member) ?? '')
         : ''
       const selfContinuation = priorSelf && stashedStartPhases && registeredEstimate
-        ? `【自配档接续·开工证据读档】你的自配推理等级 \`${priorSelf}\` 与五步第 1/2/3 步开工证据均已登记生效（成员自配为权威）。继续勿重做：直接执行正式任务，不要重新评估复杂度、不要重复提交开工证据。正式执行必须严格按你第二步理清的方法、流程、步骤进行，全程少走弯路：先查历史教训、先验证再动手、不重复试错。你的开工预估已登记并送达部门负责人（约 ${registeredEstimate.declaredMinutes} 分钟，整数分钟），无需重复上报。
+        ? `【自配档接续·开工证据读档】已登记自配档 \`${priorSelf}\`、开工证据与开工预估（约 ${registeredEstimate.declaredMinutes} 分钟，已送达负责人，勿重复上报）。继续勿重做：直接执行第四/五步，不要重复提交开工证据，严按第二步方案少走弯路。
 
 ${stashedEvidenceRef
           ? renderStartEvidenceBrief(stashedStartPhases, stashedEvidenceRef)
-          : '\n【开工登记证据·原文（[3.2.0] 收尾可省略 phases.planning / phases.preparation，平台自动并入，不必重抄；下列原文供核对）】\n' + renderStartPhaseEvidence(stashedStartPhases)}`
+          : '【开工登记证据·原文（收尾可省略 phases.planning / phases.preparation，平台自动并入，不必重抄）】\n' + renderStartPhaseEvidence(stashedStartPhases)}`
         : (priorSelf
-          ? `【自配档接续】你的自配推理等级 \`${priorSelf}\` 已登记生效（成员自配为权威）。继续勿重做：直接执行正式任务，不要重新评估复杂度。`
+          ? `【自配档接续】已登记自配档 \`${priorSelf}\`（成员自配为权威），直接执行正式任务，勿重估复杂度。`
           : '')
       /*
-       * [3.2.9] 专家角色上下文包：只路由 expert 需要的锚点/验收/约束/依赖产物/
-       * 教训/答复，不再把整份计划广播给每个专家。phase-0 只做复杂度评估，
-       * 不注入上下文包；phase-1 预算 3200 字；编译结果按内容哈希复用。
+       * [3.2.9][3.3.0] 仅在 !leafPhaseZero（phase-1）构建 rulesBrief、读教训并组装专家上下文包；
+       * phase-0 不消费这三项，避免对每位专家做无谓磁盘读取与字符串组装。
        */
+      const rulesBrief = leafPhaseZero
+        ? ''
+        : buildLlmRulesBrief({
+            model,
+            effort: assignment.effort,
+            requested: assignment.requested ?? null,
+            correctionReason: assignment.correctionReason ?? null,
+            tier: 'delegate',
+            memberName: assignment.member,
+            memberRole: assignment.role,
+            phase1: true,
+          })
       const packetCwd = cwd ?? ''
-      let memberLessonsBrief = ''
-      try {
-        memberLessonsBrief = renderLessonsBrief({
-          department: row.department,
-          title: row.title,
-          objective: assignment.task,
-          cwd: packetCwd,
-        })
-      } catch {
-        memberLessonsBrief = ''
-      }
       let memberContextPacket = ''
+      let memberLessonsBrief = ''
       if (!leafPhaseZero) {
         try {
-          memberContextPacket = buildExpertContextPacket({
-            plan: record.plan,
-            statuses: record.statuses,
-            subtaskId,
-            member: assignment.member,
+          memberLessonsBrief = renderLessonsBrief({
+            department: row.department,
+            title: row.title,
+            objective: assignment.task,
             cwd: packetCwd,
-            stage: 'execution',
-            lessonsBrief: memberLessonsBrief,
           })
         } catch {
-          // 同上：上下文包失败不得阻断专家派发，退回原任务书。
-          memberContextPacket = ''
+          memberLessonsBrief = ''
         }
+      }
+      try {
+        memberContextPacket = buildExpertContextPacket({
+          plan: record.plan,
+          statuses: record.statuses,
+          subtaskId,
+          member: assignment.member,
+          cwd: packetCwd,
+          stage: leafPhaseZero ? 'planning' : 'execution',
+          ...(leafPhaseZero ? { budgetChars: 900 } : {}),
+          lessonsBrief: memberLessonsBrief,
+        })
+      } catch {
+        // 同上：上下文包失败不得阻断专家派发，退回原任务书。
+        memberContextPacket = ''
       }
       const promptText = leafPhaseZero ? buildPhaseZeroDelegateePrompt({
         departmentLabel,

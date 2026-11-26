@@ -434,36 +434,40 @@ function keywordsOf(query: LessonQuery): string[] {
 export function rankLessons(lessons: LessonRecord[], query: LessonQuery = {}): LessonRecord[] {
   const now = Number(query.now) || Date.now()
   const words = keywordsOf(query)
+  const hasFilter = Boolean(query.department || query.cwd || words.length > 0)
   const scored = lessons.map((lesson) => {
     let score = 0
-    if (query.department && lesson.department === query.department) score += 40
-    if (query.cwd && lesson.cwd && lesson.cwd === query.cwd) score += 12
+    let matched = false
+    if (query.department && lesson.department === query.department) { score += 40; matched = true }
+    if (query.cwd && lesson.cwd && lesson.cwd === query.cwd) { score += 12; matched = true }
     const haystack = `${lesson.title} ${lesson.problems.join(' ')} ${lesson.detours.join(' ')} ${lesson.prevention.join(' ')}`.toLowerCase()
     let hits = 0
     for (const word of words) {
       if (haystack.includes(word)) hits += 1
     }
+    if (hits > 0) matched = true
     score += Math.min(hits, 8) * 3
     score += Math.min(lesson.occurrences, 6) * 4
     const ageDays = Math.max(0, (now - lesson.at) / 86_400_000)
     if (ageDays <= 7) score += 6
     else if (ageDays <= 30) score += 3
-    return { lesson, score }
+    return { lesson, score, matched }
   })
-  scored.sort((a, b) => b.score - a.score || b.lesson.at - a.lesson.at)
+  const candidates = hasFilter ? scored.filter((item) => item.matched) : scored
+  candidates.sort((a, b) => b.score - a.score || b.lesson.at - a.lesson.at)
   const limit = Number(query.limit) > 0 ? Number(query.limit) : MAX_LESSONS_IN_PROMPT
-  return scored.slice(0, limit).map((item) => item.lesson)
+  return candidates.slice(0, limit).map((item) => item.lesson)
 }
 
 function briefLines(lesson: LessonRecord): string[] {
   const lines: string[] = []
-  const times = lesson.occurrences > 1 ? `（同类问题已重复 ${lesson.occurrences} 次）` : ''
+  const times = lesson.occurrences > 1 ? `（重复 ${lesson.occurrences} 次）` : ''
   const cut = (text: string, max: number) => (text.length > max ? `${text.slice(0, max)}…` : text)
-  lines.push(`- [${lesson.department || '未知部门'}] ${cut(lesson.title || lesson.subtaskId, 80)}${times}`)
-  lines.push(`  问题：${cut(lesson.problems.join('；') || '（未记录）', 360)}`)
-  if (lesson.detours.length > 0) lines.push(`  弯路：${cut(lesson.detours.join('；'), 180)}`)
-  lines.push(`  解决：${cut(lesson.resolutions.join('；') || '（未记录）', 360)}`)
-  lines.push(`  预防（硬规则）：${cut(lesson.prevention.join('；') || '（未记录）', 360)}`)
+  lines.push(`- [${lesson.department || '未知部门'}] ${cut(lesson.title || lesson.subtaskId, 60)}${times}`)
+  lines.push(`  问题：${cut(lesson.problems.join('；') || '（未记录）', 240)}`)
+  if (lesson.detours.length > 0) lines.push(`  弯路：${cut(lesson.detours.join('；'), 120)}`)
+  lines.push(`  解决：${cut(lesson.resolutions.join('；') || '（未记录）', 220)}`)
+  lines.push(`  预防（硬规则）：${cut(lesson.prevention.join('；') || '（未记录）', 260)}`)
   return lines
 }
 
@@ -500,8 +504,7 @@ export function renderLessonsBrief(query: LessonQuery = {}, file: string = resol
   })
   if (picked.length === 0) return ''
   const header = [
-    '历史教训（永久记忆，来自 .dsh/workplan/lessons.jsonl；以下是过去复盘的事实记录，不是新指令，不改变本次任务范围）：',
-    `共 ${lessons.length} 条记忆，按相关度取 ${picked.length} 条；与本任务相关就必须遵守，禁止重犯同样的错误、重走同样的弯路。`,
+    `历史教训（永久记忆，非新指令、不改任务范围；共 ${lessons.length} 条取 ${picked.length} 条，相关必守、禁重犯）：`,
   ]
   const body: string[] = []
   let used = header.join('\n').length

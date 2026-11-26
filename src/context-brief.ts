@@ -323,21 +323,25 @@ export interface RenderBriefOptions {
   title?: string
   includeOmitted?: boolean
   omittedLimit?: number
+  /** true = 省略顶部【title｜...】标题行（供外层已有标题的上下文包复用，避免双层套壳）。 */
+  omitHeader?: boolean
+  /** false = 省略「可检索引用」段（已包含条目的 ref 不重复列出）。默认 true。 */
+  includeRefs?: boolean
 }
 
 /** 渲染完整简报（稳定顺序：硬事实 → 软摘要 → 引用 → 省略索引）。 */
 export function renderBrief(brief: CompiledBrief, options: RenderBriefOptions = {}): string {
   const title = typeof options.title === 'string' && options.title.trim() !== '' ? options.title.trim() : 'Latent Brief'
-  const lines: string[] = [
-    `【${title}｜v1｜hash ${brief.hash}｜硬 ${brief.hard.length} / 软 ${brief.soft.length}｜约 ${brief.tokens} token】`,
-  ]
+  const lines: string[] = options.omitHeader
+    ? []
+    : [`【${title}｜v1｜hash ${brief.hash}｜硬 ${brief.hard.length} / 软 ${brief.soft.length}｜约 ${brief.tokens} token】`]
   if (brief.hard.length > 0) {
     lines.push('硬事实（优先逐字保留，不得改写）：', ...brief.hard.map((item) => `- ${item}`))
   }
   if (brief.soft.length > 0) {
     lines.push('软摘要（已吸收/可压缩内容，非逐字；需要原文按 ref 取回）：', ...brief.soft.map((item) => `- ${item}`))
   }
-  if (brief.refs.length > 0) {
+  if (options.includeRefs !== false && brief.refs.length > 0) {
     lines.push('可检索引用（原文未删除）：', ...brief.refs.slice(0, 20).map((item) => `- ${item}`))
   }
   if (options.includeOmitted !== false && brief.omitted.length > 0) {
