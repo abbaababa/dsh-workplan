@@ -921,15 +921,48 @@ export function recentConversation(session: any, maxChars = MAX_CONVERSATION_CHA
   return truncateTail(parts.join('\n\n'), maxChars)
 }
 
-export function isPlanModeActive(ctx: any, session: any) {
+export function isPlanModeActive(ctx: any, session: any, agent?: any) {
   try {
-    const service = ctx.get?.('sessionProjections')
+    const service = ctx?.get?.('sessionProjections')
     const snapshot = service?.snapshot?.(session, ['plan'])
     const state = snapshot?.values?.plan
-    return state?.active === true || state?.pending === true
+    if (state !== undefined) {
+      return state?.active === true || state?.pending === true
+    }
   } catch {
-    return false
+    /* 继续走下方的预设域 / 会话日志兜底。 */
   }
+  /*
+   * [3.3.2] DSH 0.2.3-alpha.2 Web profile 将 plan-mode 移入了会话预设隔离域
+   * （cordis:group isolate: { planMode: true }）。当会话刚冷恢复或预设尚未完成
+   * projection 注册时，sessionProjections.snapshot(session, ['plan']).values.plan
+   * 可能为 undefined；这里依次回退到预设域 planMode 服务与持久化 plan/mode 日志。
+   */
+  try {
+    const liveAgent = agent ?? (typeof session?.id === 'string' ? ctx?.agents?.get?.(session.id) : undefined)
+    const planModeSvc = liveAgent?.ctx?.get?.('planMode') ?? ctx?.get?.('planMode')
+    if (liveAgent && typeof planModeSvc?.get === 'function') {
+      const state = planModeSvc.get(liveAgent)
+      if (state && typeof state === 'object') {
+        return state.active === true || state.pending === true
+      }
+    }
+  } catch {
+    /* 回退到会话日志。 */
+  }
+  try {
+    if (session && typeof session.seq === 'number' && typeof session.eventAt === 'function') {
+      for (let i = session.seq - 1; i >= 0; i -= 1) {
+        const ev = session.eventAt(i)
+        if (ev?.type === 'plan/mode') {
+          return ev?.data?.active === true
+        }
+      }
+    }
+  } catch {
+    /* 兜底只读，失败时返回 false。 */
+  }
+  return false
 }
 
 function enterDecision(downstream: any, extraMessages: any[]) {
@@ -2866,6 +2899,35 @@ function readSettlementBackupVerdict(params: {
     })
     if (!verdict || verdict.missingBlock === true || verdict.verification === 'unparsable') {
       return { path: backupPath, verdict: null, reason: '备份自身不可结算（缺块或不可解析）', mtimeMs: backupStat.mtimeMs }
+    }
+    /*
+     * [3.3.2][治本] 备份只能「救回更好的结论」，绝不能把本次回报降级。
+     *
+     * 事故（session-ad9066eb…/wp-6cf42e5b…T1，2026-11-26）：子会话收尾正文
+     * 已经交出 execution/verification（真正缺口只有验收 A2 一条），而它同一次
+     * 执行写下的盘上备份只有 status/summary/artifacts/acceptance、没有 phases
+     * 与证据块。旧逻辑把这份更弱的备份「照单采纳」，于是一连串因果被触发：
+     *   ① 子会话拿到与真实缺口无关的「phases 缺失」，根本不知道要补 A2；
+     *   ② 台账 summary 被替换成备份原文（一段 JSON），真实汇报与摘要一起丢失；
+     *   ③ 本可救回的有界回喂（EVIDENCE_INCOMPLETE）被 return 直接跳过，
+     *      T1 一次即 blocked，T2–T11 随即全部「上游受阻」——11 项 0 完成。
+     * 现在只采纳「有独立结算价值」的备份：
+     *   - status=done：等价于一份完整合法证据，采纳即完成（原设计目标）；
+     *   - status=blocked 且带 question：子会话明确请示，采纳可保住问题原文；
+     * 其余（unverified / failed / comm-format / partial）说明备份本身也过不了
+     * 结算闸，采纳只会用更差的诊断覆盖更好的诊断，一律拒绝并落回消息路径的
+     * 有界回喂——严格性不变，诊断不再被覆盖，也少重派一整轮。
+     */
+    const escalationQuestion = typeof verdict.question === 'string' ? verdict.question.trim() : ''
+    if (verdict.status !== 'done' && escalationQuestion === '') {
+      return {
+        path: backupPath,
+        verdict: null,
+        reason: '备份证据不优于本次回报（status=' + String(verdict.status) + '，verification=' + String(verdict.verification ?? '')
+          + (typeof verdict.error === 'string' && verdict.error !== '' ? '，备份判定：' + truncate(verdict.error, 160) : '')
+          + '）——只有 status=done 或带 question 的受阻备份才可原地结算，否则按本次回报的真实缺口回喂补报',
+        mtimeMs: backupStat.mtimeMs,
+      }
     }
     return { path: backupPath, verdict, text: backupText, reason: '', mtimeMs: backupStat.mtimeMs }
   }
@@ -13969,29 +14031,81 @@ ${stashedEvidenceRef
     }
   }
 
-  async function route(req: any, res: any, connectionCtx: any = ctx) {
+  function isAdmittedPeerScope(candidate: any): boolean {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return false
+    if (candidate.signal?.aborted === true) return false
+    const hasId = typeof candidate.id === 'string' && candidate.id.length > 0
+    const hasPrincipal = Boolean(candidate.principal && typeof candidate.principal === 'object')
+    const hasSignal = Boolean(candidate.signal && typeof candidate.signal === 'object')
+    return hasId || hasPrincipal || hasSignal
+  }
+
+  async function route(req: any, res: any, connectionCtx: any = ctx, peer?: any) {
     applyHardeningHeaders(res)
-    let rejection
+    const conn = connectionCtx?.connection
     /*
-     * 鉴权 fail-closed：connection 服务存在但没有 requestRejection（宿主 API 改名/降级）时，
-     * 旧实现会因可选链返回 undefined 而直接放行，等于把全部会话计划暴露给未鉴权请求。
-     * 看板是敏感数据路由，宁可直接拒绝，也不能在“检查器不见了”时默认通过。
+     * [3.3.2] 兼容 DSH 0.2.2-rc.x 与 0.2.3-alpha.2+ 双代鉴权，始终 fail-closed：
+     *  1) 旧版 DSH (<= 0.2.2-rc.x)：调用 `connection.requestRejection(req)`；
+     *  2) 新版 DSH (>= 0.2.3-alpha.2)：`connection.requestRejection` 已移除，由
+     *     `WebServer` 在 `webserver/authorize` 阶段统一执行 Host/Origin/Cookie/Token
+     *     校验，并将已放行的 `peer: PeerScope` 作为第 3 参数传给 handler；
+     *  3) 若直调 route 未传 `peer` 但存在 `connection.admit(request)`（0.2.3+ 公开面），
+     *     则主动走 `connection.admit` 校验；
+     *  4) 任一校验器均不可用或返回拒绝时一律 fail-closed 拒绝，绝不放行未鉴权请求。
      */
-    if (typeof connectionCtx?.connection?.requestRejection !== 'function') {
+    if (typeof conn?.requestRejection === 'function') {
+      let rejection
+      try {
+        rejection = await Promise.resolve(conn.requestRejection(req))
+      } catch {
+        respondJson(res, 403, { ok: false, error: '未授权的请求' })
+        return
+      }
+      if (rejection) {
+        respondJson(res, typeof rejection === 'number' ? rejection : 401, {
+          ok: false,
+          error: '未授权的请求',
+        })
+        return
+      }
+    } else if (peer !== undefined) {
+      if (!isAdmittedPeerScope(peer)) {
+        respondJson(res, 401, { ok: false, error: '未授权的请求' })
+        return
+      }
+    } else if (typeof conn?.admit === 'function') {
+      let admission: any
+      try {
+        const trustReq = {
+          headers: req?.headers ?? {},
+          method: req?.method,
+          url: req?.url ?? '/',
+          transport: 'http' as const,
+          socket: req?.socket,
+        }
+        admission = await Promise.resolve(conn.admit(trustReq))
+      } catch {
+        respondJson(res, 403, { ok: false, error: '未授权的请求' })
+        return
+      }
+      if (!admission || typeof admission !== 'object') {
+        respondJson(res, 403, { ok: false, error: '未授权的请求' })
+        return
+      }
+      if ('rejection' in admission && admission.rejection) {
+        const status = typeof admission.rejection === 'number' ? admission.rejection : 401
+        respondJson(res, status, {
+          ok: false,
+          error: status === 503 ? '鉴权服务不可用，已拒绝访问' : '未授权的请求',
+        })
+        return
+      }
+      if (!isAdmittedPeerScope(admission.peer)) {
+        respondJson(res, 401, { ok: false, error: '未授权的请求' })
+        return
+      }
+    } else {
       respondJson(res, 503, { ok: false, error: '鉴权服务不可用，已拒绝访问' })
-      return
-    }
-    try {
-      rejection = await Promise.resolve(connectionCtx.connection.requestRejection(req))
-    } catch {
-      respondJson(res, 403, { ok: false, error: '未授权的请求' })
-      return
-    }
-    if (rejection) {
-      respondJson(res, typeof rejection === 'number' ? rejection : 401, {
-        ok: false,
-        error: '未授权的请求',
-      })
       return
     }
     let url

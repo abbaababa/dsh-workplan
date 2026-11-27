@@ -1596,6 +1596,7 @@ window.__ModuleLoader__.load({
       const query = sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : ''
       const response = await fetch(`/dsh-workplan/plans${query}`, {
         headers: { accept: 'application/json' },
+        credentials: 'same-origin',
         cache: 'no-store',
         signal,
       })

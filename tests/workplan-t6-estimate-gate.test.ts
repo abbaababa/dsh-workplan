@@ -554,20 +554,44 @@ test('读面透传：derivePlanSnapshot 与 modelStatusLines 均可见 estimate�
 
 /* ---------- 同源⑥ · schema 与任务书文案（契约 §6，A3 单位明确） ---------- */
 
-test('同源⑥a delegate schema：timeNotice 必填原子项（declaredMinutes integer≥1）＋整数分钟＋错误码告知', () => {
+test('同源⑥a delegate schema：timeNotice 必填原子项（declaredMinutes integer；边界由代码硬校验）＋整数分钟＋错误码告知', () => {
   const tool: any = createDelegateTool({})
   const props = tool.parameters.properties
   const notice = props.timeNotice
   assert.ok(notice, 'delegate schema 必须新增 timeNotice 属性')
   assert.equal(notice.type, 'object')
   assert.equal(notice.properties?.declaredMinutes?.type, 'integer', 'declaredMinutes 必须是 integer')
-  assert.equal(notice.properties?.declaredMinutes?.minimum, 1, 'declaredMinutes 必须 ≥1')
+  /*
+   * [3.3.2] 边界表达方式变更（判据不变）：
+   * DSH 0.2.3-alpha.2 的 dsh-tools 只接受精简 JSON Schema 子集（type/oneOf/
+   * properties/required/additionalProperties/items/enum/const + 注解），
+   * `minimum`/`maximum` 会让整个插件注册即抛 UNSUPPORTED_SCHEMA。因此边界从
+   * schema 关键字搬到「描述写明 1..10080 + 代码硬校验」，下方用公开写入路径
+   * 证明 0、10081 仍被丢弃、10080 仍被接受——边界没有被放宽。
+   */
+  assert.equal(notice.properties?.declaredMinutes?.minimum, undefined, 'schema 不得再带 minimum（DSH 0.2.3 子集禁止）')
+  assert.equal(notice.properties?.declaredMinutes?.maximum, undefined, 'schema 不得再带 maximum（DSH 0.2.3 子集禁止）')
+  assert.match(String(notice.properties?.declaredMinutes?.description ?? ''), /1 至 10080/, '边界必须写进描述，不能只说「正整数」')
   assert.ok(notice.required?.includes('declaredMinutes'), 'declaredMinutes 必填')
   assert.match(notice.description, /整数分钟/, 'schema 必须写明整数分钟')
   assert.match(notice.description, /self_effort/, 'schema 必须写明 self_effort 必填')
   assert.match(notice.description, /ESTIMATE_MISSING/)
   assert.match(notice.description, /ESTIMATE_INVALID/)
   assert.match(props.action.description, /timeNotice|开工前预估/, 'action enum 描述同步预估义务')
+  const plan = makePlan('wp-t6est-bounds')
+  const probe = (minutes: any) => applyStatus(createStatuses(plan), 'T1', {
+    status: 'in_progress',
+    delegateEstimates: { 'Expert-A': { declaredMinutes: minutes, at: 1500, delivery: 'sent' } },
+    delegates: [{
+      member: 'Expert-A', role: 'expert', task: '读取目标文件并写出一份结论', effort: 'low',
+      childId: 'member-1', status: 'running',
+      estimate: { declaredMinutes: minutes, at: 1500, delivery: 'sent' },
+      qualityRequirements: ['必须给出命令输出'],
+    }],
+  })[0]
+  assert.equal(probe(0).delegateEstimates?.['Expert-A'], undefined, '0 分钟必须被丢弃（边界硬校验在代码里，不靠 schema 关键字）')
+  assert.equal(probe(10081).delegateEstimates?.['Expert-A'], undefined, '超过 10080 分钟必须被丢弃')
+  assert.equal(probe(10080).delegateEstimates?.['Expert-A']?.declaredMinutes, 10080, '上边界 10080 必须接受')
 })
 
 test('同源⑥b phase-0/叶子任务书与共享 brief：预估义务＋D9 原话；负责人任务书含送达留痕一句', () => {

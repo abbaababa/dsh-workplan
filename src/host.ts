@@ -267,7 +267,7 @@ function shadowWorkplanPromptForChild(agent: any) {
     if (PROMPT_SHADOW_REGISTERED.has(agent)) return
     const scoped = agent?.ctx
     if (!scoped?.systemPrompt || typeof scoped.systemPrompt.section !== 'function') return
-    scoped.systemPrompt.section({ name, order: PROMPT_ORDER, text: CHILD_PROMPT_SHADOW })
+    scoped.systemPrompt.section({ name, order: PROMPT_ORDER, text: CHILD_PROMPT_SHADOW, interpolate: false })
     PROMPT_SHADOW_REGISTERED.add(agent)
   } catch {
     /* fail-open：注册不上就保留全局段（多付 token，不少能力）。 */
@@ -302,7 +302,7 @@ export const PROMPT_ORDER = 40
  * 自报版本时被误导，用户也拿不到真实版本（用户要求 13/G 要如实报告版本）。
  * 硬编码字符串与 meta 双写是根因，改为同一常量派生。
  */
-export const PLUGIN_VERSION = '3.3.1'
+export const PLUGIN_VERSION = '3.3.2'
 
 const PROMPT_SECTION = [
   '本会话已启用自动任务分解。新任务首步前生成【任务分解】；分配任务前必须先告知预估耗时（由平台自动发【规划预告】/【派发预告】与固定文案「任务正在分配中，请稍等一下......」「任务已经完成分配，正在执行中......」，勿重复、勿改任务原文）；需派发/续跑调 dsh_workplan_dispatch（默认 wait，长任务 mode: "async" 后用 dsh_workplan_status 查进度；后台生成中先等待）。',
@@ -530,8 +530,7 @@ function createReplanTool(runtime: any) {
         changeText: { type: 'string' },
         changes: {
           type: 'array',
-          minItems: 1,
-          maxItems: 12,
+          description: '1 至 12 条子任务变更（后端硬校验数量与结构）',
           items: {
             type: 'object',
             properties: {
@@ -885,7 +884,7 @@ function createDelegateTool(runtime: any) {
           type: 'object',
           description: 'self_effort 必填：开工前预估耗时（整数分钟；缺/非法硬拒 ESTIMATE_MISSING / ESTIMATE_INVALID）',
           properties: {
-            declaredMinutes: { type: 'integer', minimum: 1, maximum: 10080 },
+            declaredMinutes: { type: 'integer', description: '预估耗时（1 至 10080 分钟正整数）' },
             reason: { type: 'string' },
           },
           required: ['declaredMinutes'],
@@ -1850,6 +1849,7 @@ export function apply(ctx: any, config: WorkplanConfig = {}) {
       name: 'dsh-workplan',
       order: PROMPT_ORDER,
       text: PROMPT_SECTION,
+      interpolate: false,
     }),
   )
 
@@ -1939,7 +1939,8 @@ export function apply(ctx: any, config: WorkplanConfig = {}) {
       scope.webServer.register({
         kind: 'exact',
         path: '/dsh-workplan/plans',
-        handler: (req: any, res: any) => runtime.route(req, res, scope),
+        auth: 'required',
+        handler: (req: any, res: any, peer?: any) => runtime.route(req, res, scope, peer),
       }),
     )
     /*
@@ -1952,6 +1953,7 @@ export function apply(ctx: any, config: WorkplanConfig = {}) {
       scope.webServer.register({
         kind: 'exact',
         path: '/dsh-workplan/vendor/chart.umd.js',
+        auth: 'anonymous',
         handler: (req: any, res: any) => {
           applyHardeningHeaders(res)
           /*
@@ -2124,10 +2126,10 @@ function isWriteShapedCall(exec: any) {
  * 前缀且前缀后是 [-_] 分隔符或结尾（bash_exec、shell-tool 等宿主工具名变体）。
  * 要求分隔符是为了避免 'executor' 这类普通名字被误判进 shell 闸门。
  */
-function isShellLikeToolName(name: any): boolean {
+export function isShellLikeToolName(name: any): boolean {
   if (typeof name !== 'string' || name === '') return false
-  if (name === 'bash' || name === 'shell' || name === 'exec') return true
-  return /^(?:bash|shell|exec)(?:[-_]|$)/.test(name)
+  if (name === 'bash' || name === 'shell' || name === 'exec' || name === 'pwsh' || name === 'persistent_bash') return true
+  return /^(?:bash|shell|exec|pwsh|persistent[-_]bash)(?:[-_]|$)/.test(name)
 }
 
 /*

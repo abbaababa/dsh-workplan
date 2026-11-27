@@ -4766,11 +4766,24 @@ export function adjudicateResult({ output, strict = true, expectedAcceptance = [
      */
     const rawText = String(parsed.raw ?? '')
     const rawHasAcceptance = /"acceptance"\s*:/.test(rawText)
-    const hint = acceptance.length === 0 && rawHasAcceptance
-      ? '（原始结果块里确实写了 acceptance，但没有落在顶层：通常是 phases 少一个 } 导致层级错位，已尝试自动归位仍未读到）'
-      : parsed.repaired
-        ? '（结果块 JSON 有语法错误，已修复；若 acceptance 位于错误点之后，会被一起裁掉）'
-        : ''
+    /*
+     * [3.3.2][治本] 归位成功就不能再说「会被一起裁掉」。
+     *
+     * 事故（session-ad9066eb…/wp-6cf42e5b…T1）：结果块结尾少一个 }，把
+     * acceptance/artifacts/departmentSummary 全吞进了 phases；平台其实已把它们
+     * 自动归位、读到 5 条验收（真正缺的只有 A2）。旧文案却统一写「JSON 有语法
+     * 错误，已修复；若 acceptance 位于错误点之后，会被一起裁掉」，子会话据此
+     * 以为证据被裁、倾向重写整块——既费 token 又扩大出错面，还掩盖了「只缺 A2」
+     * 这一条真正要补的缺口。归位有据可查时如实说明已归位与已读条数。
+     */
+    const hoistedKeys = Array.isArray(hoistedEvidence?.hoisted) ? hoistedEvidence.hoisted : []
+    const hint = acceptance.length > 0 && hoistedKeys.length > 0
+      ? `（平台已把 ${hoistedKeys.join('/')} 从 phases 内自动归位到顶层${parsed.repaired ? '：结果块 JSON 少写了结尾的括号，已自动闭合' : ''}，因此已读到 ${acceptance.length} 条验收；只需补上面缺的编号，不必重写整块）`
+      : acceptance.length === 0 && rawHasAcceptance
+        ? '（原始结果块里确实写了 acceptance，但没有落在顶层：通常是 phases 少一个 } 导致层级错位，已尝试自动归位仍未读到）'
+        : parsed.repaired
+          ? '（结果块 JSON 有语法错误，已修复；若 acceptance 位于错误点之后，会被一起裁掉）'
+          : ''
     return {
       ...advisoryTime,
       status: 'blocked',
@@ -8151,7 +8164,7 @@ export function buildChildPrompt({
       + (noticeTarget
         ? ` 失败首行写 \`noticeChannel: {"target":"${noticeTarget}","at":<毫秒>,"error":"<原文>"}\` 并重试一次，仍失败继续做（勿改目标；插件不解析这一行，以状态行观测为准）。`
         : ''),
-    `- 盘上结算备份（必做）：发送前将同一 JSON（顶层带 planId/subtaskId）写入 reports/wp-settlement-${plan?.planId ? `${plan.planId}-` : ''}${subtask.id}.json。`,
+    `- 盘上结算备份（必做）：把最终结果块里那份 JSON 原样另存为 reports/wp-settlement-${plan?.planId ? `${plan.planId}-` : ''}${subtask.id}.json——同一份、字段一个不少（含 phases/acceptance/artifacts/departmentSummary），只在最外层额外加 planId 与 subtaskId 两个字段。只写 summary/artifacts 的摘要式备份平台不会采纳：本地恢复失效，整轮白跑。`,
     `【防偏离锚定】对照上方「用户原要求」锚点与本任务（${subtask.id}）目标「${truncate(String(subtask?.objective ?? '').replace(/\s+/g, ' ').trim(), 90) || String(subtask?.title ?? '')}」，逐项落实验收（${Array.isArray(subtask?.acceptance) ? subtask.acceptance.length : 0} 条），严禁跑题或漏项。`,
     '提交前再对照上方 F1–F11 自查一遍。',
   ].join('\n'))
