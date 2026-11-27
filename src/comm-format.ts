@@ -213,12 +213,12 @@ export function checkCommFormatCompliance(
       message: `artifacts 有 ${badArtifacts.length} 条非法声明：每条必须 kind 取 file/url/note 且 ref 非空，不允许空条目` })
   }
 
-  // F7: 复盘完整（problems/resolutions/prevention 均至少 1 条）
+  // F7: 复盘完整（problems/resolutions/prevention 均至少 1 条；3.4.0+ 零异常任务显式声明 noIssues:true 合法）
   const retro = phases?.verification?.retrospective
   if (!retro || typeof retro !== 'object') {
     violations.push({ ruleId: 'F7', category: 'retrospective',
-      message: '缺少 phases.verification.retrospective 复盘（problems / detours / resolutions / prevention）' })
-  } else {
+      message: '缺少 phases.verification.retrospective 复盘（problems / detours / resolutions / prevention，或零异常任务 {"noIssues":true}）' })
+  } else if (retro.noIssues !== true) {
     const missingRetro: string[] = []
     if (!Array.isArray(retro.problems) || retro.problems.length === 0) missingRetro.push( 'problems（遇到的问题，现象+根因）')
     if (!Array.isArray(retro.resolutions) || retro.resolutions.length === 0) missingRetro.push( 'resolutions（最终如何解决）')

@@ -174,6 +174,42 @@ function totalChars(items: string[]) {
   return items.reduce((sum, item) => sum + item.length, 0)
 }
 
+/*
+ * [3.4.1][RC-1 治本] verification.checks 同义字段归一。
+ *
+ * 实机事故（wp-c04490d4 / macOS 27 / deepseek-flash）：T1、T2、T3 的子 Agent
+ * 顶层 acceptance 全部 pass 且证据齐全，却把 checks 写成
+ * `{check,result,evidence}` / `{item,result,evidence}` /
+ * `{check,command,expected,actual,passed}`，被「criterion/method 不能为空」
+ * 硬拒，T3 因此永久阻塞。字段名只是同义写法，不是证据缺失——这里把常见别名
+ * 归一到 criterion/method/evidence；真正空白的仍然由校验器拦截。
+ */
+const CHECK_CRITERION_ALIASES = ['criterion', 'check', 'item', 'name', 'title', 'target', 'requirement', 'acceptance', 'id']
+const CHECK_METHOD_ALIASES = ['method', 'command', 'cmd', 'how', 'tool', 'via', 'approach', 'verifiedBy', 'verification']
+const CHECK_EVIDENCE_ALIASES = ['evidence', 'actual', 'output', 'observed', 'proof', 'detail', 'details', 'note', 'notes', 'result']
+
+function firstText(item: Record<string, any>, keys: string[]) {
+  for (const key of keys) {
+    const value = item[key]
+    if (typeof value === 'string' && value.trim()) return value.trim()
+    if (typeof value === 'number' && Number.isFinite(value)) return String(value)
+  }
+  return ''
+}
+
+export function normalizePhaseCheckFields(item: any): { criterion: string; method: string; evidence: string } {
+  if (!isRecord(item)) return { criterion: '', method: '', evidence: '' }
+  const criterion = firstText(item, CHECK_CRITERION_ALIASES)
+  const method = firstText(item, CHECK_METHOD_ALIASES)
+  let evidence = firstText(item, CHECK_EVIDENCE_ALIASES)
+  // `result: "pass"` 只是结论不是证据；有 expected/actual 时拼成可复核的一句。
+  if (/^(pass|passed|ok|true|通过|fail|failed|unverified)$/i.test(evidence)) {
+    const expected = typeof item.expected === 'string' ? item.expected.trim() : ''
+    evidence = expected ? `${evidence}（期望：${expected}）` : evidence
+  }
+  return { criterion, method, evidence }
+}
+
 /**
  * Same matching rules as `src/plan.ts#acceptanceCoverage`（[4th batch] 归一化逐字
  * 对齐 plan.ts:3300-3309：全角折叠、完成态前缀剥离、去标点、去祈使前缀）：
@@ -426,10 +462,11 @@ export function validateFiveStepEvidence(value: any, expectedAcceptance: any = [
           fail('verification', `phases.verification.checks[${index}] 必须是对象（criterion / method / evidence）`)
           return { criterion: '', method: '', evidence: '' }
         }
+        const normalized = normalizePhaseCheckFields(item)
         const check: PhaseCheck = {
-          criterion: typeof item.criterion === 'string' ? item.criterion.trim().slice(0, MAX_PHASE_ITEM_CHARS) : '',
-          method: typeof item.method === 'string' ? item.method.trim().slice(0, MAX_PHASE_ITEM_CHARS) : '',
-          evidence: typeof item.evidence === 'string' ? item.evidence.trim().slice(0, MAX_PHASE_ITEM_CHARS) : '',
+          criterion: normalized.criterion.slice(0, MAX_PHASE_ITEM_CHARS),
+          method: normalized.method.slice(0, MAX_PHASE_ITEM_CHARS),
+          evidence: normalized.evidence.slice(0, MAX_PHASE_ITEM_CHARS),
         }
         if (!check.criterion) fail('verification', `phases.verification.checks[${index}].criterion 不能为空`)
         if (!check.method) fail('verification', `phases.verification.checks[${index}].method 不能为空（用什么方式验证）`)
@@ -562,7 +599,7 @@ export function fiveStepPromptLines(): string[] {
     '【第一步 · 任务梳理】先全面、全盘、深入梳理、研究、思考自己的任务（目标/验收/现状/约束/未知/主要矛盾/边界），写 phases.planning.problemAnalysis。',
     '【第二步 · 资源、工具与实施方案研究】基于第一步完成好的所有结果，再全面、全盘、深入地梳理、研究、思考需要哪些资源（resources）、哪些工具（tools），以及以最高效率执行、确保完美完成自己任务的方法、流程和步骤（approach，含少走弯路：先查历史教训、先验证再动手）；并在 approachBasis 写清第二步基于第一步结果的依据。',
     '【第三步 · 准备】把第二步资源、工具真正备齐：已备项→phases.preparation.prepared；就绪证据（命令/文件/配置/版本）→phases.preparation.evidence。',
-    '【第四步 · 执行与验证】基于第三步备齐的成果和既定实施方案，开始具体执行（steps/deviations）；第四步：可以调用 dsh_workplan_verify 核验（前几步调用会因缺少前几步证据返回 PHASE_GATE）；逐条验证并附证据（无法确认写 "unverified"，未全通过不得 done）；checks 可省略（平台由顶层 acceptance 生成）。',
+    '【第四步 · 执行与验证】基于第三步备齐的成果和既定实施方案，开始具体执行（steps/deviations）；第四步：可以调用 dsh_workplan_verify 核验（前几步调用会因缺少前几步证据返回 PHASE_GATE；非必调，交卷前勿为它重复输出大段 JSON）；逐条验证并附证据（无法确认写 "unverified"，未全通过不得 done）；checks 可省略（只写顶层 acceptance 的 A1/A2… 编号 + result + evidence，平台由顶层 acceptance 生成 checks 与 allPassed）。',
     '【第四步收尾 · 自我学习复盘（强制）】retrospective 四项缺一不可：problems（现象+根因）≥1、detours（无写 []）、resolutions ≥1、prevention（「遇到…先…」）≥1。',
     '【第五步 · JSON mode 结构化交付给本部门负责人】专家写 report（四数组）；负责人写 departmentSummary（sources 覆盖全部专家）。放 <!-- WORKPLAN_EVIDENCE:START --> 与 <!-- WORKPLAN_EVIDENCE:END --> 间合法 JSON。',
     '开工/结算闸：开工前随 startPhases 交第 1-3 步（缺/不合格硬拒 START_EVIDENCE_MISSING / START_EVIDENCE_INCOMPLETE）；有 phase-0 登记时收尾可省略 planning/preparation（平台自动并入，勿重抄），只交 execution/verification；收尾不得变薄（否则 EVIDENCE_INCOMPLETE）。',
@@ -574,7 +611,7 @@ export function fiveStepPromptLines(): string[] {
 export function fiveStepContinuationPromptLines(): string[] {
   return [
     '五步工作法（phase-1 接续：前三步已在 phase-0 登记，不要重做，直接做第四、第五步）：',
-    '【第四步 · 执行与验证】按已登记方案执行（steps/deviations；含 approachBasis 对应检查）；可用 dsh_workplan_verify 核验；逐条验证附证据，未通过不得 done（无法确认写 "unverified"）。收尾必填 retrospective（problems/detours/resolutions/prevention）。',
+    '【第四步 · 执行与验证】按已登记方案执行（steps/deviations；含 approachBasis 对应检查）；逐条验证附证据，未通过不得 done（无法确认写 "unverified"）；只写顶层 acceptance（A1/A2… 编号 + result + evidence）即可，verification.checks/allPassed 由平台生成；dsh_workplan_verify 非必需，勿为它重复输出整份 JSON。收尾必填 retrospective（problems/detours/resolutions/prevention，零异常可写 {"noIssues":true}）。',
     '【第五步 · JSON mode 交付】专家交 report、负责人交 departmentSummary，放 <!-- WORKPLAN_EVIDENCE:START --> 与 END 间合法 JSON。',
     '结算闸：收尾可省略 phases.planning 与 phases.preparation（平台自动并入 phase-0 登记原文），只交 execution/verification；遇阻用 dsh_workplan_escalate；缺开工证据硬拒 START_EVIDENCE_MISSING / START_EVIDENCE_INCOMPLETE。',
   ]
