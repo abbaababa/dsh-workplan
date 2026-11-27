@@ -214,38 +214,59 @@ function sessionDelegationDepth(session: any): number {
   return header.parentSession ? 1 : 0
 }
 
+function extractEventContentText(content: any): string {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content
+      .filter((part: any) => part && typeof part.text === 'string')
+      .map((part: any) => part.text)
+      .join('\n')
+  }
+  return ''
+}
+
 function firstSessionPromptText(session: any): string {
   if (!session || typeof session.eventAt !== 'function') return ''
   const seq = typeof session.seq === 'number' && Number.isFinite(session.seq) ? session.seq : 16
   const limit = Math.min(16, Math.max(0, seq))
   for (let i = 0; i < limit; i += 1) {
     const ev = session.eventAt(i)
-    if (!ev || ev.type !== 'user/message') continue
-    const content = ev.data?.message?.content ?? ev.data?.content
-    let text = ''
-    if (typeof content === 'string') text = content
-    else if (Array.isArray(content)) {
-      text = content
-        .filter((part: any) => part && typeof part.text === 'string')
-        .map((part: any) => part.text)
-        .join('\n')
+    if (!ev) continue
+    /*
+     * [3.4.1][RC-4 治本] DSH 0.2.3-alpha.2 在 Step 1 tools.collect（seq=6）时
+     * 尚未写入 user/message（seq=8），首条任务书此时位于 seq=3 的
+     * `agent/inbox/spliced`（data.inserted[0].content）。旧实现只看
+     * user/message，导致 Step 1 返回空串放行全量工具、Step 2 才识别为
+     * leader-phase-0 并触发 `tool-removal: dsh_workplan_instruct, dsh_workplan_verify`，
+     * 每会话打碎约 16,468 输入 token 的 KV 缓存。这里同时读取 user/message 与
+     * agent/inbox/spliced 的 inserted 消息，Step 1 即命中正确阶段。
+     */
+    let candidates: any[] = []
+    if (ev.type === 'user/message') {
+      candidates = [ev.data?.message?.content ?? ev.data?.content]
+    } else if (ev.type === 'agent/inbox/spliced' && Array.isArray(ev.data?.inserted)) {
+      candidates = ev.data.inserted.map((item: any) => item?.message?.content ?? item?.content)
+    } else {
+      continue
     }
-    const trimmed = text.trim()
-    if (!trimmed) continue
-    // 跳过宿主或插件前置的纯 <system-reminder> 包装消息，避免误把提醒当成首条任务书。
-    if (/^<system-reminder>[\s\S]*<\/system-reminder>$/i.test(trimmed)) continue
-    return trimmed
+    for (const rawContent of candidates) {
+      const trimmed = extractEventContentText(rawContent).trim()
+      if (!trimmed) continue
+      // 跳过宿主或插件前置的纯 <system-reminder> 包装消息，避免误把提醒当成首条任务书。
+      if (/^<system-reminder>[\s\S]*<\/system-reminder>$/i.test(trimmed)) continue
+      return trimmed
+    }
   }
   return ''
 }
 
 /**
- * [3.3.0→3.4.0][极致省 token·零 KV 抖动阶段裁剪] 优先读不可变登记表与 header 元数据，
- * 再兜底扫描首条任务书并记忆化：
+ * [3.3.0→3.4.1][极致省 token·零 KV 抖动阶段裁剪] 优先读不可变登记表与 header 元数据，
+ * 再兜底扫描首条任务书（含 agent/inbox/spliced）并只对确定性结果记忆化：
  *  - leader-phase-0：仅需 delegate(review/direct) + escalate，隐藏 verify + instruct；
  *  - leaf-phase-0：仅需 delegate(self_effort) + escalate，隐藏 verify；
  *  - leaf-phase-1：已完成自配档且禁派第四层，隐藏 delegate（每步省 ~63% 工具说明书）；
- *  - 无登记且无首条事件/无法识别：返回 null（fail-open 沿用既有角色白名单）。
+ *  - 无登记且无首条事件/无法识别：返回 null（fail-open 沿用既有角色白名单，且不锁入缓存）。
  */
 export function detectChildToolPhase(session: any, depth: number): ChildToolPhase | null {
   const sid = typeof session?.id === 'string' ? session.id.trim() : ''
@@ -264,7 +285,7 @@ export function detectChildToolPhase(session: any, depth: number): ChildToolPhas
   }
   if (session && typeof session === 'object' && MEMOIZED_SESSION_PHASE.has(session)) {
     const cached = MEMOIZED_SESSION_PHASE.get(session)
-    if (cached !== undefined) return cached
+    if (cached) return cached
   }
   const prompt = firstSessionPromptText(session)
   if (!prompt) return null
@@ -276,7 +297,7 @@ export function detectChildToolPhase(session: any, depth: number): ChildToolPhas
     if (prompt.includes('执行负责人，phase-0（先配置后开工')) detected = 'leader-phase-0'
     else if (prompt.includes('你是 dsh-workplan 部门执行 Agent')) detected = 'leader-phase-1'
   }
-  if (session && typeof session === 'object') {
+  if (detected && session && typeof session === 'object') {
     MEMOIZED_SESSION_PHASE.set(session, detected)
   }
   return detected
@@ -376,7 +397,7 @@ export const PROMPT_ORDER = 40
  * 自报版本时被误导，用户也拿不到真实版本（用户要求 13/G 要如实报告版本）。
  * 硬编码字符串与 meta 双写是根因，改为同一常量派生。
  */
-export const PLUGIN_VERSION = '3.4.0'
+export const PLUGIN_VERSION = '3.4.1'
 
 const PROMPT_SECTION = [
   '本会话已启用自动任务分解。新任务首步前生成【任务分解】；分配任务前必须先告知预估耗时（由平台自动发【规划预告】/【派发预告】与固定文案「任务正在分配中，请稍等一下......」「任务已经完成分配，正在执行中......」，勿重复、勿改任务原文）；需派发/续跑调 dsh_workplan_dispatch（默认 wait，长任务 mode: "async" 后用 dsh_workplan_status 查进度；后台生成中先等待）。',
@@ -1110,7 +1131,7 @@ function createDelegateTool(runtime: any) {
 export function createVerifyTool(runtime: any) {
   return {
     name: 'dsh_workplan_verify',
-    description: '部门子 Agent 第四步核验：交 execution/verification（有登记时 planning/preparation 自动并入）。',
+    description: '部门子 Agent 第四步可选自检（非必调，结算闸同口径核验；零异常可传 retrospective:{"noIssues":true}，checks 可省略）。',
     parameters: {
       type: 'object',
       properties: {
@@ -1137,12 +1158,12 @@ export function createVerifyTool(runtime: any) {
                 retrospective: {
                   type: 'object',
                   properties: {
+                    noIssues: { type: 'boolean' },
                     problems: { type: 'array', items: { type: 'string' } },
                     detours: { type: 'array', items: { type: 'string' } },
                     resolutions: { type: 'array', items: { type: 'string' } },
                     prevention: { type: 'array', items: { type: 'string' } },
                   },
-                  required: ['problems', 'detours', 'resolutions', 'prevention'],
                 },
               },
               required: ['retrospective'],

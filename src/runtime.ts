@@ -1790,8 +1790,54 @@ function waitForActivation(activation: any, signal: any) {
   })
 }
 
+/*
+ * [3.4.1][RC-2 治本] deepseek-flash 偶有在收尾步把完整汇报 + WORKPLAN_EVIDENCE
+ * 结果块整段写进 `content: [{ type: "reasoning", text: "…" }]` 而未生成
+ * `type: "text"` 块（实机会话 972522c3：finish=stop，outputTokens=2164，含完整
+ * WORKPLAN_EVIDENCE:START…END，却因 messageText 只读 text 块被判
+ * EMPTY_CHILD_OUTPUT，白丢 41.3s 与 37.7k token）。
+ *
+ * 只在常规 text 块为空（或不含结果块）且 reasoning 块确含 WORKPLAN_EVIDENCE
+ * 标记（或首行 BLOCKED:）时打捞；打捞时只截取标记块前的最后一段简短结论
+ * （≤180 字，剥离前置推理长文与 "hi\n\n" 口头禅）+ 完整标记块，既不把思维链
+ * 当正文触发 F2 超长退回，也不放过任何已完成的真实交付。
+ */
+function salvageReasoningEvidence(blocks: any): string {
+  if (!Array.isArray(blocks)) return ''
+  for (let i = blocks.length - 1; i >= 0; i -= 1) {
+    const block = blocks[i]
+    if (!block || block.type !== 'reasoning' || typeof block.text !== 'string') continue
+    const raw = block.text.trim()
+    if (!raw) continue
+    const markerMatch = /<!--\s*WORKPLAN_EVIDENCE:(?:START|BEGIN)\s*-->/i.exec(raw)
+    if (markerMatch && typeof markerMatch.index === 'number') {
+      const before = raw
+        .slice(0, markerMatch.index)
+        .replace(/^(?:hi|hello|你好)[!！,，.\s]*\n+/i, '')
+        .trim()
+      const paragraphs = before
+        .split(/\n\s*\n/)
+        .map((p: string) => p.trim())
+        .filter(Boolean)
+      const tailProse = paragraphs.length > 0 ? paragraphs[paragraphs.length - 1].slice(0, 180) : ''
+      const evidencePart = raw.slice(markerMatch.index).trim()
+      return tailProse ? `${tailProse}\n\n${evidencePart}` : evidencePart
+    }
+    if (/^BLOCKED\s*[:：]/im.test(raw)) {
+      const lines = raw.split(/\r?\n/).map((l: string) => l.trim()).filter(Boolean)
+      const blockedIdx = lines.findIndex((l: string) => /^BLOCKED\s*[:：]/i.test(l))
+      if (blockedIdx >= 0) return lines.slice(blockedIdx).join('\n').slice(0, 600)
+    }
+  }
+  return ''
+}
+
 function resultText(result: any) {
-  const text = messageText({ content: result?.output ?? [] }).trim()
+  const blocks = result?.output ?? []
+  const text = messageText({ content: blocks }).trim()
+  if (text && /WORKPLAN_EVIDENCE:(?:START|BEGIN)|^BLOCKED\s*[:：]/im.test(text)) return text
+  const salvaged = salvageReasoningEvidence(blocks)
+  if (salvaged) return text ? `${text}\n\n${salvaged}` : salvaged
   return text
 }
 
@@ -3109,6 +3155,28 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
       record.errors = [...(record.errors ?? []), `${subtask.id} noticeChannel 写入失败：${truncate(String(error?.message ?? error), 300)}`].slice(-20)
     }
   }
+  let priorObservedNotice: any = null
+  const harvestPriorNotice = () => {
+    const row = record.statuses.find((item: any) => item?.subtaskId === subtask.id)
+    const prev = row?.noticeChannel
+    if (!prev) return
+    if (prev.state === 'observed') {
+      priorObservedNotice = prev
+      return
+    }
+    const noticeSession = options.session && typeof options.session.eventAt === 'function'
+      ? options.session
+      : findSession(ctx, prev.target)
+    const observed = observeRelayedNotice(noticeSession, { childId: prev.caller, sinceMs: prev.at })
+    if (observed) {
+      priorObservedNotice = finaliseNoticeChannel(prev, {
+        observed: true,
+        observedAt: observed.at,
+        sessionAvailable: true,
+        now: Date.now(),
+      })
+    }
+  }
   const finaliseNotice = () => {
     if (guard.timedOut) {
       /*
@@ -3136,12 +3204,14 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
       ? options.session
       : findSession(ctx, current.target)
     const observed = observeRelayedNotice(noticeSession, { childId: current.caller, sinceMs: current.at })
-    const entry = finaliseNoticeChannel(current, {
-      observed: Boolean(observed),
-      observedAt: observed?.at ?? null,
-      sessionAvailable: Boolean(noticeSession),
-      now: Date.now(),
-    })
+    const entry = (!observed && priorObservedNotice?.state === 'observed')
+      ? priorObservedNotice
+      : finaliseNoticeChannel(current, {
+          observed: Boolean(observed),
+          observedAt: observed?.at ?? null,
+          sessionAvailable: Boolean(noticeSession),
+          now: Date.now(),
+        })
     recordNoticeChannel(entry)
     if (entry.state !== 'observed') {
       record.errors = [...(record.errors ?? []), formatNoticeChannelLog({
@@ -3548,6 +3618,7 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
          * 会话日志里看（observeRelayedNotice）。旧实现里预告失败在计划记录上
          * 完全不可见，主 Agent 只能看到一句 `subagent "lead" is unavailable`。
          */
+        harvestPriorNotice()
         recordNoticeChannel(createNoticeChannel({
           target: noticeLead.id,
           targetSource: noticeLead.source,
@@ -3756,7 +3827,7 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
                 ? `；上一次回报声明且已核到在盘的产物：${unparsableLanded.slice(0, 6).join('、')}——请勿重做已完成的工作，只修正结果块为合法 JSON 后重新完整回报`
                 : '；请修正结果块为合法 JSON（引号、逗号、括号成对，标记成对出现）后重新回报'),
             'EVIDENCE_UNPARSABLE',
-            { subtaskId: subtask.id },
+            { subtaskId: subtask.id, previousOutputDraft: output },
           )
           if (shouldRetryAttempt(unparsableError, attempt, Number.POSITIVE_INFINITY, idleTimeoutMs)) {
             throw unparsableError
@@ -3780,7 +3851,7 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
                 : '')
               + '——请勿重做已完成的工作，只补交完整结构化结果块（WORKPLAN_EVIDENCE 标记成对、JSON 合法）后重新回报',
             'EVIDENCE_MISSING',
-            { subtaskId: subtask.id },
+            { subtaskId: subtask.id, previousOutputDraft: output },
           )
           if (shouldRetryAttempt(missingError, attempt, Number.POSITIVE_INFINITY, idleTimeoutMs)) {
             throw missingError
@@ -3797,11 +3868,15 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
          * 最多两次由 attempt 上限统一把关，重试耗尽仍按实 blocked（严格性不变）。
          */
         if (settleVerdict && settleVerdict.verification === 'unverified' && settleVerdict.rereport === true) {
+          const incompleteLanded = probeInterruptedArtifacts(output, subtask, options.cwd, options.artifactExists)
           const incompleteError = new PlanError(
             `结果块已解析，但结算闸退回（本次回报不能计完成）：${truncate(String(settleVerdict.error ?? ''), 600)}`
-              + '——请勿重做已完成的工作，按上述缺口补全证据后重新回报完整结构化结果块',
+              + (incompleteLanded.length > 0
+                ? `；已核到在盘产物：${incompleteLanded.slice(0, 6).join('、')}`
+                : '')
+              + '——请勿重做已完成的工作，按上述缺口在已交结果草稿上补全证据后重新回报完整结构化结果块',
             'EVIDENCE_INCOMPLETE',
-            { subtaskId: subtask.id },
+            { subtaskId: subtask.id, previousOutputDraft: output },
           )
           if (shouldRetryAttempt(incompleteError, attempt, Number.POSITIVE_INFINITY, idleTimeoutMs)) {
             throw incompleteError
@@ -3841,6 +3916,9 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
           attempt,
           code: error?.code ?? 'UNKNOWN',
           message: describeError(error),
+          previousOutputDraft: typeof error?.details?.previousOutputDraft === 'string'
+            ? error.details.previousOutputDraft
+            : undefined,
           // [3.1.1] 带上登记原文回喂：EVIDENCE_INCOMPLETE 的重试根因常是「登记在
           // 别的会话、交卷人没见过原文」，只回数字会把补报退化成凑字数；附原文后
           // buildChildPrompt 会渲染登记证据块，交卷人照抄即可。settleRow 声明在
@@ -5289,7 +5367,8 @@ function latestAssistantText(session: any) {
     }
     if (!event) continue
     if (event.type !== 'assistant/message') continue
-    const text = messageText(event.data?.message ?? event.data).trim()
+    const msg = event.data?.message ?? event.data
+    const text = resultText({ output: msg?.content ?? [] })
     if (text) return text
   }
   return ''
@@ -10932,12 +11011,30 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         })))
       return { ok: true, planId: record.plan.planId, handoffs: rows, count: rows.length }
     }
-    const subtaskId = typeof args?.subtaskId === 'string' ? args.subtaskId.trim() : ''
+    let subtaskId = typeof args?.subtaskId === 'string' ? args.subtaskId.trim() : ''
+    const wanted = typeof args?.handoffId === 'string' ? args.handoffId.trim() : ''
+    if (!subtaskId && wanted) {
+      /*
+       * [3.4.1][RC-7] 主 Agent 常只传 `handoffId: "H1"` 而漏传 `subtaskId`
+       * （实机 root Step 7 调 `dsh_workplan_handoff(action="resolve", handoffId="H1")`
+       * 被 MISSING_SUBTASK 退回，白费一步）。当 handoffId 在本计划待处理（或全表）
+       * 行中唯一命中时，自动反查补齐 subtaskId；多行重名或未命中仍按原错误返回。
+       */
+      const openMatches = (record.statuses ?? []).filter((item: any) =>
+        normaliseHandoffs(item?.handoffs).some((h: any) =>
+          h?.id === wanted && (h?.status === 'open' || h?.status === 'routed')))
+      const allMatches = openMatches.length === 1
+        ? openMatches
+        : (record.statuses ?? []).filter((item: any) =>
+          normaliseHandoffs(item?.handoffs).some((h: any) => h?.id === wanted))
+      if (allMatches.length === 1 && typeof allMatches[0]?.subtaskId === 'string') {
+        subtaskId = allMatches[0].subtaskId.trim()
+      }
+    }
     if (!subtaskId) return { ok: false, code: 'MISSING_SUBTASK', error: '缺少 subtaskId' }
     const row = record.statuses.find((item: any) => item?.subtaskId === subtaskId)
     if (!row) return { ok: false, code: 'UNKNOWN_SUBTASK', subtaskId, error: `未知子任务：${subtaskId}` }
     const handoffs = normaliseHandoffs(row.handoffs)
-    const wanted = typeof args?.handoffId === 'string' ? args.handoffId.trim() : ''
     const index = wanted
       ? handoffs.findIndex((item: any) => item.id === wanted)
       : handoffs.findIndex((item: any) => item.status === 'open' || item.status === 'routed')
@@ -13121,7 +13218,28 @@ ${stashedEvidenceRef
      * （record + durable workplan-update），续跑/重试/join/重启回放读档放行；
      * 证据按 planId 记账——重规划换新计划是新任务，必须重新完成前三步。
      */
-    if (!record.mainStartPhases || record.mainStartPhasesPlanId !== record.plan.planId) {
+    /*
+     * [3.4.1][RC-7] autoDispatch 启动的首轮不会经过 dispatchTool 登记
+     * mainStartPhases；首轮若因受阻/暂停结束，主 Agent 调 dsh_workplan_dispatch
+     * 续跑本计划时不应被 START_EVIDENCE_MISSING 拦下重补 1500+ token 的开工证据
+     * （实机 root Step 7 续跑被拦、Step 8 被迫补写 1571 输出 token）。
+     * 仅对「当前 planId 已实际启动过至少一轮（dispatchedAt>0 或子任务已有执行记录）、
+     * 且未显式传入 startPhases、且非重规划换新计划（mainStartPhasesPlanId 未指向旧计划）」
+     * 的续跑放行；plan-first 首次派发、重规划新计划首次派发、或显式传了 startPhases
+     * 的调用仍 100% 走 validateStartPhaseEvidence 硬校验。
+     */
+    const alreadyDispatchedThisPlan = Boolean(
+      args?.startPhases === undefined
+      && (!record.mainStartPhasesPlanId || record.mainStartPhasesPlanId === record.plan.planId)
+      && (
+        Number(record.dispatchedAt ?? 0) > 0
+        || record.phase === 'blocked'
+        || record.phase === 'paused'
+        || (record.statuses ?? []).some((row: any) =>
+          Number(row?.attempts ?? 0) > 0 || row?.status === 'done' || row?.status === 'blocked')
+      ),
+    )
+    if ((!record.mainStartPhases || record.mainStartPhasesPlanId !== record.plan.planId) && !alreadyDispatchedThisPlan) {
       const startCheck = validateStartPhaseEvidence(args?.startPhases)
       if (!startCheck.ok) {
         const snapshot = derivePlanSnapshot(record.statuses)

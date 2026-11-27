@@ -1,3 +1,16 @@
+## 3.4.1 — 2026-11-27（macOS 27 + DSH 0.2.3-alpha.2 实机运行全量取证治本修复版）
+
+本版基于 macOS 27 + DeepSeek Harness `0.2.3-alpha.2`（`deepseek-flash`）实机运行计划 `wp-c04490d4-71f2-4b69-a0fa-87cdfc52ae09` 的 12 份完整会话日志取证，对导致子任务反复报 `EVIDENCE_INCOMPLETE`、`EMPTY_CHILD_OUTPUT`、`CHILD_NOT_COMPLETED (MALFORMED_RESPONSE)` 以及 Step-2 `tool-removal` 缓存击穿的全部 8 个底层代码根因做一次性治本修复：
+
+- **RC-1（致命·主因）兑现 `verification.checks` 同义字段归一与顶层 `acceptance` 自动补齐 + F7 `noIssues:true` 同源放行**：`normalizePhaseCheckFields`（`src/five-step.ts`）与 `synthesizeVerificationFromAcceptance`（`src/plan.ts`）自动将 `{check/item/id, command/how/tool, actual/output/result}` 等同义字段归一为 `{criterion, method, evidence}`，并用已通过覆盖校验的顶层 `acceptance` 自动补齐缺失字段与未覆盖编号；`checkCommFormatCompliance`（`src/comm-format.ts` F7）与 `validateRetrospective` 对齐放行 `retrospective: {"noIssues": true}`；`buildChildPrompt` 结果模板补齐 `departmentSummary` 示例。
+- **RC-2（高）打捞 `reasoning` 块中的最终结果块，根治 `EMPTY_CHILD_OUTPUT`**：`resultText` 与 `latestAssistantText`（`src/runtime.ts`）在常规 `text` 块为空或不含结果块时，自动从含 `WORKPLAN_EVIDENCE`（或 `BLOCKED:`）的 `reasoning` 块尾部提取简短结论（≤180 字）与完整证据块，防止 `deepseek-flash` 将收尾交付写入思考区时被误判为空输出。
+- **RC-3（高）消除交卷前冗余大段 JSON 调用 `dsh_workplan_verify` 触发的 `MALFORMED_RESPONSE`**：`createVerifyTool`（`src/host.ts`）的 `retrospective` schema 支持 `noIssues: boolean` 并移除强制四项长数组的 `required`；五步提示词明确该工具非必调、禁止在交卷前为它重复输出整份大段转义 JSON。
+- **RC-4（高·KV 缓存保护）Step 1 即读取 `agent/inbox/spliced` 识别子会话阶段，消灭 Step 2 `tool-removal`**：`firstSessionPromptText`（`src/host.ts`）同时解析 `user/message` 与 `agent/inbox/spliced`（`seq=3`，早于 Step 1 `tools.collect`），且 `detectChildToolPhase` 仅缓存非空判定，彻底消除每个 Phase-0 子会话 Step 2 的 `tool-removal: dsh_workplan_instruct, dsh_workplan_verify` 与 1.6 万 token 缓存失效。
+- **RC-5（中）修复计划级验证要求渲染 `[object Object]`**：`buildChildPrompt`（`src/plan.ts`）将 `{item, method, evidence}` 对象数组格式化为可读中文描述。
+- **RC-6（中）0 专家 `direct` 负责人 `report` 自动兼容 + 重试保留已观测 `noticeChannel` + 双代 `send_message` 参数说明**：`adjudicateResult` 对 0 专家负责人误写 `report` 自动映射为 `sources: []` 的 `departmentSummary`；`executeSubtask` 在同子任务重试前归档首次已观测到的 `noticeChannel`，避免重试子会话跳过重复预告时被误刷 `NOT_OBSERVED_IN_SESSION_LOG`；`leadNoticeCallForm` 补充 DSH 0.2.3+ `agent` 参数兼容提示。
+- **RC-7（中）`dsh_workplan_handoff` 唯一 `handoffId` 自动反查 `subtaskId` + `autoDispatch` 续跑免重复交 `startPhases`**：`handoffTool` 在未传 `subtaskId` 但 `handoffId` 唯一命中时自动补齐 `subtaskId`；`dispatchTool` 对已由 `autoDispatch` 启动过首轮的同 `planId` 计划续跑免除 `START_EVIDENCE_MISSING` 二次拦截。
+- **RC-8（中）证据缺口重试回喂附带 `previousOutputDraft` 与已核实在盘产物清单**：`EVIDENCE_INCOMPLETE` / `EVIDENCE_UNPARSABLE` 重试提示词直接附上一次已交结果草稿与在盘产物路径，子会话只需修补缺口字段即可一步交卷，无需重跑命令或重写产物。
+
 ## 3.4.0 — 2026-11-27（防注意力偏离治本 + KV 前缀缓存重排 + 极致省 Token 全链路改造版）
 
 本版对 `dsh-workplan` 全部底层核心模块（10 个源码文件）做全链路治本改造，同时解决两大核心痛点：**① 长链路与上下文压缩（Compaction）场景下的注意力丢失与任务执行偏离**；**② KV Prefix Cache 击穿、额外会话往返与高价 Output Token 浪费**。DSH 0.2.3-alpha.2 兼容与全部证据门禁体系原样保留。

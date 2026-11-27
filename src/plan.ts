@@ -22,7 +22,7 @@ import { extractTaskElements, MAX_TASK_ANCHOR_CHARS } from './understanding.js'
 // 杜绝「写 25 读 12」的存读不对称（3.0.6 死锁同类事故的预防）。
 import { MAX_COMPLEX_DELEGATE_MEMBERS, MAX_TOTAL_EXPERTS_PER_PLAN, MIN_COMPLEX_DELEGATE_MEMBERS, leaderPreRegisterEnabled } from './caps.js'
 import { isMappingDigest, verifyMappingDigest } from './supersede-digest.js'
-import { checkStartEvidenceCarryover, fiveStepContinuationPromptLines, fiveStepPromptLines, MAX_PHASE_LIST_ITEMS, mergeStartEvidenceIntoSettlement, phaseSummaryLine, renderStartEvidenceBlueprint, renderStartPhaseEvidence, sanitizeStartPhaseEvidence, startEvidenceIndexLines, START_EVIDENCE_MIN_CHARS_BRIEF, validateFiveStepEvidence, validateStartPhaseEvidence } from './five-step.js'
+import { checkStartEvidenceCarryover, fiveStepContinuationPromptLines, fiveStepPromptLines, MAX_PHASE_LIST_ITEMS, mergeStartEvidenceIntoSettlement, normalizePhaseCheckFields, phaseSummaryLine, renderStartEvidenceBlueprint, renderStartPhaseEvidence, sanitizeStartPhaseEvidence, startEvidenceIndexLines, START_EVIDENCE_MIN_CHARS_BRIEF, validateFiveStepEvidence, validateStartPhaseEvidence } from './five-step.js'
 // [修复] 七项字数下限简报（five-step.ts 单一事实源）转发给 host.ts 等消费方。
 export { START_EVIDENCE_MIN_CHARS_BRIEF } from './five-step.js'
 import {
@@ -4655,18 +4655,73 @@ export interface AdjudicateResult {
  *
  * Only fills missing fields. Authored checks/allPassed are never overwritten,
  * so historical plans and explicit model output keep exactly their old meaning.
+ *
+ * [3.4.1][RC-1 治本] 「只补缺失」不能只看整组有没有写。
+ *
+ * 实机事故 wp-c04490d4：模型顶层 acceptance A1/A2 全部 pass 且有证据，但
+ * checks 写成了 `{check,result,evidence}` / `{item,…}` /
+ * `{check,command,expected,actual,passed}`，或 criterion 写了描述却没写 A1/A2
+ * 编号——旧实现看到 checks 非空就原样放行给校验器，于是 T1 首轮卡死、T3 永久
+ * 阻塞。提示词已承诺「checks 可省略（平台由顶层 acceptance 生成）」，这里兑现：
+ *  1) 逐行做同义字段归一（normalizePhaseCheckFields）；
+ *  2) 归一后仍空白的字段，用同位置的 acceptance 行补齐（criterion/evidence），
+ *     method 补「按顶层 acceptance 的同一证据核验」；
+ *  3) 已作者化的 checks 没有逐字覆盖到的 acceptance 行，追加一条派生行——
+ *     顶层 acceptance 已先经 acceptanceCoverage 逐条覆盖校验，派生行与它同源。
+ * 作者写的非空值一律保留；acceptance 为空时保持原行为（照常失败）。
  */
+const DERIVED_CHECK_METHOD = '按顶层 acceptance 的同一证据核验'
+
+function checkKey(value: unknown) {
+  return String(value ?? '').trim().toLowerCase().replace(/[\s:：,，。.;；、"'“”‘’()（）[\]【】]/g, '')
+}
+
+function isBareVerdict(value: string) {
+  return /^(pass|passed|ok|true|通过|fail|failed|unverified)$/i.test(value.trim())
+}
+
 export function synthesizeVerificationFromAcceptance(phases: any, acceptance: any[]) {
   if (!isRecord(phases) || !Array.isArray(acceptance) || acceptance.length === 0) return phases
   const verification = isRecord(phases.verification) ? { ...phases.verification } : {}
-  const checks = Array.isArray(verification.checks) ? verification.checks : []
-  if (checks.length === 0) {
-    verification.checks = acceptance.map((entry: any) => ({
-      criterion: String(entry?.criterion ?? ''),
-      method: '按顶层 acceptance 的同一证据核验',
-      evidence: String(entry?.evidence ?? ''),
-    }))
+  const rows = acceptance.filter((entry: any) => isRecord(entry))
+  const derive = (entry: any) => ({
+    criterion: String(entry?.criterion ?? ''),
+    method: DERIVED_CHECK_METHOD,
+    evidence: String(entry?.evidence ?? ''),
+  })
+  const authored = Array.isArray(verification.checks) ? verification.checks : []
+  if (authored.length === 0) {
+    verification.checks = rows.map(derive)
+  } else {
+    const repaired = authored.map((item: any, index: number) => {
+      const fallback = rows[index]
+      if (typeof item === 'string' && item.trim()) {
+        return {
+          criterion: String(fallback?.criterion ?? ''),
+          method: DERIVED_CHECK_METHOD,
+          evidence: item.trim(),
+        }
+      }
+      if (!isRecord(item)) return item
+      const normalized = normalizePhaseCheckFields(item)
+      const fallbackEvidence = String(fallback?.evidence ?? '').trim()
+      return {
+        ...item,
+        criterion: normalized.criterion || String(fallback?.criterion ?? ''),
+        method: normalized.method || DERIVED_CHECK_METHOD,
+        evidence: normalized.evidence && !(isBareVerdict(normalized.evidence) && fallbackEvidence)
+          ? normalized.evidence
+          : (fallbackEvidence || normalized.evidence),
+      }
+    })
+    const covered = new Set(repaired.map((check: any) => checkKey(check?.criterion)).filter(Boolean))
+    for (const row of rows) {
+      if (!String(row?.evidence ?? '').trim()) continue
+      if (!covered.has(checkKey(row.criterion))) repaired.push(derive(row))
+    }
+    verification.checks = repaired
   }
+  if (verification.allPassed === 'true') verification.allPassed = true
   if (verification.allPassed === undefined || verification.allPassed === null) {
     verification.allPassed = acceptance.every((entry: any) => entry?.result === 'pass')
   }
@@ -4994,6 +5049,27 @@ export function adjudicateResult({ output, strict = true, expectedAcceptance = [
    * 只拦 done 路径：解析失败、验收缺口、五步证据缺失等已被上方门禁拦下的结果，
    * 维持原受阻原因，不用格式条目覆盖更有针对性的诊断。
    */
+  if (
+    formatTier === 'leader'
+    && (!Array.isArray(expectedExperts) || expectedExperts.length === 0)
+    && isRecord(payload)
+    && !isRecord(payload.departmentSummary)
+    && isRecord(payload.report)
+  ) {
+    /*
+     * [3.4.1][RC-6] direct 亲自执行（0 专家）的部门负责人偶有把自己当作单兵写
+     * `report` 而非 `departmentSummary`（实机 d07bc394 在推理区反复纠结两者）。
+     * 无下级专家时 `report` 的 keyResults/keyInfo/importantInfo 与
+     * `departmentSummary` 同构，自动映射为 sources:[] 的 departmentSummary，
+     * 避免因字段名二选一被打回重跑。有下级专家时仍严格要求 departmentSummary。
+     */
+    payload.departmentSummary = {
+      keyResults: Array.isArray(payload.report.keyResults) ? payload.report.keyResults : [],
+      keyInfo: Array.isArray(payload.report.keyInfo) ? payload.report.keyInfo : [],
+      importantInfo: Array.isArray(payload.report.importantInfo) ? payload.report.importantInfo : [],
+      sources: [],
+    }
+  }
   const commFormat = requirePhases === false
     /*
      * [2.1.0] 兼容边界：`requirePhases:false` 是「历史回放 / 明确关闭新契约」
@@ -7902,7 +7978,7 @@ export function buildChildPrompt({
   const noticeTarget = readLeadAgentId(leadAgentId)
   const noticeCall = leadNoticeCallForm(noticeTarget)
   const noticeTargetLine = noticeTarget
-    ? `- 目标会话 id（**由插件注入，唯一合法目标**）：\`${noticeTarget}\`（来源：${leadAgentIdSource || 'unknown'}）。它就是本轮主 Agent 的会话 id，宿主的父子血缘校验只认它。`
+    ? `- 目标会话 id（**由插件注入，唯一合法目标**）：\`${noticeTarget}\`（来源：${leadAgentIdSource || 'unknown'}）。它就是本轮主 Agent 的会话 id，宿主的父子血缘校验只认它（若宿主 send_message 参数名为 agent，填系统提示声明的根会话名即可送达它）。`
     : `- **本提示词没有注入父会话 id**（来源：${leadAgentIdSource || 'none'}）：禁止猜测、禁止自行拼一个 id。跳过 send_message 预告，改为在结果块首行写 \`noticeChannel: {"target":"${NOTICE_TARGET_MISSING_TEXT}","at":<毫秒时间戳>,"error":"LEAD_ID_MISSING"}\`——供主 Agent 阅读；**插件不解析这一行**，通道结论以状态行观测为准。`
   /*
    * Every field below is read defensively.
@@ -7974,9 +8050,30 @@ export function buildChildPrompt({
    * 旧 buildChildPrompt 却从未透传给部门负责人。此处放在「同计划共享背景」段（既全量防偏离，
    * 又被并行负责人 100% 共享 KV 前缀缓存）。
    */
+  /*
+   * [3.4.1][RC-5] plan.verification 是 `{item, method, evidence}` 对象数组
+   * （readVerification 存档形状），旧实现 String(v) 把每条渲染成
+   * 「[object Object]」，实机每个子任务提示都出现
+   * 「计划级整体验证要求：[object Object]；[object Object]；…」，子 Agent 看不到
+   * 真正的验证要求。对象按字段拼成一句；字符串与历史形状原样保留。
+   */
+  const textOf = (v: any): string => {
+    if (v === null || v === undefined) return ''
+    if (typeof v !== 'object') return String(v)
+    if (Array.isArray(v)) return v.map(textOf).filter(Boolean).join('、')
+    const head = [v.item, v.criterion, v.target, v.check, v.title, v.name].find((x) => typeof x === 'string' && x.trim())
+    const rest = [
+      typeof v.method === 'string' && v.method.trim() ? `方法：${v.method.trim()}` : '',
+      typeof v.expected === 'string' && v.expected.trim() ? `期望：${v.expected.trim()}` : '',
+      typeof v.evidence === 'string' && v.evidence.trim() ? `证据：${v.evidence.trim()}` : '',
+    ].filter(Boolean)
+    const title = typeof head === 'string' ? head.trim() : ''
+    if (!title) return rest.join('，')
+    return rest.length ? `${title}（${rest.join('，')}）` : title
+  }
   const listOf = (arr: any, maxItems: number, maxChars: number): string[] =>
     Array.isArray(arr)
-      ? arr.map((v: any) => truncate(String(v ?? '').replace(/\s+/g, ' ').trim(), maxChars)).filter(Boolean).slice(0, maxItems)
+      ? arr.map((v: any) => truncate(textOf(v).replace(/\s+/g, ' ').trim(), maxChars)).filter(Boolean).slice(0, maxItems)
       : []
   const hardConstraints = listOf(understanding.constraints, 12, 240)
   const successCriteria = listOf(understanding.successCriteria, 10, 240)
@@ -8136,6 +8233,13 @@ export function buildChildPrompt({
                 renderStartPhaseEvidence(registered),
               ]
         })(),
+        ...(typeof previousFailure.previousOutputDraft === 'string' && previousFailure.previousOutputDraft.trim()
+          ? [
+              '',
+              '【上一次尝试已提交的结果草稿（工作与在盘产物已完成，严禁重做或重跑耗时命令；仅按上方失败说明在下方草稿上补齐缺失字段后直接输出最终结果）】',
+              truncate(previousFailure.previousOutputDraft.trim(), 2400),
+            ]
+          : []),
       ].join('\n')
     : ''
   /*
@@ -8259,11 +8363,11 @@ export function buildChildPrompt({
     EVIDENCE_MARKER_BEGIN,
     ...(phaseZeroContinuation
       ? [
-        '- phase-0 已登记 phases.planning / phases.preparation，下面省略这两组，平台会自动并入：',
-        '{"status":"done","phases":{"execution":{"steps":["步骤"],"deviations":[]},"verification":{"retrospective":{"noIssues":true}}},"acceptance":[{"criterion":"A1","result":"pass","evidence":"证据"}],"artifacts":[{"kind":"file","ref":"路径"}]}',
+        '- phase-0 已登记 phases.planning / phases.preparation，下面省略这两组，平台会自动并入（verification.checks/allPassed 亦由顶层 acceptance 自动生成；direct 无专家时 sources 写 []）：',
+        '{"status":"done","phases":{"execution":{"steps":["步骤"],"deviations":[]},"verification":{"retrospective":{"noIssues":true}}},"acceptance":[{"criterion":"A1","result":"pass","evidence":"证据"}],"artifacts":[{"kind":"file","ref":"路径"}],"departmentSummary":{"keyResults":["成果"],"keyInfo":[],"importantInfo":[],"sources":[]}}',
       ]
       : [
-        '{"status":"done","phases":{"planning":{"problemAnalysis":["问题"],"resources":["资源"],"tools":["工具"],"approach":["步骤"],"approachBasis":["依据"]},"preparation":{"prepared":["已备"],"evidence":["证据"]},"execution":{"steps":["步骤"],"deviations":[]},"verification":{"retrospective":{"noIssues":true}}},"acceptance":[{"criterion":"A1","result":"pass","evidence":"证据"}],"artifacts":[{"kind":"file","ref":"路径"}]}',
+        '{"status":"done","phases":{"planning":{"problemAnalysis":["问题"],"resources":["资源"],"tools":["工具"],"approach":["步骤"],"approachBasis":["依据"]},"preparation":{"prepared":["已备"],"evidence":["证据"]},"execution":{"steps":["步骤"],"deviations":[]},"verification":{"retrospective":{"noIssues":true}}},"acceptance":[{"criterion":"A1","result":"pass","evidence":"证据"}],"artifacts":[{"kind":"file","ref":"路径"}],"departmentSummary":{"keyResults":["成果"],"keyInfo":[],"importantInfo":[],"sources":[]}}',
       ]),
     EVIDENCE_MARKER_END,
     '',
