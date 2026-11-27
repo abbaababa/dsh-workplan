@@ -130,3 +130,99 @@ export function budgetFailureContext(
   if (harvestRefs.length === 0) return base
   return `${base}；已落盘结算备份（可先收编核验，勿按零产出重做）：${harvestRefs.slice(0, 3).join('、')}`
 }
+
+/**
+ * [3.4.0][防失控治本] 单子会话累计 token 预算（默认硬上限 2,000,000 token，软上限 75% = 1,500,000）。
+ *
+ * 历史实测（2026-11-23）：单个 124 步专家会话烧掉 13,263,562 token。仅有结算后
+ * `console.warn` 无法阻止失控循环烧穿用户预算；此处提供可配置的运行期步数 + token
+ * 双维度软提醒与硬熔断判定（`DSH_WORKPLAN_TOKEN_BUDGET=0|false|off|no` 可关闭）。
+ */
+export const TOKEN_BUDGET_ENV = 'DSH_WORKPLAN_TOKEN_BUDGET'
+export const DEFAULT_TOKEN_BUDGET = 2_000_000
+export const TOKEN_SOFT_RATIO = 0.75
+
+export type TokenBudgetConfig = {
+  /** null = 关闭；正整数 = 硬上限（总输入+缓存读+输出 token 累计）。 */
+  hard: number | null
+  soft: number
+}
+
+export function parseTokenBudget(raw: string | undefined | null): TokenBudgetConfig {
+  const text = String(raw ?? '').trim().toLowerCase()
+  if (text === '') {
+    return { hard: DEFAULT_TOKEN_BUDGET, soft: Math.floor(DEFAULT_TOKEN_BUDGET * TOKEN_SOFT_RATIO) }
+  }
+  if (text === '0' || text === 'false' || text === 'off' || text === 'no') {
+    return { hard: null, soft: 0 }
+  }
+  const n = Number(text)
+  if (Number.isFinite(n) && n >= 10_000) {
+    const hard = Math.floor(n)
+    return { hard, soft: Math.floor(hard * TOKEN_SOFT_RATIO) }
+  }
+  return { hard: DEFAULT_TOKEN_BUDGET, soft: Math.floor(DEFAULT_TOKEN_BUDGET * TOKEN_SOFT_RATIO) }
+}
+
+export type RuntimeBudgetDirective = {
+  action: 'ok' | 'warn' | 'abort'
+  reason: 'none' | 'step-soft' | 'step-hard' | 'token-soft' | 'token-hard'
+  steps: number
+  tokens: number
+  message: string
+}
+
+/**
+ * 运行期每步（agent/pre-step）预算裁决纯函数：
+ *  - 触及步数硬上限或 token 硬上限 ⇒ `action: 'abort'`（主动中止并收编已落盘产物）；
+ *  - 触及步数软上限或 token 软上限 ⇒ `action: 'warn'`（单次收尾提醒，不催交、不降验收标准）；
+ *  - 未触及 ⇒ `action: 'ok'`。
+ */
+export function evaluateRuntimeBudget(input: {
+  steps: number
+  tokens: number
+  stepConfig: StepBudgetConfig
+  tokenConfig: TokenBudgetConfig
+}): RuntimeBudgetDirective {
+  const steps = Math.max(0, Math.floor(Number(input.steps) || 0))
+  const tokens = Math.max(0, Math.floor(Number(input.tokens) || 0))
+  const { stepConfig, tokenConfig } = input
+
+  if (tokenConfig.hard !== null && tokens >= tokenConfig.hard) {
+    return {
+      action: 'abort',
+      reason: 'token-hard',
+      steps,
+      tokens,
+      message: `单子会话累计 token 已达 ${tokens.toLocaleString('en-US')}（硬上限 ${tokenConfig.hard.toLocaleString('en-US')}），触发运行期预算熔断并收编已落盘产物`,
+    }
+  }
+  if (stepConfig.soft !== null && steps >= stepConfig.hard) {
+    return {
+      action: 'abort',
+      reason: 'step-hard',
+      steps,
+      tokens,
+      message: `单子会话已执行 ${steps} 步（硬上限 ${stepConfig.hard} 步），触发运行期步数熔断并收编已落盘产物`,
+    }
+  }
+  if (tokenConfig.hard !== null && tokens >= tokenConfig.soft) {
+    return {
+      action: 'warn',
+      reason: 'token-soft',
+      steps,
+      tokens,
+      message: `预算提醒：本会话累计约 ${tokens.toLocaleString('en-US')} token（软上限 ${tokenConfig.soft.toLocaleString('en-US')} / 硬上限 ${tokenConfig.hard.toLocaleString('en-US')}）。请停止发散试错，立即收敛并输出完整结构化结果块（不削减必交证据）。`,
+    }
+  }
+  if (stepConfig.soft !== null && steps >= stepConfig.soft) {
+    return {
+      action: 'warn',
+      reason: 'step-soft',
+      steps,
+      tokens,
+      message: `${wrapUpNote(steps, stepConfig.soft)}（硬上限 ${stepConfig.hard} 步将触发预算熔断，请尽快完成验证并提交结果块。）`,
+    }
+  }
+  return { action: 'ok', reason: 'none', steps, tokens, message: '' }
+}

@@ -54,7 +54,7 @@ test('replan 工具已注册：参数面封闭，执行委托给 runtime.replanP
   const runtime = fakeRuntime()
   const tool = createReplanTool(runtime)
   assert.equal(tool.name, 'dsh_workplan_replan')
-  assert.deepEqual(Object.keys(tool.parameters.properties).sort(), ['changeText', 'changes', 'planId', 'reason'])
+  assert.deepEqual(Object.keys(tool.parameters.properties).sort(), ['abortRunning', 'changeText', 'changes', 'planId', 'reason'])
   assert.deepEqual(tool.parameters.required.sort(), ['changes', 'reason'])
   assert.deepEqual(tool.parameters.properties.changes.items.properties.action.enum, ['cancel', 'replace', 'add'])
   assert.deepEqual(tool.parameters.properties.changes.items.required.sort(), ['action', 'subtaskId'])

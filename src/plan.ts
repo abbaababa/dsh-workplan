@@ -20,7 +20,7 @@ import {
 import { extractTaskElements, MAX_TASK_ANCHOR_CHARS } from './understanding.js'
 // [3.1.0] 复杂任务专家人数上限单一真源（caps.ts）：存档消毒、门禁、提示词同源，
 // 杜绝「写 25 读 12」的存读不对称（3.0.6 死锁同类事故的预防）。
-import { MAX_COMPLEX_DELEGATE_MEMBERS, MAX_TOTAL_EXPERTS_PER_PLAN, MIN_COMPLEX_DELEGATE_MEMBERS } from './caps.js'
+import { MAX_COMPLEX_DELEGATE_MEMBERS, MAX_TOTAL_EXPERTS_PER_PLAN, MIN_COMPLEX_DELEGATE_MEMBERS, leaderPreRegisterEnabled } from './caps.js'
 import { isMappingDigest, verifyMappingDigest } from './supersede-digest.js'
 import { checkStartEvidenceCarryover, fiveStepContinuationPromptLines, fiveStepPromptLines, MAX_PHASE_LIST_ITEMS, mergeStartEvidenceIntoSettlement, phaseSummaryLine, renderStartEvidenceBlueprint, renderStartPhaseEvidence, sanitizeStartPhaseEvidence, startEvidenceIndexLines, START_EVIDENCE_MIN_CHARS_BRIEF, validateFiveStepEvidence, validateStartPhaseEvidence } from './five-step.js'
 // [修复] 七项字数下限简报（five-step.ts 单一事实源）转发给 host.ts 等消费方。
@@ -774,6 +774,33 @@ export function isUserConfirmation(value: any) {
     rest = rest.replace(CONFIRMATION_CUE, '').replace(CONFIRMATION_FILLER, '')
   }
   return rest.length === 0
+}
+
+/**
+ * [3.4.0][省钱治本] 纯概念问答/只读解释直通分类器：
+ * 典型如「什么是 KV Cache？」「解释一下 Transformer 自注意力」「how does X work?」——
+ * 没有文件修改、命令执行、交付产出、多步骤编排意图，直接由根会话 1 轮答复，
+ * 避免花数万 token 跑规划器 + 部门负责人 P0 + P1。
+ * 严格 fail-closed：任何写/改/建/审/拆/报告/文件路径/长文本需求一律返回 false，走正常分解。
+ */
+const DIRECT_QA_ACTION_BLOCK = /(?:修复|修改|改动|改写|重写|实现|编写|开发|新增|添加|删除|移除|重构|优化|改造|升级|部署|发布|构建|测试|排查|诊断|审查|审计|调研|分析报告|制定|设计|规划|拆解|对比方案|生成|创建|写入|提交|运行|执行|安装|配置|导出|翻译|整理|总结|\b(?:fix|implement|write|edit|modify|refactor|create|build|deploy|debug|audit|review|design|plan|generate|update|delete|remove|migrate|run|test|install)\b)/i
+const DIRECT_QA_PATH_OR_DELIVERABLE = /(?:(?:[\w.-]+\/)+[\w.-]+|[A-Za-z]:\\[^\s]+|\.(?:ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|json|ya?ml|md|sql|sh|css|html)\b|交付|产物|文档|报告|代码|脚本|补丁|pr\b|commit\b)/i
+const DIRECT_QA_PATTERNS: readonly RegExp[] = Object.freeze([
+  /^(?:请问|请|帮我|帮忙)?(?:简单)?(?:解释|说明|介绍|讲讲|讲一下|聊聊|科普)(?:一下)?\s*.{2,100}$/,
+  /^(?:什么是|啥是|请问什么是|请教一下什么是).{2,100}$/,
+  /^.{2,80}(?:是什么|是什么意思|有什么区别|的区别是什么|怎么理解|原理是什么|机制是什么|怎么用|用来干嘛的|干什么用的)[?？吗呢]*$/,
+  /^(?:what\s+(?:is|are)|how\s+does|explain|define|difference\s+between)\b.{3,120}$/i,
+])
+
+export function isDirectReadOnlyQuestion(value: any): boolean {
+  if (typeof value !== 'string') return false
+  const original = value.trim()
+  if (original.length < 4 || original.length > 140) return false
+  if (original.includes('\n')) return false
+  if (DIRECT_QA_ACTION_BLOCK.test(original)) return false
+  if (DIRECT_QA_PATH_OR_DELIVERABLE.test(original)) return false
+  if (/(?:然后|接着|并且|同时|以及|顺便|还要|第一步|第二步|\band\b|\bthen\b)/i.test(original)) return false
+  return DIRECT_QA_PATTERNS.some((pattern) => pattern.test(original))
 }
 
 function push(errors: string[], path: string, message: string) {
@@ -2513,9 +2540,10 @@ export function appendUserMessage(session: any, payload: any, source?: any, opts
   // 必需通知（如 2.3.0 用户要求 1 的专家预估上报）走专用豁免；禁用清单本身
   // 保持不变，isBannedProgressNotice 的语义不变。
   if (!opts?.allowBanned && !durableEnvelope && originalText && isBannedProgressNotice(originalText)) return undefined
-  // 计划定义（PLAN_MARKER）、取消/取代结构化块（CANCEL_MARKER）与用户变更原文豁免 500 字上限，防止结构化 JSON 被截断损坏。
+  // 计划定义（PLAN_MARKER）、取消/取代结构化块（CANCEL_MARKER）、最终计划结果（workplan-result）与用户变更原文豁免 500 字上限与 80 字轮次截断，防止主 Agent 收不到最终交付摘要而盲答。
   const exemptFromCap = noticeKind === 'workplan-change'
     || noticeKind === 'workplan-cancel'
+    || noticeKind === 'workplan-result'
     || originalText.includes(PLAN_MARKER_BEGIN)
     || originalText.includes(CANCEL_MARKER_BEGIN)
   if (originalText.length > 0 && !exemptFromCap) {
@@ -2815,6 +2843,13 @@ export function buildDispatchPreAnnouncement(plan: any) {
 /**
  * [2.5.0][自配档] phase-0 任务书（负责人）：唯一职责=评估复杂度+提交自配。
  * 平台强制两段式的第一段；phase-1 由 runSubtaskAttempt 在登记后以自配档接续。
+ *
+ * [3.4.0][省钱 + 防盲配治本]
+ *  1. 静态协议与共享计划锚点严格前置（字符 0 起零动态分叉），消除旧版第 3 字因
+ *     departmentLabel 分叉导致的 0.3% KV 前缀命中率；
+ *  2. 解除 360 字锚点 / 160 字交付物盲截断，透传 constraints / successCriteria /
+ *     依赖摘要 / 历史教训 / 重规划变更，避免 low 档 phase-0 盲配锁死错误施工图；
+ *  3. 明确告知负责人 assignments[].startPhases + timeNotice 预登记通道（省掉每位专家整整一次 phase-0 会话）。
  */
 export function buildPhaseZeroLeaderPrompt(input: {
   subtaskId?: string
@@ -2825,29 +2860,61 @@ export function buildPhaseZeroLeaderPrompt(input: {
   deliverable?: string
   acceptance?: string[]
   qualityRequirements?: string[]
+  constraints?: string[]
+  successCriteria?: string[]
+  dependencyBrief?: string
+  lessonsBrief?: string
+  replannedReason?: string
 }) {
   const anchor = typeof input.taskAnchor === 'string' && input.taskAnchor.trim()
-    ? truncate(input.taskAnchor.replace(/\s+/g, ' ').trim(), 360)
+    ? truncate(input.taskAnchor.replace(/\s+/g, ' ').trim(), 1600)
     : ''
   const deliverable = typeof input.deliverable === 'string' && input.deliverable.trim()
-    ? truncate(input.deliverable.replace(/\s+/g, ' ').trim(), 160)
+    ? truncate(input.deliverable.replace(/\s+/g, ' ').trim(), 400)
     : ''
   const acceptance = Array.isArray(input.acceptance)
-    ? input.acceptance.map((x) => truncate(String(x ?? '').replace(/\s+/g, ' ').trim(), 120)).filter(Boolean).slice(0, 6)
+    ? input.acceptance.map((x) => truncate(String(x ?? '').replace(/\s+/g, ' ').trim(), 240)).filter(Boolean).slice(0, 12)
     : []
   const quality = Array.isArray(input.qualityRequirements)
-    ? input.qualityRequirements.map((x) => truncate(String(x ?? '').replace(/\s+/g, ' ').trim(), 120)).filter(Boolean).slice(0, 4)
+    ? input.qualityRequirements.map((x) => truncate(String(x ?? '').replace(/\s+/g, ' ').trim(), 240)).filter(Boolean).slice(0, 8)
     : []
+  const constraints = Array.isArray(input.constraints)
+    ? input.constraints.map((x) => truncate(String(x ?? '').replace(/\s+/g, ' ').trim(), 200)).filter(Boolean).slice(0, 10)
+    : []
+  const successCriteria = Array.isArray(input.successCriteria)
+    ? input.successCriteria.map((x) => truncate(String(x ?? '').replace(/\s+/g, ' ').trim(), 200)).filter(Boolean).slice(0, 8)
+    : []
+  const dependencyBrief = typeof input.dependencyBrief === 'string' && input.dependencyBrief.trim()
+    ? truncate(input.dependencyBrief.trim(), 1000)
+    : ''
+  const lessonsBrief = typeof input.lessonsBrief === 'string' && input.lessonsBrief.trim()
+    ? truncate(input.lessonsBrief.trim(), 1000)
+    : ''
+  const replannedReason = typeof input.replannedReason === 'string' && input.replannedReason.trim()
+    ? truncate(input.replannedReason.replace(/\s+/g, ' ').trim(), 400)
+    : ''
+  const preRegisterLine = leaderPreRegisterEnabled()
+    ? '【极致省 token·专家预登记（默认开启，强烈推荐）】若需下派专家，在 consolidation.assignments[] 每条内附带 timeNotice={ declaredMinutes }（可选附专属 startPhases；未单附时平台自动继承你的 startPhases），平台将直接让专家跳过 phase-0 进入正式执行，每位专家立省整整一次独立会话。'
+    : ''
   return [
-    `你是「${input.departmentLabel ?? '部门'}」执行负责人，phase-0（先配置后开工，low 档启动）。`,
-    `你的子任务：${input.subtaskId ?? ''} ${input.title ?? ''}`,
-    `任务目标：${input.objective ?? '（未记录）'}`,
+    '你是 dsh-workplan 部门执行负责人，phase-0（先配置后开工，low 档启动；所属部门与子任务见末尾）。',
+    '本阶段唯一职责：围绕下方用户原要求、硬约束与验收标准评估复杂度并完成五步前三步，再调 dsh_workplan_delegate(action="review") 交 startPhases={ planning{ problemAnalysis[], approach[], approachBasis[], resources[], tools[] }, preparation{ prepared[], evidence[] } } 与分工表，并在 consolidation.taskReasoningEffort 配置整体档（轻度=low；qwen 中等=medium、非 qwen=high；复杂=xhigh/max）。评估为 low/未配置：禁止下派，改经 action="direct" 登记 startPhases（字数下限：' + START_EVIDENCE_MIN_CHARS_BRIEF + '；可选 reasoningEffort="low"），平台以 low 档接续你亲自执行。',
+    ...(preRegisterLine ? [preRegisterLine] : []),
+    '不要执行任务本身；review 前 dispatch 会被硬门禁拒绝。提交 review/direct 后结束本回合；平台以你的自配档接续进入 phase-1。',
+    '',
     ...(anchor ? [`【用户原要求锚点（防偏离，只读）】${anchor}`] : []),
     ...(deliverable ? [`最终交付物：${deliverable}`] : []),
+    ...(constraints.length ? [`用户硬约束（不得违背）：${constraints.join('；')}`] : []),
+    ...(successCriteria.length ? [`全局成功标准：${successCriteria.join('；')}`] : []),
+    ...(replannedReason ? [`【重规划最新变更（优先级高于旧口径）】${replannedReason}`] : []),
+    '',
+    `【本子任务动态信息】所属部门：${input.departmentLabel ?? '部门'}`,
+    `你的子任务：${input.subtaskId ?? ''} ${input.title ?? ''}`,
+    `任务目标：${input.objective ?? '（未记录）'}`,
     ...(acceptance.length ? [`验收标准：${acceptance.map((a, i) => `A${i + 1} ${a}`).join('；')}`] : []),
     ...(quality.length ? [`质量要求：${quality.join('；')}`] : []),
-    '本阶段唯一职责：围绕上述原要求与验收评估复杂度并完成五步前三步，再调 dsh_workplan_delegate(action="review") 交 startPhases={ planning{ problemAnalysis[], approach[], approachBasis[], resources[], tools[] }, preparation{ prepared[], evidence[] } } 与分工表，并在 consolidation.taskReasoningEffort 配置整体档（轻度=low；qwen 中等=medium、非 qwen=high；复杂=xhigh/max）。评估为 low/未配置：禁止下派，改经 action="direct" 登记 startPhases（字数下限：' + START_EVIDENCE_MIN_CHARS_BRIEF + '；可选 reasoningEffort="low"），平台以 low 档接续你亲自执行。',
-    '不要执行任务本身；review 前 dispatch 会被硬门禁拒绝。提交 review 后结束本回合；平台以你的自配档接续（另起执行会话）进入 phase-1。',
+    ...(dependencyBrief ? [`上游依赖已知结果：${dependencyBrief}`] : []),
+    ...(lessonsBrief ? [lessonsBrief] : []),
   ].join('\n')
 }
 
@@ -3442,11 +3509,60 @@ export function buildResultMessage(result: any) {
   if (notDeliverable) keyParts.push('禁止交付：不要调用 present')
   if (!cancelled && (incomplete || blocked > 0 || paused)) keyParts.push(`恢复指引：${truncate(recovery, 200)}`)
   if (!cancelled && !incomplete && readiness?.ready === true && typeof result.taskAnchorText === 'string' && result.taskAnchorText.trim()) {
-    keyParts.push(`原要求锚点「${truncate(result.taskAnchorText.replace(/\s+/g, ' ').trim(), 90)}」（答复逐项对照勿偏离）`)
+    keyParts.push(`原要求锚点「${truncate(result.taskAnchorText.replace(/\s+/g, ' ').trim(), 240)}」（答复逐项对照勿偏离）`)
   }
   keyParts.push(`下一步：${nextAction}`)
-  const keyText = capKeyProgressText(keyParts.join('｜'))
-  return makeUserMessage(keyText, {
+  const headline = capKeyProgressText(keyParts.join('｜'))
+  /*
+   * [3.4.0][根治主 Agent 汇总失明] 计划全部完成且 deliveryReady=true 时，在主结果消息里
+   * 直接附紧凑的逐子任务交付摘要（部门结论 + 落盘产物路径，剥离证据 JSON，上限 ~1200 字），
+   * 让主 Agent 无需额外多跑 1 轮 dsh_workplan_status/read 即可紧扣真实产物精准答复用户。
+   */
+  let bodyText = headline
+  if (!cancelled && !incomplete && readiness?.ready === true && statuses.length > 0) {
+    const digestLines: string[] = []
+    let digestBudget = 1200
+    for (const row of statuses) {
+      if (!row || row.status !== 'done') continue
+      const sid = String(row.subtaskId ?? '')
+      const deptSummary = isRecord(row.departmentSummary) ? row.departmentSummary : null
+      const report = isRecord(row.report) ? row.report : null
+      const rawConclusion = String(
+        deptSummary?.conclusion
+          ?? deptSummary?.summary
+          ?? report?.conclusion
+          ?? report?.summary
+          ?? '',
+      ).replace(/\s+/g, ' ').trim()
+      const cleanSummary = rawConclusion || String(row.summary ?? '')
+        .replace(/<!--\s*WORKPLAN_EVIDENCE:BEGIN\s*-->[\s\S]*?<!--\s*WORKPLAN_EVIDENCE:END\s*-->/g, '')
+        .replace(/\s+/g, ' ')
+        .trim()
+      const artifacts = (Array.isArray(row.artifacts) ? row.artifacts : [])
+        .filter((a: any) => a && a.exists !== false && typeof a.ref === 'string' && a.ref.trim() !== '')
+        .map((a: any) => String(a.ref).trim())
+        .slice(0, 3)
+      const parts = [
+        `- ${sid}${row.title ? ` ${truncate(String(row.title), 40)}` : ''}`,
+        cleanSummary ? `结论：${truncate(cleanSummary, 140)}` : '',
+        artifacts.length > 0 ? `产物：${artifacts.join('、')}` : '',
+      ].filter(Boolean)
+      const line = parts.join('｜')
+      if (line.length <= digestBudget) {
+        digestLines.push(line)
+        digestBudget -= line.length + 1
+      } else if (digestLines.length < 2) {
+        digestLines.push(truncate(line, Math.max(80, digestBudget)))
+        break
+      } else {
+        break
+      }
+    }
+    if (digestLines.length > 0) {
+      bodyText = `${headline}\n【各部门交付摘要】\n${digestLines.join('\n')}`
+    }
+  }
+  return makeUserMessage(bodyText, {
     kind: 'workplan-result',
     form: 'notice',
     summary,
@@ -7848,9 +7964,38 @@ export function buildChildPrompt({
    * 已回滚：自包含任务也保留最近 1,200 字背景；只有探测到指代才放 7,000 字。
    */
   const background = compactBackground
-    ? truncateTail(backgroundSource, childNeedsFullContext ? 7000 : 800)
+    ? truncateTail(backgroundSource, childNeedsFullContext ? 7000 : 1200)
     : backgroundSource
   const understanding = plan?.taskUnderstanding ?? {}
+  /*
+   * [3.4.0][闭合审计通过却被丢弃的黑洞]
+   * collectPlanText 审计时读取了 taskUnderstanding.{constraints, successCriteria,
+   * knownFacts, unknowns, assumptions}、stage.{rationale, checkpoint} 与 plan.verification，
+   * 旧 buildChildPrompt 却从未透传给部门负责人。此处放在「同计划共享背景」段（既全量防偏离，
+   * 又被并行负责人 100% 共享 KV 前缀缓存）。
+   */
+  const listOf = (arr: any, maxItems: number, maxChars: number): string[] =>
+    Array.isArray(arr)
+      ? arr.map((v: any) => truncate(String(v ?? '').replace(/\s+/g, ' ').trim(), maxChars)).filter(Boolean).slice(0, maxItems)
+      : []
+  const hardConstraints = listOf(understanding.constraints, 12, 240)
+  const successCriteria = listOf(understanding.successCriteria, 10, 240)
+  const knownFacts = listOf(understanding.knownFacts, 8, 200)
+  const unknowns = listOf(understanding.unknowns, 6, 200)
+  const assumptions = listOf(understanding.assumptions, 6, 200)
+  const planVerification = listOf(plan?.verification, 8, 240)
+  const latestReplan = Array.isArray(plan?.replanHistory) && plan.replanHistory.length > 0
+    ? plan.replanHistory[plan.replanHistory.length - 1]
+    : null
+  const replanDeltaLines = [
+    ...(latestReplan?.reason
+      ? [`【重规划最新变更 r${String(latestReplan.revision ?? plan?.planRevision ?? '?')}（优先级高于旧口径）】${truncate(String(latestReplan.reason), 400)}${latestReplan.changeText && latestReplan.changeText !== latestReplan.reason ? `｜用户新要求：${truncate(String(latestReplan.changeText), 600)}` : ''}`]
+      : []),
+    ...(typeof (subtask as any)?.replannedReason === 'string' && (subtask as any).replannedReason.trim()
+      && (!latestReplan?.reason || (subtask as any).replannedReason.trim() !== String(latestReplan.reason).trim())
+      ? [`【本子任务重规划原因】${truncate(String((subtask as any).replannedReason).trim(), 400)}`]
+      : []),
+  ]
   /*
    * [1.12.0] A department must change what the child is told. Before this the
    * label only appeared in the first line; two departments received the same
@@ -7927,6 +8072,12 @@ export function buildChildPrompt({
       : `全局任务：${originalRequestText}`
   const stageName = stage?.name ?? '（未命名阶段）'
   const stageGoal = stage?.goal ?? '（未记录目标）'
+  const stageRationale = typeof stage?.rationale === 'string' && stage.rationale.trim()
+    ? truncate(stage.rationale.replace(/\s+/g, ' ').trim(), 240)
+    : ''
+  const stageCheckpoint = typeof stage?.checkpoint === 'string' && stage.checkpoint.trim()
+    ? truncate(stage.checkpoint.replace(/\s+/g, ' ').trim(), 240)
+    : ''
   /*
    * [3.2.9] 上下文策略提示：负责人拿到的不是「一律拆 8 人」的口号，而是按
    * 任务文本判定的通道建议。memberCount 取 2 只用于让「独立可拆」分支可达；
@@ -8067,12 +8218,10 @@ export function buildChildPrompt({
    * 在唯一的出口统一消毒，避免逐个字段漏掉。
    */
   /*
-   * [3.3.0][省钱·静态优先 KV 前缀共享]
-   * 排序：全部门通用协议（格式规范 + 五步工作法 + 执行要求 + 遇阻上报 + 通用结果模板）
-   *   → 同计划共享背景（全局任务/锚点/主要矛盾/工作目录/产物根目录/对话背景）
-   *   → 本子任务动态尾部（所属部门/阶段/子任务详情/依赖/兄弟/教训/接续/预告/备份路径）。
-   * 并行派发的多个部门负责人因此共享前段数千字符的字节级一致前缀，大幅提升上游 KV 缓存命中；
-   * 且五步工作法位于执行要求之前、结果模板后保留短自查提醒（守门契约与注意力红线全保）。
+   * [3.3.0→3.4.0][省钱·静态优先 KV 前缀共享 + 全量防偏离]
+   * 排序：全部门通用静态协议（格式规范 + 五步工作法 + 执行要求 + 结果模板 + 通用再分配规则）
+   *   → 同计划共享背景（全局任务/锚点/硬约束/成功标准/已知事实/验证要求/重规划变更/主要矛盾/目录/对话背景）
+   *   → 本子任务动态尾部（所属部门/阶段/子任务详情/依赖/兄弟/教训/接续/预告/尾锚定）。
    */
   const staticLeaderRules = [
     '执行要求：',
@@ -8091,6 +8240,9 @@ export function buildChildPrompt({
         `- 先 review 交 startPhases（${START_EVIDENCE_MIN_CHARS_BRIEF}）+ 单一目标分工表，再 dispatch 给本部门 expert（复杂任务 ${MIN_COMPLEX_DELEGATE_MEMBERS}-${MAX_COMPLEX_DELEGATE_MEMBERS} 人，单阶段/顺序链豁免下限；low/未配置走 action="direct" 亲自执行；顺序链不拆，共享文件不并发写）。`,
         '- phase-0 经 consolidation.taskReasoningEffort 配档（qwen: low/medium/xhigh；非 qwen: low/high/max），专家经 self_effort 自配为权威；禁派生第四层，收齐后全覆盖汇总。',
       ]
+  const tailConstraintReminder = hardConstraints.length > 0
+    ? `；严守 ${hardConstraints.length} 条硬约束（首条：${truncate(hardConstraints[0], 90)}）`
+    : ''
   return defuseSessionReferenceText([
     '你是 dsh-workplan 部门执行 Agent，只负责下方【你的子任务】一项工作。',
     `专家定位：${DEPARTMENT_EXPERT_STANDARD.child}`,
@@ -8101,22 +8253,30 @@ export function buildChildPrompt({
     ...(phaseZeroContinuation ? fiveStepContinuationPromptLines() : fiveStepPromptLines()),
     '',
     ...staticLeaderRules,
+    ...(fallbackDelegationRules.length ? ['', ...fallbackDelegationRules] : []),
     '',
-    '结果回传（必填）：末尾附结构化结果块（块参考上限 ' + MAX_EVIDENCE_BLOCK_CHARS + ' 字符，needs 仅确有跨部门需求时写，其余见 F1–F11）：',
+    '结果回传（必填）：末尾附结构化结果块（块参考上限 ' + MAX_EVIDENCE_BLOCK_CHARS + ' 字符，needs 仅确有跨部门需求时写；零异常任务 retrospective 可简写 {"noIssues":true}，其余见 F1–F11）：',
     EVIDENCE_MARKER_BEGIN,
     ...(phaseZeroContinuation
       ? [
         '- phase-0 已登记 phases.planning / phases.preparation，下面省略这两组，平台会自动并入：',
-        '{"status":"done","phases":{"execution":{"steps":["步骤"],"deviations":[]},"verification":{"retrospective":{"problems":["现象+根因"],"detours":[],"resolutions":["解决"],"prevention":["遇到…先…"]}}},"acceptance":[{"criterion":"A1","result":"pass","evidence":"证据"}],"artifacts":[{"kind":"file","ref":"路径"}]}',
+        '{"status":"done","phases":{"execution":{"steps":["步骤"],"deviations":[]},"verification":{"retrospective":{"noIssues":true}}},"acceptance":[{"criterion":"A1","result":"pass","evidence":"证据"}],"artifacts":[{"kind":"file","ref":"路径"}]}',
       ]
       : [
-        '{"status":"done","phases":{"planning":{"problemAnalysis":["问题"],"resources":["资源"],"tools":["工具"],"approach":["步骤"],"approachBasis":["依据"]},"preparation":{"prepared":["已备"],"evidence":["证据"]},"execution":{"steps":["步骤"],"deviations":[]},"verification":{"retrospective":{"problems":["现象+根因"],"detours":[],"resolutions":["解决"],"prevention":["遇到…先…"]}}},"acceptance":[{"criterion":"A1","result":"pass","evidence":"证据"}],"artifacts":[{"kind":"file","ref":"路径"}]}',
+        '{"status":"done","phases":{"planning":{"problemAnalysis":["问题"],"resources":["资源"],"tools":["工具"],"approach":["步骤"],"approachBasis":["依据"]},"preparation":{"prepared":["已备"],"evidence":["证据"]},"execution":{"steps":["步骤"],"deviations":[]},"verification":{"retrospective":{"noIssues":true}}},"acceptance":[{"criterion":"A1","result":"pass","evidence":"证据"}],"artifacts":[{"kind":"file","ref":"路径"}]}',
       ]),
     EVIDENCE_MARKER_END,
     '',
     globalTaskLine,
     `最终交付物：${understanding.deliverable ?? '（未记录）'}`,
     ...anchorBlock,
+    ...(hardConstraints.length ? [`用户硬约束（逐字遵守，不得违背）：${hardConstraints.join('；')}`] : []),
+    ...(successCriteria.length ? [`全局成功标准：${successCriteria.join('；')}`] : []),
+    ...(knownFacts.length ? [`已知事实：${knownFacts.join('；')}`] : []),
+    ...(unknowns.length ? [`待确认项：${unknowns.join('；')}`] : []),
+    ...(assumptions.length ? [`前提假设：${assumptions.join('；')}`] : []),
+    ...(planVerification.length ? [`计划级整体验证要求：${planVerification.join('；')}`] : []),
+    ...replanDeltaLines,
     `主要矛盾：${contradiction}`,
     `工作目录：${cwd || '（未知）'}`,
     `产物根目录（唯一，强制）：${cwd ? `${cwd}/reports/` : '（工作目录）/reports/'}（写 reports/<任务代号>/<文件名>；勿写入子仓库或根目录散落临时文件，产物路径相对此根）。`,
@@ -8126,6 +8286,8 @@ export function buildChildPrompt({
     '',
     `【你的子任务】${subtask.id} ${subtask.title}（所属部门：${departmentLabel(subtask.department)}）`,
     `当前阶段：${stageName}${stageGoal && stageGoal !== '（未记录目标）' ? `（${stageGoal}）` : ''}`,
+    ...(stageRationale ? [`阶段依据：${stageRationale}`] : []),
+    ...(stageCheckpoint ? [`阶段检查点：${stageCheckpoint}`] : []),
     `角色：${subtask.role}`,
     dutyLine,
     outputLine,
@@ -8137,7 +8299,7 @@ export function buildChildPrompt({
     qualityBlock,
     `风险：${subtask.risk}`,
     ...(delegationStrategyLine ? [delegationStrategyLine] : []),
-    ...(llmRulesBrief ? ['', String(llmRulesBrief)] : fallbackDelegationRules.length ? ['', ...fallbackDelegationRules] : []),
+    ...(llmRulesBrief ? ['', String(llmRulesBrief)] : []),
     '',
     '依赖子任务的已知结果：',
     dependencies,
@@ -8164,8 +8326,8 @@ export function buildChildPrompt({
       + (noticeTarget
         ? ` 失败首行写 \`noticeChannel: {"target":"${noticeTarget}","at":<毫秒>,"error":"<原文>"}\` 并重试一次，仍失败继续做（勿改目标；插件不解析这一行，以状态行观测为准）。`
         : ''),
-    `- 盘上结算备份（必做）：把最终结果块里那份 JSON 原样另存为 reports/wp-settlement-${plan?.planId ? `${plan.planId}-` : ''}${subtask.id}.json——同一份、字段一个不少（含 phases/acceptance/artifacts/departmentSummary），只在最外层额外加 planId 与 subtaskId 两个字段。只写 summary/artifacts 的摘要式备份平台不会采纳：本地恢复失效，整轮白跑。`,
-    `【防偏离锚定】对照上方「用户原要求」锚点与本任务（${subtask.id}）目标「${truncate(String(subtask?.objective ?? '').replace(/\s+/g, ' ').trim(), 90) || String(subtask?.title ?? '')}」，逐项落实验收（${Array.isArray(subtask?.acceptance) ? subtask.acceptance.length : 0} 条），严禁跑题或漏项。`,
+    `- 盘上结算备份（平台自动原样另存，免重复输出）：提交最终结果块后，平台自动把结果块原样另存为 reports/wp-settlement-${plan?.planId ? `${plan.planId}-` : ''}${subtask.id}.json（无需额外调写文件工具重复输出同一 JSON 省输出 token；若手工兜底另存，须原样同一 JSON 含 phases/acceptance/artifacts/departmentSummary 且字段一个不少，摘要式备份平台不会采纳）。`,
+    `【防偏离锚定】对照上方「用户原要求」锚点与本任务（${subtask.id}）目标「${truncate(String(subtask?.objective ?? '').replace(/\s+/g, ' ').trim(), 260) || String(subtask?.title ?? '')}」，逐项落实验收（${Array.isArray(subtask?.acceptance) ? subtask.acceptance.length : 0} 条）${tailConstraintReminder}，严禁跑题、漏项或违背禁止约束。`,
     '提交前再对照上方 F1–F11 自查一遍。',
   ].join('\n'))
 }

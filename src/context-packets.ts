@@ -60,11 +60,11 @@ export function buildExpertContextPacket(input: ExpertContextInput): string {
   const stage: ContextStage = input.stage === 'planning' ? 'planning' : 'execution'
   const budgetChars = Number.isFinite(Number(input.budgetChars))
     ? Math.max(400, Math.floor(Number(input.budgetChars)))
-    : (stage === 'planning' ? 1200 : 2400)
+    : (stage === 'planning' ? 1800 : 3600)
   const current = statusOf(input.statuses, subtaskId)
   const items: ContextItem[] = []
 
-  const anchorCap = Math.min(1400, Math.max(400, Math.floor(budgetChars * 0.45)))
+  const anchorCap = Math.min(1800, Math.max(600, Math.floor(budgetChars * 0.45)))
   const anchor = clip(plan?.taskAnchor?.text, anchorCap)
   if (anchor) {
     items.push({
@@ -76,6 +76,26 @@ export function buildExpertContextPacket(input: ExpertContextInput): string {
       stage: '*',
       relevance: 100,
       ref: 'plan.taskAnchor',
+    })
+  }
+
+  const replannedReason = clip(
+    (subtask as any)?.replannedReason
+      || (Array.isArray(plan?.replanHistory) && plan.replanHistory.length > 0
+        ? plan.replanHistory[plan.replanHistory.length - 1]?.reason
+        : ''),
+    400,
+  )
+  if (replannedReason) {
+    items.push({
+      id: 'replan:reason',
+      kind: 'constraint',
+      text: `【重规划最新变更（优先级高于旧口径）】${replannedReason}`,
+      priority: 'must',
+      role: '*',
+      stage: '*',
+      relevance: 99,
+      ref: `subtask.${subtaskId}.replannedReason`,
     })
   }
 
@@ -123,6 +143,29 @@ export function buildExpertContextPacket(input: ExpertContextInput): string {
         ref: 'plan.taskUnderstanding.constraints',
       })
     }
+  }
+  const factsAndUnknowns = [
+    ...(Array.isArray(understanding.knownFacts) && understanding.knownFacts.length > 0
+      ? [`已知事实：${understanding.knownFacts.slice(0, 6).map((v: any) => clip(v, 160)).join('；')}`]
+      : []),
+    ...(Array.isArray(understanding.unknowns) && understanding.unknowns.length > 0
+      ? [`待确认项：${understanding.unknowns.slice(0, 4).map((v: any) => clip(v, 160)).join('；')}`]
+      : []),
+    ...(Array.isArray(understanding.assumptions) && understanding.assumptions.length > 0
+      ? [`前提假设：${understanding.assumptions.slice(0, 4).map((v: any) => clip(v, 160)).join('；')}`]
+      : []),
+  ]
+  if (factsAndUnknowns.length > 0) {
+    items.push({
+      id: 'understanding:facts',
+      kind: 'background',
+      text: factsAndUnknowns.join('｜'),
+      priority: 'high',
+      role: 'expert',
+      stage: '*',
+      relevance: 76,
+      ref: 'plan.taskUnderstanding',
+    })
   }
 
   const dependsOn = Array.isArray(subtask.dependsOn) ? subtask.dependsOn : []

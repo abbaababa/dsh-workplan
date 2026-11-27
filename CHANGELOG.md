@@ -1,3 +1,29 @@
+## 3.4.0 — 2026-11-27（防注意力偏离治本 + KV 前缀缓存重排 + 极致省 Token 全链路改造版）
+
+本版对 `dsh-workplan` 全部底层核心模块（10 个源码文件）做全链路治本改造，同时解决两大核心痛点：**① 长链路与上下文压缩（Compaction）场景下的注意力丢失与任务执行偏离**；**② KV Prefix Cache 击穿、额外会话往返与高价 Output Token 浪费**。DSH 0.2.3-alpha.2 兼容与全部证据门禁体系原样保留。
+
+### 一、全链路防注意力偏离与抗压缩失忆（Attention & Drift Root-Fixes）
+
+- **Node-0 不可变子会话系统锚点 + 压缩后自动重注**：`shadowWorkplanPromptForChild` 将子会话不可变任务锚点合并注入单一 scoped `systemPrompt.section`（严守 DSH 0.2.3 两段 `interpolate: false` 宿主契约），使子会话北极星锚点物理免疫 `dsh-compaction-basic` 历史折叠；同时 fail-open 接入压缩事件钩子与 `onPreStep` 序号检测，压缩发生后自动重注防偏离锚点。
+- **消除规划→执行断层与硬禁止项漏检**：`extractTaskElements` 将用户明确禁止项（`不要/禁止/不得/严禁/不能/不可/切勿/不允许`）升级为 `hard: true` 硬约束并支持否定极性与同义动词归一校验；`buildPhaseZeroLeaderPrompt` 全面扩容（`taskAnchor` `360→1600`、`deliverable` `160→400`、`acceptance` `6×120→12×240`、`qualityRequirements` `4×120→8×240`）并补齐 `constraints`/`successCriteria`/`dependencyBrief`/`lessonsBrief`/`replannedReason`；`buildChildPrompt` 与 `buildExpertContextPacket`（预算升至 `1800/3600`）完整透传 `knownFacts/unknowns/assumptions`、`verification`、`replanHistory` 与阶段目标，尾部 `【防偏离锚定】` 扩至 `260` 字符并附硬约束提醒。
+- **重规划（Replan）锚点同步与在途任务中止**：`planReplan` 新增 `changeText` 增量写入 `taskAnchor.text`（保留 `originalSha256`、重算 `sha256`、追加 `replanHistory`）；`dsh_workplan_replan` 新增 `abortRunning` 支持直接中止过时的在途派发。
+- **终局回传零截断与自动综合收尾**：`appendUserMessage` 将 `workplan-result` 纳入长度上限豁免；`buildResultMessage`、`emitSubtaskDoneNotice` 与 `dsh_workplan_status` 附带各部门交付结论与落地文件索引（剔除原始证据 JSON）；`onTurnStopping` 等待在途派发达成 `deliveryReady` 后自动触发一次 `workplan-synthesis` 引导主 Agent 输出最终答复，消除静默结束回合。
+
+### 二、KV Prefix Cache 满血复用与极致省 Token（Token Economy Overhaul）
+
+- **锁死子会话工具集，消灭 Step 1/Step 2 翻面击穿缓存**：新增子会话工具阶段不可变注册表（`registerChildToolPhase`）+ `WeakMap` 会话记忆化 + 16 事件扫描窗口（自动跳过 `<system-reminder>` 包装），子会话生命周期内工具定义零抖动。
+- **全提示词 Static-First 重排**：重排 `buildPhaseZeroLeaderPrompt`、`buildPhaseZeroDelegateePrompt`、`buildChildPrompt` 与 `buildDelegateePrompt`，将动态部门标签、子任务 ID 及单次 effort/专家行全部后移至动态段，实测同批 Leader Phase-0 前缀重叠率从 **0.3% 跃升至 97.7%**，跨部门 Expert Phase-0 从 **0.3% 跃升至 86.6%**，同部门 Expert Phase-1 保持 **>85%**。
+- **规划器修复重试多轮续写复用缓存**：`runPlanner` 的 `useRepairDraft` 改为 4-message 多轮续写（`system` + 原 `user` + `assistant` 草稿 + 紧凑错误列表），100% 命中首轮超长前缀 KV Cache。
+- **纯概念问答直通 + 确定性单会话快车道**：新增 `isDirectReadOnlyQuestion` 对纯概念只读提问零子会话直答；拓宽 `evaluateFastPathEligibility` 覆盖面并预填合法 `startPhases` 与 `effortOverride='low'`，轻任务跳过 Phase-0 直接单子会话闭环。
+- **零 Output Token 自动结算备份 + 洁净复盘**：`persistRuntimeSettlementBackup` 在 `done` 结算时由 Node 运行时自动将完整证据原样落盘（0 模型 Output Token）；`validateRetrospective` 支持干净任务显式提交 `{"noIssues":true}` 免除凑字复盘；专家预注册仅传 `timeNotice.declaredMinutes` 即可自动继承负责人 `startPhases`；消除 `emitDelegateDoneNotices` 重复消息注入与 `autoDispatch` 汇合误拒。
+- **实时步数 + Token 硬熔断护栏**：新增 `DSH_WORKPLAN_TOKEN_BUDGET`（默认 `2,000,000`）与 `evaluateRuntimeBudget`，软上限提醒收敛、硬上限强制熔断失控循环；新增 4 个默认开启的 `DSH_WORKPLAN_*` 能力开关。
+
+### 三、验证与版本同步
+
+- 新增 `tests/workplan-340-deep-overhaul.test.ts`（11 项全链路改造回归测试），同步更新 `tests/token-economy-323.test.ts`、`tests/workplan-replan-progress.test.ts` 与两处版本断言。
+- `npm run check`、`tsc -p tsconfig.test.json --noEmit`、全量测试与构建产物一致性校验全部通过。
+- 版本同步：`package.json` / `package-lock.json` / `src/host.ts` / 本 CHANGELOG / 三份 README / `tests/fixtures/tool-surface.json` 全部更新为 `3.4.0`。
+
 ## 3.3.2 — 2026-11-27（DSH 0.2.3-alpha.2 全面适配 + 结算误判治本版）
 
 本版做两件事：一是针对 DeepSeek Harness `0.2.3-alpha.2` 的全部破坏性变更做逐项底层适配（100% 向后兼容 `0.2.2-rc.x`）；二是治本修复一条会把「已经交出的证据」判成「没交证据」、并连带冻结整条计划的结算链缺陷。3.3.1 的极致省 Token 与高质量证据门禁体系原样保留。
