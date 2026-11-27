@@ -163,6 +163,50 @@ const ROOT_UNUSABLE_TOOLS = new Set([
   'dsh_workplan_verify',
 ])
 
+export type ChildToolPhase = 'leader-phase-0' | 'leader-phase-1' | 'leaf-phase-0' | 'leaf-phase-1'
+
+/*
+ * [3.4.0][KV Prefix Cache 治本] 不可变子会话阶段登记表 + 会话级记忆化：
+ *
+ * 旧实现只在每次 tools.when() 扫描前 4 条事件；在 DSH 0.2.x 中 Step 1 的 tools.when()
+ * 早于 user/message 入账，导致 Step 1 放行全量工具、Step 2 识别为 phase-0/leaf-phase-1
+ * 后突然隐藏工具 → 宿主触发 tool-registry 增删 + 新建 request/header → KV 前缀缓存
+ * 100% 失效；且 seq ≥ 4 或含 <system-reminder> 时永久 fail-open 漏裁。
+ *
+ * 治本方案：
+ *  1. runtime 在 startActivation 建单时按 sessionId（及创建前 pending 队列）登记阶段；
+ *  2. 兜底扫描放宽至前 16 条事件并跳过纯 <system-reminder> 包装消息；
+ *  3. 同一 session 对象一旦判定阶段（或命中登记）即锁入 WeakMap，Step 1 与 Step 2+
+ *     工具集 100% 一致，杜绝中途 request/header 重建。
+ */
+const REGISTERED_CHILD_PHASES = new Map<string, ChildToolPhase>()
+const REGISTERED_CHILD_ANCHORS = new Map<string, string>()
+const MEMOIZED_SESSION_PHASE = new WeakMap<object, ChildToolPhase | null>()
+
+export function registerChildToolPhase(sessionId: string, phase: ChildToolPhase): void {
+  if (typeof sessionId === 'string' && sessionId.trim() !== '') {
+    REGISTERED_CHILD_PHASES.set(sessionId.trim(), phase)
+  }
+}
+
+export function unregisterChildToolPhase(sessionId: string): void {
+  if (typeof sessionId === 'string' && sessionId.trim() !== '') {
+    REGISTERED_CHILD_PHASES.delete(sessionId.trim())
+    REGISTERED_CHILD_ANCHORS.delete(sessionId.trim())
+  }
+}
+
+export function registerChildSystemAnchor(sessionId: string, anchorText: string): void {
+  if (typeof sessionId === 'string' && sessionId.trim() !== '' && typeof anchorText === 'string' && anchorText.trim() !== '') {
+    REGISTERED_CHILD_ANCHORS.set(sessionId.trim(), anchorText.trim())
+  }
+}
+
+export function getRegisteredChildToolPhase(sessionId: string): ChildToolPhase | null {
+  if (typeof sessionId !== 'string' || sessionId.trim() === '') return null
+  return REGISTERED_CHILD_PHASES.get(sessionId.trim()) ?? null
+}
+
 function sessionDelegationDepth(session: any): number {
   const header = session?.header
   if (!header) return 0
@@ -172,42 +216,70 @@ function sessionDelegationDepth(session: any): number {
 
 function firstSessionPromptText(session: any): string {
   if (!session || typeof session.eventAt !== 'function') return ''
-  const limit = Math.min(4, typeof session.seq === 'number' ? session.seq : 4)
+  const seq = typeof session.seq === 'number' && Number.isFinite(session.seq) ? session.seq : 16
+  const limit = Math.min(16, Math.max(0, seq))
   for (let i = 0; i < limit; i += 1) {
     const ev = session.eventAt(i)
     if (!ev || ev.type !== 'user/message') continue
     const content = ev.data?.message?.content ?? ev.data?.content
-    if (typeof content === 'string' && content.trim()) return content
-    if (Array.isArray(content)) {
-      const text = content
+    let text = ''
+    if (typeof content === 'string') text = content
+    else if (Array.isArray(content)) {
+      text = content
         .filter((part: any) => part && typeof part.text === 'string')
         .map((part: any) => part.text)
         .join('\n')
-      if (text.trim()) return text
     }
+    const trimmed = text.trim()
+    if (!trimmed) continue
+    // 跳过宿主或插件前置的纯 <system-reminder> 包装消息，避免误把提醒当成首条任务书。
+    if (/^<system-reminder>[\s\S]*<\/system-reminder>$/i.test(trimmed)) continue
+    return trimmed
   }
   return ''
 }
 
 /**
- * [3.3.0][极致省 token·阶段裁剪] 基于子会话首条不可变提示词判定阶段（KV 缓存零抖动）：
- *  - leader-phase-0：仅需 delegate(review/direct) + escalate，隐藏 verify(1.2KB) + instruct；
- *  - leaf-phase-0：仅需 delegate(self_effort) + escalate，隐藏 verify(1.2KB)；
- *  - leaf-phase-1：已完成自配档且禁派第四层，隐藏 delegate(2.6KB，每步省 63% 工具说明书！)；
- *  - 无首条事件/无法识别：返回 null（fail-open 沿用既有角色白名单）。
+ * [3.3.0→3.4.0][极致省 token·零 KV 抖动阶段裁剪] 优先读不可变登记表与 header 元数据，
+ * 再兜底扫描首条任务书并记忆化：
+ *  - leader-phase-0：仅需 delegate(review/direct) + escalate，隐藏 verify + instruct；
+ *  - leaf-phase-0：仅需 delegate(self_effort) + escalate，隐藏 verify；
+ *  - leaf-phase-1：已完成自配档且禁派第四层，隐藏 delegate（每步省 ~63% 工具说明书）；
+ *  - 无登记且无首条事件/无法识别：返回 null（fail-open 沿用既有角色白名单）。
  */
-export function detectChildToolPhase(session: any, depth: number): 'leader-phase-0' | 'leaf-phase-0' | 'leaf-phase-1' | null {
+export function detectChildToolPhase(session: any, depth: number): ChildToolPhase | null {
+  const sid = typeof session?.id === 'string' ? session.id.trim() : ''
+  if (sid) {
+    const registered = REGISTERED_CHILD_PHASES.get(sid)
+    if (registered) return registered
+  }
+  const headerPhase = session?.header?.workplanPhase
+  if (
+    headerPhase === 'leader-phase-0'
+    || headerPhase === 'leader-phase-1'
+    || headerPhase === 'leaf-phase-0'
+    || headerPhase === 'leaf-phase-1'
+  ) {
+    return headerPhase
+  }
+  if (session && typeof session === 'object' && MEMOIZED_SESSION_PHASE.has(session)) {
+    const cached = MEMOIZED_SESSION_PHASE.get(session)
+    if (cached !== undefined) return cached
+  }
   const prompt = firstSessionPromptText(session)
   if (!prompt) return null
+  let detected: ChildToolPhase | null = null
   if (depth >= 2) {
-    if (prompt.includes('，phase-0（先配置后开工')) return 'leaf-phase-0'
-    if (prompt.includes('只负责末尾【你的分工】里那一项工作')) return 'leaf-phase-1'
-    return null
+    if (prompt.includes('，phase-0（先配置后开工')) detected = 'leaf-phase-0'
+    else if (prompt.includes('只负责末尾【你的分工】里那一项工作')) detected = 'leaf-phase-1'
+  } else if (depth === 1) {
+    if (prompt.includes('执行负责人，phase-0（先配置后开工')) detected = 'leader-phase-0'
+    else if (prompt.includes('你是 dsh-workplan 部门执行 Agent')) detected = 'leader-phase-1'
   }
-  if (depth === 1 && prompt.includes('执行负责人，phase-0（先配置后开工')) {
-    return 'leader-phase-0'
+  if (session && typeof session === 'object') {
+    MEMOIZED_SESSION_PHASE.set(session, detected)
   }
-  return null
+  return detected
 }
 
 /** 这一步是否把某工具的说明书交给该 Agent；fail-open（异常一律可见）。 */
@@ -241,24 +313,20 @@ export function workplanToolAdmitted(toolName: string, session: any): boolean {
 
 
 /*
- * [3.1.6][省钱三件套 ②] 系统提示分段：主 Agent 专属段不再注入子 Agent。
- *
- * PROMPT_SECTION（3.2.3 实测 3,579 字符）通篇面向「主 Agent」写（生成计划、审计划、
- * 派发、收尾交付），部门负责人/第三层专家有自己的任务书（buildChildPrompt /
- * buildDelegateePrompt），再读这段既无用又按步计费。
- * 做法：在子 Agent 的 agent.ctx 里注册同名 section —— 官方语义是
- * 「scoped section shadows a global section with the same name」，于是全局段
- * 对该 Agent 被替换成一句子会话提示。根会话（无 parentSession、非子 Agent、
- * depth=0）不动，保持原文。注册失败一律 fail-open：子会话继续看到全局段，
- * 只多花 token，不影响任何功能。
+ * [3.1.6→3.4.0][省钱 + 抗压缩系统头锚定] 系统提示分段：
+ *  1. 主 Agent 专属段不再注入子 Agent，改以全子会话字节一致的静态子协议段替换
+ *     （node 0 `system/message` 跨会话共享 KV 前缀，且免疫 dsh-compaction-basic 压缩）；
+ *  2. 若 runtime 已登记该子会话的不可变任务锚点/硬约束/验收清单，同步挂载为
+ *     `dsh-workplan-anchor`（order = PROMPT_ORDER + 1），即使长任务触发多轮压缩，
+ *     用户原要求锚点与 A1–An 验收清单也永久驻留 system/message 绝不丢失。
  */
 const PROMPT_SHADOW_REGISTERED = new WeakSet<object>()
 const CHILD_PROMPT_SHADOW = [
-  '本会话是 dsh-workplan 的子会话：按任务书执行，不要生成或改写主计划；',
-  '主计划的创建、派发、审阅与最终交付由主 Agent 负责。',
+  '本会话是 dsh-workplan 的子会话：按任务书与下方任务锚点严格执行，不得扩题、偏题或违背硬约束；',
+  '主计划的创建、派发、审阅与最终交付由主 Agent 负责；交付时按契约输出完整结构化结果块（平台自动落盘结算备份，无需另调写文件工具重复写结算 JSON）。',
 ].join('')
 
-function shadowWorkplanPromptForChild(agent: any) {
+function shadowWorkplanPromptForChild(agent: any, runtime?: any) {
   try {
     const session = agent?.session
     const header = session?.header
@@ -267,7 +335,13 @@ function shadowWorkplanPromptForChild(agent: any) {
     if (PROMPT_SHADOW_REGISTERED.has(agent)) return
     const scoped = agent?.ctx
     if (!scoped?.systemPrompt || typeof scoped.systemPrompt.section !== 'function') return
-    scoped.systemPrompt.section({ name, order: PROMPT_ORDER, text: CHILD_PROMPT_SHADOW, interpolate: false })
+    const sid = typeof session?.id === 'string' ? session.id.trim() : ''
+    const anchorText = (sid ? REGISTERED_CHILD_ANCHORS.get(sid) : '')
+      || (typeof runtime?.childAnchorForSession === 'function' ? runtime.childAnchorForSession(sid) : '')
+    const shadowText = typeof anchorText === 'string' && anchorText.trim() !== ''
+      ? `${CHILD_PROMPT_SHADOW}\n\n${anchorText.trim()}`
+      : CHILD_PROMPT_SHADOW
+    scoped.systemPrompt.section({ name, order: PROMPT_ORDER, text: shadowText, interpolate: false })
     PROMPT_SHADOW_REGISTERED.add(agent)
   } catch {
     /* fail-open：注册不上就保留全局段（多付 token，不少能力）。 */
@@ -302,7 +376,7 @@ export const PROMPT_ORDER = 40
  * 自报版本时被误导，用户也拿不到真实版本（用户要求 13/G 要如实报告版本）。
  * 硬编码字符串与 meta 双写是根因，改为同一常量派生。
  */
-export const PLUGIN_VERSION = '3.3.2'
+export const PLUGIN_VERSION = '3.4.0'
 
 const PROMPT_SECTION = [
   '本会话已启用自动任务分解。新任务首步前生成【任务分解】；分配任务前必须先告知预估耗时（由平台自动发【规划预告】/【派发预告】与固定文案「任务正在分配中，请稍等一下......」「任务已经完成分配，正在执行中......」，勿重复、勿改任务原文）；需派发/续跑调 dsh_workplan_dispatch（默认 wait，长任务 mode: "async" 后用 dsh_workplan_status 查进度；后台生成中先等待）。',
@@ -370,11 +444,9 @@ export type WorkplanConfig = {
   /** 自动续跑轮次上限（0–4，默认 2）；环境变量 `DSH_WORKPLAN_AUTO_RESUME_MAX`。 */
   autoResumeMaxAttempts?: number
   /**
-   * [3.2.3][省钱] 极简单动作任务的确定性计划快路径。默认 **false**：会跳过
-   * 规划器的分解/矛盾分析，需用户明确授权后才打开；环境变量
-   * `DSH_WORKPLAN_DETERMINISTIC_FAST_PATH=1` 等效。窄资格谓词任一不满足即
-   * 回落常规规划，且仍走同一套 validatePlan/validatePlanContext 三闸。
-   * 背景：docs/token-optimization-audit-3.2.2-20261122.md:179。
+   * [3.2.3→3.4.0][省钱] 简单单域动作任务的确定性计划快路径。默认 **true**：
+   * 跳过规划器 LLM 调用并支持单会话直入（`DSH_WORKPLAN_DETERMINISTIC_FAST_PATH=0` 或
+   * 配置 `false` 可关闭）。资格谓词不满足即 fail-closed 回落常规规划，仍过三闸。
    */
   deterministicFastPath?: boolean
   /**
@@ -521,13 +593,17 @@ function createUpdateTool(runtime: any) {
 function createReplanTool(runtime: any) {
   return {
     name: 'dsh_workplan_replan',
-    description: '需求变更重规划（cancel/replace/add）；执行中返回 REPLAN_PLAN_RUNNING；成功后须再 dispatch。',
+    description: '需求变更重规划（cancel/replace/add）；执行中默认返回 REPLAN_PLAN_RUNNING，传 abortRunning:true 可优雅中止过时在途任务并立即重规划；成功后须再 dispatch。',
     parameters: {
       type: 'object',
       properties: {
         planId: { type: 'string' },
         reason: { type: 'string' },
         changeText: { type: 'string' },
+        abortRunning: {
+          type: 'boolean',
+          description: '可选：true 时先中止当前过时的在途派发并立即应用重规划，避免继续为旧目标烧 token。',
+        },
         changes: {
           type: 'array',
           description: '1 至 12 条子任务变更（后端硬校验数量与结构）',
@@ -904,8 +980,37 @@ function createDelegateTool(runtime: any) {
                   task: { type: 'string' },
                   qualityRequirements: { type: 'array', items: { type: 'string' } },
                   reasoningEffort: { type: 'string', enum: ['low', 'medium', 'high', 'xhigh', 'max'] },
-                  startPhases: { type: 'object' },
-                  timeNotice: { type: 'object' },
+                  startPhases: {
+                    type: 'object',
+                    description: '可选预登记（推荐）：附带规划+准备证据即可免专家跑 phase-0，立省 1 次独立会话',
+                    properties: {
+                      planning: {
+                        type: 'object',
+                        properties: {
+                          problemAnalysis: { type: 'array', items: { type: 'string' } },
+                          resources: { type: 'array', items: { type: 'string' } },
+                          tools: { type: 'array', items: { type: 'string' } },
+                          approach: { type: 'array', items: { type: 'string' } },
+                          approachBasis: { type: 'array', items: { type: 'string' } },
+                        },
+                      },
+                      preparation: {
+                        type: 'object',
+                        properties: {
+                          prepared: { type: 'array', items: { type: 'string' } },
+                          evidence: { type: 'array', items: { type: 'string' } },
+                        },
+                      },
+                    },
+                  },
+                  timeNotice: {
+                    type: 'object',
+                    description: '可选预登记：该专家预估耗时（与 startPhases 同附可免专家 phase-0）',
+                    properties: {
+                      declaredMinutes: { type: 'integer' },
+                      reason: { type: 'string' },
+                    },
+                  },
                 },
                 required: ['member', 'role', 'task', 'qualityRequirements'],
                 additionalProperties: false,
@@ -1510,6 +1615,36 @@ function createStatusTool(runtime: any) {
               + `｜observedAt ${observedAt}`
               + `｜reason ${String(channel.reason ?? '—')}`
           })
+        const deliverableLines = statuses
+          .filter((item: any) => item && item.closure !== 'replanned')
+          .slice(0, 15)
+          .map((item: any) => {
+            const sid = String(item.subtaskId ?? '')
+            const st = String(item.status ?? 'pending')
+            const acc = Array.isArray(item.acceptance) ? item.acceptance : []
+            const accPass = acc.filter((a: any) => a?.result === 'pass').length
+            const accTag = acc.length > 0 ? `验收 ${accPass}/${acc.length}` : ''
+            const ds = isRecord(item.departmentSummary) ? item.departmentSummary : null
+            const rp = isRecord(item.report) ? item.report : null
+            const rawConclusion = String(
+              ds?.conclusion ?? ds?.summary ?? rp?.conclusion ?? rp?.summary ?? '',
+            ).replace(/\s+/g, ' ').trim()
+            const fallbackSummary = rawConclusion || String(item.error ?? item.summary ?? '')
+              .replace(/<!--\s*WORKPLAN_EVIDENCE:BEGIN\s*-->[\s\S]*?<!--\s*WORKPLAN_EVIDENCE:END\s*-->/g, '')
+              .replace(/\s+/g, ' ')
+              .trim()
+            const conclusion = fallbackSummary ? fallbackSummary.slice(0, 110) + (fallbackSummary.length > 110 ? '…' : '') : ''
+            const artifacts = (Array.isArray(item.artifacts) ? item.artifacts : [])
+              .filter((a: any) => a && a.exists !== false && typeof a.ref === 'string' && a.ref.trim() !== '')
+              .map((a: any) => String(a.ref).trim())
+              .slice(0, 3)
+            return [
+              `- ${sid} [${st}]${item.title ? ` ${String(item.title).slice(0, 40)}` : ''}`,
+              accTag,
+              conclusion ? `结论：${conclusion}` : '',
+              artifacts.length > 0 ? `产物：${artifacts.join('、')}` : '',
+            ].filter(Boolean).join('｜')
+          })
         return textContent([
           `计划 ${String(result.planId ?? '')}｜${running ? '执行中' : '未在执行'}`
           + `｜阶段：${phaseLabel(result.phase)}`
@@ -1521,6 +1656,7 @@ function createStatusTool(runtime: any) {
           + (identity ? `｜${identity}` : ''),
           plannerLine,
           cacheLine,
+          ...deliverableLines,
           ...channelLines,
         ].filter(Boolean).join('\n'))
       },
@@ -1793,6 +1929,11 @@ export function apply(ctx: any, config: WorkplanConfig = {}) {
       settingEnv('DSH_WORKPLAN_FAIL_CLOSED_ON_INCOMPLETE'),
     ),
     turnStoppingMaxWaitMs: numericSetting(config.turnStoppingMaxWaitMs, 'DSH_WORKPLAN_TURN_STOPPING_MAX_WAIT_MS', true),
+    childPhaseHooks: {
+      registerPhase: registerChildToolPhase,
+      unregisterPhase: unregisterChildToolPhase,
+      registerAnchor: registerChildSystemAnchor,
+    },
   })
 
   /*
@@ -1854,10 +1995,10 @@ export function apply(ctx: any, config: WorkplanConfig = {}) {
   )
 
   /*
-   * [省钱三件套 ②] 子 Agent 一创建就把全局段换成子会话提示；pre-step 兜底
-   * （冷恢复/事件顺序变化时同样生效，WeakSet 保证只注册一次）。
+   * [省钱三件套 ② + 3.4.0 抗压缩节点 0 锚定] 子 Agent 一创建就把全局段换成子会话静默段
+   * 并挂载不可变任务锚点段（dsh-workplan-anchor）；pre-step 兜底。
    */
-  ctx.effect(() => ctx.on('agent/created', (payload: any) => { shadowWorkplanPromptForChild(payload?.agent) }))
+  ctx.effect(() => ctx.on('agent/created', (payload: any) => { shadowWorkplanPromptForChild(payload?.agent, runtime) }))
 
   ctx.effect(() => ctx.tools.register(createUpdateTool(runtime), { when: toolWhen('dsh_workplan_update') }))
   ctx.effect(() => ctx.tools.register(createCancelTool(runtime), { when: toolWhen('dsh_workplan_cancel') }))
@@ -1913,13 +2054,31 @@ export function apply(ctx: any, config: WorkplanConfig = {}) {
 
   /*
    * [省钱三件套 ②] agent/pre-step 是 waterfall 事件：只保留一个监听器，
-   * 在交给 runtime 之前先给子会话打提示遮蔽补丁（冷恢复/创建事件漏网时兜底），
+   * 在交给 runtime 之前先给子会话打提示遮蔽与节点 0 锚定补丁（冷恢复/创建事件漏网时兜底），
    * 绝不新增第二个监听器去干扰 next() 链。
    */
   ctx.effect(() => ctx.on('agent/pre-step', (payload: any, next: any) => {
-    shadowWorkplanPromptForChild(payload?.agent)
+    shadowWorkplanPromptForChild(payload?.agent, runtime)
     return runtime.onPreStep(payload, next)
   }))
+  /*
+   * [3.4.0][抗压缩防偏离治本] 监听官方 dsh-compaction-basic 压缩完成事件（fail-open）：
+   * 一旦上下文被压缩，立即向根/子会话补注紧凑的【压缩后锚点恢复】（用户原要求锚点 + 硬约束 +
+   * 当前进度/A1–An 验收清单），杜绝压缩抹掉任务书导致注意力归零。
+   */
+  for (const eventName of ['compaction/after', 'session/compacted']) {
+    try {
+      ctx.effect(() => ctx.on(eventName, (payload: any) => {
+        try {
+          runtime.onCompaction?.(payload)
+        } catch {
+          /* fail-open：压缩钩子异常不得阻断主循环 */
+        }
+      }))
+    } catch {
+      /* fail-open：旧版宿主或最小单测桩未声明该事件时静默跳过 */
+    }
+  }
   /*
    * [3.0.1] 后台规划等待期间，followup/queue 可能还没进入下一次 pre-step。
    * 在官方 inbox 插入事件处立即取代旧规划，避免旧结果迟到覆盖新任务。

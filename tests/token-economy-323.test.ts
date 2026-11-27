@@ -112,13 +112,18 @@ test('W1：校验失败后的第二次规划只发「待修问题 + 上轮原文
     assert.equal(plan.title, '整理说明文档')
     assert.equal(seen.length, 2, '第二次成功，不应有第三次调用')
     const first: string = seen[0].messages[0].content[0].text
-    const second: string = seen[1].messages[0].content[0].text
     assert.match(first, /可用部门/)
-    assert.match(second, /待修问题/)
-    assert.match(second, /上一轮输出/)
-    assert.doesNotMatch(second, /可用部门/, '第二次不得重发部门表')
-    assert.doesNotMatch(second, /输出 JSON 结构/, '第二次不得重发 JSON 结构说明')
-    assert.ok(second.includes(JSON.stringify(bad)), '上一轮原文必须逐字带上，不能让模型凭空编子任务')
+    // [3.4.0] 定向修复改为 4 段多轮接续（system + 原 user + assistant 原文 + 精简待修 user），
+    // 前 3 段与首轮逐字节一致以命中 KV 前缀缓存，末段只发待修问题不再重复规则。
+    assert.equal(seen[1].messages.length, 4)
+    assert.equal(seen[1].messages[0].content[0].text, first, 'system 规则前缀必须逐字节一致以命中 KV 缓存')
+    assert.equal(seen[1].messages[1].content[0].text, seen[0].messages[1].content[0].text, '原始 user 前缀必须逐字节一致')
+    assert.equal(seen[1].messages[2].role, 'assistant')
+    assert.ok(seen[1].messages[2].content[0].text.includes(JSON.stringify(bad)), '上一轮原文必须逐字带上，不能让模型凭空编子任务')
+    const repairUser: string = seen[1].messages[3].content[0].text
+    assert.match(repairUser, /待修问题/)
+    assert.doesNotMatch(repairUser, /可用部门/, '修复增量消息不得重发部门表')
+    assert.doesNotMatch(repairUser, /输出 JSON 结构/, '修复增量消息不得重发 JSON 结构说明')
   } finally {
     if (previous === undefined) delete process.env.DSH_WORKPLAN_CONTEXT_GUARD
     else process.env.DSH_WORKPLAN_CONTEXT_GUARD = previous

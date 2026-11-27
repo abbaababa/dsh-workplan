@@ -696,8 +696,21 @@ export function buildDelegateePrompt(input: {
    * 内容一字未删，只是换了位置；`五步工作法` 仍在 `执行要求：` 之前（守门测试
    * three-phase.test.ts:135 钉住）。
    */
+  /*
+   * [3.4.0][省钱·极致 KV 前缀共享]
+   * 1) 首行去掉因部门而异的变量，保证跨部门与同部门专家共享 100% 字节一致静态前缀；
+   * 2) 含动态 effort/memberName 的 rulesBrief 移入【你的分工】动态尾部，避免不同档位
+   *    专家在静态段提前分叉；
+   * 3) 取消要求模型手写盘上备份 JSON（平台结算层自动落盘，省掉整份结果块 2× 输出 token）；
+   * 4) 零异常任务允许 retrospective 写 {"noIssues":true}，不再逼迫模型凑字编造假复盘。
+   */
+  const rulesLines = typeof input.rulesBrief === 'string' && input.rulesBrief.trim()
+    ? input.rulesBrief.split('\n')
+    : []
+  const staticRulesLines = rulesLines.filter((line) => !line.startsWith('- 本任务等级 `') && !line.startsWith('- 第三层全球顶尖专家（'))
+  const dynamicRulesLines = rulesLines.filter((line) => line.startsWith('- 本任务等级 `') || line.startsWith('- 第三层全球顶尖专家（'))
   return defuseSessionReferenceText([
-    `你是「${input.departmentLabel ?? '部门'}」的${roleLabel}，只负责末尾【你的分工】里那一项工作。`,
+    `你是 dsh-workplan 第三层${roleLabel}，只负责末尾【你的分工】里那一项工作。`,
     ...(input.continuation ? fiveStepContinuationPromptLines() : fiveStepPromptLines()),
     '',
     '执行要求（用户强制要求 5 原文口径）：',
@@ -705,40 +718,44 @@ export function buildDelegateePrompt(input: {
       ? '- 执行自己的任务：前三步已在 phase-0 经 self_effort 登记，勿重做，直接从第四步执行；仅核对/补缺（含 approachBasis），全程少走弯路。'
       : '- 执行自己的任务：前三步已在 phase-0 经 self_effort 交 startPhases 登记，不要重做，直接从第四步执行；仅核对/补缺（先全面、全盘、深入梳理、研究、思考自己的任务，再基于第一步完成好的所有结果研究需要哪些资源、哪些工具、具体实施方案与方法、流程、步骤及 approachBasis），全程少走弯路。',
     '- 推理等级以 self_effort 自配为权威（分工表档仅建议），全程按登记档执行；开工前必须先预估本人任务耗时（整数分钟）经 self_effort 的 timeNotice={ declaredMinutes: 正整数分钟, reason? } 上报（ESTIMATE_MISSING/ESTIMATE_INVALID 硬拒）；该上报只是协调信息，没有总时长、单次时长、空闲或回执硬截止，预估或实际耗时不会触发延期、超时接手，也不影响 done 验收。',
-    '- 确保品质、高效执行、不浪费 token。你是第三层叶子执行者，不得派生第四层；无法完成首行写 BLOCKED: 原因。共享可变状态纪律：只写 outputs 声明产物与 reports/wp-member-<成员>-<任务>.json，禁并发写共享文件。',
+    '- 确保品质、高效执行、不浪费 token。你是第三层叶子执行者，不得派生第四层；无法完成首行写 BLOCKED: 原因。共享可变状态纪律：只写 outputs 声明产物，禁并发写共享文件。',
     '- 遇阻上报通道（四步闭环）：遇阻由你先向部门负责人报告具体问题（调 dsh_workplan_escalate({ question, options, needs })）并停写等待；负责人全面梳理你的问题与本部门全部已派发任务执行状态，再由负责人用 dsh_workplan_instruct 把方案告诉你（禁止负责人在你待指示期间把你改派给其他专家）。',
-    '- 完成后 ≤200 字、≤3 句中文回报负责人并写 reports/wp-member-<成员>-<任务>.json 兜底；步数预算（只记账，不是时限）不中断，避免无效试错（verify 参数被拒则正文交结果块）。',
+    '- 完成后 ≤200 字、≤3 句中文回报负责人并直接在末尾输出结构化结果块（平台会自动落盘结算备份，无需再调用写文件工具另存重复 JSON）；零异常任务 retrospective 可简写 {"noIssues":true}；步数预算（只记账，不是时限）；超硬上限触发防失控熔断并收编产物，避免无效试错（verify 参数被拒则正文交结果块）。',
     `- 结果块契约：${EVIDENCE_MARKER_BEGIN} … ${EVIDENCE_MARKER_END} 内合法 JSON（status、phases、acceptance 逐条带证据；有 phase-0 登记可省 planning/preparation）。`,
     '',
     renderExpertReportSpec(),
-    ...(input.rulesBrief ? ['', input.rulesBrief] : []),
+    ...(staticRulesLines.length > 0 ? ['', staticRulesLines.join('\n')] : []),
     '',
     '【你的分工】（本任务书中唯一因专家而异的部分）：',
+    `- 所属部门：${input.departmentLabel ?? '部门'}`,
     `- 成员：${input.member.member}`,
     `- 负责人任务：${input.leaderSubtaskId ?? ''} ${input.leaderSubtaskTitle ?? ''}`,
     `- 你的任务：${input.member.task}`,
     `- 工作目录：${input.cwd || '（未知）'}`,
     `- 产物根目录（唯一，强制）：${input.cwd ? `${input.cwd}/reports/` : '（工作目录）/reports/'}（所有产物写 reports/<任务代号>/<文件名>，勿写进子仓库）。`,
+    ...(dynamicRulesLines.length > 0 ? ['', dynamicRulesLines.join('\n')] : []),
     ...(input.contextPacket ? ['', input.contextPacket] : []),
     ...(qualityBlock ? ['', qualityBlock] : []),
     ...(input.extraContext ? ['', input.extraContext] : []),
-    `【防偏离锚定】紧扣上方用户原要求锚点与本项唯一目标「${String(input.member.task ?? '').replace(/\s+/g, ' ').trim().slice(0, 90)}」，严禁扩题、偏题或漏项；提交前自查 F1–F10。`,
+    `【防偏离锚定】紧扣上方用户原要求锚点与本项唯一目标「${String(input.member.task ?? '').replace(/\s+/g, ' ').trim().slice(0, 260)}」，严禁扩题、偏题、漏项或违背禁止约束；提交前自查 F1–F10。`,
   ].filter(Boolean).join('\n'))
 }
 
 /**
  * [2.5.0][自配档] phase-0 任务书（叶子）：唯一职责=评估复杂度+提交 self_effort。
+ * [3.4.0][省钱] 静态优先重排：固定协议前置（0 字节动态分叉），所属部门移至【你的分工】。
  */
 export function buildPhaseZeroDelegateePrompt(input: { departmentLabel?: string; member: DelegationAssignment; cwd?: string; contextPacket?: string; extraContext?: string }) {
   const roleLabel = '本部门相关领域全球顶尖专家'
   const qualityBlock = renderQualityRequirementsBlock(input.member.qualityRequirements ?? [], '部门负责人')
   return [
-    `你是「${input.departmentLabel ?? '部门'}」${roleLabel}（成员名见末尾），phase-0（先配置后开工，low 启动）。`,
+    `你是 dsh-workplan 第三层${roleLabel}，phase-0（先配置后开工，low 启动；部门与成员见末尾）。`,
     '唯一职责：评估复杂度并完成五步前三步，调 dsh_workplan_delegate(action="self_effort") 一次提交：member + 推理等级 reasoningEffort（轻度=low；qwen 中等=medium/非常复杂=xhigh；非 qwen 中等=high/非常复杂=max）+ 依据（complexityReason 枚举 facts/dependencies/verification-difficulty 或 complexityRationale 二选一）+ startPhases + timeNotice={ declaredMinutes: 正整数分钟, reason? }（整数分钟；缺/非法硬拒 ESTIMATE_MISSING/ESTIMATE_INVALID：你必须自己预估时间，汇报给对应负责人后，才可以重试或继续执行）。',
     `startPhases 下限（problemAnalysis/approach≥40字，依据/资源/准备≥20字）：${START_EVIDENCE_MIN_CHARS_BRIEF}（含少走弯路：先查教训、先验证再动手）。`,
     '勿执行任务、不得派生任何第四层子代理；缺/不合格 startPhases 硬拒（START_EVIDENCE_MISSING / START_EVIDENCE_INCOMPLETE）。提交后结束本回合，平台按自配档接续 phase-1。',
     '',
     '【你的分工】（本任务书中唯一因专家而异的部分）：',
+    `- 所属部门：${input.departmentLabel ?? '部门'}`,
     `- 成员：${input.member.member}`,
     `- 你分到的任务：${input.member.task}`,
     `- 工作目录：${input.cwd || '（未知）'}`,

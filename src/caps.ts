@@ -40,6 +40,51 @@ export function leaderPreRegisterEnabled(): boolean {
   return true
 }
 
+/**
+ * [3.4.0][省钱治本] 纯问答/单点解释直通开关（默认开）：
+ * 无需规划器与子代理的纯概念解释、只读问答直接交给根会话一次答复，零额外会话开销。
+ * `DSH_WORKPLAN_DIRECT_BYPASS=0|false|off` 可关闭。
+ */
+export function directBypassEnabled(): boolean {
+  const raw = String(process.env.DSH_WORKPLAN_DIRECT_BYPASS ?? '').trim().toLowerCase()
+  if (raw === '0' || raw === 'false' || raw === 'off' || raw === 'no') return false
+  return true
+}
+
+/**
+ * [3.4.0][省钱治本] 确定性快路径单会话直入开关（默认开）：
+ * 命中确定性快路径的 low 档单文件简单任务，由平台在建单时直接写入确定性
+ * effortOverride='low' 与精简开工证据，免跑 phase-0 单独会话、直接 1 个子会话完活。
+ * `DSH_WORKPLAN_FAST_PATH_SINGLE_SESSION=0|false|off` 可关闭。
+ */
+export function fastPathSingleSessionEnabled(): boolean {
+  const raw = String(process.env.DSH_WORKPLAN_FAST_PATH_SINGLE_SESSION ?? '').trim().toLowerCase()
+  if (raw === '0' || raw === 'false' || raw === 'off' || raw === 'no') return false
+  return true
+}
+
+/**
+ * [3.4.0][省钱治本] 负责人已交完整开工证据时自动为未单写 pre-register 的专家继承预登记（默认开）：
+ * 消除「leaderPreRegister 默认开但 schema/提示词断链导致每个专家仍白跑一遍 phase-0」的整倍会话开销。
+ * `DSH_WORKPLAN_AUTO_INHERIT_EXPERT_PRE_REGISTER=0|false|off` 可关闭。
+ */
+export function autoInheritExpertPreRegisterEnabled(): boolean {
+  const raw = String(process.env.DSH_WORKPLAN_AUTO_INHERIT_EXPERT_PRE_REGISTER ?? '').trim().toLowerCase()
+  if (raw === '0' || raw === 'false' || raw === 'off' || raw === 'no') return false
+  return true
+}
+
+/**
+ * [3.4.0][防千万 token 失控] 运行期步数/token 硬上限实时熔断开关（默认开）：
+ * 触及软上限发一次收尾提醒；触及硬上限主动中止失控子会话并收编盘上已有产物，
+ * 彻底杜绝 124 步 13M token 失控烧钱。`DSH_WORKPLAN_STEP_BUDGET_ENFORCE=0|false|off` 可关闭。
+ */
+export function stepBudgetEnforceEnabled(): boolean {
+  const raw = String(process.env.DSH_WORKPLAN_STEP_BUDGET_ENFORCE ?? '').trim().toLowerCase()
+  if (raw === '0' || raw === 'false' || raw === 'off' || raw === 'no') return false
+  return true
+}
+
 export function envPositiveInt(name: string, fallback: number): number {
   const raw = process.env[name]
   if (typeof raw !== 'string' || raw.trim() === '') return fallback

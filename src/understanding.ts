@@ -403,18 +403,21 @@ export function extractTaskElements(taskText: unknown): TaskElements {
   })) pushElement(elements, seen, element)
 
   /*
-   * Negations are recorded for readability but are not blocking by themselves.
-   * A negation's object often includes the verb ("不要修改业务代码"), so a
-   * legitimate synonym ("不得改动业务代码") would be a false deviation. When the
-   * object is a path, id or number it is already covered by the hard kinds
-   * above, so nothing checkable is lost.
+   * [3.4.0][防偏离治本] 明确禁止/不得类负面约束升级为硬锚点（hard: true）：
+   * 此前全部 negation 标为 hard: false，导致「不要修改业务代码 / 禁止删除数据库」被
+   * 规划器整条丢弃时仍判 verdict='aligned'。下方 elementPresent 已增加同义动词剥离与
+   * 否定极性核对，合法改写（如「不要修改业务代码」→「不得改动业务代码」）不会误报。
    */
-  for (const element of collectMatches(text, NEGATION_PATTERN, (match) => ({
-    kind: 'negation' as const,
-    value: `禁止:${match[1]}`,
-    evidence: clauseOf(text, match.index, match[0].length),
-    hard: false,
-  }))) pushElement(elements, seen, element)
+  const HARD_NEGATION_HEAD = /^(?:不要|禁止|不得|严禁|不能|不可|切勿|不允许)/
+  for (const element of collectMatches(text, NEGATION_PATTERN, (match) => {
+    const target = String(match[1] ?? '').trim()
+    return {
+      kind: 'negation' as const,
+      value: `禁止:${target}`,
+      evidence: clauseOf(text, match.index, match[0].length),
+      hard: HARD_NEGATION_HEAD.test(match[0]) && target.length >= 2,
+    }
+  })) pushElement(elements, seen, element)
 
   const deliverableClauses = splitClauses(text)
     .filter((clause) => /(?:交付|产出|输出|发布|提供|生成|给出)/.test(clause))
@@ -1284,7 +1287,18 @@ function elementPresent(planText: string, element: TaskElement): boolean {
     return haystack.includes(value) || haystack.includes(value.replace(/-/g, ''))
   }
   if (element.kind === 'negation') {
-    return haystack.includes(normalizeForMatch(element.value.replace(/^禁止:/, '')))
+    const rawTarget = element.value.replace(/^禁止:/, '')
+    const target = normalizeForMatch(rawTarget)
+    if (!target) return true
+    const hasNegationPolarity = /(?:不要|禁止|不得|严禁|不能|不可|切勿|避免|不允许|不许|无需|禁|勿|不改|不动|不删|不写)/.test(planText)
+    if (!hasNegationPolarity) return false
+    if (haystack.includes(target)) return true
+    // 同义动词剥离：例如「不要修改业务代码」在计划中写成「不得改动业务代码」时，核对核心宾语「业务代码」。
+    const core = normalizeForMatch(
+      rawTarget.replace(/^(?:修改|改动|更改|编辑|删除|移除|触碰|变更|覆盖|重写|运行|执行|安装|重启|动|改|删|写|用|跑)/, ''),
+    )
+    if (core.length >= 2 && haystack.includes(core)) return true
+    return false
   }
   return haystack.includes(normalizeForMatch(element.value))
 }
