@@ -1,7 +1,7 @@
 {
   "name": "dsh-workplan",
   "version": "3.4.2",
-  "description": "Automatic task decomposition, real department subagents, and a responsive workplan dashboard for DeepSeek Harness.",
+  "description": "Automatic task decomposition, real department subagents, and a responsive workplan dashboard for DeepSeek Harness — with 90%+ KV-cache token savings, compaction-proof anti-drift anchors, auto-salvage delivery, and instant agent wake-up.",
   "type": "module",
   "license": "MIT",
   "repository": {

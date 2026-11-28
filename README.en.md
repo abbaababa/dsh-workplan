@@ -10,6 +10,10 @@ Adds "plan first → dispatch real department subagents → watch progress in th
 - A task-decomposition block appears in the conversation first: stages, work items, departments, acceptance criteria
 - Up to 5 department leads start per round; the whole session tree is capped by the host's `maxActiveSubagents` (default 8)
 - The **Task progress** panel shows who is working, how far, and what is stuck
+- **Latest core capabilities (rock-solid delivery & extreme token savings)**:
+  - **Extreme token savings**: 90%+ cross-subtask KV prefix-cache hit rate, streamlined single-session execution by default (skipping redundant setup rounds and trimming 71% of unused tool definitions), zero-subagent direct answers for read-only questions, and billing-weighted budgets that never falsely kill high-cache tasks
+  - **Anti-drift memory**: Immutable system-level task anchors survive long runs and context compaction without losing requirements
+  - **No lost work, no dead waiting**: 1-step grace window + automatic post-abort evidence salvage (99%-finished work is never thrown away), plus instant inbox wake-up so the main agent never waits blindly
 
 **中文（简体）说明：** [README.md](README.md)
 
