@@ -1,3 +1,23 @@
+## 3.4.2 — 2026-11-28（全流程高质量交付与极致省 Token 治本版）
+
+本版基于主流大模型计费与推理机制（输出/思考链高权重、KV 前缀缓存逐字节连续性、Test-time Compute 按难度分配）、DeepSeek Harness `0.2.3-alpha.2` 运行期契约，以及 `T7` / `T7R` / `T7D` 多轮实机跑测取证，在不牺牲高难复杂任务最终交付质量的前提下完成全链路质量保障与降本治本改造：
+
+- **三档成本模式开关（`DSH_WORKPLAN_COST_PROFILE`，默认 `balanced`）**：
+  - `balanced`（默认）：零质量损失去浪费全开 + 规划器按任务真实复杂度自适应选档 + 子任务保留按真实难度配档 + 等效计费权重与全计划总预算双熔断；
+  - `ultra-lean`：极穷模式，强制 `low` 档 + 更紧步数/预算（单会话 30 万 / 计划 50 万）+ 默认关闭自动续跑；
+  - `full`（兼容旧别名 `DSH_WORKPLAN_LEAN_MODE=0`）：完整保留 `3.4.1` 重型三层流程。
+- **真正打通跨会话 KV 前缀缓存（治本）**：`buildChildSystemAnchor`（Node-0 `system/message`）剥离单子任务/单专家私有字段，仅保留全计划共享的用户原要求、硬约束与最新重规划变更，保证同计划并行负责人与专家从 `system/message` 到 Static-First `user/message` 前缀连续一致；新增 `registerPlanSystemAnchor` 在 `startActivation` 前预登记，消除 `agent/created` 竞态；子任务私有目标与 A1–An 验收清单改由 `buildChildRecoveryAnchor` 在压缩恢复时完整补注。
+- **跳过冗余 Phase-0 二次建会话 + `leader-direct` 工具裁剪**：`maybePlan` 在 `balanced`/`ultra-lean` 下直接为所有子任务预登记合规开工基线并保留各自难度档（`balanced` 不拉低高难任务推理档）；`leader-direct` 单会话模式从 Step 1 隐藏 `dsh_workplan_delegate`（3,098 字）与 `dsh_workplan_instruct`（302 字），工具面再减 71%。
+- **消除无效步数与根会话膨胀**：默认免除子会话开工前 `send_message` 预估耗时步（每子任务省 1–2 步 LLM）、静默 45s 聊天心跳刷屏（防止提前触发 Compaction 炸毁根会话缓存，侧栏进度不受影响），且不强设低 `maxTokens` 避免推理模型截断重试；专家派发在漏填 `timeNotice` 时自动兜底继承预登记以跳过专家 Phase-0。
+- **按真实花钱权重熔断 + 新增全计划总预算硬上限 + 高缓存命中免误杀**：新增 `computeWeightedTokens`（`cacheRead×0.1 + input×1 + cacheWrite×1.25 + output×5`）与计划级总预算（`DSH_WORKPLAN_PLAN_TOKEN_BUDGET` / `DSH_WORKPLAN_PLAN_WEIGHTED_BUDGET`），`resolveProfileBudgets` 按子任务数动态扩容并将原始 token 兜底上限抬升至 `6,000,000`（`balanced`）/ `2,000,000`（`ultra-lean`），不误杀高缓存命中优质任务（如 93% `cacheRead` 的 `T7R`）、精准刹停高输出死循环。
+- **事后证据打捞 + 1 步优雅交卷宽限窗（彻底根治 99% 完成前功尽弃）**：`executeSubtask`、`settleContinuation` 与 `delegateTool` 新增 `extractLatestEvidenceTextFromSession` 自动打捞已产出的 `WORKPLAN_EVIDENCE` 证据块直接结算（`T7R` `d3d69363` 根因）；`onPreStep` 新增 1 步预算宽限窗（`subtaskGraceUsed` / `delegateGraceUsed` / `graceStepsUsed`）并联动 `budgetGraceToolGuardReason` 锁定全部工具调用（若误调 `dsh_workplan_verify` 等工具则 0ms 拦截后再给 1 步纯文本恢复），让 `T7D` 等刚 `BUILD OK` 的 99% 完成任务零浪费立即交卷。
+- **专家报告顶层 `execution`/`verification` 自动归位 + 活Leader精确通知与Phase-0排空**：`adjudicateExpertReport` 自动将顶层 `execution` / `verification` 归位进 `phases`（修复 `T7D` 专家 `866b2c37` 误报 `phases 缺失`）；`settleContinuation` 与 `delegateTool` 动态解析活负责人 `current?.childId`（不再发往已结束 Phase-0 旧会话）；`executeSubtask` 启动 Phase-1 前先排空在途 Phase-0 专家并打捞证据。
+- **重规划（`replanPlan`）开关对等、UI 即时落盘与 `directMode` 耐久重放**：抽离 `applyBalancedDirectPreRegistration` 供 `maybePlan` 与 `replanPlan` 共用并在尾部立即 `flushPendingWorkplanUpdates(session)`；`buildUpdateMessage` / `applyStatus` 持久化并重放 `directMode`，根治重规划子任务 `FIRST_STEP_MUST_BE_TIME_NOTICE` 误拦与旧行阻塞卡滞。
+- **主 Agent 异步唤醒（`workplan-wake`）与防死等 `wait_agent` 拦截**：将 `'workplan-wake'` 纳入 `PLAN_CONTINUATION_KINDS`，`notifyRootAgentInboxOnAsyncEnd` 与 `armAutoResume` 结束时通过 `rootAgent.inject` / `followup` 主动唤醒主会话，并通过 `waitAgentGuardReason` 拦截后台派发活跃期间的盲目 15 分钟 `wait_agent` 傻等。
+- **精准放宽零开销直通与安全快车道**：`isDirectReadOnlyQuestion` 覆盖 260 字以内只读查文件/解释代码/对比差异/配置问答；`evaluateFastPathEligibility` 支持无显式文件路径的短小单域明确改动（同时严拒根因排查/架构重构/跨模块任务，守住复杂任务质量底线）。
+- **修复 DSH `0.2.3-alpha.2` 多轮修复崩溃与长中文禁令误杀**：为 `runPlanner` 多轮修复的合成 `assistant` 消息补齐 `{ kind: 'model', provider, model }` `source` 元数据，彻底消除 `@deepseek-ai/dsh-llm` 读取 `source.replayState` 导致的 `0.0s UNKNOWN` 崩溃，并在宿主拒收合成 `assistant` 消息时自动降级单轮附底稿重试；同时扩展 `elementPresent` 对 `参考/查阅/读取/引用/使用/复用` 等动词与长中文禁止项的同义改写核对，防止高质量计划在首轮被 `CONTEXT_GUARD` 误判缺失。
+- **修复任务进度界面异常与多子任务预算按规模自适应**：将计划级运行期预算硬熔断（`BUDGET_HARD_ABORT`）与用户主动取消（`CANCELLED`）隔离（`abortBudget` vs `abortDispatch`），预算熔断时只停当前在途子任务、保留下游 `pending` 并置 `phase='blocked'`，不再误标 `cancelled` 导致左侧「任务进度」卡片消失及内联卡冲突；`balanced` / `ultra-lean` 预算随子任务数动态扩容（`balanced` 默认单子会话 60 万等效 / 600 万原始上限，全计划 120–400 万等效）；在 `client.ts` `plainError` 与 `watchdog.ts` `describeError` 剥离确定性错误内部 `［stack: ...］` 调用栈；并在 `skipChildTimeNoticeEnabled` 生效时同步跳过 `noticeChannel` 挂载，消灭 `NOT_OBSERVED_IN_SESSION_LOG` 假告警；强化反冗余测试脚本与反大范围 `ls -R reports` 纪律；在 `PROMPT_SECTION` 强化运行中澄清改口径优先走 `hold` / `replan` 保持进度面板同步。
+
 ## 3.4.1 — 2026-11-27（macOS 27 + DSH 0.2.3-alpha.2 实机运行全量取证治本修复版）
 
 本版基于 macOS 27 + DeepSeek Harness `0.2.3-alpha.2`（`deepseek-flash`）实机运行计划 `wp-c04490d4-71f2-4b69-a0fa-87cdfc52ae09` 的 12 份完整会话日志取证，对导致子任务反复报 `EVIDENCE_INCOMPLETE`、`EMPTY_CHILD_OUTPUT`、`CHILD_NOT_COMPLETED (MALFORMED_RESPONSE)` 以及 Step-2 `tool-removal` 缓存击穿的全部 8 个底层代码根因做一次性治本修复：

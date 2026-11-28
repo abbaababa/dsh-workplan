@@ -335,6 +335,8 @@ export function planDelegations(input: {
   singleStagePlan?: boolean
   /** 可选：覆盖默认复杂任务人数下限（缺省读取 caps.MIN_COMPLEX_DELEGATE_MEMBERS）。 */
   minHeadcount?: number
+  /** [3.4.2] 可选：运行期有效单部门人数上限（由 costProfile 派生）。 */
+  maxHeadcount?: number
 }): DelegationPlan {
   const empty = { ok: false as const, code: 'DELEGATE_CONSOLIDATION_MISSING', members: [], clamped: [], taskEffort: null, taskEffortClamped: null }
   const consolidation = input?.consolidation
@@ -384,7 +386,12 @@ export function planDelegations(input: {
       error: '本任务为 low 档（或未配置，视同 low）：按用户裁决 D1–D5 禁止第三层下派，review/dispatch 一律硬拒，无任何例外通道。请部门负责人亲自执行：完成五步第 1/2/3 步（任务梳理 + 资源/工具/方案研究 + 准备）后经 dsh_workplan_delegate(action="direct") 登记 startPhases={ planning{ problemAnalysis[], approach[], approachBasis[], resources[], tools[] }, preparation{ prepared[], evidence[] } }（' + START_EVIDENCE_MIN_CHARS_BRIEF + '；可选 reasoningEffort="low"；不接受分工表），平台将以 low 档接续（宿主另起执行会话并携带登记产物）由你亲自执行。已完成的历史派发不回溯。[3.2.0] 收尾纪律：有登记证据时 phases.planning / phases.preparation 可省略——平台自动并入并集落账（登记永不丢失），不要重抄；无登记时才须自带这两组。',
     }
   }
-  const memberCap = complexTask ? MAX_COMPLEX_DELEGATE_MEMBERS : MAX_DELEGATE_MEMBERS
+  const configuredCap = Number.isInteger((input as any).maxHeadcount) && Number((input as any).maxHeadcount) >= 1
+    ? Number((input as any).maxHeadcount)
+    : null
+  const memberCap = complexTask
+    ? (configuredCap !== null ? Math.min(MAX_COMPLEX_DELEGATE_MEMBERS, configuredCap) : MAX_COMPLEX_DELEGATE_MEMBERS)
+    : (configuredCap !== null ? Math.min(MAX_DELEGATE_MEMBERS, configuredCap) : MAX_DELEGATE_MEMBERS)
   /*
    * [3.1.0] 不再静默截断：完整分工表进入校验链，超上限由下方 DELEGATE_HEADCOUNT_MAX
    * 闸明确拒收（可照做的精简/拆两轮指引）。旧实现在这里 slice(0, memberCap)，
@@ -719,9 +726,10 @@ export function buildDelegateePrompt(input: {
       : '- 执行自己的任务：前三步已在 phase-0 经 self_effort 交 startPhases 登记，不要重做，直接从第四步执行；仅核对/补缺（先全面、全盘、深入梳理、研究、思考自己的任务，再基于第一步完成好的所有结果研究需要哪些资源、哪些工具、具体实施方案与方法、流程、步骤及 approachBasis），全程少走弯路。',
     '- 推理等级以 self_effort 自配为权威（分工表档仅建议），全程按登记档执行；开工前必须先预估本人任务耗时（整数分钟）经 self_effort 的 timeNotice={ declaredMinutes: 正整数分钟, reason? } 上报（ESTIMATE_MISSING/ESTIMATE_INVALID 硬拒）；该上报只是协调信息，没有总时长、单次时长、空闲或回执硬截止，预估或实际耗时不会触发延期、超时接手，也不影响 done 验收。',
     '- 确保品质、高效执行、不浪费 token。你是第三层叶子执行者，不得派生第四层；无法完成首行写 BLOCKED: 原因。共享可变状态纪律：只写 outputs 声明产物，禁并发写共享文件。',
+    '- 省 token 硬纪律：脚本须从磁盘直接读取上游 JSON/CSV/MD，严禁把大表硬编码进数百行脚本源码；生成长报告后用脚本断言核验，禁止全文 read 自己刚生成的长文件；严禁 ls -R reports 或扫描声明 inputs 外的历史旧目录。',
     '- 遇阻上报通道（四步闭环）：遇阻由你先向部门负责人报告具体问题（调 dsh_workplan_escalate({ question, options, needs })）并停写等待；负责人全面梳理你的问题与本部门全部已派发任务执行状态，再由负责人用 dsh_workplan_instruct 把方案告诉你（禁止负责人在你待指示期间把你改派给其他专家）。',
     '- 完成后 ≤200 字、≤3 句中文回报负责人并直接在末尾输出结构化结果块（平台会自动落盘结算备份，无需再调用写文件工具另存重复 JSON）；零异常任务 retrospective 可简写 {"noIssues":true}；步数预算（只记账，不是时限）；超硬上限触发防失控熔断并收编产物，避免无效试错（verify 参数被拒则正文交结果块）。',
-    `- 结果块契约：${EVIDENCE_MARKER_BEGIN} … ${EVIDENCE_MARKER_END} 内合法 JSON（status、phases、acceptance 逐条带证据；有 phase-0 登记可省 planning/preparation）。`,
+    `- 结果块契约：${EVIDENCE_MARKER_BEGIN} … ${EVIDENCE_MARKER_END} 内合法 JSON：{"status":"done","phases":{"execution":{"steps":[...],"deviations":[]},"verification":{"checks":[...],"retrospective":{"noIssues":true}}},"acceptance":[...],"report":{...}}（有 phase-0 登记可省 planning/preparation）。`,
     '',
     renderExpertReportSpec(),
     ...(staticRulesLines.length > 0 ? ['', staticRulesLines.join('\n')] : []),

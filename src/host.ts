@@ -163,7 +163,7 @@ const ROOT_UNUSABLE_TOOLS = new Set([
   'dsh_workplan_verify',
 ])
 
-export type ChildToolPhase = 'leader-phase-0' | 'leader-phase-1' | 'leaf-phase-0' | 'leaf-phase-1'
+export type ChildToolPhase = 'leader-phase-0' | 'leader-phase-1' | 'leader-direct' | 'leaf-phase-0' | 'leaf-phase-1'
 
 /*
  * [3.4.0][KV Prefix Cache 治本] 不可变子会话阶段登记表 + 会话级记忆化：
@@ -181,6 +181,7 @@ export type ChildToolPhase = 'leader-phase-0' | 'leader-phase-1' | 'leaf-phase-0
  */
 const REGISTERED_CHILD_PHASES = new Map<string, ChildToolPhase>()
 const REGISTERED_CHILD_ANCHORS = new Map<string, string>()
+const REGISTERED_PARENT_PLAN_ANCHORS = new Map<string, string>()
 const MEMOIZED_SESSION_PHASE = new WeakMap<object, ChildToolPhase | null>()
 
 export function registerChildToolPhase(sessionId: string, phase: ChildToolPhase): void {
@@ -199,6 +200,12 @@ export function unregisterChildToolPhase(sessionId: string): void {
 export function registerChildSystemAnchor(sessionId: string, anchorText: string): void {
   if (typeof sessionId === 'string' && sessionId.trim() !== '' && typeof anchorText === 'string' && anchorText.trim() !== '') {
     REGISTERED_CHILD_ANCHORS.set(sessionId.trim(), anchorText.trim())
+  }
+}
+
+export function registerPlanSystemAnchor(parentSessionId: string, anchorText: string): void {
+  if (typeof parentSessionId === 'string' && parentSessionId.trim() !== '' && typeof anchorText === 'string' && anchorText.trim() !== '') {
+    REGISTERED_PARENT_PLAN_ANCHORS.set(parentSessionId.trim(), anchorText.trim())
   }
 }
 
@@ -278,6 +285,7 @@ export function detectChildToolPhase(session: any, depth: number): ChildToolPhas
   if (
     headerPhase === 'leader-phase-0'
     || headerPhase === 'leader-phase-1'
+    || headerPhase === 'leader-direct'
     || headerPhase === 'leaf-phase-0'
     || headerPhase === 'leaf-phase-1'
   ) {
@@ -295,6 +303,7 @@ export function detectChildToolPhase(session: any, depth: number): ChildToolPhas
     else if (prompt.includes('只负责末尾【你的分工】里那一项工作')) detected = 'leaf-phase-1'
   } else if (depth === 1) {
     if (prompt.includes('执行负责人，phase-0（先配置后开工')) detected = 'leader-phase-0'
+    else if (prompt.includes('【直执单会话模式】')) detected = 'leader-direct'
     else if (prompt.includes('你是 dsh-workplan 部门执行 Agent')) detected = 'leader-phase-1'
   }
   if (detected && session && typeof session === 'object') {
@@ -312,17 +321,16 @@ export function workplanToolAdmitted(toolName: string, session: any): boolean {
     const rootLike = !header.parentSession && header.origin !== 'subagent' && depth === 0
     if (rootLike) return !ROOT_UNUSABLE_TOOLS.has(toolName)
     if (ROOT_ONLY_TOOLS.has(toolName)) return false
+    const phase = detectChildToolPhase(session, depth)
     if (HEAD_ONLY_SUPPLEMENT_TOOLS.has(toolName)) {
       if (depth > 1) return false
-      const phase = detectChildToolPhase(session, depth)
-      if (phase === 'leader-phase-0') return false
+      if (phase === 'leader-phase-0' || phase === 'leader-direct') return false
       return true
     }
-    const phase = detectChildToolPhase(session, depth)
     if (phase === 'leader-phase-0' || phase === 'leaf-phase-0') {
       if (toolName === 'dsh_workplan_verify') return false
     }
-    if (phase === 'leaf-phase-1') {
+    if (phase === 'leaf-phase-1' || phase === 'leader-direct') {
       if (toolName === 'dsh_workplan_delegate') return false
     }
     // delegate 在未知/phase-0 子会话一律保留：叶子 phase-0 要用 action="self_effort" 开工登记。
@@ -334,14 +342,14 @@ export function workplanToolAdmitted(toolName: string, session: any): boolean {
 
 
 /*
- * [3.1.6→3.4.0][省钱 + 抗压缩系统头锚定] 系统提示分段：
+ * [3.1.6→3.4.2][省钱 + 抗压缩系统头锚定] 系统提示分段：
  *  1. 主 Agent 专属段不再注入子 Agent，改以全子会话字节一致的静态子协议段替换
  *     （node 0 `system/message` 跨会话共享 KV 前缀，且免疫 dsh-compaction-basic 压缩）；
- *  2. 若 runtime 已登记该子会话的不可变任务锚点/硬约束/验收清单，同步挂载为
- *     `dsh-workplan-anchor`（order = PROMPT_ORDER + 1），即使长任务触发多轮压缩，
- *     用户原要求锚点与 A1–An 验收清单也永久驻留 system/message 绝不丢失。
+ *  2. 共享计划级任务锚点（原要求 + 硬约束 + 最新重规划）在 startActivation 前即按父会话登记，
+ *     保证同计划所有子会话的 node 0 `system/message` 逐字节一致（真正跨会话命中 KV Cache），
+ *     同时消除 agent/created 时锚点尚未入表的抢跑竞态。
  */
-const PROMPT_SHADOW_REGISTERED = new WeakSet<object>()
+const PROMPT_SHADOW_ANCHOR_STATE = new WeakMap<object, boolean>()
 const CHILD_PROMPT_SHADOW = [
   '本会话是 dsh-workplan 的子会话：按任务书与下方任务锚点严格执行，不得扩题、偏题或违背硬约束；',
   '主计划的创建、派发、审阅与最终交付由主 Agent 负责；交付时按契约输出完整结构化结果块（平台自动落盘结算备份，无需另调写文件工具重复写结算 JSON）。',
@@ -353,17 +361,21 @@ function shadowWorkplanPromptForChild(agent: any, runtime?: any) {
     const header = session?.header
     if (!header) return
     if (!header.parentSession && header.origin !== 'subagent' && sessionDelegationDepth(session) === 0) return
-    if (PROMPT_SHADOW_REGISTERED.has(agent)) return
     const scoped = agent?.ctx
     if (!scoped?.systemPrompt || typeof scoped.systemPrompt.section !== 'function') return
     const sid = typeof session?.id === 'string' ? session.id.trim() : ''
+    const parentSid = typeof header?.parentSession === 'string' ? header.parentSession.trim() : ''
     const anchorText = (sid ? REGISTERED_CHILD_ANCHORS.get(sid) : '')
       || (typeof runtime?.childAnchorForSession === 'function' ? runtime.childAnchorForSession(sid) : '')
-    const shadowText = typeof anchorText === 'string' && anchorText.trim() !== ''
+      || (parentSid ? REGISTERED_PARENT_PLAN_ANCHORS.get(parentSid) : '')
+    const hasAnchor = typeof anchorText === 'string' && anchorText.trim() !== ''
+    const prevHadAnchor = PROMPT_SHADOW_ANCHOR_STATE.get(agent)
+    if (prevHadAnchor === true || (prevHadAnchor === false && !hasAnchor)) return
+    const shadowText = hasAnchor
       ? `${CHILD_PROMPT_SHADOW}\n\n${anchorText.trim()}`
       : CHILD_PROMPT_SHADOW
     scoped.systemPrompt.section({ name, order: PROMPT_ORDER, text: shadowText, interpolate: false })
-    PROMPT_SHADOW_REGISTERED.add(agent)
+    PROMPT_SHADOW_ANCHOR_STATE.set(agent, hasAnchor)
   } catch {
     /* fail-open：注册不上就保留全局段（多付 token，不少能力）。 */
   }
@@ -397,15 +409,15 @@ export const PROMPT_ORDER = 40
  * 自报版本时被误导，用户也拿不到真实版本（用户要求 13/G 要如实报告版本）。
  * 硬编码字符串与 meta 双写是根因，改为同一常量派生。
  */
-export const PLUGIN_VERSION = '3.4.1'
+export const PLUGIN_VERSION = '3.4.2'
 
 const PROMPT_SECTION = [
-  '本会话已启用自动任务分解。新任务首步前生成【任务分解】；分配任务前必须先告知预估耗时（由平台自动发【规划预告】/【派发预告】与固定文案「任务正在分配中，请稍等一下......」「任务已经完成分配，正在执行中......」，勿重复、勿改任务原文）；需派发/续跑调 dsh_workplan_dispatch（默认 wait，长任务 mode: "async" 后用 dsh_workplan_status 查进度；后台生成中先等待）。',
+  '本会话已启用自动任务分解。新任务首步前生成【任务分解】；分配任务前必须先告知预估耗时（由平台自动发【规划预告】/【派发预告】与固定文案「任务正在分配中，请稍等一下......」「任务已经完成分配，正在执行中......」，勿重复、勿改任务原文）；需派发/续跑或汇合等待在途派发优先调 dsh_workplan_dispatch（默认 mode: "wait" 在途自动汇合并立即返回；长任务用 mode: "async" 后再用 mode: "wait" 汇合或 dsh_workplan_status 查进度，严禁对本插件派发调 wait_agent 空等；后台生成计划中先等待）。',
   `质量与原子门禁：子任务须含 qualityRequirements（缺拒 DISPATCH_QUALITY_REQUIREMENTS_MISSING / DELEGATE_QUALITY_REQUIREMENTS_MISSING，replan 补齐）；单句 ≤300 字单目标单产物无并列词（DELEGATE_TASK_NOT_ATOMIC）；role 仅 expert；专家交 F10 report，负责人交 F11 departmentSummary。${PLUGIN_VERSION} 版本（用户要求 13）：对外一律写 ${PLUGIN_VERSION}。`,
   '主 Agent 五步开工证据协议（3.0.8）：首次 dispatch 须附 startPhases——第一步全面、全盘、深入梳理、研究、思考自己的任务；第二步基于刚才第一步完成好的所有结果，再全面、全盘、深入地开展梳理、研究和思考（资源、工具与少走弯路的方法、流程和步骤及 approachBasis）；第三步备齐资源工具并给就绪证据（缺/不达标硬拒 START_EVIDENCE_MISSING / START_EVIDENCE_INCOMPLETE，重规划须重交）。',
   'plan 模式禁 dispatch；寒暄/确认/“继续”/问进度不分解；降级先报原因等确认。交付判据：全 done 且 deliveryReady=true（verification="structured" 且 acceptance 全 pass），取消≠完成；未就绪禁 present，开头写「未完成：剩余 N 项与原因」并继续 dispatch。最终答复 ≤800 字（紧扣用户原意，不复述证据 JSON）。',
   '无执行时限：不设总时长、单次时长、空闲无进展或回执硬截止，不得仅因执行较久、暂时无新事件或未立即回执而中止；estimateMinutes、timeNotice、timeSpentMinutes 只用于协调与告知，extendMs 已停用（TIME_LIMITS_DISABLED）；用户显式取消、真实执行错误、证据/质量门禁仍然有效。',
-  '闭环：①待指示（escalated）用 dsh_workplan_instruct 答复或 update 置 blocked；②ackOverdue 先 status 必要时 followup；③需求变更用 replan 后 dispatch，补说明用 update.note；④「跨部门待转达」（needs）用 dsh_workplan_handoff 处置完，否则拦 present；⑤第四步复盘自动落永久记忆（dsh_workplan_lessons 只读查询，occurrences≥2 写入后续约束）。',
+  '闭环：①待指示（escalated）用 dsh_workplan_instruct 答复或 update 置 blocked；②ackOverdue 先 status 必要时 followup；③需求变更或用户澄清改口径须用 replan（在途加 abortRunning: true）后 dispatch（确需先问用户可先 dsh_workplan_hold，勿绕开本插件私调内置 subagent 致进度面板失步），补说明用 update.note；若个别受阻项确由主 Agent 亲自补做，落盘核验后须调 dsh_workplan_update（附 structured + acceptance pass + artifacts）改判 done 再 dispatch 解锁下游，禁抛开台账包揽全部剩余项或扫 reports 历史旧目录；④「跨部门待转达」（needs）用 dsh_workplan_handoff 处置完，否则拦 present；⑤第四步复盘自动落永久记忆（dsh_workplan_lessons 只读查询，occurrences≥2 写入后续约束）。',
 ].join('\n')
 
 /**
@@ -1618,6 +1630,11 @@ function createStatusTool(runtime: any) {
         const cacheLine = cache && Number(cache.calls ?? 0) > 0
           ? renderCacheSummary(cache as any)
           : ''
+        const budget = isRecord(result.budget) ? result.budget : null
+        const budgetLine = budget && Number(cache?.calls ?? 0) > 0
+          ? `成本档位：${String(budget.costProfile ?? 'balanced')}｜计划消耗 ${Number(budget.planTokens ?? 0).toLocaleString('en-US')} raw / ${Number(budget.planWeightedTokens ?? 0).toLocaleString('en-US')} 等效计费 token`
+            + (Number(budget.planWeightedLimit ?? 0) > 0 ? `（等效上限 ${Number(budget.planWeightedLimit).toLocaleString('en-US')}）` : '')
+          : ''
         const channelLines = statuses
           .filter((item: any) => isRecord(item?.noticeChannel))
           .slice(0, 12)
@@ -1677,6 +1694,7 @@ function createStatusTool(runtime: any) {
           + (identity ? `｜${identity}` : ''),
           plannerLine,
           cacheLine,
+          budgetLine,
           ...deliverableLines,
           ...channelLines,
         ].filter(Boolean).join('\n'))
@@ -1881,8 +1899,17 @@ function numericSetting(configValue: any, envName: string, allowZero = false) {
  */
 export function toolGuardReason(
   exec: any,
-  runtime: { planModeActive(session: any): boolean; presentDenialReason(agent: any): string | undefined },
+  runtime: {
+    planModeActive(session: any): boolean
+    presentDenialReason(agent: any): string | undefined
+    waitAgentGuardReason?(agent: any): string | undefined
+    budgetGraceToolGuardReason?(exec: any): string | undefined
+  },
 ) {
+  if (typeof runtime.budgetGraceToolGuardReason === 'function') {
+    const graceDenial = runtime.budgetGraceToolGuardReason(exec)
+    if (graceDenial) return graceDenial
+  }
   if (exec?.name === 'dsh_workplan_dispatch' || exec?.name === 'dsh_workplan_release') {
     const session = exec?.agent?.session
     if (session && runtime.planModeActive(session)) {
@@ -1891,6 +1918,9 @@ export function toolGuardReason(
         : '当前是 plan 模式：计划已生成，请先让用户审阅/退出 plan 模式，再调用 dsh_workplan_dispatch。'
     }
     return undefined
+  }
+  if (exec?.name === 'wait_agent' && typeof runtime.waitAgentGuardReason === 'function') {
+    return runtime.waitAgentGuardReason(exec?.agent)
   }
   if (exec?.name === 'present') return runtime.presentDenialReason(exec?.agent)
   return undefined
@@ -1954,6 +1984,7 @@ export function apply(ctx: any, config: WorkplanConfig = {}) {
       registerPhase: registerChildToolPhase,
       unregisterPhase: unregisterChildToolPhase,
       registerAnchor: registerChildSystemAnchor,
+      registerPlanAnchor: registerPlanSystemAnchor,
     },
   })
 

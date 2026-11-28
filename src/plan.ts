@@ -784,22 +784,34 @@ export function isUserConfirmation(value: any) {
  * 严格 fail-closed：任何写/改/建/审/拆/报告/文件路径/长文本需求一律返回 false，走正常分解。
  */
 const DIRECT_QA_ACTION_BLOCK = /(?:修复|修改|改动|改写|重写|实现|编写|开发|新增|添加|删除|移除|重构|优化|改造|升级|部署|发布|构建|测试|排查|诊断|审查|审计|调研|分析报告|制定|设计|规划|拆解|对比方案|生成|创建|写入|提交|运行|执行|安装|配置|导出|翻译|整理|总结|\b(?:fix|implement|write|edit|modify|refactor|create|build|deploy|debug|audit|review|design|plan|generate|update|delete|remove|migrate|run|test|install)\b)/i
-const DIRECT_QA_PATH_OR_DELIVERABLE = /(?:(?:[\w.-]+\/)+[\w.-]+|[A-Za-z]:\\[^\s]+|\.(?:ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|json|ya?ml|md|sql|sh|css|html)\b|交付|产物|文档|报告|代码|脚本|补丁|pr\b|commit\b)/i
+const DIRECT_QA_DELIVERABLE_BLOCK = /(?:交付|产物|文档|报告|补丁|pr\b|commit\b)/i
+const DIRECT_QA_PATH_OR_CODE = /(?:(?:[\w.-]+\/)+[\w.-]+|[A-Za-z]:\\[^\s]+|\.(?:ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|json|ya?ml|md|sql|sh|css|html)\b|代码|脚本)/i
 const DIRECT_QA_PATTERNS: readonly RegExp[] = Object.freeze([
-  /^(?:请问|请|帮我|帮忙)?(?:简单)?(?:解释|说明|介绍|讲讲|讲一下|聊聊|科普)(?:一下)?\s*.{2,100}$/,
-  /^(?:什么是|啥是|请问什么是|请教一下什么是).{2,100}$/,
-  /^.{2,80}(?:是什么|是什么意思|有什么区别|的区别是什么|怎么理解|原理是什么|机制是什么|怎么用|用来干嘛的|干什么用的)[?？吗呢]*$/,
-  /^(?:what\s+(?:is|are)|how\s+does|explain|define|difference\s+between)\b.{3,120}$/i,
+  /^(?:请问|请|帮我|帮忙)?(?:简单)?(?:解释|说明|介绍|讲讲|讲一下|聊聊|科普)(?:一下)?\s*.{2,200}$/,
+  /^(?:什么是|啥是|请问什么是|请教一下什么是).{2,200}$/,
+  /^.{2,160}(?:是什么|是什么意思|有什么区别|的区别是什么|怎么理解|原理是什么|机制是什么|怎么用|用来干嘛的|干什么用的)[?？吗呢]*$/,
+  /^(?:what\s+(?:is|are)|how\s+does|how\s+do|explain|define|difference\s+between)\b.{3,220}$/i,
 ])
+/** 只读代码/文件/配置查看与问答模式（严禁带写/改/交付动作词）。 */
+const DIRECT_READONLY_INSPECT_PATTERNS: readonly RegExp[] = Object.freeze([
+  /^(?:请问|请|帮我|帮忙)?(?:看看|查看|看下|看一下|读一下|读取|查一下|检查一下)\s*.{2,220}(?:是干嘛的|做什么的|干什么用的|什么意思|怎么工作的|的逻辑|的内容|的结构|的配置|在哪里|怎么用|吗|[?？])$/,
+  /^(?:请问|请|帮我|帮忙)?(?:对比|比较)(?:一下)?\s*.{2,180}(?:的区别|有什么区别|差异|优缺点)[?？吗呢]*$/,
+  /^(?:请问|请|怎么|如何)(?:开启|关闭|配置|启用|禁用|使用)\s*.{2,180}[?？吗呢]*$/,
+])
+const DIRECT_QA_INSPECT_ACTION_BLOCK = /(?:修复|修改|改动|改写|重写|实现|编写|开发|新增|添加|删除|移除|重构|优化|改造|升级|部署|发布|构建|测试|排查|诊断|审查|审计|调研|分析报告|制定|设计|规划|拆解|生成|创建|写入|提交|运行|执行|安装|导出|翻译|整理|总结|\b(?:fix|implement|write|edit|modify|refactor|create|build|deploy|debug|audit|review|design|plan|generate|update|delete|remove|migrate|run|test|install)\b)/i
 
 export function isDirectReadOnlyQuestion(value: any): boolean {
   if (typeof value !== 'string') return false
   const original = value.trim()
-  if (original.length < 4 || original.length > 140) return false
-  if (original.includes('\n')) return false
-  if (DIRECT_QA_ACTION_BLOCK.test(original)) return false
-  if (DIRECT_QA_PATH_OR_DELIVERABLE.test(original)) return false
+  if (original.length < 4 || original.length > 260) return false
+  if (original.split(/\r?\n/).length > 2) return false
+  if (DIRECT_QA_DELIVERABLE_BLOCK.test(original)) return false
   if (/(?:然后|接着|并且|同时|以及|顺便|还要|第一步|第二步|\band\b|\bthen\b)/i.test(original)) return false
+  if (DIRECT_READONLY_INSPECT_PATTERNS.some((pattern) => pattern.test(original))) {
+    return !DIRECT_QA_INSPECT_ACTION_BLOCK.test(original)
+  }
+  if (DIRECT_QA_ACTION_BLOCK.test(original)) return false
+  if (DIRECT_QA_PATH_OR_CODE.test(original)) return false
   return DIRECT_QA_PATTERNS.some((pattern) => pattern.test(original))
 }
 
@@ -2746,6 +2758,8 @@ export function createPlanningHeartbeat(options: {
   clearTimer?: (handle: any) => void
   /** [2.5.2][stall-fix] 自定义文案（执行心跳用）；缺省=规划心跳文案。 */
   buildMessage?: (elapsedMs: number) => string
+  /** [3.4.2] 静默模式：不向根会话对话历史写入周期性心跳，防止污染上下文提前触发 Compaction 炸缓存。 */
+  silent?: boolean
 }) {
   const interval = planningHeartbeatIntervalMs(options.intervalMs)
   // 上限只是防失控的保险丝；真正的收束是调用方 finally 里的 stop()。
@@ -2772,6 +2786,7 @@ export function createPlanningHeartbeat(options: {
     options.appendNotice(text)
   }
   const start = () => {
+    if (options.silent === true) return
     if (handle !== null) return
     if (options.signal?.aborted) return
     handle = setTimer(tick, interval)
@@ -3479,7 +3494,7 @@ export function buildResultMessage(result: any) {
    * 整条置空会使在途编排停摆（违反 C4 在途行为不变）；一行 ≤500 字符，
    * 体积相对旧版（可达数千字符）仍收敛 >90%。
    */
-  const remainingRows = statuses.filter((item: any) => item?.status !== 'done')
+  const remainingRows = statuses.filter((item: any) => item?.status !== 'done' && item?.closure !== 'replanned')
   const remainingIds = remainingRows.map((item: any) => String(item?.subtaskId ?? '')).filter((id: string) => id !== '')
   const firstReason = truncate(String(remainingRows[0]?.error ?? remainingRows[0]?.question ?? remainingRows[0]?.summary ?? '').replace(/\s+/g, ' ').trim(), 80)
   const nextAction = cancelled
@@ -5208,6 +5223,7 @@ export function buildUpdateMessage(update: any) {
      * （runtime dispatch 读 row.startPhases.planning.approach）在刷新/重启后不丢。
      */
     ...(update.startPhases === undefined ? {} : { startPhases: update.startPhases }),
+    ...(update.directMode === undefined ? {} : { directMode: Boolean(update.directMode) }),
     /*
      * [3.0.8] 主 Agent 五步第 1/2/3 步开工证据（计划级，subtaskId=null）随 durable
      * workplan-update 回放：写入侧 dispatchTool 开工闸登记，消费侧 reconstruct
@@ -5932,6 +5948,7 @@ export function applyStatus(statuses: any, subtaskId: any, patch: any) {
   }
   if (patch.insertedBy !== undefined) next.insertedBy = truncate(String(patch.insertedBy), 40) || null
   if (patch.replaces !== undefined) next.replaces = truncate(String(patch.replaces), 16) || null
+  if (patch.directMode !== undefined) next.directMode = Boolean(patch.directMode)
   if (patch.progress !== undefined) {
     if (!Number.isInteger(patch.progress) || patch.progress < 0 || patch.progress > 100) {
       throw new PlanError('progress 必须是 0-100 的整数', 'INVALID_PROGRESS')
@@ -7974,6 +7991,8 @@ export function buildChildPrompt({
    * no second truncation" contract for direct callers/tests.
    */
   compactBackground = false,
+  skipTimeNotice = false,
+  directMode = false,
 }: any) {
   const noticeTarget = readLeadAgentId(leadAgentId)
   const noticeCall = leadNoticeCallForm(noticeTarget)
@@ -8328,12 +8347,14 @@ export function buildChildPrompt({
    *   → 本子任务动态尾部（所属部门/阶段/子任务详情/依赖/兄弟/教训/接续/预告/尾锚定）。
    */
   const staticLeaderRules = [
+    ...(directMode ? ['【直执单会话模式】本子任务无需再拆分第三层专家，请由你亲自彻底、高质量地完成全部实现与严格验证。'] : []),
     '执行要求：',
     phaseZeroContinuation
       ? '- 前三步已在 phase-0 登记（见下方接续块），勿重做或重复登记，直接从第四步执行；仅核对/补齐登记外缺口（含 approachBasis）。'
       : '- 执行自己的任务必须先完成上方「五步工作法」的前三步（梳理任务 → 资源/工具/方案含 approachBasis → 备齐就绪证据），前三步证据经 review 的 startPhases 一并提交并登记，未登记合格证据前禁止进入执行与再分配。',
     '- 先诊断根因再动手；没有主计划派发权限、不能重启服务或安装依赖（遇需先上报），但拥有本部门再分配权限（除 dsh_workplan_delegate 外不得派生其它 Agent）。',
     '- 不得编造证据，无法确认写“未验证”；无法完成首行写 `BLOCKED: 原因` 并附 question；正文汇报 ≤200 字、≤3 句（结论/产物路径/遗留项）。',
+    '- 省 token 与防熔断硬纪律：用脚本处理数据时必须通过 json.load / csv 等直接从磁盘读取上游产物文件，严禁把上游大表硬编码粘贴成数百行脚本字面量；长交付物落盘后用简短脚本断言核验字段与数值，禁止全文 read 自己刚生成的长文件；严禁执行 ls -R reports 或扫描本计划声明 inputs/outputs 之外的历史目录（reports/ 下可能存有旧任务残留，只准按精确路径读取本计划上游产物）。',
     '- 下属经 self_effort 上报的开工预估（整数分钟）会即时送达你会话并留痕（kind=estimate）；未上报者被平台拦截开工。',
     '- 遇阻上报（强制，先于继续动作）：缺权限/输入/依赖、需求矛盾、无法验证、命令连败两次或需主 Agent 拍板时，立即调 `dsh_workplan_escalate({ "subtaskId": "<ID>", "question": "...", "options": [...], "needs": [...] })` 并停止推进，只做只读核对、等待指示（不可用时在结果块写 `"status":"blocked","question":"..."`）；可独立完成部分先做。',
   ]
@@ -8425,11 +8446,15 @@ export function buildChildPrompt({
       : []),
     '',
     '执行时间与进度沟通（无执行硬截止，extendMs 已停用）：',
-    noticeTargetLine,
-    `- 开工前先报预估时长：用 \`${noticeCall}\` 上报（预估仅供参考，不影响验收）；变化更新，长任务及时落盘，完成即回报。`
-      + (noticeTarget
-        ? ` 失败首行写 \`noticeChannel: {"target":"${noticeTarget}","at":<毫秒>,"error":"<原文>"}\` 并重试一次，仍失败继续做（勿改目标；插件不解析这一行，以状态行观测为准）。`
-        : ''),
+    ...(skipTimeNotice
+      ? ['- 省流模式已免除开工前 send_message 预估上报，请直接执行核心任务；长任务及时落盘，完成即回报。']
+      : [
+          noticeTargetLine,
+          `- 开工前先报预估时长：用 \`${noticeCall}\` 上报（预估仅供参考，不影响验收）；变化更新，长任务及时落盘，完成即回报。`
+            + (noticeTarget
+              ? ` 失败首行写 \`noticeChannel: {"target":"${noticeTarget}","at":<毫秒>,"error":"<原文>"}\` 并重试一次，仍失败继续做（勿改目标；插件不解析这一行，以状态行观测为准）。`
+              : ''),
+        ]),
     `- 盘上结算备份（平台自动原样另存，免重复输出）：提交最终结果块后，平台自动把结果块原样另存为 reports/wp-settlement-${plan?.planId ? `${plan.planId}-` : ''}${subtask.id}.json（无需额外调写文件工具重复输出同一 JSON 省输出 token；若手工兜底另存，须原样同一 JSON 含 phases/acceptance/artifacts/departmentSummary 且字段一个不少，摘要式备份平台不会采纳）。`,
     `【防偏离锚定】对照上方「用户原要求」锚点与本任务（${subtask.id}）目标「${truncate(String(subtask?.objective ?? '').replace(/\s+/g, ' ').trim(), 260) || String(subtask?.title ?? '')}」，逐项落实验收（${Array.isArray(subtask?.acceptance) ? subtask.acceptance.length : 0} 条）${tailConstraintReminder}，严禁跑题、漏项或违背禁止约束。`,
     '提交前再对照上方 F1–F11 自查一遍。',

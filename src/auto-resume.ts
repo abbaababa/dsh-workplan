@@ -91,6 +91,8 @@ export function autoResumeAttemptCap(value: any) {
  * @param envValue - `DSH_WORKPLAN_AUTO_RESUME`, if set.
  * @returns whether automatic continuation rounds are allowed.
  */
+import { resolveCostProfile } from './caps.js'
+
 export function autoResumeEnabledFrom(configValue: any, envValue: any) {
   if (typeof configValue === 'boolean') return configValue
   const raw = envValue === undefined || envValue === null ? '' : String(envValue).trim()
@@ -98,6 +100,7 @@ export function autoResumeEnabledFrom(configValue: any, envValue: any) {
     if (/^(1|true|yes|on)$/i.test(raw)) return true
     if (/^(0|false|no|off)$/i.test(raw)) return false
   }
+  if (resolveCostProfile() === 'ultra-lean') return false
   return AUTO_RESUME_DEFAULTS.enabled === true
 }
 

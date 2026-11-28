@@ -104,6 +104,7 @@ import {
   truncateTail,
   validatePlan,
   applyResultStatuses,
+  hoistEvidenceFields,
   adjudicateResult,
   // [3.0.0] F10 专家汇报核验（adjudicateExpertReport）复用同一解析器。
   parseEvidenceBlock,
@@ -139,14 +140,20 @@ import {
   synthesizeVerificationForVerify,
 } from './plan.js'
 import {
+  PLAN_TOKEN_BUDGET_ENV,
+  PLAN_WEIGHTED_BUDGET_ENV,
+  SESSION_WEIGHTED_BUDGET_ENV,
   STEP_BUDGET_ENV,
   TOKEN_BUDGET_ENV,
   budgetFailureContext,
+  computeRawTokens,
+  computeWeightedTokens,
   countAssistantSteps,
   evaluateRuntimeBudget,
   judgeStepBudget,
   parseStepBudget,
   parseTokenBudget,
+  resolveProfileBudgets,
 } from './step-budget.js'
 // [3.0.0] 用户 2026-11-14 第 2、4 条：两条逐字冻结的会话固定文案。
 import { STATUS_ASSIGNED_TEXT, STATUS_ASSIGNING_TEXT, checkExpertReport, checkSubtaskQualityRequirements, detectSequentialChainTask, isQualityGatePlan } from './v3-contract.js'
@@ -179,6 +186,7 @@ import {
 } from './llm-rules.js'
 // [3.2.9] 角色上下文包（RCR/Latent Brief/ASTC）与供应商 KV 前缀缓存计量。
 import { buildExpertContextPacket } from './context-packets.js'
+import { decideDelegationStrategy } from './context-strategy.js'
 import { createLlmCacheMeter } from './cache-meter.js'
 import { checkStartEvidenceCarryover, phaseGateFromErrors, phaseSummaryLine, renderStartPhaseEvidence, sanitizeStartPhaseEvidence, START_EVIDENCE_MIN_CHARS_BRIEF, validateFiveStepEvidence, validateLeafExecutionEvidence, validateStartPhaseEvidence } from './five-step.js'
 import {
@@ -193,14 +201,22 @@ import { computeMappingDigest, verifyMappingDigest } from './supersede-digest.js
 import { supersedePlanRecord } from './supersede.js'
 // [3.1.0] 人数上限单一真源（caps.ts）：报错文案与门禁同源。
 import {
+  type CostProfile,
   MAX_COMPLEX_DELEGATE_MEMBERS,
   MAX_TOTAL_EXPERTS_PER_PLAN,
   MIN_COMPLEX_DELEGATE_MEMBERS,
+  adaptivePlannerEffortEnabled,
   autoInheritExpertPreRegisterEnabled,
   directBypassEnabled,
+  effectiveDepartmentExpertCap,
+  effectivePlanExpertCap,
   envPositiveInt,
   fastPathSingleSessionEnabled,
   leaderPreRegisterEnabled as capsLeaderPreRegisterEnabled,
+  resolveCostProfile,
+  silentChatHeartbeatEnabled,
+  skipChildTimeNoticeEnabled,
+  skipLeaderPhaseZeroEnabled,
   stepBudgetEnforceEnabled,
 } from './caps.js'
 import { createProgressWatchdog, describeError } from './watchdog.js'
@@ -984,7 +1000,8 @@ export function isPlanModeActive(ctx: any, session: any, agent?: any) {
 
 function enterDecision(downstream: any, extraMessages: any[]) {
   if (!downstream || downstream.kind !== 'enter') return downstream
-  const decision: any = { kind: 'enter', messages: [...downstream.messages, ...extraMessages] }
+  const baseMessages = Array.isArray(downstream.messages) ? downstream.messages : []
+  const decision: any = { kind: 'enter', messages: [...baseMessages, ...extraMessages] }
   if (downstream.startsRequestSeries === true) decision.startsRequestSeries = true
   return decision
 }
@@ -1236,6 +1253,28 @@ function salvagePartialPlan(text: any, guardOptions: any) {
  * 每次中止都携带真实旋钮（DSH_WORKPLAN_PLANNER_TIMEOUT_MS /
  * DSH_WORKPLAN_PLANNER_IDLE_TIMEOUT_MS），而不是让用户去改源码常量。
  */
+/**
+ * [3.4.2] 规划器自适应复杂度判定：
+ * 真正复杂（长需求、多部门、架构/重构/根因排查/审计/研究/多步编排）才开家族中档推理，
+ * 简单单域任务用 low 档即可准确分解，既不拉低难活的顶层设计质量，又砍掉简单任务高价思考链。
+ */
+export function isComplexPlanningTask(taskText: string, _conversationContext = ''): boolean {
+  const text = typeof taskText === 'string' ? taskText.trim() : ''
+  if (!text) return false
+  if (text.length > 260) return true
+  if (/(架构|重构|根因|排查|诊断|全链路|多模块|多阶段|全面|深度|审计|调研|方案|设计|对比|迁移|安全|性能|并发|系统|报告|analyze|architect|refactor|audit|research|migrate|investigate)/i.test(text)) {
+    return true
+  }
+  if (/(?:第一步|第二步|^\s*1\..*2\.|并且|同时|另外)/m.test(text)) return true
+  try {
+    const coverage = auditDepartmentCoverage(text, { stages: [] })
+    if (Array.isArray(coverage?.required) && coverage.required.length >= 2) return true
+  } catch {
+    /* ignore */
+  }
+  return false
+}
+
 export async function runPlanner(ctx: any, options: any) {
   const {
     taskText, cwd, sessionId, modelSelection, signal,
@@ -1282,11 +1321,21 @@ export async function runPlanner(ctx: any, options: any) {
    * = 不发送档位字段（宿主按 adapter 默认档执行，对任何模型都合法）；'max'
    * 裸发会在 resolveModelInfo 同时失败时被 UNSUPPORTED_REASONING_EFFORT 终态拒绝。
    */
+  const costProfile: CostProfile = options.costProfile
+    ?? (process.env.DSH_WORKPLAN_COST_PROFILE ? resolveCostProfile() : 'full')
   const plannerStaticAllowed = allowedEffortsForModel(modelSelection?.model)
   const plannerModerateDefault = classifyModelFamily(modelSelection?.model) === 'qwen' ? 'medium' : 'high'
-  const plannerFamilyDefault = (plannerStaticAllowed && plannerStaticAllowed.includes(plannerModerateDefault)
+  const plannerModerateFallback = (plannerStaticAllowed && plannerStaticAllowed.includes(plannerModerateDefault)
     ? plannerModerateDefault
     : highestEffortOf(plannerStaticAllowed)) ?? ''
+  const adaptivePlannerDefault = costProfile === 'ultra-lean'
+    ? 'low'
+    : (costProfile === 'balanced' && adaptivePlannerEffortEnabled(costProfile) && !isComplexPlanningTask(taskText, conversationContext)
+      ? 'low'
+      : plannerModerateDefault)
+  const plannerFamilyDefault = (plannerStaticAllowed && plannerStaticAllowed.includes(adaptivePlannerDefault)
+    ? adaptivePlannerDefault
+    : plannerModerateFallback) ?? ''
   const requestedPlannerEffort = plannerEffort || plannerFamilyDefault
   const plannerEffortOriginLabel = plannerEffort
     ? 'env'
@@ -1351,6 +1400,7 @@ export async function runPlanner(ctx: any, options: any) {
    */
   const attemptReports: string[] = []
   let lastText = ''
+  let forceSingleTurnRepair = false
   for (let attempt = 1; attempt <= PLANNER_MAX_ATTEMPTS; attempt += 1) {
     if (signal.aborted) throw abortError()
     const controller = new AbortController()
@@ -1423,6 +1473,8 @@ export async function runPlanner(ctx: any, options: any) {
      */
     let terminalFailure = false
     let retryBackoffMs = 0
+    const prevRepairErrors = [...repairErrors]
+    let usedMultiTurnRepairDraft = false
     try {
       /*
        * [3.2.3][省钱 W1/治本] 校验类重试不再整份重发规划器提示词（规则表 +
@@ -1438,7 +1490,10 @@ export async function runPlanner(ctx: any, options: any) {
        * 大小的底稿仍走短修复（保留结构、避免模型凭空补出不存在的子任务）。
        */
       const REPAIR_DRAFT_MAX_CHARS = 24_000
-      const useRepairDraft = repairErrors.length > 0 && lastText.length > 0 && lastText.length <= REPAIR_DRAFT_MAX_CHARS
+      const hasSmallRepairDraft = repairErrors.length > 0 && lastText.length > 0 && lastText.length <= REPAIR_DRAFT_MAX_CHARS
+      const useRepairDraft = !forceSingleTurnRepair && hasSmallRepairDraft
+      const useSingleTurnRepairDraft = forceSingleTurnRepair && hasSmallRepairDraft
+      usedMultiTurnRepairDraft = useRepairDraft
       const repairTooLarge = repairErrors.length > 0 && lastText.length > REPAIR_DRAFT_MAX_CHARS
       const repairErrorLines = repairErrors.slice(0, 12).map((error: any) => `- ${error}`)
       const baseUserPrompt = buildPlannerUserPrompt(taskText, cwd, conversationContext)
@@ -1447,29 +1502,45 @@ export async function runPlanner(ctx: any, options: any) {
             '上一轮输出的计划 JSON 未通过校验。请只修正下面列出的「待修问题」，输出修正后的完整 JSON 对象，不要输出解释或代码围栏，也不要改动未点名字段的值：',
             ...repairErrorLines,
           ].join('\n')
-        : repairTooLarge
+        : useSingleTurnRepairDraft
           ? [
               baseUserPrompt,
               '',
-              `待修问题（上一轮输出 ${lastText.length} 字超过 ${REPAIR_DRAFT_MAX_CHARS} 字底稿上限，` +
-                '本轮不附原文；请按上面的完整规则重新生成计划，并逐条修正下列错误）：',
+              '上一轮输出的计划 JSON 草稿：',
+              lastText,
+              '',
+              '上一轮输出的计划 JSON 未通过校验。请只修正下面列出的「待修问题」，输出修正后的完整 JSON 对象，不要输出解释或代码围栏，也不要改动未点名字段的值：',
               ...repairErrorLines,
             ].join('\n')
-          : baseUserPrompt
+          : repairTooLarge
+            ? [
+                baseUserPrompt,
+                '',
+                `待修问题（上一轮输出 ${lastText.length} 字超过 ${REPAIR_DRAFT_MAX_CHARS} 字底稿上限，` +
+                  '本轮不附原文；请按上面的完整规则重新生成计划，并逐条修正下列错误）：',
+                ...repairErrorLines,
+              ].join('\n')
+            : baseUserPrompt
       promptChars = prompt.length
       /*
-       * [3.2.4→3.4.0][省钱 B1 + KV Prefix Cache 100% 续命]
+       * [3.2.4→3.4.0→3.4.2][省钱 B1 + KV Prefix Cache 100% 续命 + DSH 0.2.3 兼容]
        * 无论首次规划还是定向修复重试，均保持 `system = buildPlannerSystemPrompt(budget)` +
        * `user = baseUserPrompt` 前缀逐字节一致；useRepairDraft 以多轮接续（assistant=lastText +
-       * user=精简错误清单）提交，既让 Attempt 2 命中 Attempt 1 的全量 KV 前缀缓存（输入降 30-50×），
-       * 又保留完整 schema 规则避免盲修跑偏。
+       * user=精简错误清单）提交，并按 DSH 0.2.3-alpha.2 `LlmRuntime.forAdapter` 契约补齐
+       * `source: { kind: 'model', provider, model }`（不伪造 replayState），既不触发
+       * `reading 'replayState'` 崩溃，又 100% 命中 Attempt 1 的 KV 前缀缓存。
        */
       const plannerSystemText = buildPlannerSystemPrompt(budget)
+      const assistantSource = {
+        kind: 'model' as const,
+        provider: String(modelSelection?.provider ?? 'unknown'),
+        model: String(modelSelection?.model ?? 'unknown'),
+      }
       const plannerMessages: any[] = useRepairDraft
         ? [
             { role: 'system', content: [{ type: 'text', text: plannerSystemText }] },
             { role: 'user', content: [{ type: 'text', text: baseUserPrompt }] },
-            { role: 'assistant', content: [{ type: 'text', text: lastText }] },
+            { role: 'assistant', content: [{ type: 'text', text: lastText }], source: assistantSource },
             { role: 'user', content: [{ type: 'text', text: prompt }] },
           ]
         : [
@@ -1660,7 +1731,20 @@ export async function runPlanner(ctx: any, options: any) {
         && typeof error.details === 'string'
         ? error.details
         : ''
-      if (llmCode !== '' && !PLANNER_RETRYABLE_LLM_CODES.includes(llmCode)) {
+      const syntheticAssistantRejected = usedMultiTurnRepairDraft
+        && attempt < PLANNER_MAX_ATTEMPTS
+        && !signal.aborted
+        && prevRepairErrors.length > 0
+        && lastText.length > 0
+        && (
+          error instanceof TypeError
+          || (error instanceof PlanError && error.code === 'PLANNER_LLM_ERROR'
+            && (llmCode === '' || ['UNKNOWN', 'INVALID_REQUEST', 'UNSUPPORTED_CONTENT'].includes(llmCode)))
+        )
+      if (syntheticAssistantRejected) {
+        forceSingleTurnRepair = true
+        repairErrors = [...prevRepairErrors]
+      } else if (llmCode !== '' && !PLANNER_RETRYABLE_LLM_CODES.includes(llmCode)) {
         terminalFailure = true
       } else if (attempt < PLANNER_MAX_ATTEMPTS && !signal.aborted) {
         retryBackoffMs = Math.round(
@@ -1863,30 +1947,62 @@ function resultText(result: any) {
  *    交负责人（escalate 工具已登记 escalation 的行不受本判定影响——结算回调
  *    里 escalation 优先于 done/failed）。
  */
-function adjudicateExpertReport(outcome: any): { ok: true } | { ok: false; rejection: string } {
+function extractLatestEvidenceTextFromSession(session: any): string {
+  if (!session || typeof session.eventAt !== 'function') return ''
+  const total = Number(session.seq)
+  if (!Number.isFinite(total) || total <= 0) return ''
+  const floor = Math.max(0, Math.floor(total) - 24)
+  for (let seq = Math.floor(total) - 1; seq >= floor; seq -= 1) {
+    let ev: any
+    try {
+      ev = session.eventAt(seq)
+    } catch {
+      continue
+    }
+    if (!ev || ev.type !== 'assistant/message') continue
+    const raw = messageText(ev.data)
+    if (typeof raw === 'string' && raw.includes(EVIDENCE_MARKER_BEGIN) && raw.includes(EVIDENCE_MARKER_END)) {
+      return raw
+    }
+  }
+  return ''
+}
+
+export function adjudicateExpertReport(outcome: any): { ok: true } | { ok: false; rejection: string } {
   const text = resultText(outcome)
   const parsed = parseEvidenceBlock(text)
-  const payload = parsed && typeof parsed === 'object' ? parsed.payload : null
-  if (!payload || typeof payload !== 'object') {
+  const rawPayload = parsed && typeof parsed === 'object' ? parsed.payload : null
+  if (!rawPayload || typeof rawPayload !== 'object') {
     return {
       ok: false,
       rejection: '专家汇报无法结算：结果块缺失或 JSON 无法解析（完成必回报，非法 JSON 绝不计 done）；请负责人核实其产物后重派，或按实改判',
     }
   }
-  if (String(payload.status ?? '') !== 'done') {
+  const hoisted: any = hoistEvidenceFields(rawPayload).payload ?? rawPayload
+  if (String(hoisted.status ?? '') !== 'done') {
     return {
       ok: false,
-      rejection: `专家汇报声明 status=${String(payload.status ?? '（缺失）')}（非 done，不计完成）：${truncate(String(payload.blockedReason ?? payload.question ?? '未附原因'), 200)}`,
+      rejection: `专家汇报声明 status=${String(hoisted.status ?? '（缺失）')}（非 done，不计完成）：${truncate(String(hoisted.blockedReason ?? hoisted.question ?? '未附原因'), 200)}`,
     }
   }
-  const report = checkExpertReport((payload as any).report)
+  const reportCandidate = hoisted.report ?? (isRecord(hoisted.phases) ? hoisted.phases.report : undefined)
+  const report = checkExpertReport(reportCandidate)
   if (!Array.isArray(report.violations) || report.violations.length === 0) {
     /*
      * [3.2.7][P0] F10 只证明「汇报格式对」，不证明「活真的干完并验证过」。
-     * 旧实现到此就记 done：专家即使完全没写第四步执行与验证，也照样算完成，
-     * 负责人汇总就建立在未经核验的成果上。这里补上第四步/验证两组证据的核验。
+     * [3.4.3] 兼容专家把 execution / verification 写在结果块顶层的合法写法：
+     * 与主结算路径 hoistEvidenceFields 保持同口径归位到 phases 下再核验，不再因层级摆放
+     * 差异把已自检 ALL PASSED 的完成汇报误退回为「phases 缺失」。
      */
-    const leaf = validateLeafExecutionEvidence((payload as any).phases, (payload as any).acceptance)
+    const normalizedPhases = isRecord(hoisted.phases)
+      ? hoisted.phases
+      : (isRecord(hoisted.execution) || isRecord(hoisted.verification)
+        ? {
+            ...(isRecord(hoisted.execution) ? { execution: hoisted.execution } : {}),
+            ...(isRecord(hoisted.verification) ? { verification: hoisted.verification } : {}),
+          }
+        : hoisted.phases)
+    const leaf = validateLeafExecutionEvidence(normalizedPhases, hoisted.acceptance)
     if (!leaf.ok) {
       return {
         ok: false,
@@ -2556,17 +2672,18 @@ export function persistRuntimeSettlementBackup(
 }
 
 /**
- * [3.4.0][抗压缩节点 0 锚定] 构造驻留子会话 `system/message` (node 0) 的不可变任务锚点：
- * `dsh-compaction-basic` 会把早期 user/message 压缩成摘要，唯独 node 0 `system/message`
- * 永久保活。此处把用户原要求锚点、硬约束、最新重规划变更、A1–An 验收清单浓缩成紧凑块，
- * 让长任务历经多次压缩也不偏离用户要求。
+ * [3.4.0→3.4.2][抗压缩节点 0 共享锚定] 构造驻留子会话 `system/message` (node 0) 的不可变计划锚点：
+ *  - 只放全计划所有并行子会话共享的「用户原要求 + 硬约束 + 最新重规划变更」，
+ *    绝不把单子任务编号/目标/成员名塞进 node 0（否则每个子会话从 system/message 起就不同，
+ *    直接击穿供应商跨会话 KV 前缀缓存）；
+ *  - 子任务私有目标与 A1–An 验收清单放在 user/message 任务书与压缩恢复锚点（见 buildChildRecoveryAnchor）。
  */
 export function buildChildSystemAnchor(
   plan: any,
-  subtask: any,
-  member?: { member?: string; task?: string; qualityRequirements?: string[] } | null,
+  _subtask?: any,
+  _member?: { member?: string; task?: string; qualityRequirements?: string[] } | null,
 ): string {
-  if (!plan && !subtask) return ''
+  if (!plan) return ''
   const anchorText = typeof plan?.taskAnchor?.text === 'string' && plan.taskAnchor.text.trim()
     ? truncate(plan.taskAnchor.text.replace(/\s+/g, ' ').trim(), 1200)
     : truncate(String(plan?.taskUnderstanding?.originalRequest ?? '').replace(/\s+/g, ' ').trim(), 1200)
@@ -2575,23 +2692,40 @@ export function buildChildSystemAnchor(
     .map((x: any) => truncate(String(x ?? '').replace(/\s+/g, ' ').trim(), 180))
     .filter(Boolean)
     .slice(0, 8)
-  const acceptance = (Array.isArray(subtask?.acceptance) ? subtask.acceptance : [])
-    .map((x: any, i: number) => `A${i + 1} ${truncate(String(x ?? '').replace(/\s+/g, ' ').trim(), 180)}`)
-    .filter(Boolean)
-    .slice(0, 8)
   const latestReplan = Array.isArray(plan?.replanHistory) && plan.replanHistory.length > 0
     ? plan.replanHistory[plan.replanHistory.length - 1]
     : null
   const replanLine = latestReplan?.reason
     ? `【重规划变更 r${String(latestReplan.revision ?? plan?.planRevision ?? '?')}】${truncate(String(latestReplan.reason), 260)}`
-    : (typeof subtask?.replannedReason === 'string' && subtask.replannedReason.trim()
-      ? `【重规划变更】${truncate(subtask.replannedReason.trim(), 260)}`
-      : '')
+    : ''
   const lines = [
     '【不可变任务锚点（抗压缩常驻，严禁偏离）】',
     ...(anchorText ? [`用户原要求：${anchorText}`] : []),
     ...(constraints.length > 0 ? [`硬约束（严禁违背）：${constraints.join('；')}`] : []),
     ...(replanLine ? [replanLine] : []),
+  ]
+  return lines.length > 1 ? lines.join('\n') : ''
+}
+
+/**
+ * [3.4.2] 压缩后恢复用的子任务完整锚点（含子任务私有目标、A1–An 验收清单与成员分工），
+ * 在触发 Compaction 后补注到对话中，既不污染 Node-0 跨会话 KV 缓存，又保证长任务压缩后不失忆。
+ */
+export function buildChildRecoveryAnchor(
+  plan: any,
+  subtask: any,
+  member?: { member?: string; task?: string; qualityRequirements?: string[] } | null,
+): string {
+  const shared = buildChildSystemAnchor(plan, subtask, member)
+  const acceptance = (Array.isArray(subtask?.acceptance) ? subtask.acceptance : [])
+    .map((x: any, i: number) => `A${i + 1} ${truncate(String(x ?? '').replace(/\s+/g, ' ').trim(), 180)}`)
+    .filter(Boolean)
+    .slice(0, 8)
+  const subtaskReplan = typeof subtask?.replannedReason === 'string' && subtask.replannedReason.trim()
+    ? `【本子任务重规划变更】${truncate(subtask.replannedReason.trim(), 260)}`
+    : ''
+  const extra = [
+    ...(subtaskReplan ? [subtaskReplan] : []),
     ...(member?.task
       ? [`你的唯一分工（${String(member.member ?? 'expert')}）：${truncate(String(member.task).replace(/\s+/g, ' ').trim(), 320)}`]
       : subtask
@@ -2599,7 +2733,8 @@ export function buildChildSystemAnchor(
         : []),
     ...(acceptance.length > 0 ? [`验收清单（逐项落实）：${acceptance.join('；')}`] : []),
   ]
-  return lines.length > 1 ? lines.join('\n') : ''
+  if (!shared && extra.length === 0) return ''
+  return [shared, ...extra].filter(Boolean).join('\n')
 }
 
 function settleFromOutput(
@@ -3420,6 +3555,32 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
         const phaseZeroEvidenceRef = phaseZeroCompleted
           ? persistStartEvidenceFile(options.cwd, record.plan?.planId, subtask.id, effortRow?.startPhases)
           : ''
+        const explicitSkipNoticeEnv = process.env.DSH_WORKPLAN_SKIP_TIME_NOTICE !== undefined
+          || process.env.DSH_WORKPLAN_COST_PROFILE !== undefined
+          || process.env.DSH_WORKPLAN_LEAN_MODE !== undefined
+        const effectiveNoticeProfile: CostProfile = (record?.plan?.costProfile as CostProfile | undefined)
+          ?? (explicitSkipNoticeEnv ? resolveCostProfile() : 'full')
+        const skipChildNotice = !phaseZeroActivation && skipChildTimeNoticeEnabled(effectiveNoticeProfile)
+        const preRegisteredStartPhases = !phaseZeroCompleted && selfEffortConfigured && effortRow?.startPhases
+          ? effortRow.startPhases
+          : null
+        const preRegisteredEvidenceRef = preRegisteredStartPhases
+          ? (persistStartEvidenceFile(options.cwd, record.plan?.planId, subtask.id, preRegisteredStartPhases) ?? '')
+          : ''
+        const preRegisteredContinuation = preRegisteredStartPhases
+          ? (preRegisteredEvidenceRef
+            ? renderStartEvidenceBrief(preRegisteredStartPhases, preRegisteredEvidenceRef)
+            : '【开工登记证据已在规划阶段由平台预登记（收尾可省略 phases.planning / phases.preparation，平台自动并入）】')
+          : ''
+        const isDirectSubtask = Boolean(effortRow?.directMode)
+        const childPhaseLabel = phaseZeroActivation
+          ? 'leader-phase-0'
+          : (isDirectSubtask ? 'leader-direct' : 'leader-phase-1')
+        const sharedPlanAnchor = buildChildSystemAnchor(record.plan, subtask)
+        const parentAnchorKey = String(liveAgent?.session?.id ?? options.session?.id ?? record?.plan?.sessionId ?? '').trim()
+        if (sharedPlanAnchor && parentAnchorKey) {
+          options.childPhaseHooks?.registerPlanAnchor?.(parentAnchorKey, sharedPlanAnchor)
+        }
         try {
           activation = await startActivationQueued(
             () => ctx.subagents.startActivation({
@@ -3503,7 +3664,11 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
                  */
                 // [3.1.1] 第 4 参回注登记原文：direct/review 在负责人会话登记、执行在
                 // 新会话承接时，接续提示必须带登记证据原文，否则收尾必然被变薄退回。
-                phaseZeroContinuation: phaseZeroCompleted ? buildPhaseZeroContinuationHint(String(effortRow?.effortOverride ?? ''), phaseZeroOutput, effortRow?.effortOverride === 'low' && (effortRow?.consolidation?.assignments ?? []).length === 0, effortRow?.startPhases, phaseZeroEvidenceRef ?? '') : '',
+                phaseZeroContinuation: phaseZeroCompleted
+                  ? buildPhaseZeroContinuationHint(String(effortRow?.effortOverride ?? ''), phaseZeroOutput, effortRow?.effortOverride === 'low' && (effortRow?.consolidation?.assignments ?? []).length === 0, effortRow?.startPhases, phaseZeroEvidenceRef ?? '')
+                  : preRegisteredContinuation,
+                skipTimeNotice: skipChildNotice,
+                directMode: isDirectSubtask,
                 llmRulesBrief: buildLlmRulesBrief({
                   model: modelSelection?.model ?? null,
                   effort: staticRuleChildEffort || null,
@@ -3511,8 +3676,8 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
                   correctionReason: childStaticCorrection?.reason ?? null,
                   tier: 'department',
                   taskEffort: typeof effortRow?.effortOverride === 'string' ? effortRow.effortOverride : null,
-                  // [3.2.4][省钱 R6] phase-1 接续时简报不再重述已在 phase-0 完成的开工流程。
-                  phase1: phaseZeroCompleted,
+                  // [3.2.4][省钱 R6] phase-1 接续或预登记直入时简报不再重述开工流程。
+                  phase1: phaseZeroCompleted || Boolean(preRegisteredStartPhases),
                 }),
               }),
             }],
@@ -3561,10 +3726,11 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
         if (!activation || typeof activation.result?.then !== 'function') {
           throw new PlanError('子 Agent 没有返回可等待的结果', 'NO_ACTIVATION')
         }
-        // [3.4.0] 立即登记不可变工具阶段 + 抗压缩节点 0 任务锚点 + 运行期步数/token 预算追踪器。
+        // [3.4.0→3.4.2] 立即登记不可变工具阶段 + 抗压缩节点 0 共享锚点 + 运行期步数/token 预算追踪器。
         if (typeof activation.childId === 'string' && activation.childId) {
-          options.childPhaseHooks?.registerPhase?.(activation.childId, phaseZeroActivation ? 'leader-phase-0' : 'leader-phase-1')
-          const anchorForNode0 = buildChildSystemAnchor(record.plan, subtask)
+          options.childPhaseHooks?.registerPhase?.(activation.childId, childPhaseLabel)
+          const anchorForNode0 = sharedPlanAnchor || buildChildSystemAnchor(record.plan, subtask)
+          const recoveryAnchorText = buildChildRecoveryAnchor(record.plan, subtask)
           if (anchorForNode0) options.childPhaseHooks?.registerAnchor?.(activation.childId, anchorForNode0)
           options.childBudgetTrackers?.set?.(activation.childId, {
             controller: child.controller,
@@ -3572,9 +3738,12 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
             planId: record.plan?.planId ?? '',
             label: `${subtask.department}:${subtask.id}`,
             warned: false,
+            graceStepsUsed: 0,
+            graceToolBlockedOnce: false,
             aborted: false,
             abortReason: '',
             anchorText: anchorForNode0,
+            recoveryAnchorText,
           })
         }
         // [3.1.8][P0 D4] 登记「这个子任务当前由哪个负责人会话执行」：续跑重置
@@ -3618,13 +3787,15 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
          * 会话日志里看（observeRelayedNotice）。旧实现里预告失败在计划记录上
          * 完全不可见，主 Agent 只能看到一句 `subagent "lead" is unavailable`。
          */
-        harvestPriorNotice()
-        recordNoticeChannel(createNoticeChannel({
-          target: noticeLead.id,
-          targetSource: noticeLead.source,
-          caller: activation.childId,
-          at: assignedAt,
-        }))
+        if (!skipChildNotice) {
+          harvestPriorNotice()
+          recordNoticeChannel(createNoticeChannel({
+            target: noticeLead.id,
+            targetSource: noticeLead.source,
+            caller: activation.childId,
+            at: assignedAt,
+          }))
+        }
         const ackTimers: Array<ReturnType<typeof setTimeout>> = []
         clearAckTimers = () => {
           while (ackTimers.length > 0) {
@@ -3702,8 +3873,47 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
           const configuredRow = record.statuses.find((item: any) => item?.subtaskId === subtask.id)
           const configured = typeof configuredRow?.effortOverride === 'string' && configuredRow.effortOverride.length > 0
           if (configured) {
+            // [3.4.3] 若 phase-0 在离开前已通过 delegate(action="dispatch") 派出在途第三层专家，
+            // 必须等在途专家全部结算收口后再拉起 phase-1 负责人，并把专家结算结果/产物写进接续摘要——
+            // 彻底根除 phase-1 盲开与专家并行重复劳动（200% token 浪费）的竞态事故。
+            let staleEndedChecks = 0
+            while (!guard.timedOut && !parentSignal.aborted && !child.controller.signal.aborted) {
+              const latestRow = record.statuses.find((item: any) => item?.subtaskId === subtask.id)
+              const liveDelegates = Array.isArray(latestRow?.delegates) ? latestRow.delegates : []
+              const pendingDelegates = liveDelegates.filter((d: any) => d?.status === 'running' || d?.continuationPending === true)
+              if (pendingDelegates.length === 0) break
+              staleEndedChecks += 1
+              if (staleEndedChecks % 15 === 0) {
+                try {
+                  const endedCheck = reconcileEndedDelegateSessions(
+                    liveDelegates,
+                    (cid: string) => ctx.sessions?.get?.(cid),
+                    () => null,
+                  )
+                  const allEndedAndIdle = endedCheck.changed && pendingDelegates.every((d: any) => {
+                    const cid = typeof d?.childId === 'string' ? d.childId : ''
+                    return Boolean(cid && !ctx.agents?.get?.(cid))
+                  })
+                  if (allEndedAndIdle) {
+                    writeSubtaskStatus(record, subtask.id, { delegates: endedCheck.delegates }, guard)
+                    break
+                  }
+                } catch { /* 对账兜底不阻断等待循环 */ }
+              }
+              await sleepAbortable(child.controller.signal, 300)
+            }
+            const settledRowAfterPhase0 = record.statuses.find((item: any) => item?.subtaskId === subtask.id)
+            const settledDelegatesAfterPhase0 = Array.isArray(settledRowAfterPhase0?.delegates) ? settledRowAfterPhase0.delegates : []
+            const delegateBriefLines = settledDelegatesAfterPhase0.map((d: any) =>
+              `- 专家 ${String(d?.member ?? '?')}（status=${String(d?.status ?? 'unknown')}）：${truncate(String(d?.summary || d?.error || ''), 280)}`,
+            )
             phaseZeroCompleted = true
-            phaseZeroOutput = resultText(result)
+            phaseZeroOutput = [
+              resultText(result),
+              delegateBriefLines.length > 0
+                ? `【阶段 0 已派发第三层专家结算结果（严禁重复重做已完成工作，请直接核验盘上产物并汇总交卷）】\n${delegateBriefLines.join('\n')}`
+                : '',
+            ].filter(Boolean).join('\n\n')
             attempt -= 1 // phase-0→phase-1 是接续不是重试：不消耗 attempt 预算
             continue
           }
@@ -3715,6 +3925,43 @@ async function executeSubtask(ctx: any, record: any, stage: any, subtask: any, o
         }
         const output = resultText(result)
         if (result.stopReason !== 'completed') {
+          // [3.4.3] 中断后成果挽救（T7R d3d69363 事故根治）：
+          // 子会话可能已经发出完整合格的 WORKPLAN_EVIDENCE(status="done") 块，只因下一条 inbox 消息
+          // 触发了多开的一步并在 pre-step 撞预算被 abort。只要用户未取消整份计划，先核验已有结果块，
+          // 过闸即就地结算 done，绝不把完美完成的工作当成 aborted 丢弃重跑。
+          if (!record.cancelled && record.phase !== 'cancelled') {
+            const childSessionNow = ctx.sessions?.get?.(activation.childId)
+            const salvagedText = (output && output.includes(EVIDENCE_MARKER_BEGIN) && output.includes(EVIDENCE_MARKER_END))
+              ? output
+              : extractLatestEvidenceTextFromSession(childSessionNow)
+            if (salvagedText) {
+              const salvageRow = record.statuses.find((item: any) => item?.subtaskId === subtask.id)
+              const salvageDelegates = Array.isArray(salvageRow?.delegates)
+                ? salvageRow.delegates.map((item: any) => String(item?.member ?? '')).filter((name: string) => name !== '')
+                : []
+              const salvageVerdict = salvageRow?.closure === 'escalated'
+                ? null
+                : adjudicateResult({
+                  output: salvagedText,
+                  strict: options.strictEvidence !== false,
+                  expectedAcceptance: Array.isArray(subtask?.acceptance) ? subtask.acceptance : [],
+                  startPhases: salvageRow?.startPhases ?? undefined,
+                  formatTier: salvageDelegates.length > 0 ? 'leader' : undefined,
+                  expectedExperts: salvageDelegates,
+                })
+              if (salvageVerdict && salvageVerdict.status === 'done' && salvageVerdict.verification === 'structured' && !salvageVerdict.blockedKind) {
+                settleFromOutput(record, subtask, salvagedText, guard, options, salvageVerdict)
+                const afterSalvage = record.statuses.find((item: any) => item?.subtaskId === subtask.id)
+                if (afterSalvage?.status === 'done') {
+                  record.errors = [
+                    ...(record.errors ?? []),
+                    `${subtask.id}: 子会话输出完整结果块后被中断（${result.stopReason}），已从会话日志自动挽回并结算 done`,
+                  ].slice(-20)
+                  return
+                }
+              }
+            }
+          }
           /*
            * [1.8.5] 中断必须自己说出「接下来怎么办」。
            *
@@ -4617,9 +4864,9 @@ export function statusFingerprint(statuses: any): string {
 /* ------------------------------------------------------------------ 快路径 */
 
 /**
- * [3.2.3→3.4.0][省钱·默认开启] 简单单域动作任务的确定性计划资格判定。
- * 满足单域、无多步编排、无指代/矛盾、无需深度调研的条件即跳过规划器 LLM 调用；
- * 任一复杂疑点 fail-closed 回落常规规划，仍走同一套 validatePlan/validatePlanContext 三闸。
+ * [3.2.3→3.4.2][高质省钱·安全快车道] 简单单域动作任务的确定性计划资格判定。
+ * 满足单域、无多步编排、无指代/矛盾、无跨模块/根因/架构/排错风险的条件即跳过规划器 LLM 调用；
+ * 任何高难/复杂疑点 fail-closed 回落常规规划，绝不拿低档快车道牺牲复杂任务质量。
  */
 export function evaluateFastPathEligibility(input: any): { ok: boolean; code: string; department?: string } {
   try {
@@ -4637,17 +4884,25 @@ export function evaluateFastPathEligibility(input: any): { ok: boolean; code: st
     if (/(?:^|[，,；;。])\s*(?:再|然后|接着|同时|另外|以及|其次|最后|第一步|第二步|after|then|also|plus|finally)/i.test(text)) {
       return { ok: false, code: 'MULTI_STEP' }
     }
-    if (/(分析|调研|评估|规划|拆解|方案对比|为什么|根因|诊断|-review|analyze|research|plan\b|design\b|compare)/i.test(text)) {
+    if (/(分析|调研|评估|规划|拆解|方案对比|为什么|根因|排查|诊断|重构|架构|跨模块|全链路|性能优化|安全审计|并发|死锁|内存泄漏|-review|analyze|research|plan\b|design\b|compare|architect|refactor|investigate|debug)/i.test(text)) {
       return { ok: false, code: 'ANALYSIS' }
     }
-    const verbs = text.match(/修复|修改|改动|改|修|实现|新增|添加|删除|移除|重构|优化|升级|回退|重写|生成|创建|构建|提交|更新|调整|补全|补上|补充|rename|fix|implement|add|remove|refactor|update|create|write|build|edit|patch/gi) ?? []
+    const verbs = text.match(/修复|修改|改动|改一下|改写|改|修|实现|新增|添加|加上|删除|移除|优化|升级|回退|重写|生成|创建|构建|提交|更新|调整|替换|补全|补上|补充|rename|fix|implement|add|remove|update|create|write|build|edit|patch|replace/gi) ?? []
     if (verbs.length < 1 || verbs.length > 2) return { ok: false, code: 'VERBS' }
     const paths = text.match(/(?:[\w.-]+\/)+[\w.-]+|[A-Za-z]:\\?[^\s,，；;]+/g) ?? []
     const bareFiles = text.match(/\b[\w.-]+\.(?:ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|json|ya?ml|md|sql|sh|css|html|toml|env)\b/gi) ?? []
     const targetCount = paths.length > 0 ? paths.length : bareFiles.length
-    if (targetCount < 1 || targetCount > 2) return { ok: false, code: 'PATHS' }
+    const profile = input.costProfile ?? resolveCostProfile()
+    const maxTargets = profile === 'full' ? 2 : 3
+    // 省钱模式下，短小明确的单一改动（≤120 字、无复合多步连接、无跨模块/状态机/系统风险）即使没写具体文件路径也允许走单域快车道
+    const simpleNoPathAction = profile !== 'full'
+      && targetCount === 0
+      && text.length <= 120
+      && !/(?:并且|同时|以及|另外|然后|接着|并(?:运行|验证|测试|提交|检查|更新|修改|实现|补|加|删))/.test(text)
+      && !/(?:所有|全部|整个|各个|全仓|全局|多个|多处|状态机|模块|网关|架构|系统|回归|all\s+files)/i.test(text)
+    if (!simpleNoPathAction && (targetCount < 1 || targetCount > maxTargets)) return { ok: false, code: 'PATHS' }
     const elements = extractTaskElements(text)
-    if (elements.references.length > 0 || elements.conflicts.length > 0 || elements.hardCount < 1) {
+    if (elements.references.length > 0 || elements.conflicts.length > 0 || (!simpleNoPathAction && elements.hardCount < 1)) {
       return { ok: false, code: 'REFERENCE' }
     }
     if (auditClarifyNeed(text, input.conversationContext ?? '', input.sessionId ?? '').needed) {
@@ -4658,9 +4913,9 @@ export function evaluateFastPathEligibility(input: any): { ok: boolean; code: st
     if (coverage.required.length === 1) {
       return { ok: true, code: 'OK', department: coverage.required[0].department }
     }
-    // 单文件代码/配置文件修改未命中 2 个部门关键词时，按工程单域兜底，避免白跑一次 high 档规划器。
+    // 单文件代码/配置文件修改或明确单动作改动未命中 2 个部门关键词时，按工程单域兜底，避免白跑一次规划器。
     const hasCodeFile = /\.(?:ts|tsx|js|jsx|mjs|cjs|py|go|rs|java|json|ya?ml|toml|sql|sh|css|html|md)\b/i.test(text)
-    if (hasCodeFile && targetCount >= 1) {
+    if ((hasCodeFile && targetCount >= 1) || simpleNoPathAction) {
       return { ok: true, code: 'OK', department: 'engineering' }
     }
     return { ok: false, code: 'DEPARTMENT' }
@@ -4702,6 +4957,61 @@ function buildFastPathStartPhases(taskText: string, cwd?: string) {
       ],
       evidence: [
         `平台确定性快路径已通过 validatePlan 与 validatePlanContext 校验并锁定单动作执行范围（${clean.slice(0, 80)}）。`,
+      ],
+    },
+  }
+}
+
+/**
+ * [3.4.2][跳过 Phase-0 二次建会话] 基于规划器产出（objective/method/inputs/outputs/acceptance/constraints）
+ * 为常规子任务构建合规第 1/2/3 步开工登记证据，经同一 validateStartPhaseEvidence 校验通过后直接进入执行会话。
+ */
+export function buildPlanSubtaskStartPhases(plan: any, subtask: any, cwd?: string) {
+  const objective = truncate(String(subtask?.objective ?? subtask?.title ?? '').replace(/\s+/g, ' ').trim(), 320) || '完成分配的子任务'
+  const methodList = Array.isArray(subtask?.method)
+    ? subtask.method.map((m: any) => truncate(String(m ?? '').replace(/\s+/g, ' ').trim(), 240)).filter(Boolean)
+    : []
+  const inputsList = Array.isArray(subtask?.inputs)
+    ? subtask.inputs.map((m: any) => truncate(String(m ?? '').replace(/\s+/g, ' ').trim(), 200)).filter(Boolean)
+    : []
+  const outputsList = Array.isArray(subtask?.outputs)
+    ? subtask.outputs.map((m: any) => truncate(String(m ?? '').replace(/\s+/g, ' ').trim(), 200)).filter(Boolean)
+    : []
+  const acceptanceList = Array.isArray(subtask?.acceptance)
+    ? subtask.acceptance.map((m: any, i: number) => `A${i + 1} ${truncate(String(m ?? '').replace(/\s+/g, ' ').trim(), 180)}`).filter(Boolean)
+    : []
+  const constraintsList = Array.isArray(plan?.taskUnderstanding?.constraints)
+    ? plan.taskUnderstanding.constraints.map((c: any) => truncate(String(c ?? '').replace(/\s+/g, ' ').trim(), 200)).filter(Boolean)
+    : []
+  const dir = typeof cwd === 'string' && cwd.trim() ? cwd.trim() : '当前工作目录'
+  return {
+    planning: {
+      problemAnalysis: [
+        `任务梳理（${String(subtask?.id ?? 'T1')}）：围绕「${objective}」精准定位目标与边界，严格逐条对齐验收清单（${acceptanceList.slice(0, 4).join('；') || '完整验收'}）。`,
+      ],
+      constraints: constraintsList.length > 0 ? constraintsList.slice(0, 8) : ['严守用户原要求锚点，不做范围外无关改动'],
+      unknowns: Array.isArray(plan?.taskUnderstanding?.unknowns) ? plan.taskUnderstanding.unknowns.slice(0, 6) : [],
+      resources: [
+        `工作区目录（${dir}）、规划输入（${inputsList.join('、') || '任务书与上下文'}）及预期产出路径（${outputsList.join('、') || 'reports/'}）。`,
+      ],
+      tools: [
+        '使用只读检索与文件读取工具确认现状，使用编辑/命令工具实施修改并跑通针对性验证与全量检查。',
+      ],
+      approach: methodList.length > 0 && methodList.join('').length >= 40
+        ? methodList.slice(0, 8)
+        : [
+            `第一步对照原要求与约束读取相关代码/资料确认边界；第二步围绕「${objective}」实施完整高质量实现（${methodList.join('；') || '先核查再实现'}）；第三步逐条验证 ${acceptanceList.length || 1} 项验收标准并输出结构化证据块。`,
+          ],
+      approachBasis: [
+        '规划器已基于完整用户要求与部门职责完成结构化分解；平台直入执行会话可避免低档 Phase-0 重复拆解造成的上下文断层与额外会话开销。',
+      ],
+    },
+    preparation: {
+      prepared: [
+        `工作目录 ${dir}、任务目标「${objective.slice(0, 80)}」及全部约束/验收清单已就绪，可直接进入执行。`,
+      ],
+      evidence: [
+        `计划 ${String(plan?.planId ?? '')} 子任务 ${String(subtask?.id ?? '')} 已通过规划器三闸校验并在平台侧登记开工基线。`,
       ],
     },
   }
@@ -4934,6 +5244,7 @@ export async function dispatchPlan(ctx: any, record: any, options: any) {
     intervalMs: planningHeartbeatIntervalMs(process.env.DSH_WORKPLAN_DISPATCH_HEARTBEAT_MS ?? PLANNING_HEARTBEAT_MS),
     startedAt: record.dispatchedAt,
     maxAttempts: 1,
+    silent: silentChatHeartbeatEnabled(record?.plan?.costProfile) && !process.env.DSH_WORKPLAN_DISPATCH_HEARTBEAT_MS,
     buildMessage: (elapsedMs: number) => {
       const snap = derivePlanSnapshot(record.statuses)
       return buildDispatchHeartbeat(elapsedMs, snap.stats?.done, snap.stats?.total, snap.stats?.inProgress)
@@ -4955,7 +5266,9 @@ export async function dispatchPlan(ctx: any, record: any, options: any) {
     while (true) {
       guard += 1
       if (guard > 200) throw new PlanError('调度次数异常', 'DISPATCH_LOOP')
-      if (parentSignal.aborted) throw abortError()
+      if (parentSignal.aborted) {
+        throw parentSignal.reason instanceof Error ? parentSignal.reason : abortError()
+      }
       /*
        * [1.7.0] A `done` upstream only unblocks its dependents when the files it
        * declared actually exist. The check is opt-out (`artifactGate:false`) so
@@ -5170,6 +5483,8 @@ export async function dispatchPlan(ctx: any, record: any, options: any) {
     const message = describeError(error)
     pushRecordError(record, error)
     const budgetExhausted = (error as any)?.code === 'TOTAL_TIMEOUT' && !parentSignal.aborted
+    const parentBudgetAbort = parentSignal.aborted && (parentSignal.reason as any)?.code === 'BUDGET_HARD_ABORT'
+    const isPlanBudgetAbort = parentBudgetAbort || (error as any)?.code === 'BUDGET_HARD_ABORT'
     if (budgetExhausted) {
       /*
        * Running out of the round budget is not a task failure.
@@ -5260,6 +5575,39 @@ export async function dispatchPlan(ctx: any, record: any, options: any) {
        */
       record.errors = (record.errors ?? []).filter((line: string) => !/总执行超时/.test(String(line)))
       if (!allDoneNow) record.errors = [...(record.errors ?? []), record.error].slice(-20)
+    } else if (isPlanBudgetAbort) {
+      /*
+       * [3.4.2][UI 修复] 计划级运行期预算熔断 ≠ 用户主动取消（CANCELLED）。
+       * 只把当前仍在跑的子任务记为 blocked（progress: 100），未开工的 pending
+       * 保持 pending 不群杀级联，record.phase 置为 blocked（不置 cancelled，否则
+       * 左侧「任务进度」会整张消失且内联卡误显示「已取消」；也不置 paused 防
+       * armAutoResume 死循环续跑）。
+       */
+      const cleanBudgetMsg = String(
+        (parentSignal.reason as any)?.message ?? (error instanceof Error ? error.message : message),
+      ).replace(/\s*[［\[]stack:[\s\S]*$/i, '').trim()
+      const now = Date.now()
+      record.statuses = record.statuses.map((item: any) => {
+        if (item.closure === 'replanned' || item.status === 'done') return item
+        if (item.closure === 'escalated' || item.closure === 'instructed') return item
+        if (item.status === 'in_progress') {
+          return {
+            ...item,
+            status: 'blocked',
+            progress: 100,
+            error: truncate(cleanBudgetMsg, 2000),
+            finishedAt: item.finishedAt ?? now,
+          }
+        }
+        return item
+      })
+      record.phase = 'blocked'
+      record.cancelled = false
+      record.error = truncate(cleanBudgetMsg, 2000)
+      const cleanedErrors = (record.errors ?? []).filter(
+        (line: string) => !/BUDGET_HARD_ABORT|\[stack:|［stack:/.test(String(line)),
+      )
+      record.errors = [...cleanedErrors, cleanBudgetMsg].slice(-20)
     } else {
       /*
        * `blocked` is a terminal state, so it always reports progress 100 — the
@@ -6166,7 +6514,7 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
           for (const entry of (Array.isArray(result.statuses) ? result.statuses : [])) {
             const rebuiltRow = snap.statuses.find((item: any) => item?.subtaskId === entry?.subtaskId)
             if (!rebuiltRow || !isRecord(entry)) continue
-            for (const field of ['deadlineAt', 'timeNotice', 'timeWarning', 'timeJournal', 'pendingAdjudication', 'timeoutCount', 'takeoverRequired', 'takeoverBrief', 'criterionResult', 'criterionException', 'criterionViolations']) {
+            for (const field of ['deadlineAt', 'timeNotice', 'timeWarning', 'timeJournal', 'pendingAdjudication', 'timeoutCount', 'takeoverRequired', 'takeoverBrief', 'criterionResult', 'criterionException', 'criterionViolations', 'directMode']) {
               if (entry[field] !== undefined) rebuiltRow[field] = entry[field]
             }
             /*
@@ -6381,6 +6729,7 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
               // [3.0.8] 行级开工证据（review/direct 登记）回放：applyStatus 同口径
               // 消毒，undefined 保留旧值——刷新/重启后结算一致性比对与重试蓝图不丢。
               startPhases: update.startPhases,
+              directMode: typeof update.directMode === 'boolean' ? update.directMode : undefined,
               delegates: update.delegates,
               delegateSelfEfforts: update.delegateSelfEfforts,
               // [3.0.8] 叶子开工证据台账回放（applyStatus 同口径消毒）。
@@ -6467,7 +6816,7 @@ export function reconstructFromSession(session: any, targetPlanId?: string) {
              */
             const replayRow = snap.statuses.find((item: any) => item?.subtaskId === update.subtaskId)
             if (replayRow) {
-              for (const field of ['deadlineAt', 'timeNotice', 'timeWarning', 'timeJournal', 'pendingAdjudication', 'timeoutCount', 'takeoverRequired', 'takeoverBrief', 'criterionResult', 'criterionException', 'criterionViolations']) {
+              for (const field of ['deadlineAt', 'timeNotice', 'timeWarning', 'timeJournal', 'pendingAdjudication', 'timeoutCount', 'takeoverRequired', 'takeoverBrief', 'criterionResult', 'criterionException', 'criterionViolations', 'directMode']) {
                 if (update[field] !== undefined) replayRow[field] = update[field]
               }
               const replayExtend = Number(update.extendMs)
@@ -7135,11 +7484,12 @@ export type WorkplanRuntimeOptions = {
     entryPath?: string
     buildHash?: string
   }
-  /** [3.4.0] 宿主注入的子会话不可变阶段登记与节点 0 锚定钩子（避免 host↔runtime 循环引用）。 */
+  /** [3.4.0→3.4.2] 宿主注入的子会话不可变阶段登记与节点 0 锚定钩子（避免 host↔runtime 循环引用）。 */
   childPhaseHooks?: {
-    registerPhase?: (sessionId: string, phase: 'leader-phase-0' | 'leader-phase-1' | 'leaf-phase-0' | 'leaf-phase-1') => void
+    registerPhase?: (sessionId: string, phase: 'leader-phase-0' | 'leader-phase-1' | 'leader-direct' | 'leaf-phase-0' | 'leaf-phase-1') => void
     unregisterPhase?: (sessionId: string) => void
     registerAnchor?: (sessionId: string, anchorText: string) => void
+    registerPlanAnchor?: (parentSessionId: string, anchorText: string) => void
   }
 }
 
@@ -7194,11 +7544,19 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     return typeof tracker?.anchorText === 'string' ? tracker.anchorText : ''
   }
 
+  function childRecoveryAnchorForSession(sessionId: string): string {
+    if (typeof sessionId !== 'string' || sessionId.trim() === '') return ''
+    const tracker = childBudgetTrackers.get(sessionId.trim())
+    return typeof tracker?.recoveryAnchorText === 'string' && tracker.recoveryAnchorText
+      ? tracker.recoveryAnchorText
+      : (typeof tracker?.anchorText === 'string' ? tracker.anchorText : '')
+  }
+
   function buildPostCompactionAnchorText(session: any): string {
     const sid = typeof session?.id === 'string' ? session.id : ''
     if (!sid) return ''
-    // 子会话：直接恢复该子会话的不可变节点 0 任务锚点（原要求 + 硬约束 + A1–An）。
-    const childAnchor = childAnchorForSession(sid)
+    // 子会话：恢复该子会话的完整任务锚点（原要求 + 硬约束 + 子任务目标 + A1–An）。
+    const childAnchor = childRecoveryAnchorForSession(sid)
     if (childAnchor) {
       return `【压缩后锚点恢复（防偏离）】上下文刚被压缩，以下为本子任务的不可变硬锚点，请严格对照执行并按契约提交结构化结果块：\n${childAnchor}`
     }
@@ -7364,6 +7722,11 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         controller.abort(new PlanError(`计划已取消：${reason}`, 'CANCELLED'))
       }
     }
+    record.abortBudget = (reason: string) => {
+      if (!controller.signal.aborted) {
+        controller.abort(new PlanError(reason, 'BUDGET_HARD_ABORT'))
+      }
+    }
     const roundOptions = {
       agent,
       modelSelection: record.modelSelection,
@@ -7397,6 +7760,7 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       record.dispatchPromise = null
       record.dispatchStartedAt = null
       record.abortDispatch = null
+      record.abortBudget = null
     })
     record.dispatchPromise
       .then(() => {
@@ -7443,53 +7807,133 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         }
       }
       /*
-       * [3.4.0][运行期步数 + token 双维度防失控熔断]
-       * 针对活跃子会话（部门负责人 / 专家）在每步入环前检查真实步数与累计 token：
-       *  - 触及硬上限 ⇒ 立即中止失控子会话（触发已有产物收编，杜绝 13M token 失控）；
+       * [3.4.0→3.4.2][运行期步数 + 真实计费权重 + 全计划总预算防失控熔断]
+       * 针对活跃子会话（部门负责人 / 专家）在每步入环前检查真实步数、单会话原始/等效计费 token，
+       * 以及整份计划的累计原始/等效计费 token：
+       *  - 触及计划级或单会话硬上限 ⇒ 立即中止（触发已有产物收编，杜绝多会话联合烧穿预算）；
        *  - 触及软上限 ⇒ 单次注入温和收尾提醒（不催交、不削减证据要求）。
        */
       if (session?.id && stepBudgetEnforceEnabled()) {
         const tracker = childBudgetTrackers.get(String(session.id))
         if (tracker && !tracker.aborted) {
-          const stepConfig = parseStepBudget(process.env[STEP_BUDGET_ENV])
-          const tokenConfig = parseTokenBudget(process.env[TOKEN_BUDGET_ENV])
-          const liveSteps = countAssistantSteps(session, 0, Math.max(256, (stepConfig.hard || 60) + 16))
+          let activePlanRecord: any = null
+          for (const rec of state.records.values()) {
+            if (rec?.plan?.planId && rec.plan.planId === tracker.planId) {
+              activePlanRecord = rec
+              break
+            }
+          }
+          const activeProfile: CostProfile = activePlanRecord?.plan?.costProfile
+            ?? (process.env.DSH_WORKPLAN_COST_PROFILE ? resolveCostProfile() : 'full')
+          const rawSubtaskCount = activePlanRecord?.plan ? definedSubtaskCount(activePlanRecord.plan) : 0
+          const activeSubtaskCount = Number.isFinite(rawSubtaskCount) && rawSubtaskCount > 0 && rawSubtaskCount < Number.MAX_SAFE_INTEGER
+            ? rawSubtaskCount
+            : undefined
+          const budgets = resolveProfileBudgets(activeProfile, process.env, activeSubtaskCount)
+          const liveSteps = countAssistantSteps(session, 0, Math.max(256, (budgets.stepConfig.hard || 60) + 16))
           const snap = cacheMeter.snapshot(String(session.id))
-          const liveTokens = snap.inputTokens + snap.outputTokens + snap.cacheReadTokens + snap.cacheWriteTokens
+          const liveTokens = computeRawTokens(snap)
+          const liveWeightedTokens = computeWeightedTokens(snap)
+          const planSummary = activePlanRecord
+            ? cacheMeter.summary(collectCacheSessionIds(activePlanRecord))
+            : snap
+          const planTokens = computeRawTokens(planSummary)
+          const planWeightedTokens = computeWeightedTokens(planSummary)
           const directive = evaluateRuntimeBudget({
             steps: liveSteps,
             tokens: liveTokens,
-            stepConfig,
-            tokenConfig,
+            weightedTokens: liveWeightedTokens,
+            planTokens,
+            planWeightedTokens,
+            stepConfig: budgets.stepConfig,
+            tokenConfig: budgets.sessionTokenConfig,
+            weightedConfig: budgets.sessionWeightedConfig,
+            planTokenConfig: budgets.planTokenConfig,
+            planWeightedConfig: budgets.planWeightedConfig,
           })
           if (directive.action === 'abort') {
-            tracker.aborted = true
-            tracker.abortReason = directive.message
-            console.warn('[dsh-workplan] runtime budget hard abort:', JSON.stringify({
-              sessionId: session.id,
-              subtaskId: tracker.subtaskId,
-              reason: directive.reason,
-              steps: directive.steps,
-              tokens: directive.tokens,
-            }))
-            try {
-              tracker.controller?.abort?.(new PlanError(directive.message, 'BUDGET_HARD_ABORT', {
+            // [3.4.3] 运行期硬上限「收尾步 + 全工具锁定」：
+            // 当会话首次触及预算上限、尚未落出结果块、且未突破紧急熔断线时：
+            //  ① 给第 1 次文本收尾宽限步（graceStepsUsed = 1），并同时经 toolGuard 锁定该子会话一切工具调用；
+            //  ② 若模型习惯性试图再调 verify/read/bash，toolGuard 0ms 拦截并记 graceToolBlockedOnce = true，
+            //     多给 1 次纯文本交卷机会（graceStepsUsed = 2）——彻底防止“把唯一收尾步花在调工具上被下一刻杀死”；
+            //  ③ 若仍不交出结果块或已突破紧急安全线（单会话 1.35× / 计划 1.25×），立即硬中止。
+            const alreadyHasEvidence = extractLatestEvidenceTextFromSession(session) !== ''
+            const weightedEmergency = budgets.sessionWeightedConfig.hard !== null
+              && liveWeightedTokens >= Math.ceil(budgets.sessionWeightedConfig.hard * 1.35)
+            const stepEmergency = budgets.stepConfig.soft !== null
+              && liveSteps >= budgets.stepConfig.hard + 5
+            const planWeightedEmergency = budgets.planWeightedConfig.hard !== null
+              && planWeightedTokens >= Math.ceil(budgets.planWeightedConfig.hard * 1.25)
+            const emergencyExceeded = directive.scope === 'plan'
+              ? planWeightedEmergency
+              : (weightedEmergency || stepEmergency)
+            const graceUsed = Number(tracker.graceStepsUsed ?? 0)
+            const canGrantGrace = !alreadyHasEvidence && !emergencyExceeded
+              && (graceUsed === 0 || (graceUsed === 1 && tracker.graceToolBlockedOnce === true))
+            if (canGrantGrace) {
+              tracker.graceStepsUsed = graceUsed + 1
+              tracker.graceToolBlockedOnce = false
+              tracker.warned = true
+              extraPreStepMessages.push(makeUserMessage(
+                `【预算上限收尾步（最后一步·严禁调任何工具）】当前子会话已触及运行预算上限（${directive.message}）。本步已锁定所有工具，严禁发起任何 tool call（包括 bash / read / write / edit / dsh_workplan_verify 等，调工具不会执行且下一步将强制熔断！）：若声明产物已在盘上通过验证，请立即在本条纯文本回复末尾直接输出完整 ${EVIDENCE_MARKER_BEGIN} … ${EVIDENCE_MARKER_END} 结构化结算块；若核心产物尚未完成，请直接首行写 BLOCKED: 说明已完成进度与在盘产物路径。`,
+                {
+                  kind: 'workplan-budget-grace',
+                  form: 'notice',
+                  summary: '预算上限最后收尾步',
+                },
+              ))
+            } else {
+              tracker.aborted = true
+              tracker.abortReason = directive.message
+              console.warn('[dsh-workplan] runtime budget hard abort:', JSON.stringify({
+                sessionId: session.id,
                 subtaskId: tracker.subtaskId,
+                planId: tracker.planId,
+                scope: directive.scope ?? 'session',
+                reason: directive.reason,
                 steps: directive.steps,
                 tokens: directive.tokens,
+                weightedTokens: directive.weightedTokens,
+                planTokens: directive.planTokens,
+                planWeightedTokens: directive.planWeightedTokens,
               }))
-            } catch {
-              /* abort 异常不阻断主循环 */
+              if (directive.scope === 'plan' && activePlanRecord) {
+                try {
+                  if (typeof activePlanRecord.abortBudget === 'function') {
+                    activePlanRecord.abortBudget(directive.message)
+                  } else {
+                    activePlanRecord.abortDispatch?.(directive.message)
+                  }
+                } catch { /* ignore */ }
+              }
+              try {
+                tracker.controller?.abort?.(new PlanError(directive.message, 'BUDGET_HARD_ABORT', {
+                  subtaskId: tracker.subtaskId,
+                  scope: directive.scope ?? 'session',
+                  steps: directive.steps,
+                  tokens: directive.tokens,
+                  weightedTokens: directive.weightedTokens,
+                  planTokens: directive.planTokens,
+                  planWeightedTokens: directive.planWeightedTokens,
+                }))
+              } catch {
+                /* abort 异常不阻断主循环 */
+              }
+              return downstream
             }
-            return downstream
-          }
-          if (directive.action === 'warn' && !tracker.warned) {
-            tracker.warned = true
-            extraPreStepMessages.push(makeUserMessage(directive.message, {
-              kind: 'workplan-budget-warn',
-              form: 'notice',
-              summary: '步数/token 预算软上限提醒',
-            }))
+          } else if (directive.action === 'warn') {
+            const isPlanWarn = directive.scope === 'plan' && activePlanRecord
+            const alreadyWarned = isPlanWarn ? Boolean(activePlanRecord.planBudgetWarned) : tracker.warned
+            if (!alreadyWarned) {
+              if (isPlanWarn && activePlanRecord) activePlanRecord.planBudgetWarned = true
+              else tracker.warned = true
+              extraPreStepMessages.push(makeUserMessage(directive.message, {
+                kind: 'workplan-budget-warn',
+                form: 'notice',
+                summary: isPlanWarn ? '计划总预算软上限提醒' : '步数/token 预算软上限提醒',
+              }))
+            }
           }
         }
       }
@@ -8218,7 +8662,48 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     }
     record.plan = result.payload.plan
     record.planRevision = revision
-    record.statuses = applyReplanStatuses(record.statuses, result.payload)
+    let updatedStatuses = applyReplanStatuses(record.statuses, result.payload)
+    // [3.4.3] 重规划新加/替换的子任务（如 T7R / T7D）必须与 maybePlan 走同一套
+    // balanced / ultra-lean 预登记链路（startPhases + effortOverride + directMode），
+    // 否则重规划行退回老式 Phase-0 + 3 层重复会话，既烧双倍 token 又易撞竞态。
+    const replanProfile: CostProfile = record.plan?.costProfile ?? resolveCostProfile()
+    const addedSet = new Set<string>(
+      Array.isArray(result.payload.added)
+        ? result.payload.added.map((item: any) => String(item?.subtaskId ?? '')).filter(Boolean)
+        : [],
+    )
+    if (skipLeaderPhaseZeroEnabled(replanProfile) && addedSet.size > 0) {
+      updatedStatuses = applyBalancedDirectPreRegistration({
+        fullPlan: record.plan,
+        statuses: updatedStatuses,
+        costProfile: replanProfile,
+        workingCwd: session.header?.cwd ?? options.cwd,
+        modelName: agent?.options?.model ?? record.modelSelection?.model,
+        at,
+        onlySubtaskIds: addedSet,
+      })
+      for (const addedId of addedSet) {
+        const preRow = updatedStatuses.find((s: any) => s?.subtaskId === addedId)
+        if (preRow?.effortOverride && preRow?.startPhases) {
+          try {
+            appendUserMessage(session, buildUpdateMessage({
+              planId,
+              planCreatedAt: record.plan?.createdAt,
+              subtaskId: addedId,
+              status: preRow.status,
+              effortOverride: preRow.effortOverride,
+              startPhases: preRow.startPhases,
+              ...(preRow.directMode !== undefined ? { directMode: Boolean(preRow.directMode) } : {}),
+              consolidation: preRow.consolidation,
+            }))
+          } catch { /* 预登记回放优化：写失败不影响内存态开跑 */ }
+        }
+      }
+      try {
+        flushPendingWorkplanUpdates(session)
+      } catch { /* 刷新缓冲失败不影响内存态 */ }
+    }
+    record.statuses = updatedStatuses
     record.phase = planPhase(record.statuses)
     record.error = null
     record.updatedAt = at
@@ -8677,6 +9162,9 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
         record.abortDispatch = (reason: string) => {
           if (!controller.signal.aborted) controller.abort(new PlanError(`计划已取消：${reason}`, 'CANCELLED'))
         }
+        record.abortBudget = (reason: string) => {
+          if (!controller.signal.aborted) controller.abort(new PlanError(reason, 'BUDGET_HARD_ABORT'))
+        }
         record.dispatchStartedAt = Date.now()
         // 新一轮必须写一条新的结果消息，否则主 Agent 永远看不到自动续跑的结局。
         record.resultWritten = false
@@ -8707,7 +9195,19 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
             record.dispatchPromise = null
             record.dispatchStartedAt = null
             record.abortDispatch = null
-            armAutoResume(record, session, base)
+            record.abortBudget = null
+            const nextResumeDecision = armAutoResume(record, session, base)
+            if (!nextResumeDecision?.scheduled) {
+              try {
+                const rootAgent = resolveLiveAgent(ctx, session?.id)
+                if (rootAgent && rootAgent.status === 'idle' && typeof rootAgent.followup === 'function') {
+                  rootAgent.followup(makeUserMessage(
+                    '[dsh-workplan] 自动续跑轮次已结算完毕，最新【关键进度·计划级】已写入会话，请读取并继续处理。',
+                    { kind: 'workplan-wake', form: 'notice', summary: '自动续跑已结算' },
+                  ))
+                }
+              } catch { /* 自动续跑唤醒失败不影响结算 */ }
+            }
           })
         ctx.logger?.warn?.(
           `dsh-workplan: 计划 ${record.plan?.planId ?? '?'} 自动续跑第 ${attempt}/${limits.autoResume.maxAttempts} 轮已开始`
@@ -9732,6 +10232,13 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
     const readiness = readinessOf(record, snapshot)
     // [T4][F6] 一致性告警只算一次（只告警，不改变 deliveryReady 与 done 判定）。
     const consistencyWarnings = deriveDelegateConsistencyWarnings(snapshot.statuses)
+    const cacheSummary = cacheMeter.summary(collectCacheSessionIds(record))
+    const statusProfile: CostProfile = record?.plan?.costProfile ?? resolveCostProfile()
+    const rawStatusCount = record?.plan ? definedSubtaskCount(record.plan) : 0
+    const statusSubtaskCount = Number.isFinite(rawStatusCount) && rawStatusCount > 0 && rawStatusCount < Number.MAX_SAFE_INTEGER
+      ? rawStatusCount
+      : undefined
+    const statusBudgets = resolveProfileBudgets(statusProfile, process.env, statusSubtaskCount)
     return {
       ok: true,
       version: pluginVersion,
@@ -9760,10 +10267,18 @@ export function createWorkplanRuntime(ctx: any, options: WorkplanRuntimeOptions 
       deliveryBlockers: readiness.blockers.slice(0, 12),
       deliveryRemaining: readiness.remaining.slice(0, 20),
       /*
-       * [3.2.9] 供应商 KV 前缀缓存计量：计划根会话 + 各子会话的 usage 汇总。
-       * 只读展示真实 cacheRead/cacheWrite；无数据时为 0，不据此改变任何判定。
+       * [3.2.9→3.4.2] 供应商 KV 前缀缓存计量 + 成本档位/计划总预算观测面。
        */
-      cache: cacheMeter.summary(collectCacheSessionIds(record)),
+      cache: cacheSummary,
+      budget: {
+        costProfile: statusProfile,
+        planTokens: computeRawTokens(cacheSummary),
+        planWeightedTokens: computeWeightedTokens(cacheSummary),
+        planRawLimit: statusBudgets.planTokenConfig.hard,
+        planWeightedLimit: statusBudgets.planWeightedConfig.hard,
+        sessionRawLimit: statusBudgets.sessionTokenConfig.hard,
+        sessionWeightedLimit: statusBudgets.sessionWeightedConfig.hard,
+      },
       // [T4][F6] 一致性告警（只告警，不改变 deliveryReady 与 done 判定）。
       ...(consistencyWarnings.length > 0 ? { warnings: consistencyWarnings } : {}),
       ...(running
@@ -11591,17 +12106,32 @@ ${startEvidenceRef
       : ''
     const settleContinuation = async (settledChildId: string | null, outcome: any) => {
       try {
+        const budgetCfg = stepBudgetConfig()
+        const budgetSession = settledChildId ? (ctx as any).sessions?.get?.(settledChildId) : null
         const completed = outcome?.stopReason === 'completed'
-        const f10 = completed ? adjudicateExpertReport(outcome) : { ok: true as const }
-        const settledDone = completed && f10.ok
+        const rawText = resultText(outcome)
+        let effectiveText = rawText
+        let f10 = completed ? adjudicateExpertReport(outcome) : { ok: true as const }
+        let settledDone = completed && f10.ok
+        if (!settledDone && !record.cancelled && record.phase !== 'cancelled') {
+          const salvagedText = (rawText && rawText.includes(EVIDENCE_MARKER_BEGIN) && rawText.includes(EVIDENCE_MARKER_END))
+            ? rawText
+            : extractLatestEvidenceTextFromSession(budgetSession)
+          if (salvagedText) {
+            const salvagedF10 = adjudicateExpertReport({ output: [{ type: 'text', text: salvagedText }] })
+            if (salvagedF10.ok) {
+              settledDone = true
+              f10 = salvagedF10
+              effectiveText = salvagedText
+            }
+          }
+        }
         /*
          * [3.2.4][步数预算] 步数预算（结算时口径，绝不改判成功、绝不中断回合）：
          * phase-1 会话从 0 起数 assistant/message；done 且 ≥ 软上限 ⇒ 只留痕；
          * 非 done ⇒ 失败 error 追加步数上下文（与产物收编说明同段），让
          * 重派决策有据可依。会话取不到 ⇒ 计 0 ⇒ 'ok' ⇒ 无操作（fail-open）。
          */
-        const budgetCfg = stepBudgetConfig()
-        const budgetSession = settledChildId ? (ctx as any).sessions?.get?.(settledChildId) : null
         const budgetSteps = budgetCfg.soft === null ? 0 : countAssistantSteps(budgetSession, 0)
         const budgetVerdict = judgeStepBudget(budgetSteps, budgetCfg)
         if (settledDone && budgetVerdict.level !== 'ok') {
@@ -11620,7 +12150,7 @@ ${startEvidenceRef
                   status: settledDone ? 'done' : 'failed',
                   closure: null,
                   continuationPending: false,
-                  summary: truncate(resultText(outcome), 300),
+                  summary: truncate(effectiveText, 300),
                   error: settledDone ? null : [failedErrorWithHarvestNote(f10.ok ? String(outcome?.diagnostic ?? `子会话结束状态 ${outcome?.stopReason}`) : f10.rejection, settleCwd, item?.member), budgetFailureContext(budgetSteps, budgetCfg, [])].filter(Boolean).join('；'),
                   finishedAt: Date.now(),
                 })
@@ -11638,11 +12168,13 @@ ${startEvidenceRef
             ? { note: `步数台账：该成员会话共 ${budgetVerdict.steps} 步（软 ${budgetVerdict.soft}/硬 ${budgetVerdict.hard}）——已结算成功，仅留痕供下一轮参考。` }
             : {}),
         }))
-        await emitDelegateDoneNotices(record, (ctx as any).sessions?.get?.(String(leaderId ?? '')) ?? leaderSession, rootSession, subtaskId)
+        const liveLeaderId = String(current?.childId || leaderId || '')
+        const liveLeaderSession = (liveLeaderId ? (ctx as any).sessions?.get?.(liveLeaderId) : null) ?? leaderSession
+        await emitDelegateDoneNotices(record, liveLeaderSession, rootSession, subtaskId)
         if (!settledDone && settledChildId) {
           await emitDelegateTerminationNotices(
             record,
-            (ctx as any).sessions?.get?.(String(leaderId ?? '')) ?? leaderSession,
+            liveLeaderSession,
             rootSession,
             subtaskId,
             [{ childId: settledChildId, kind: termination.kind, reason: termination.reason }],
@@ -11700,6 +12232,7 @@ ${startEvidenceRef
               options.childPhaseHooks?.registerPhase?.(contChildId, 'leaf-phase-1')
               const subtaskObj = findSubtaskById(record.plan, subtaskId)
               const anchorText = buildChildSystemAnchor(record.plan, subtaskObj, member)
+              const recoveryAnchorText = buildChildRecoveryAnchor(record.plan, subtaskObj, member)
               if (anchorText) options.childPhaseHooks?.registerAnchor?.(contChildId, anchorText)
               childBudgetTrackers.set(contChildId, {
                 controller: null,
@@ -11707,9 +12240,12 @@ ${startEvidenceRef
                 planId: record.plan?.planId ?? '',
                 label: `${String(row?.department ?? '')}:${subtaskId}→${member.member}`,
                 warned: false,
+                graceStepsUsed: 0,
+                graceToolBlockedOnce: false,
                 aborted: false,
                 abortReason: '',
                 anchorText,
+                recoveryAnchorText,
               })
             }
             attachSettlement(activation, contChildId)
@@ -11805,6 +12341,7 @@ ${startEvidenceRef
       options.childPhaseHooks?.registerPhase?.(directContChildId, 'leaf-phase-1')
       const subtaskObj = findSubtaskById(record.plan, subtaskId)
       const anchorText = buildChildSystemAnchor(record.plan, subtaskObj, member)
+      const recoveryAnchorText = buildChildRecoveryAnchor(record.plan, subtaskObj, member)
       if (anchorText) options.childPhaseHooks?.registerAnchor?.(directContChildId, anchorText)
       childBudgetTrackers.set(directContChildId, {
         controller: null,
@@ -11812,9 +12349,12 @@ ${startEvidenceRef
         planId: record.plan?.planId ?? '',
         label: `${String(row?.department ?? '')}:${subtaskId}→${member.member}`,
         warned: false,
+        graceStepsUsed: 0,
+        graceToolBlockedOnce: false,
         aborted: false,
         abortReason: '',
         anchorText,
+        recoveryAnchorText,
       })
     }
     attachSettlement(activation, directContChildId)
@@ -12296,7 +12836,18 @@ ${startEvidenceRef
       // [2.5.5][T3] 防注入：钳制前声明记忆只由平台写入，review 新输入不得携带
       // （否则 {taskReasoningEffort:'low', taskReasoningEffortDeclared:'max'} 可绕过禁派闸）。
       const { taskReasoningEffortDeclared: _stripped, ...reviewInput } = input
-      const preview = planDelegations({ consolidation: reviewInput, model, taskEffortFallback: row.effortOverride, taskRowEffort, parentTaskText, singleStagePlan: Array.isArray(record.plan?.stages) && record.plan.stages.length === 1 })
+      const delegateCostProfile: CostProfile | undefined = record.plan?.costProfile
+        ?? (process.env.DSH_WORKPLAN_COST_PROFILE ? resolveCostProfile() : undefined)
+      const deptCapOverride = delegateCostProfile ? effectiveDepartmentExpertCap(delegateCostProfile) : undefined
+      const preview = planDelegations({
+        consolidation: reviewInput,
+        model,
+        taskEffortFallback: row.effortOverride,
+        taskRowEffort,
+        parentTaskText,
+        singleStagePlan: Array.isArray(record.plan?.stages) && record.plan.stages.length === 1,
+        ...(deptCapOverride !== undefined ? { maxHeadcount: deptCapOverride } : {}),
+      })
       if (!preview.ok) {
         // [2.5.4][T3R1] 门禁拒绝留痕（A3）：薄产物/缺产物都记入 gateAudit。
         recordGate('review', false, preview.code ?? 'DELEGATE_CONSOLIDATION_INVALID')
@@ -12365,7 +12916,18 @@ ${startEvidenceRef
     const consolidation = isRecord(row.consolidation) ? row.consolidation : null
     // [2.5.0][R2×R4] dispatch 读回梳理产物时，整体等级缺失同样回落行上
     // effortOverride（durable 回放/重置后依然全程贯穿）。
-    const delegationPlan = planDelegations({ consolidation, model, taskEffortFallback: row.effortOverride, taskRowEffort, parentTaskText, singleStagePlan: Array.isArray(record.plan?.stages) && record.plan.stages.length === 1 })
+    const delegationCostProfile: CostProfile | undefined = record.plan?.costProfile
+      ?? (process.env.DSH_WORKPLAN_COST_PROFILE ? resolveCostProfile() : undefined)
+    const dispatchDeptCapOverride = delegationCostProfile ? effectiveDepartmentExpertCap(delegationCostProfile) : undefined
+    const delegationPlan = planDelegations({
+      consolidation,
+      model,
+      taskEffortFallback: row.effortOverride,
+      taskRowEffort,
+      parentTaskText,
+      singleStagePlan: Array.isArray(record.plan?.stages) && record.plan.stages.length === 1,
+      ...(dispatchDeptCapOverride !== undefined ? { maxHeadcount: dispatchDeptCapOverride } : {}),
+    })
     if (!delegationPlan.ok) {
       // [2.5.4][T3R1] 分派门禁拒绝留痕（A3）：未梳理/薄产物一律记录拒因。
       recordGate('dispatch', false, delegationPlan.code ?? 'DELEGATE_CONSOLIDATION_MISSING')
@@ -12469,12 +13031,15 @@ ${startEvidenceRef
       const prior = priorDelegates.find((item: any) => item?.member === assignment.member) ?? null
       return !(prior?.status === 'done' || (prior?.status === 'running' && prior?.childId && prior?.continuationPending !== true))
     }).length
-    if (planWideRegistered + freshMembers > MAX_TOTAL_EXPERTS_PER_PLAN) {
+    const effectivePlanCap = delegationCostProfile
+      ? Math.min(MAX_TOTAL_EXPERTS_PER_PLAN, effectivePlanExpertCap(delegationCostProfile))
+      : MAX_TOTAL_EXPERTS_PER_PLAN
+    if (planWideRegistered + freshMembers > effectivePlanCap) {
       return {
         ok: false,
         code: 'DELEGATE_PLAN_EXPERTS_EXCEEDED',
         subtaskId,
-        error: `全计划专家总数将达到 ${planWideRegistered + freshMembers} 人，超过上限 ${MAX_TOTAL_EXPERTS_PER_PLAN} 人（子任务数 × 单任务人数相乘最大可达 375，失控计划会烧穿预算）。两条可照做的出路：1) 精简分工表——砍掉/合并低价值成员后重新 review；2) 拆成多轮计划——先交付核心成果，扩展项放到下一轮。确有需要时可用环境变量 DSH_WORKPLAN_MAX_TOTAL_EXPERTS_PER_PLAN 调整上限。`,
+        error: `全计划专家总数将达到 ${planWideRegistered + freshMembers} 人，超过上限 ${effectivePlanCap} 人（子任务数 × 单任务人数相乘最大可达 375，失控计划会烧穿预算）。两条可照做的出路：1) 精简分工表——砍掉/合并低价值成员后重新 review；2) 拆成多轮计划——先交付核心成果，扩展项放到下一轮。确有需要时可用环境变量 DSH_WORKPLAN_MAX_TOTAL_EXPERTS_PER_PLAN 调整上限。`,
       }
     }
     // [3.0.8] retry brief 的负责人执行蓝图改从行级 startPhases.planning.approach
@@ -12498,13 +13063,22 @@ ${startEvidenceRef
       const leaderStartEvidence = autoInheritExpertPreRegisterEnabled()
         ? sanitizeStartPhaseEvidence((row as any)?.startPhases)
         : null
+      const subtaskObjForPre = findSubtaskById(record.plan, subtaskId)
+      const autoTimeNoticeFallback = delegationCostProfile === 'balanced' || delegationCostProfile === 'ultra-lean'
+        ? Math.max(1, Math.min(240, Math.round(Number(subtaskObjForPre?.estimateMinutes) || 10)))
+        : null
       for (const assignment of orderedMembers) {
         const prior = priorDelegates.find((item: any) => item?.member === assignment.member) ?? null
         if (prior?.status === 'done') continue
         if (prior?.status === 'running' && prior?.childId && prior?.continuationPending !== true) continue
         const notice: any = (assignment as any).timeNotice
-        const minutes = Number(notice?.declaredMinutes)
-        const reason = typeof notice?.reason === 'string' && notice.reason.trim() ? truncate(notice.reason.trim(), 300) : ''
+        const rawMinutes = Number(notice?.declaredMinutes)
+        const minutes = Number.isInteger(rawMinutes) && rawMinutes >= 1 && rawMinutes <= 10080
+          ? rawMinutes
+          : (autoTimeNoticeFallback ?? 0)
+        const reason = typeof notice?.reason === 'string' && notice.reason.trim()
+          ? truncate(notice.reason.trim(), 300)
+          : (autoTimeNoticeFallback ? '省流模式自动继承负责人预估' : '')
         const effort = REASONING_EFFORTS.includes(assignment.effort) ? assignment.effort : ''
         if (!Number.isInteger(minutes) || minutes < 1 || minutes > 10080 || !effort) continue
         /*
@@ -12786,6 +13360,12 @@ ${stashedEvidenceRef
       let memberQueued = false
       const activationBeganAt = Date.now()
       const expertBudgetChild = createChildController(signal)
+      const subtaskObjForAnchor = findSubtaskById(record.plan, subtaskId)
+      const sharedExpertAnchor = buildChildSystemAnchor(record.plan, subtaskObjForAnchor, assignment)
+      const leaderAnchorKey = String(childSession?.id ?? agent?.session?.id ?? '').trim()
+      if (sharedExpertAnchor && leaderAnchorKey) {
+        options.childPhaseHooks?.registerPlanAnchor?.(leaderAnchorKey, sharedExpertAnchor)
+      }
       try {
         // [3.0.1][P1a] 宿主 subagent.maxDepth < 2 时一次性告警（scope=计划根会话）。
         notifyDepthOverrideConflict(ctx, typeof parentSession?.header?.parentSession === 'string' ? parentSession.header.parentSession : (typeof parentId === 'string' ? parentId : null))
@@ -12826,11 +13406,11 @@ ${stashedEvidenceRef
           { maxWaitMs: Math.max(0, dispatchQueueDeadline - Date.now()) },
         )
         childId = typeof activation?.childId === 'string' ? activation.childId : null
-        // [3.4.0] 立即登记第三层专家不可变工具阶段 + 抗压缩节点 0 任务锚点 + 运行期步数/token 预算追踪器。
+        // [3.4.0→3.4.2] 立即登记第三层专家不可变工具阶段 + 抗压缩节点 0 共享锚点 + 运行期步数/token 预算追踪器。
         if (childId) {
           options.childPhaseHooks?.registerPhase?.(childId, leafPhaseZero ? 'leaf-phase-0' : 'leaf-phase-1')
-          const subtaskObj = findSubtaskById(record.plan, subtaskId)
-          const expertAnchor = buildChildSystemAnchor(record.plan, subtaskObj, assignment)
+          const expertAnchor = sharedExpertAnchor || buildChildSystemAnchor(record.plan, subtaskObjForAnchor, assignment)
+          const expertRecoveryAnchor = buildChildRecoveryAnchor(record.plan, subtaskObjForAnchor, assignment)
           if (expertAnchor) options.childPhaseHooks?.registerAnchor?.(childId, expertAnchor)
           childBudgetTrackers.set(childId, {
             controller: expertBudgetChild.controller,
@@ -12838,9 +13418,12 @@ ${stashedEvidenceRef
             planId: record.plan?.planId ?? '',
             label: `${row.department}:${subtaskId}→${assignment.member}`,
             warned: false,
+            graceStepsUsed: 0,
+            graceToolBlockedOnce: false,
             aborted: false,
             abortReason: '',
             anchorText: expertAnchor,
+            recoveryAnchorText: expertRecoveryAnchor,
           })
         }
         // [3.1.8][治本] 第三层叶子同样登记派发实例：叶子结算/对账时按 childId 认亲。
@@ -12876,17 +13459,34 @@ ${stashedEvidenceRef
                 childBudgetTrackers.delete(settledChildId)
               }
               expertBudgetChild.disposeListener()
+              const budgetCfg = stepBudgetConfig()
+              const budgetSession = settledChildId ? (ctx as any).sessions?.get?.(settledChildId) : null
               const completed = outcome?.stopReason === 'completed'
+              const rawText = resultText(outcome)
+              let effectiveText = rawText
               // [3.0.0] F10：专家汇报入口强制核验（adjudicateExpertReport），
               // 未过即退回（failed + F10 拒因），绝不记 done。
-              const f10 = completed ? adjudicateExpertReport(outcome) : { ok: true as const }
-              const settledDone = completed && f10.ok
+              let f10 = completed ? adjudicateExpertReport(outcome) : { ok: true as const }
+              let settledDone = completed && f10.ok
+              if (!settledDone && !record.cancelled && record.phase !== 'cancelled') {
+                const salvagedText = (rawText && rawText.includes(EVIDENCE_MARKER_BEGIN) && rawText.includes(EVIDENCE_MARKER_END))
+                  ? rawText
+                  : extractLatestEvidenceTextFromSession(budgetSession)
+                if (salvagedText) {
+                  const salvagedF10 = adjudicateExpertReport({ output: [{ type: 'text', text: salvagedText }] })
+                  if (salvagedF10.ok) {
+                    settledDone = true
+                    f10 = salvagedF10
+                    effectiveText = salvagedText
+                  }
+                }
+              }
               if (settledDone) {
                 persistRuntimeSettlementBackup(
                   cwd,
                   record.plan?.planId,
                   `${subtaskId}-member-${assignment.member}`,
-                  resultText(outcome),
+                  effectiveText,
                 )
               }
               /*
@@ -12896,8 +13496,6 @@ ${stashedEvidenceRef
                * 追加步数上下文，让重派决策有据可依。会话取不到 ⇒ 计 0 ⇒
                * 'ok' ⇒ 无操作（fail-open）。
                */
-              const budgetCfg = stepBudgetConfig()
-              const budgetSession = settledChildId ? (ctx as any).sessions?.get?.(settledChildId) : null
               const budgetSteps = budgetCfg.soft === null ? 0 : countAssistantSteps(budgetSession, 0)
               const budgetVerdict = judgeStepBudget(budgetSteps, budgetCfg)
               if (settledDone && budgetVerdict.level !== 'ok') {
@@ -12928,7 +13526,7 @@ ${stashedEvidenceRef
                         ...item,
                         status: settledDone ? 'done' : 'failed',
                         closure: null,
-                        summary: truncate(resultText(outcome), 300),
+                        summary: truncate(effectiveText, 300),
                         error: settledDone ? null : [failedErrorWithHarvestNote(f10.ok ? String(outcome?.diagnostic ?? `子会话结束状态 ${outcome?.stopReason}`) : f10.rejection, cwd, assignment?.member), budgetFailureContext(budgetSteps, budgetCfg, [])].filter(Boolean).join('；'),
                         finishedAt: Date.now(),
                       })
@@ -12949,13 +13547,15 @@ ${stashedEvidenceRef
                   ? { note: `步数台账：成员 ${assignment?.member} 会话共 ${budgetVerdict.steps} 步（软 ${budgetVerdict.soft}/硬 ${budgetVerdict.hard}）——已结算成功，仅留痕供下一轮参考。` }
                   : {}),
               }))
-              // [T8] 完成即时通知 → 原分派负责人会话（row.childId）：done-only、
-              // report.state='sent' 幂等、投递失败留 failed 待兜底补发，绝不回滚结算。
-              await emitDelegateDoneNotices(record, (ctx as any).sessions?.get?.(String(row.childId ?? '')) ?? childSession, parentSession, subtaskId)
+              // [T8] 完成即时通知 → 原分派负责人会话：永远按最新 current.childId 解析活体 phase-1 负责人，
+              // 绝不投递到已释放的旧 phase-0 闭包 row.childId（T7D 专家回报孤儿事故根治）。
+              const liveLeaderId = String(current?.childId || row?.childId || '')
+              const liveLeaderSession = (liveLeaderId ? (ctx as any).sessions?.get?.(liveLeaderId) : null) ?? childSession
+              await emitDelegateDoneNotices(record, liveLeaderSession, parentSession, subtaskId)
               if (!settledDone && settledChildId && !pendingContinuation) {
                 await emitDelegateTerminationNotices(
                   record,
-                  (ctx as any).sessions?.get?.(String(row.childId ?? '')) ?? childSession,
+                  liveLeaderSession,
                   parentSession,
                   subtaskId,
                   [{ childId: settledChildId, kind: termination.kind, reason: termination.reason }],
@@ -13324,6 +13924,11 @@ ${stashedEvidenceRef
         dispatchController.abort(new PlanError(`计划已取消：${reason}`, 'CANCELLED'))
       }
     }
+    record.abortBudget = (reason: string) => {
+      if (!dispatchController.signal.aborted) {
+        dispatchController.abort(new PlanError(reason, 'BUDGET_HARD_ABORT'))
+      }
+    }
     const roundOptions = {
       agent,
       modelSelection: selection.provider && selection.model ? selection : record.modelSelection,
@@ -13343,6 +13948,7 @@ ${stashedEvidenceRef
     // [3.0.6][第 3 批①] 人工派发/续派复用原 record：派发前清零等待耗尽标记（同 startAutoDispatch）。
     record.turnWaitExhausted = undefined
     record.waitExhaustedNotifiedTurn = undefined
+    record.dispatchedAsync = mode === 'async'
     record.dispatchPromise = dispatchPlan(ctx, record, {
       ...roundOptions,
       signal: dispatchController.signal,
@@ -13362,6 +13968,7 @@ ${stashedEvidenceRef
       record.dispatchPromise = null
       record.dispatchStartedAt = null
       record.abortDispatch = null
+      record.abortBudget = null
       signal?.removeEventListener?.('abort', onToolAbort)
     })
     if (mode === 'async') {
@@ -13376,12 +13983,14 @@ ${stashedEvidenceRef
         .then(() => {
           finishRound(record, session)
           state.records.set(session.id, record)
+          notifyRootAgentInboxOnAsyncEnd(session, record)
           armAutoResume(record, session, roundOptions)
         })
         .catch((error: any) => {
           pushRecordError(record, error)
           finishRound(record, session)
           state.records.set(session.id, record)
+          notifyRootAgentInboxOnAsyncEnd(session, record)
           armAutoResume(record, session, roundOptions)
         })
       const live = derivePlanSnapshot(record.statuses)
@@ -13399,7 +14008,7 @@ ${stashedEvidenceRef
         stats: live.stats,
         statuses: modelStatusLines(live.statuses),
         hint: '计划已开跑，尚未完成：先向用户说明“已派发、正在执行”，不要声称完成；'
-          + '结果消息会在本轮结束时自动出现，期间可用 dsh_workplan_status 查看进度。',
+          + '若需要等结果直接再调 dsh_workplan_dispatch（默认 mode="wait" 会自动汇合并立刻返回），严禁调内置 wait_agent 空等。',
       }
     }
     await record.dispatchPromise
@@ -13634,7 +14243,7 @@ ${stashedEvidenceRef
     return ids
   }
 
-  const PLAN_CONTINUATION_KINDS = new Set(['subagent-settled', 'workplan-result', 'workplan-continue'])
+  const PLAN_CONTINUATION_KINDS = new Set(['subagent-settled', 'workplan-result', 'workplan-continue', 'workplan-wake'])
 
   /**
    * [1.8.9] 子会话谱系判定。
@@ -14807,6 +15416,63 @@ ${stashedEvidenceRef
     }
   }
 
+  /**
+   * [3.4.3] async 后台派发结算时，向活体根 Agent inbox 投递轻量唤醒消息（kind='workplan-wake'）：
+   *  - running 时 inject() 写入 nextStep 并触发 agent/inbox/inserted，若模型误调 wait_agent 会 0ms 唤醒；
+   *  - idle 且确由 mode:'async' 派发时 followup() 唤醒新一轮，彻底根除主会话傻等超时。
+   */
+  function notifyRootAgentInboxOnAsyncEnd(session: any, record: any) {
+    try {
+      if (!session?.id || !record || record.dispatchedAsync !== true) return
+      const rootAgent = resolveLiveAgent(ctx, session.id)
+      if (!rootAgent) return
+      const wakeMsg = makeUserMessage(
+        '[dsh-workplan] 本轮后台派发已结算完毕，最新【关键进度·计划级】已写入会话，请直接读取并继续处理。',
+        {
+          kind: 'workplan-wake',
+          form: 'notice',
+          summary: '派发轮次已结算',
+        },
+      )
+      if (rootAgent.status === 'running' && typeof rootAgent.inject === 'function') {
+        rootAgent.inject(wakeMsg)
+      } else if (rootAgent.status === 'idle' && typeof rootAgent.followup === 'function') {
+        rootAgent.followup(wakeMsg)
+      }
+    } catch {
+      /* 唤醒失败绝不影响结算主链路 */
+    }
+  }
+
+  /**
+   * [3.4.3] toolGuard 拦截主 Agent 对内置 wait_agent 的盲目空等：
+   * dsh-workplan 派发采用 delivery='caller'，内置 wait_agent 监听不到插件派发状态；
+   * 若工作计划正在派发中或刚刚结束结算（blocked/paused），直接引导主 Agent 使用
+   * dsh_workplan_dispatch（mode='wait' 自动汇合并在结算瞬间返回），省掉 15 分钟傻等。
+   */
+  function waitAgentGuardReason(agent: any): string | undefined {
+    const session = agent?.session
+    if (!session || !isRootSession(session)) return undefined
+    const record = state.records.get(session.id)
+    if (!record?.plan || isTerminalPhase(record.phase) || record.phase === 'done') return undefined
+    if (record.dispatchPromise) {
+      return '当前 dsh-workplan 派发由插件托管（delivery=caller），内置 wait_agent 无法监听其完成事件且会导致空等超时；请直接调用 dsh_workplan_dispatch（默认 mode="wait" 会自动汇合在途派发并在结束瞬间立即返回完整结果，零空等）。'
+    }
+    if (record.resultWritten === true && (record.phase === 'blocked' || record.phase === 'paused')) {
+      return '当前 dsh-workplan 派发轮次已经结算完毕，无需调用 wait_agent 等待；请直接根据最新进度调用 dsh_workplan_status / dsh_workplan_replan / dsh_workplan_dispatch 继续处理。'
+    }
+    return undefined
+  }
+
+  function budgetGraceToolGuardReason(exec: any): string | undefined {
+    const sid = typeof exec?.agent?.session?.id === 'string' ? exec.agent.session.id.trim() : ''
+    if (!sid) return undefined
+    const tracker = childBudgetTrackers.get(sid)
+    if (!tracker || tracker.aborted || !(Number(tracker.graceStepsUsed ?? 0) >= 1)) return undefined
+    tracker.graceToolBlockedOnce = true
+    return `当前子会话已达运行预算上限（最后收尾步），所有工具调用已锁定禁止执行！请勿再调用任何工具，立即在下一条纯文本回复中直接输出完整 ${EVIDENCE_MARKER_BEGIN} … ${EVIDENCE_MARKER_END} 结构化结算块（或首行写 BLOCKED: 说明已完成进度与在盘产物路径）。`
+  }
+
   function dispose() {
     // [1.10.4] 定时器不能吊住进程，也不能在记录清空后复活一个已销毁的计划。
     disarmDelegateSweep()
@@ -14848,8 +15514,72 @@ ${stashedEvidenceRef
     plansPayload,
     route,
     dispose,
+    budgetGraceToolGuardReason,
+    waitAgentGuardReason,
     planModeActive: (session: any) => isPlanModeActive(ctx, session),
   }
+}
+
+/**
+ * [3.4.0→3.4.3] balanced / ultra-lean 预登记共享辅助：maybePlan 与 replanPlan 共用。
+ * 为新建/替换子任务预写入 effortOverride + startPhases + 按策略判定的 directMode，
+ * 彻底消灭重规划行退回老式 Phase-0 + 双倍冷启动 + 孤儿专家竞态。
+ */
+function applyBalancedDirectPreRegistration(input: {
+  fullPlan: any
+  statuses: any[]
+  costProfile: CostProfile
+  workingCwd: string | undefined
+  modelName: string | undefined
+  at: number
+  onlySubtaskIds?: Set<string>
+}) {
+  const { fullPlan, statuses, costProfile, workingCwd, modelName, at, onlySubtaskIds } = input
+  if (!Array.isArray(statuses) || statuses.length === 0) return statuses
+  const subtaskList = flattenSubtasks(fullPlan)
+  const subtaskById = new Map<string, any>()
+  for (const entry of subtaskList) {
+    if (entry?.subtask?.id) subtaskById.set(String(entry.subtask.id), entry.subtask)
+  }
+  return statuses.map((row: any) => {
+    const sid = String(row?.subtaskId ?? '')
+    if (!sid) return row
+    if (onlySubtaskIds && !onlySubtaskIds.has(sid)) return row
+    if (row?.closure === 'replanned' || row?.status === 'done') return row
+    const subtaskObj = subtaskById.get(sid)
+    if (!subtaskObj) return row
+    const builtStart = validateStartPhaseEvidence(buildPlanSubtaskStartPhases(fullPlan, subtaskObj, workingCwd))
+    if (!builtStart.ok) return row
+    const rawEffort = costProfile === 'ultra-lean'
+      ? 'low'
+      : (REASONING_EFFORTS.includes(String(subtaskObj.reasoningEffort ?? '')) ? String(subtaskObj.reasoningEffort) : DEFAULT_REASONING_EFFORT)
+    const effortCorrection = correctEffortForModel(rawEffort, modelName)
+    const resolvedEffort = effortCorrection.effort
+    const taskTextForStrategy = [
+      subtaskObj.objective,
+      ...(Array.isArray(subtaskObj.method) ? subtaskObj.method : []),
+    ].filter((item: any) => typeof item === 'string' && item.trim() !== '').join('\n')
+    const strategy = decideDelegationStrategy({
+      taskText: taskTextForStrategy,
+      memberCount: 2,
+      taskEffort: resolvedEffort,
+      singleStagePlan: Array.isArray(fullPlan?.stages) && fullPlan.stages.length === 1,
+    })
+    const directMode = resolvedEffort === 'low' || costProfile === 'ultra-lean' || strategy.lane !== 'split'
+    return {
+      ...row,
+      effortOverride: resolvedEffort,
+      startPhases: builtStart.evidence,
+      ...(directMode ? {
+        directMode: true,
+        consolidation: {
+          assignments: [],
+          taskReasoningEffort: resolvedEffort,
+          submittedAt: at,
+        },
+      } : {}),
+    }
+  })
 }
 
 /**
@@ -15397,6 +16127,7 @@ async function maybePlan(ctx: any, state: any, payload: any, downstream: any, op
    * 写入仍是 user/message（surfaceOp:'append'、形状校验），不新增事件类型、
    * 不触碰 system/message，不会引入会话日志损坏；finally 里 stop，绝不残留。
    */
+  const planCostProfile = resolveCostProfile()
   const planningHeartbeat = createPlanningHeartbeat({
     signal: planningSignal,
     appendNotice: (text: string) => appendUserMessage(session, text, undefined, { deferUntilHead: true }),
@@ -15404,6 +16135,7 @@ async function maybePlan(ctx: any, state: any, payload: any, downstream: any, op
     startedAt: planningStartedAt,
     getAttempt: () => plannerAttempt,
     maxAttempts: PLANNER_MAX_ATTEMPTS,
+    silent: silentChatHeartbeatEnabled(planCostProfile) && !process.env.DSH_WORKPLAN_PLANNING_HEARTBEAT_MS,
   })
   planningHeartbeat.start()
   try {
@@ -15425,6 +16157,7 @@ async function maybePlan(ctx: any, state: any, payload: any, downstream: any, op
       existingActivePlan: existing,
       approvalHeld: approvalGateVerdict.held,
       signal: planningSignal,
+      costProfile: planCostProfile,
     })
     if (fastPlan) {
       plan = fastPlan
@@ -15437,6 +16170,7 @@ async function maybePlan(ctx: any, state: any, payload: any, downstream: any, op
       sessionId: session.id,
       modelSelection,
       signal: planningSignal,
+      costProfile: planCostProfile,
       plannerTimeoutMs: normalisePlannerWindow(options?.limits?.plannerTimeoutMs ?? options?.plannerTimeoutMs, PLANNER_TIMEOUT_MS),
       plannerIdleTimeoutMs: normalisePlannerWindow(options?.limits?.plannerIdleTimeoutMs ?? options?.plannerIdleTimeoutMs, PLANNER_IDLE_TIMEOUT_MS),
       telemetry: plannerTelemetry,
@@ -15559,25 +16293,45 @@ async function maybePlan(ctx: any, state: any, payload: any, downstream: any, op
     createdAt,
     sourceMessageIds: human.map((message: any) => message.id).filter((id: any) => typeof id === 'string'),
   })
+  fullPlan.costProfile = planCostProfile
   const initialStatuses: any[] = createStatuses(fullPlan)
   /*
-   * [3.4.0][省钱治本·确定性快路径单会话直入]
-   * 命中确定性快路径的单动作 low 任务不再强制先跑一个独立 phase-0 会话再销毁重建 phase-1：
-   * 直接由平台写入 effortOverride='low' 与通过 validateStartPhaseEvidence 校验的确定性开工证据，
-   * 整个简单任务仅需 1 个子会话闭环（0 规划器 LLM + 0 phase-0 会话）。
+   * [3.4.0→3.4.2][高质省钱治本·跳过 Phase-0 二次建会话]
+   *  1. 命中确定性快路径：直接注入 low + fastPath startPhases + directMode=true；
+   *  2. 常规计划在 balanced/ultra-lean 模式下：由平台直接为每个子任务预登记合规开工基线与推理档
+   *     （balanced 严格保留规划器按真实复杂度给出的档位，不拉低难活质量；ultra-lean 收紧到 low），
+   *     且单线/耦合/低复杂度任务标记 directMode=true（隐藏 3,400 字的 delegate/instruct），
+   *     彻底砍掉「先开 low 小号 Phase-0、销毁再开大号 Phase-1」的双倍冷启动开销。
    */
   const isFastPathPlan = plannerTelemetry.outcome === 'DETERMINISTIC'
+  const workingCwd = session.header?.cwd ?? options.cwd
   if (isFastPathPlan && fastPathSingleSessionEnabled() && initialStatuses.length === 1) {
     const fastStart = validateStartPhaseEvidence(
-      buildFastPathStartPhases(taskText, session.header?.cwd ?? options.cwd),
+      buildFastPathStartPhases(taskText, workingCwd),
     )
     if (fastStart.ok) {
       initialStatuses[0] = {
         ...initialStatuses[0],
         effortOverride: 'low',
         startPhases: fastStart.evidence,
+        directMode: true,
+        consolidation: {
+          assignments: [],
+          taskReasoningEffort: 'low',
+          submittedAt: createdAt,
+        },
       }
     }
+  } else if (skipLeaderPhaseZeroEnabled(planCostProfile)) {
+    const preRegistered = applyBalancedDirectPreRegistration({
+      fullPlan,
+      statuses: initialStatuses,
+      costProfile: planCostProfile,
+      workingCwd,
+      modelName: modelSelection?.model,
+      at: createdAt,
+    })
+    initialStatuses.splice(0, initialStatuses.length, ...preRegistered)
   }
   const record: any = {
     plan: fullPlan,
@@ -15899,6 +16653,7 @@ export function statusToolOutputSchema() {
       runtime: { type: 'object' },
       planner: { oneOf: [{ type: 'object' }, { type: 'null' }] },
       cache: { type: 'object' },
+      budget: { type: 'object' },
       deliveryReady: { type: 'boolean' },
       deliveryBlockers: { type: 'array' },
       deliveryRemaining: { type: 'array' },

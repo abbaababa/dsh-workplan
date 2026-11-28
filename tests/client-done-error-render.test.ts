@@ -196,3 +196,21 @@ test('done-error-render: 历史真实文本（error 与 lastError 相同）只�
   assert.equal(occurrences, 1, '同一段历史文本在页面上只能出现一次（留档）')
   assert.ok(html.includes(`上一轮的失败记录（已完成，仅留档）：${realText}`), '历史文本应以留档样式出现')
 })
+
+test('done-error-render: 受阻错误里的内部 ［stack: ...］ 堆栈文本必须在界面剥离', async () => {
+  const cleanMsg = '单子会话等效计费 token 已达 254,763（硬上限 250,000），触发运行期计费预算熔断并收编已落盘产物'
+  const rawWithStack = `${cleanMsg}［stack: PlanError: ${cleanMsg} | at Object.onPreStep (file:///Users/open/Documents/Stocks/dsh-workplan/lib/runtime.js:7496:57)］`
+  const html = await renderDashboard({
+    ...planFixture,
+    phase: 'blocked',
+    stats: { total: 3, done: 1, blocked: 1, inProgress: 0, pending: 1, progress: 33 },
+    statuses: [
+      { subtaskId: 'T1', status: 'done', progress: 100 },
+      { subtaskId: 'T2', status: 'blocked', progress: 100, error: rawWithStack },
+      { subtaskId: 'T3', status: 'pending', progress: 0 },
+    ],
+  })
+  assert.ok(html.includes(cleanMsg), '核心受阻原因必须保留展示')
+  assert.equal(html.includes('stack: PlanError'), false, '内部 stack 堆栈不得泄漏到任务进度卡片')
+  assert.equal(html.includes('lib/runtime.js:7496'), false, '代码路径与行号不得出现在卡片中')
+})

@@ -10,6 +10,7 @@
  * 本模块不写状态、不读会话；只接收 plan/statuses/lessonsBrief 等纯数据。
  */
 
+import { resolveCostProfile } from './caps.js'
 import { compileBrief, renderBrief, type BriefSource } from './context-brief.js'
 import { renderContextOmissions, routeContext, type ContextItem, type ContextStage } from './context-router.js'
 import { dependencyResultBrief, findSubtask, flattenSubtasks } from './plan.js'
@@ -58,9 +59,15 @@ export function buildExpertContextPacket(input: ExpertContextInput): string {
   const subtask = found?.subtask
   if (!subtask) return ''
   const stage: ContextStage = input.stage === 'planning' ? 'planning' : 'execution'
+  const profile = resolveCostProfile(plan?.costProfile)
+  const defaultBudget = profile === 'ultra-lean'
+    ? (stage === 'planning' ? 900 : 1600)
+    : profile === 'balanced'
+      ? (stage === 'planning' ? 1200 : 2400)
+      : (stage === 'planning' ? 1800 : 3600)
   const budgetChars = Number.isFinite(Number(input.budgetChars))
     ? Math.max(400, Math.floor(Number(input.budgetChars)))
-    : (stage === 'planning' ? 1800 : 3600)
+    : defaultBudget
   const current = statusOf(input.statuses, subtaskId)
   const items: ContextItem[] = []
 

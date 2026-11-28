@@ -1312,7 +1312,11 @@ window.__ModuleLoader__.load({
             return `${t('workPrefix')} ${index + 1}`;
         }
         function plainError(value) {
-            const text = typeof value === 'string' ? value.trim() : '';
+            const raw = typeof value === 'string' ? value.trim() : '';
+            if (!raw)
+                return '';
+            // 剥离尾部内部堆栈［stack: ...］，防止代码路径与调用栈糊满任务进度卡片。
+            const text = raw.replace(/\s*[［\[]stack:[\s\S]*$/i, '').trim();
             if (!text)
                 return '';
             // 保留详细诊断原文（>24 字不覆盖成模糊泛化语），只把极短模糊错误翻成人话。
